@@ -1,0 +1,239 @@
+// Main router — combines intent classification, sensitivity scoring, and model selection
+// into a single routing decision for the loke privacy proxy pipeline.
+
+i=t:shared.types;
+i=intent:core.router.intent;
+i=sens:core.router.sensitivity;
+i=sel:core.router.selector;
+i=reg:core.models.registry;
+i=log:shared.log;
+i=str:std.str;
+
+pub m.$router_config{
+  ollama_url:str;
+  prefer_local:bool;
+  max_cost_per_1k:f64;
+  default_tolerance:$latency_tolerance
+}
+
+pub m.$router{
+  config:$router_config;
+  registry:$reg.registry
+}
+
+// Creates a default router config pointing at the given Ollama URL.
+// prefer_local=true, max_cost_per_1k=0.05, default_tolerance=$instant.
+pub f=new_config(ollama_url:str):$router_config{
+  <$router_config{
+    ollama_url:ollama_url;
+    prefer_local:true;
+    max_cost_per_1k:0.05;
+    default_tolerance:$latency_tolerance.$instant
+  }
+}
+
+// Creates a router with the given config and a fresh default model registry.
+pub f=new(config:$router_config):$router{
+  let registry=reg.new_registry();
+  <$router{config:config;registry:registry}
+}
+
+// Converts a $task_type to a display string for logging.
+f=task_to_str(task:$task_type):str{
+  task|{
+    $task_type.$chat;           <"chat";
+    $task_type.$code_generation;<"code_generation";
+    $task_type.$code_review;    <"code_review";
+    $task_type.$summarisation;  <"summarisation";
+    $task_type.$classification; <"classification";
+    $task_type.$ner;            <"ner";
+    $task_type.$embedding;      <"embedding";
+    $task_type.$data_analysis;  <"data_analysis"
+  }
+}
+
+// Resolves a $provider string name to the $provider enum variant.
+f=provider_from_str(s:str):$provider{
+  if str.eq(s;"anthropic"){
+    <$provider.$anthropic
+  }else{
+    if str.eq(s;"openai"){
+      <$provider.$openai
+    }else{
+      if str.eq(s;"google"){
+        <$provider.$google
+      }else{
+        if str.eq(s;"mistral"){
+          <$provider.$mistral
+        }else{
+          if str.eq(s;"openrouter"){
+            <$provider.$openrouter
+          }else{
+            if str.eq(s;"ollama"){
+              <$provider.$ollama
+            }else{
+              <$provider.$local
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Approximates context window size from a model ID string.
+f=ctx_from_model(model_id:str):u32{
+  if str.contains(model_id;"claude"){
+    <200000
+  }else{
+    if str.contains(model_id;"gpt-4o"){
+      <128000
+    }else{
+      if str.contains(model_id;"qwen2.5:72b"){
+        <128000
+      }else{
+        if str.contains(model_id;"qwen2.5:7b"){
+          <32000
+        }else{
+          if str.contains(model_id;"gemma3"){
+            <8000
+          }else{
+            if str.contains(model_id;"nomic-embed"){
+              <8000
+            }else{
+              <32000
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Approximates cost_per_1k_input from a model ID string.
+f=cost_in_from_model(model_id:str):f64{
+  if str.contains(model_id;"claude-3-5-sonnet"){
+    <0.003
+  }else{
+    if str.contains(model_id;"claude-3-5-haiku"){
+      <0.001
+    }else{
+      if str.contains(model_id;"gpt-4o-mini"){
+        <0.00015
+      }else{
+        if str.contains(model_id;"gpt-4o"){
+          <0.005
+        }else{
+          <0.0
+        }
+      }
+    }
+  }
+}
+
+// Approximates cost_per_1k_output from a model ID string.
+f=cost_out_from_model(model_id:str):f64{
+  if str.contains(model_id;"claude-3-5-sonnet"){
+    <0.015
+  }else{
+    if str.contains(model_id;"claude-3-5-haiku"){
+      <0.005
+    }else{
+      if str.contains(model_id;"gpt-4o-mini"){
+        <0.0006
+      }else{
+        if str.contains(model_id;"gpt-4o"){
+          <0.015
+        }else{
+          <0.0
+        }
+      }
+    }
+  }
+}
+
+// Builds a $model_spec from a $sel.selection_result for embedding in $routing_decision.
+f=spec_from_result(result:$sel.selection_result):$model_spec{
+  let provider=provider_from_str(result.provider);
+  let ctx=ctx_from_model(result.model_id);
+  let cost_in=cost_in_from_model(result.model_id);
+  let cost_out=cost_out_from_model(result.model_id);
+  <$model_spec{
+    id:result.model_id;
+    provider:provider;
+    context_window:ctx;
+    cost_per_1k_input:cost_in;
+    cost_per_1k_output:cost_out;
+    tier:result.tier
+  }
+}
+
+// Estimates latency in ms from the model tier (rough heuristic).
+f=estimate_latency(result:$sel.selection_result):u32{
+  result.tier|{
+    $model_tier.$interactive; <500;
+    $model_tier.$considered;  <3000;
+    $model_tier.$background;  <15000
+  }
+}
+
+// F5 — Full routing pipeline.
+//  1. Classify intent from text
+//  2. Score sensitivity combining PII result with content heuristics
+//  3. Build selection criteria
+//  4. Select optimal model via registry
+//  5. Return $routing_decision
+pub f=route(
+  router:$router;
+  text:str;
+  pii_sensitivity:$sensitivity_level;
+  pii_entity_count:u32;
+  tolerance:$latency_tolerance;
+  cid:str
+):$routing_decision|$loke_err{
+  // Step 1: classify intent
+  let intent_result=intent.classify(text;router.config.ollama_url);
+  let task_str=task_to_str(intent_result.task);
+  let conf_str=str.from_float(intent_result.confidence);
+  let intent_msg=str.concat(str.concat(str.concat("intent: ";task_str);" confidence=");conf_str);
+  log.info(intent_msg;"router";cid);
+
+  // Step 2: score sensitivity
+  let pii_scored=sens.score_from_pii(pii_sensitivity;pii_entity_count);
+  let content_scored=sens.score_from_content(text);
+  let final_sensitivity=sens.combine(pii_scored;content_scored);
+  let sens_str=sens.level_to_str(final_sensitivity);
+  let sens_msg=str.concat("sensitivity: ";sens_str);
+  log.info(sens_msg;"router";cid);
+
+  // Step 3: build selection criteria
+  let criteria=$sel.selection_criteria{
+    task:intent_result.task;
+    sensitivity:final_sensitivity;
+    tolerance:tolerance;
+    prefer_local:router.config.prefer_local;
+    max_cost_per_1k:router.config.max_cost_per_1k;
+    require_tools:false
+  };
+
+  // Step 4: select model
+  let selected=sel.select(criteria;router.registry);
+  selected|{
+    $loke_err e;
+      <$loke_err.$model_err("router: model selection failed")
+    result;
+      // Step 5: build routing decision
+      let model_spec=spec_from_result(result);
+      let latency=estimate_latency(result);
+      let decision=$routing_decision{
+        model:model_spec;
+        reason:result.reason;
+        tier:result.tier;
+        estimated_cost:result.estimated_cost;
+        estimated_latency_ms:latency
+      };
+      let route_msg=str.concat(str.concat(str.concat("route: selected ";result.model_id);" via ");result.provider);
+      log.info(route_msg;"router";cid);
+      <decision
+  }
+}

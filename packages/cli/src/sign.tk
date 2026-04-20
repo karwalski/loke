@@ -1,0 +1,166 @@
+// A6.2 — Code signing helper
+// Wraps OS-level signing for distribution builds.
+// macOS: codesign + notarytool stapling. Windows: signtool.
+
+m=cli.sign;
+
+i=fs:std.fs;
+i=str:std.string;
+i=sh:std.shell;
+
+pub m.$sign_config{
+  identity:str;
+  team_id:str;
+  entitlements_path:str;
+  notarize:bool;
+  apple_id:str;
+  app_password:str
+}
+
+pub m.$sign_result{
+  ok:bool;
+  stdout:str;
+  stderr:str;
+  notarization_id:str
+}
+
+pub f=sign_macos(bin_path:str;cfg:$sign_config):$sign_result{
+  let cmd=str.concat(
+    "codesign --deep --force --options runtime --entitlements ";
+    str.concat(
+      cfg.entitlements_path;
+      str.concat(
+        " --sign ";
+        str.concat(cfg.identity;str.concat(" ";bin_path))
+      )
+    )
+  );
+  let res=sh.run(cmd);
+  let ok=res.exit_code==0;
+  <$sign_result{
+    ok=ok;
+    stdout=res.stdout;
+    stderr=res.stderr;
+    notarization_id=""
+  }
+}
+
+pub f=notarize_macos(bin_path:str;cfg:$sign_config):$sign_result{
+  // Step 1 — zip the binary for submission
+  let zip_path=str.concat(bin_path;".zip");
+  let zip_cmd=str.concat(
+    "ditto -c -k --keepParent ";
+    str.concat(bin_path;str.concat(" ";zip_path))
+  );
+  let zip_res=sh.run(zip_cmd);
+  if zip_res.exit_code!=0{
+    <$sign_result{
+      ok=false;
+      stdout=zip_res.stdout;
+      stderr=zip_res.stderr;
+      notarization_id=""
+    }
+  };
+
+  // Step 2 — submit to Apple notary service and wait
+  let submit_cmd=str.concat(
+    "xcrun notarytool submit ";
+    str.concat(
+      zip_path;
+      str.concat(
+        " --apple-id ";
+        str.concat(
+          cfg.apple_id;
+          str.concat(
+            " --password ";
+            str.concat(
+              cfg.app_password;
+              str.concat(
+                " --team-id ";
+                str.concat(cfg.team_id;" --wait --output-format json")
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+  let sub_res=sh.run(submit_cmd);
+  if sub_res.exit_code!=0{
+    <$sign_result{
+      ok=false;
+      stdout=sub_res.stdout;
+      stderr=sub_res.stderr;
+      notarization_id=""
+    }
+  };
+
+  // Parse submission id from stdout — notarytool emits id: <uuid>
+  let notarization_id=str.extract_between(sub_res.stdout;"\"id\":\"";"\",");
+
+  // Step 3 — check approval status in the JSON output
+  let approved=str.contains(sub_res.stdout;"\"status\":\"Accepted\"");
+  if !approved{
+    <$sign_result{
+      ok=false;
+      stdout=sub_res.stdout;
+      stderr=sub_res.stderr;
+      notarization_id=notarization_id
+    }
+  };
+
+  // Step 4 — staple ticket to the binary
+  let staple_cmd=str.concat("xcrun stapler staple ";bin_path);
+  let staple_res=sh.run(staple_cmd);
+  <$sign_result{
+    ok=staple_res.exit_code==0;
+    stdout=staple_res.stdout;
+    stderr=staple_res.stderr;
+    notarization_id=notarization_id
+  }
+}
+
+pub f=verify_macos(bin_path:str):bool{
+  let cmd=str.concat("codesign --verify --deep --strict ";bin_path);
+  let res=sh.run(cmd);
+  <res.exit_code==0
+}
+
+pub f=sign_windows(bin_path:str;cert_path:str;cert_pass:str):$sign_result{
+  let cmd=str.concat(
+    "signtool sign /f ";
+    str.concat(
+      cert_path;
+      str.concat(
+        " /p ";
+        str.concat(
+          cert_pass;
+          str.concat(
+            " /fd sha256 /tr http://timestamp.digicert.com /td sha256 ";
+            bin_path
+          )
+        )
+      )
+    )
+  );
+  let res=sh.run(cmd);
+  <$sign_result{
+    ok=res.exit_code==0;
+    stdout=res.stdout;
+    stderr=res.stderr;
+    notarization_id=""
+  }
+}
+
+pub f=default_entitlements():str{
+  <"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+   "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" +
+   "<plist version=\"1.0\">\n" +
+   "<dict>\n" +
+   "  <key>com.apple.security.cs.allow-jit</key>\n" +
+   "  <false/>\n" +
+   "  <key>com.apple.security.network.client</key>\n" +
+   "  <true/>\n" +
+   "</dict>\n" +
+   "</plist>\n"
+}

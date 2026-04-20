@@ -1,0 +1,174 @@
+// F7.1 — MCP client
+// Connects to an MCP server over HTTP and dispatches JSON-RPC 2.0 tool calls.
+
+i=t:shared.types;
+i=proto:core.mcp.protocol;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+pub m.$mcp_client{
+  server_url:str;
+  server_name:str;
+  next_id:u32
+}
+
+// ── Constructor ───────────────────────────────────────────────────────────────
+
+pub f=new(server_url:str;server_name:str):$mcp_client{
+  <$mcp_client{
+    server_url:server_url;
+    server_name:server_name;
+    next_id:1
+  }
+}
+
+// ── Low-level transport ───────────────────────────────────────────────────────
+
+// POSTs a JSON-RPC message to <server_url>/mcp and returns the raw result JSON.
+// Increments the client's next_id on each call.
+pub f=send_request(client:mut $mcp_client;method:str;params_json:str):str|$loke_err{
+  let cid=log.new_correlation_id();
+  let id=client.next_id;
+  client.next_id=client.next_id+1;
+  let id_str=str.from_int(id);
+  let url=str.concat(client.server_url;"/mcp");
+
+  // Build JSON-RPC envelope. params_json may be "null" when no params needed.
+  let body_p1=str.concat("{\"jsonrpc\":\"2.0\",\"id\":";id_str);
+  let body_p2=str.concat(body_p1;",\"method\":\"");
+  let body_p3=str.concat(body_p2;method);
+  let body_p4=str.concat(body_p3;"\",\"params\":");
+  let body=str.concat(body_p4;str.concat(params_json;"}"));
+
+  log.debug(str.concat("mcp send: ";method);"mcp-client";cid);
+
+  let resp=http.post(url;body;"application/json");
+  resp|{
+    $http_err e;
+      <$loke_err.$network_err(str.concat("mcp send_request: HTTP error calling ";url))
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          <$loke_err.$network_err("mcp send_request: invalid JSON response")
+        obj;
+          // Check for JSON-RPC error
+          let is_error=json.has_key(obj;"error");
+          if is_error{
+            let err_obj=json.get_val(obj;"error");
+            let err_msg=json.get_str(err_obj;"message");
+            <$loke_err.$network_err(str.concat("mcp server error: ";err_msg))
+          }else{
+            let result_val=json.get_val(obj;"result");
+            <json.enc(result_val)
+          }
+      }
+  }
+}
+
+// ── Initialize ────────────────────────────────────────────────────────────────
+
+// Sends the MCP initialize handshake and validates the protocol version.
+// Returns true on success.
+pub f=initialize(client:mut $mcp_client):bool|$loke_err{
+  let cid=log.new_correlation_id();
+  let params="{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"loke\",\"version\":\"0.1.0\"}}";
+  let result=send_request(client;"initialize";params);
+  result|{
+    $loke_err e;
+      <$loke_err(e)
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          <$loke_err.$network_err("initialize: could not parse response")
+        obj;
+          let proto_ver=json.get_str(obj;"protocolVersion");
+          let ok=str.eq(proto_ver;"2024-11-05");
+          if ok{
+            log.info(str.concat("MCP initialized with server: ";client.server_name);"mcp-client";cid)
+          }else{
+            log.warn(str.concat("MCP protocol version mismatch: ";proto_ver);"mcp-client";cid)
+          };
+          <ok
+      }
+  }
+}
+
+// ── List tools ────────────────────────────────────────────────────────────────
+
+// Sends a tools/list request and parses the returned tool definitions.
+pub f=list_tools(client:mut $mcp_client):@($proto.mcp_tool)|$loke_err{
+  let result=send_request(client;"tools/list";"null");
+  result|{
+    $loke_err e;
+      <$loke_err(e)
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          <$loke_err.$network_err("list_tools: could not parse response")
+        obj;
+          let tools_arr=json.get_arr(obj;"tools");
+          let tools=@();
+          tools_arr|{
+            item;
+              let name=json.get_str(item;"name");
+              let desc=json.get_str(item;"description");
+              let schema_val=json.get_val(item;"inputSchema");
+              let schema=json.enc(schema_val);
+              let tool=$proto.mcp_tool{
+                name:name;
+                description:desc;
+                input_schema:schema
+              };
+              tools=@(tools;tool)
+          };
+          <tools
+      }
+  }
+}
+
+// ── Call tool ─────────────────────────────────────────────────────────────────
+
+// Sends a tools/call request and parses the content array in the response.
+pub f=call_tool(client:mut $mcp_client;tool_name:str;args_json:str):$proto.tool_result|$loke_err{
+  let cid=log.new_correlation_id();
+  let name_escaped=str.replace(tool_name;"\"";"\\\"");
+  let params=str.concat("{\"name\":\"";str.concat(name_escaped;str.concat("\",\"arguments\":";str.concat(args_json;"}"))));
+  let result=send_request(client;"tools/call";params);
+  result|{
+    $loke_err e;
+      <$loke_err(e)
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          <$loke_err.$network_err("call_tool: could not parse response")
+        obj;
+          // Check isError flag at top level
+          let is_err=json.has_key(obj;"isError");
+          let content_arr=json.get_arr(obj;"content");
+          let text="";
+          content_arr|{
+            item;
+              let item_text=json.get_str(item;"text");
+              if str.eq(text;""){
+                text=item_text
+              }else{
+                text=str.concat(text;str.concat("\n";item_text))
+              }
+          };
+          log.debug(str.concat("call_tool result for: ";tool_name);"mcp-client";cid);
+          <$proto.tool_result{
+            content_type:"text";
+            text:text;
+            is_error:is_err
+          }
+      }
+  }
+}

@@ -1,0 +1,229 @@
+// F6.6 — Persistent sync queue
+// Outbound work queue with retry and exponential backoff. Items survive
+// process restarts; failed items accumulate attempts until they are moved
+// to the dead-letter bucket or acknowledged by the caller.
+
+i=t:shared.types;
+i=s:core.storage.db;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$queue_item_status{
+  $pending;
+  $processing;
+  $completed;
+  $failed;
+  $dead_letter
+}
+
+pub m.$queue_item{
+  id:str;
+  queue_name:str;
+  payload:str;
+  status:$queue_item_status;
+  attempts:u32;
+  max_attempts:u32;
+  error:str;
+  created_at:str
+}
+
+// Creates the sync_queue table if it does not already exist.
+// Safe to call multiple times (IF NOT EXISTS).
+pub f=ensure_table(store:$s.store):void|$loke_err{
+  db.exec(
+    store.conn;
+    "CREATE TABLE IF NOT EXISTS sync_queue (
+  id TEXT PRIMARY KEY,
+  queue_name TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  next_retry_at TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)"
+  )|{
+    $ok:_ {
+      log.debug("sync_queue table ensured";"sync_queue";"init");
+      <$ok(void)
+    };
+    $err:e <$err($storage_err("failed to create sync_queue table"))
+  }
+}
+
+// Inserts a new item in 'pending' status and returns its generated id.
+pub f=enqueue(store:$s.store;queue_name:str;payload:str;max_attempts:u32):str|$loke_err{
+  let id=str.rand_hex(16);
+  let max_str=str.from_int(max_attempts);
+  db.exec_params(
+    store.conn;
+    "INSERT INTO sync_queue (id,queue_name,payload,status,attempts,max_attempts,next_retry_at,error,created_at,updated_at) VALUES (?,?,'pending',0,?,NULL,NULL,datetime('now'),datetime('now'))";
+    @(id;queue_name;payload;max_str)
+  )|{
+    $ok:_ {
+      log.debug(str.concat("enqueued item to: ";queue_name);"sync_queue";queue_name);
+      <$ok(id)
+    };
+    $err:e <$err($storage_err(str.concat("failed to enqueue item to: ";queue_name)))
+  }
+}
+
+// Claims one pending item from the named queue, transitioning it to
+// 'processing' status. Returns $loke_err if the queue is empty.
+pub f=dequeue(store:$s.store;queue_name:str):$queue_item|$loke_err{
+  db.query_one_params(
+    store.conn;
+    "SELECT id,queue_name,payload,status,attempts,max_attempts,error,created_at FROM sync_queue WHERE queue_name=? AND status='pending' AND (next_retry_at IS NULL OR next_retry_at <= datetime('now')) ORDER BY created_at ASC LIMIT 1";
+    @(queue_name)
+  )|{
+    $ok:row {
+      let item_id=json.get_str(row;"id");
+      db.exec_params(
+        store.conn;
+        "UPDATE sync_queue SET status='processing',updated_at=datetime('now') WHERE id=?";
+        @(item_id)
+      )|{
+        $ok:_ {};
+        $err:e <$err($storage_err(str.concat("failed to mark item as processing: ";item_id)))
+      };
+      let attempts_int=json.get_int(row;"attempts");
+      let max_attempts_int=json.get_int(row;"max_attempts");
+      let error_val=json.get_str(row;"error");
+      <$ok($queue_item{
+        id:item_id;
+        queue_name:json.get_str(row;"queue_name");
+        payload:json.get_str(row;"payload");
+        status:$processing;
+        attempts:attempts_int;
+        max_attempts:max_attempts_int;
+        error:error_val;
+        created_at:json.get_str(row;"created_at")
+      })
+    };
+    $err:e <$err($not_found_err(str.concat("no pending items in queue: ";queue_name)))
+  }
+}
+
+// Marks an item as successfully completed.
+pub f=ack(store:$s.store;item_id:str):void|$loke_err{
+  db.exec_params(
+    store.conn;
+    "UPDATE sync_queue SET status='completed',updated_at=datetime('now') WHERE id=?";
+    @(item_id)
+  )|{
+    $ok:_ {
+      log.debug(str.concat("acked item: ";item_id);"sync_queue";item_id);
+      <$ok(void)
+    };
+    $err:e <$err($storage_err(str.concat("failed to ack item: ";item_id)))
+  }
+}
+
+// Records a failure for an item. Increments attempts and applies
+// exponential backoff. Once attempts >= max_attempts the item is moved
+// to 'dead_letter' and will never be dequeued again.
+//
+// Backoff schedule (1-indexed attempt number after the failure):
+//   attempt 1 → +1 minute
+//   attempt 2 → +2 minutes
+//   attempt 3 → +4 minutes
+//   attempt N → +2^(N-1) minutes  (capped at 60 minutes by the SQL expression)
+pub f=nack(store:$s.store;item_id:str;error:str):void|$loke_err{
+  // Fetch current attempts and max_attempts
+  db.query_one_params(
+    store.conn;
+    "SELECT attempts,max_attempts FROM sync_queue WHERE id=?";
+    @(item_id)
+  )|{
+    $ok:row {
+      let current_attempts=json.get_int(row;"attempts");
+      let max_attempts=json.get_int(row;"max_attempts");
+      let new_attempts=current_attempts+1;
+      let new_attempts_str=str.from_int(new_attempts);
+
+      if new_attempts>=max_attempts{
+        // Move to dead-letter — no further retries
+        db.exec_params(
+          store.conn;
+          "UPDATE sync_queue SET status='dead_letter',attempts=?,error=?,updated_at=datetime('now') WHERE id=?";
+          @(new_attempts_str;error;item_id)
+        )|{
+          $ok:_ {
+            log.warn(str.concat("item moved to dead_letter: ";item_id);"sync_queue";item_id);
+            <$ok(void)
+          };
+          $err:e <$err($storage_err(str.concat("failed to dead-letter item: ";item_id)))
+        }
+      }else{
+        // Exponential backoff: 2^(new_attempts - 1) minutes, cap at 60
+        // SQLite expression: MIN(POWER(2, new_attempts - 1), 60) minutes
+        let backoff_expr=str.concat(
+          "datetime('now', '+' || MIN(CAST(ROUND(POWER(2,";
+          str.concat(
+            new_attempts_str;
+            str.concat(" - 1)) AS INTEGER),60)",",' minutes')")
+          )
+        );
+        // Use a static SQL with the computed new_attempts embedded directly
+        let update_sql=str.concat(
+          "UPDATE sync_queue SET status='pending',attempts=";
+          str.concat(
+            new_attempts_str;
+            str.concat(
+              ",error=?,next_retry_at=datetime('now','+' || MIN(CAST(ROUND(POWER(2,";
+              str.concat(
+                new_attempts_str;
+                " - 1)) AS INTEGER),60) || ' minutes'),updated_at=datetime('now') WHERE id=?"
+              )
+            )
+          )
+        );
+        db.exec_params(
+          store.conn;
+          update_sql;
+          @(error;item_id)
+        )|{
+          $ok:_ {
+            log.debug(str.concat("nacked item, will retry: ";item_id);"sync_queue";item_id);
+            <$ok(void)
+          };
+          $err:e <$err($storage_err(str.concat("failed to nack item: ";item_id)))
+        }
+      }
+    };
+    $err:e <$err($storage_err(str.concat("item not found for nack: ";item_id)))
+  }
+}
+
+// Returns the number of pending items in the named queue.
+pub f=queue_depth(store:$s.store;queue_name:str):u32|$loke_err{
+  db.query_one_params(
+    store.conn;
+    "SELECT COUNT(*) as cnt FROM sync_queue WHERE queue_name=? AND status='pending'";
+    @(queue_name)
+  )|{
+    $ok:row {
+      let n=json.get_int(row;"cnt");
+      <$ok(n)
+    };
+    $err:e <$err($storage_err(str.concat("failed to count queue depth for: ";queue_name)))
+  }
+}
+
+// Returns the number of dead-letter items in the named queue.
+pub f=dead_letter_count(store:$s.store;queue_name:str):u32|$loke_err{
+  db.query_one_params(
+    store.conn;
+    "SELECT COUNT(*) as cnt FROM sync_queue WHERE queue_name=? AND status='dead_letter'";
+    @(queue_name)
+  )|{
+    $ok:row {
+      let n=json.get_int(row;"cnt");
+      <$ok(n)
+    };
+    $err:e <$err($storage_err(str.concat("failed to count dead-letter items for: ";queue_name)))
+  }
+}

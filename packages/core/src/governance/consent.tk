@@ -1,0 +1,191 @@
+// G2.2 — Consent management.
+// Tracks user consent records for data processing purposes required under
+// GDPR and the Australian Privacy Act 1988.
+// Consent is scoped to a named purpose and carries an expiry date.
+// loke will not route data for a purpose unless the user has granted
+// and not revoked or expired consent for that purpose.
+
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=time:std.time;
+
+pub m.$consent_record{
+  id:str;
+  user_id:str;
+  purpose:str;
+  granted:bool;
+  ts:i64;
+  expiry_ts:i64
+}
+
+// Convenience struct that maps all known purposes to their current grant state.
+// All fields default to false (deny-by-default).
+pub m.$consent_purposes{
+  telemetry:bool;
+  improvement:bool;
+  cloud_routing:bool;
+  companion_sync:bool
+}
+
+// Creates the consent_records table if it does not already exist.
+pub f=ensure_table(store:db.$store):bool{
+  let sql="CREATE TABLE IF NOT EXISTS consent_records (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  granted INTEGER NOT NULL DEFAULT 0,
+  ts INTEGER NOT NULL,
+  expiry_ts INTEGER NOT NULL,
+  UNIQUE(user_id, purpose)
+)";
+  db.exec_params(store.conn;sql;@())|{
+    $ok:_ <true;
+    $err:e {
+      log.warn("failed to create consent_records table";"consent";"system");
+      <false
+    }
+  }
+}
+
+// Records a consent grant for a user and purpose.
+// expiry_days sets how many days from now the consent expires.
+// A grant with expiry_days=0 is treated as permanent (expiry_ts=0).
+// Uses INSERT OR REPLACE so re-granting updates the record.
+pub f=grant(store:db.$store;user_id:str;purpose:str;expiry_days:i32):bool{
+  let id=str.rand_hex(16);
+  let now=time.now_unix();
+  let now_s=str.from_int(now);
+  let expiry_ts=if expiry_days<=0{
+    0
+  }else{
+    let days_secs=expiry_days*86400;
+    now+days_secs
+  };
+  let expiry_s=str.from_int(expiry_ts);
+  db.exec_params(
+    store.conn;
+    "INSERT INTO consent_records (id,user_id,purpose,granted,ts,expiry_ts)
+     VALUES (?,?,?,1,?,?)
+     ON CONFLICT(user_id,purpose) DO UPDATE SET
+       granted=1,
+       ts=excluded.ts,
+       expiry_ts=excluded.expiry_ts";
+    @(id;user_id;purpose;now_s;expiry_s)
+  )|{
+    $ok:_ {
+      log.info(
+        str.concat(
+          str.concat("consent granted user=";user_id);
+          str.concat(" purpose=";purpose)
+        );
+        "consent";
+        user_id
+      );
+      <true
+    };
+    $err:e {
+      log.warn(
+        str.concat(
+          str.concat("failed to grant consent user=";user_id);
+          str.concat(" purpose=";purpose)
+        );
+        "consent";
+        user_id
+      );
+      <false
+    }
+  }
+}
+
+// Revokes a consent grant for a user and purpose.
+// Sets granted=0 rather than deleting so the audit trail is preserved.
+pub f=revoke(store:db.$store;user_id:str;purpose:str):bool{
+  let now=time.now_unix();
+  let now_s=str.from_int(now);
+  db.exec_params(
+    store.conn;
+    "UPDATE consent_records SET granted=0,ts=? WHERE user_id=? AND purpose=?";
+    @(now_s;user_id;purpose)
+  )|{
+    $ok:_ {
+      log.info(
+        str.concat(
+          str.concat("consent revoked user=";user_id);
+          str.concat(" purpose=";purpose)
+        );
+        "consent";
+        user_id
+      );
+      <true
+    };
+    $err:e {
+      log.warn(
+        str.concat(
+          str.concat("failed to revoke consent user=";user_id);
+          str.concat(" purpose=";purpose)
+        );
+        "consent";
+        user_id
+      );
+      <false
+    }
+  }
+}
+
+// Returns true if the user has an active, non-expired grant for the given purpose.
+// An expiry_ts of 0 means no expiry.
+pub f=check(store:db.$store;user_id:str;purpose:str):bool{
+  let now=time.now_unix();
+  let now_s=str.from_int(now);
+  db.query_params(
+    store.conn;
+    "SELECT granted,expiry_ts FROM consent_records WHERE user_id=? AND purpose=? LIMIT 1";
+    @(user_id;purpose)
+  )|{
+    $ok:rows {
+      if rows.len==0{
+        <false
+      }else{
+        let row=rows.get(0);
+        let granted=json.get_int(row;"granted");
+        let expiry_ts=json.get_int(row;"expiry_ts");
+        if granted==0{
+          <false
+        }else{
+          if expiry_ts==0{
+            <true
+          }else{
+            <expiry_ts>now
+          }
+        }
+      }
+    };
+    $err:e {
+      log.warn(
+        str.concat(
+          str.concat("failed to check consent user=";user_id);
+          str.concat(" purpose=";purpose)
+        );
+        "consent";
+        user_id
+      );
+      <false
+    }
+  }
+}
+
+// Loads all known consent purposes for a user and returns a $consent_purposes struct.
+// Any purpose without an active grant defaults to false.
+pub f=load_prefs(store:db.$store;user_id:str):$consent_purposes{
+  let telemetry=check(store;user_id;"telemetry");
+  let improvement=check(store;user_id;"improvement");
+  let cloud_routing=check(store;user_id;"cloud_routing");
+  let companion_sync=check(store;user_id;"companion_sync");
+  <$consent_purposes{
+    telemetry:telemetry;
+    improvement:improvement;
+    cloud_routing:cloud_routing;
+    companion_sync:companion_sync
+  }
+}

@@ -1,0 +1,215 @@
+// G3.2 — Incident management.
+// When quality degrades or a governance policy fires repeatedly, loke creates
+// an incident record and tracks it to resolution.
+
+i=t:shared.types;
+i=db:storage.db;
+i=log:shared.log;
+i=str:std.str;
+i=sql:std.db;
+i=time:std.time;
+
+m.$incident_severity{ name:str }
+
+m.$incident_status{ name:str }
+
+m.$incident{
+  id:str;
+  title:str;
+  severity:str;
+  status:str;
+  description:str;
+  created_at:i64;
+  resolved_at:i64;
+  resolution_note:str
+}
+
+pub let sev_p0="P0";
+pub let sev_p1="P1";
+pub let sev_p2="P2";
+pub let sev_p3="P3";
+
+pub let status_open="open";
+pub let status_investigating="investigating";
+pub let status_resolved="resolved";
+
+// Creates the incidents table if it does not already exist.
+pub f=ensure_table(store:db.$store):bool{
+  let sql="CREATE TABLE IF NOT EXISTS incidents (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  status TEXT NOT NULL,
+  description TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER NOT NULL DEFAULT 0,
+  resolution_note TEXT NOT NULL DEFAULT ''
+)";
+  sql.exec_params(store.conn;sql;@())|{
+    $ok:_ <true;
+    $err:e {
+      log.warn("failed to create incidents table";"incidents";"system");
+      <false
+    }
+  }
+}
+
+// Inserts a new incident with the given title, severity, and description.
+// Returns the new incident id.
+pub f=open_incident(store:db.$store;title:str;severity:str;description:str):str{
+  let id=str.rand_hex(16);
+  let now=time.now_unix();
+  let now_s=str.from_int(now);
+  sql.exec_params(
+    store.conn;
+    "INSERT INTO incidents (id,title,severity,status,description,created_at) VALUES (?,?,?,?,?,?)";
+    @(id;title;severity;status_open;description;now_s)
+  )|{
+    $ok:_ {
+      log.info(str.concat("incident opened: ";id);"incidents";"system");
+      <id
+    };
+    $err:e {
+      log.warn(str.concat("failed to open incident: ";title);"incidents";"system");
+      <id
+    }
+  }
+}
+
+// Updates the status of an existing incident by id.
+pub f=update_status(store:db.$store;id:str;status:str):bool{
+  sql.exec_params(
+    store.conn;
+    "UPDATE incidents SET status=? WHERE id=?";
+    @(status;id)
+  )|{
+    $ok:_ <true;
+    $err:e {
+      log.warn(str.concat("failed to update incident status: ";id);"incidents";"system");
+      <false
+    }
+  }
+}
+
+// Resolves an incident: sets status to resolved, records resolved_at and note.
+pub f=resolve(store:db.$store;id:str;note:str):bool{
+  let now=time.now_unix();
+  let now_s=str.from_int(now);
+  sql.exec_params(
+    store.conn;
+    "UPDATE incidents SET status=?,resolved_at=?,resolution_note=? WHERE id=?";
+    @(status_resolved;now_s;note;id)
+  )|{
+    $ok:_ {
+      log.info(str.concat("incident resolved: ";id);"incidents";"system");
+      <true
+    };
+    $err:e {
+      log.warn(str.concat("failed to resolve incident: ";id);"incidents";"system");
+      <false
+    }
+  }
+}
+
+// Returns all open or investigating incidents ordered by created_at descending.
+pub f=list_open(store:db.$store):@($incident){
+  sql.query_params(
+    store.conn;
+    "SELECT id,title,severity,status,description,created_at,resolved_at,resolution_note FROM incidents WHERE status != 'resolved' ORDER BY created_at DESC";
+    @()
+  )|{
+    $ok:rows {
+      <rows.map|row{
+        $incident{
+          id:json.get_str(row;"id");
+          title:json.get_str(row;"title");
+          severity:json.get_str(row;"severity");
+          status:json.get_str(row;"status");
+          description:json.get_str(row;"description");
+          created_at:json.get_int(row;"created_at");
+          resolved_at:json.get_int(row;"resolved_at");
+          resolution_note:json.get_str(row;"resolution_note")
+        }
+      }
+    };
+    $err:e {
+      log.warn("failed to list open incidents";"incidents";"system");
+      <@()
+    }
+  }
+}
+
+// Opens a P2 incident if the thumbs-up rate for a model has dropped below 50%.
+// Returns true if an incident was opened, false otherwise.
+pub f=auto_open_if_degraded(store:db.$store;model:str;thumbs_up_rate:f64):bool{
+  if thumbs_up_rate < 0.5{
+    let pct=thumbs_up_rate*100.0;
+    let pct_s=str.from_float(pct);
+    let title=str.concat("Quality degradation: ";model);
+    let desc=str.concat("Thumbs-up rate dropped to ";str.concat(pct_s;"%"));
+    let id=open_incident(store;title;sev_p2;desc);
+    log.warn(
+      str.concat("auto-opened incident for model: ";str.concat(model;str.concat(" rate=";pct_s)));
+      "incidents";
+      "system"
+    );
+    <true
+  }else{
+    <false
+  }
+}
+
+// Pads a string with trailing spaces to at least width characters.
+f=pad_right(s:str;width:u32):str{
+  let len=str.len(s);
+  if len >= width{
+    <s
+  }else{
+    let diff=width-len;
+    let spaces="                              ";
+    let pad=str.slice(spaces;0;diff);
+    <str.concat(s;pad)
+  }
+}
+
+// Renders a formatted table of incidents: ID | Severity | Status | Title | Age.
+pub f=format_incidents(incidents:@($incident)):str{
+  let header="ID               | Severity | Status         | Title                              | Age\n";
+  let divider="-----------------+----------+----------------+------------------------------------+-------\n";
+  let body="";
+  let now=time.now_unix();
+  incidents.each|inc{
+    let age_secs=now-inc.created_at;
+    let age_mins=age_secs/60;
+    let age_s=if age_mins < 60{
+      str.concat(str.from_int(age_mins);"m")
+    }else{
+      let age_hrs=age_mins/60;
+      if age_hrs < 48{
+        str.concat(str.from_int(age_hrs);"h")
+      }else{
+        let age_days=age_hrs/24;
+        str.concat(str.from_int(age_days);"d")
+      }
+    };
+    let id_col=pad_right(inc.id;17);
+    let sev_col=pad_right(inc.severity;10);
+    let status_col=pad_right(inc.status;16);
+    let title_col=pad_right(inc.title;36);
+    let line=str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(id_col;"| ");
+            str.concat(sev_col;"| ")
+          );
+          str.concat(status_col;"| ")
+        );
+        str.concat(title_col;"| ")
+      );
+      str.concat(age_s;"\n")
+    );
+    body=str.concat(body;line)
+  };
+  <str.concat(str.concat(header;divider);body)
+}

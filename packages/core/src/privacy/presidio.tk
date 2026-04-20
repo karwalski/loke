@@ -1,0 +1,176 @@
+// F3.4 — Presidio REST client
+// Wraps the Microsoft Presidio sidecar (Python, default http://localhost:5000).
+// Provides 180+ entity type detection via /analyze and /anonymize endpoints.
+
+i=t:shared.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=ph:core.privacy.placeholder;
+
+pub m.$presidio_entity{
+  entity_type:str;
+  start:u32;
+  end:u32;
+  score:f64
+}
+
+pub m.$presidio_client{
+  base_url:str
+}
+
+// Creates a new Presidio client pointing at base_url (e.g. "http://localhost:5000")
+pub f=new(base_url:str):$presidio_client{
+  <$presidio_client{base_url:base_url}
+}
+
+// Returns true if Presidio sidecar is reachable (GET /health returns 200)
+pub f=is_available(client:$presidio_client):bool{
+  let url=str.concat(client.base_url;"/health");
+  let result=http.get_timeout(url;2000);
+  result|{
+    $http_err e;
+      <false
+    body;
+      <true
+  }
+}
+
+// Calls POST /analyze and returns a list of detected Presidio entities
+pub f=analyze(client:$presidio_client;text:str):@($presidio_entity)|$loke_err{
+  let url=str.concat(client.base_url;"/analyze");
+  let body=json.enc({text:text;language:"en"});
+  let result=http.post(url;body;"application/json");
+  result|{
+    $http_err e;
+      <$loke_err.$network_err("presidio analyze: failed to reach /analyze")
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          <$loke_err.$privacy_err("presidio analyze: failed to parse JSON response")
+        arr;
+          let entities=@();
+          let items=json.get_arr(arr;"");
+          items|{
+            item;
+              let entity_type=json.get_str(item;"entity_type");
+              let start=json.get_int(item;"start");
+              let end=json.get_int(item;"end");
+              let score=json.get_int(item;"score");
+              let e=$presidio_entity{
+                entity_type:entity_type;
+                start:start;
+                end:end;
+                score:score
+              };
+              entities=@(entities;e)
+          };
+          <entities
+      }
+  }
+}
+
+// Maps a Presidio entity_type string to a sensitivity level and confidence score
+f=map_sensitivity(entity_type:str):$sensitivity_level{
+  if str.eq(entity_type;"CREDIT_CARD"){
+    <$restricted
+  }else{
+    if str.eq(entity_type;"US_SSN"){
+      <$restricted
+    }else{
+      if str.eq(entity_type;"AU_TFN"){
+        <$restricted
+      }else{
+        if str.eq(entity_type;"PERSON"){
+          <$confidential
+        }else{
+          if str.eq(entity_type;"EMAIL_ADDRESS"){
+            <$confidential
+          }else{
+            if str.eq(entity_type;"PHONE_NUMBER"){
+              <$confidential
+            }else{
+              if str.eq(entity_type;"LOCATION"){
+                <$internal
+              }else{
+                if str.eq(entity_type;"ORGANIZATION"){
+                  <$internal
+                }else{
+                  <$internal
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+f=map_confidence(entity_type:str):f64{
+  if str.eq(entity_type;"CREDIT_CARD"){
+    <0.99
+  }else{
+    if str.eq(entity_type;"US_SSN"){
+      <0.99
+    }else{
+      if str.eq(entity_type;"AU_TFN"){
+        <0.99
+      }else{
+        if str.eq(entity_type;"PERSON"){
+          <0.92
+        }else{
+          if str.eq(entity_type;"EMAIL_ADDRESS"){
+            <0.92
+          }else{
+            if str.eq(entity_type;"PHONE_NUMBER"){
+              <0.92
+            }else{
+              if str.eq(entity_type;"LOCATION"){
+                <0.75
+              }else{
+                if str.eq(entity_type;"ORGANIZATION"){
+                  <0.75
+                }else{
+                  <0.70
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Converts a list of Presidio entities into loke $pii_entity values.
+// Extracts the matched value by slicing the original text at start/end offsets.
+pub f=to_pii_entities(presidio_results:@($presidio_entity);text:str):@($pii_entity){
+  let entities=@();
+  let count=presidio_results.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let pe=str.array_get(presidio_results;i);
+      let value=str.slice(text;pe.start;pe.end);
+      let index=str.array_len(entities)+1;
+      let placeholder=ph.make_placeholder(pe.entity_type;index);
+      let sensitivity=map_sensitivity(pe.entity_type);
+      let confidence=map_confidence(pe.entity_type);
+      let entity=t.$pii_entity{
+        entity_type:pe.entity_type;
+        value:value;
+        start:pe.start;
+        end:pe.end;
+        confidence:confidence;
+        placeholder:placeholder
+      };
+      entities=@(entities;entity);
+      i=i+1
+    }
+  };
+  <entities
+}

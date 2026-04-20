@@ -1,0 +1,101 @@
+// POST /api/moke/upload — CSV/TSV upload and parse handler.
+// Accepts multipart file upload or raw text body. Parses the content with
+// moke.upload, then returns a JSON summary: column count, row count, headers,
+// and the first 5 preview rows. Raw rows are not included beyond the preview.
+
+m=page.moke.api.upload;
+i=http:std.http;
+i=json:std.json;
+i=str:std.string;
+i=upload:moke.upload;
+
+pub f=post(req:http.$req):http.$res{
+  // ── resolve filename ───────────────────────────────────────────────────────
+  // Try Content-Disposition header first (multipart upload). Fall back to
+  // a query-string "name" param, then to the generic default.
+  let content_disp=http.header(req;"content-disposition");
+  let filename="uploaded_dataset";
+
+  if str.len(content_disp) > 0{
+    // Extract filename="..." or filename*=UTF-8''...
+    let fn_idx=str.index_of(content_disp;"filename=\"");
+    if fn_idx >= 0{
+      let start=fn_idx + 10;
+      let rest=str.slice(content_disp;start;str.len(content_disp));
+      let end_idx=str.index_of(rest;"\"");
+      if end_idx > 0{
+        filename=str.slice(rest;0;end_idx)
+      }
+    }
+  };
+
+  // Query param override (used by paste-upload path)
+  let qname=http.query_param(req;"name");
+  if str.len(qname) > 0{ filename=qname };
+
+  // ── read body ──────────────────────────────────────────────────────────────
+  // For multipart, the framework strips the boundary and gives us the part
+  // body directly. For raw text/plain or text/csv, body is the file content.
+  let raw_text=req.body;
+
+  if str.len(str.trim(raw_text)) == 0{
+    let err_body="{\"ok\":false,\"error\":\"empty body\",\"col_count\":0,\"row_count\":0,\"headers\":[],\"preview_rows\":[]}";
+    <http.res.json(400;err_body)
+  };
+
+  // ── parse ──────────────────────────────────────────────────────────────────
+  let opts=upload.default_opts();
+  let result=upload.parse_csv(raw_text;opts);
+
+  if result.ok == false{
+    let err_body=str.concat("{\"ok\":false,\"error\":";
+      str.concat(str.json_encode(result.error);
+      ",\"col_count\":0,\"row_count\":0,\"headers\":[],\"preview_rows\":[]}"));
+    <http.res.json(422;err_body)
+  };
+
+  // ── serialise preview rows ─────────────────────────────────────────────────
+  let preview_parts=@();
+  let pi=0;
+  ??(pi < result.preview_rows.len()){
+    let row=result.preview_rows[pi];
+    let cell_parts=@();
+    let ci=0;
+    ??(ci < row.len()){
+      cell_parts.push(str.json_encode(row[ci]));
+      ci=ci + 1
+    }{};
+    preview_parts.push(str.concat("[";str.concat(str.join(cell_parts;",");"]")));
+    pi=pi + 1
+  }{};
+  let preview_json=str.concat("[";str.concat(str.join(preview_parts;",");"]"));
+
+  // ── serialise headers ──────────────────────────────────────────────────────
+  let header_parts=@();
+  let hi=0;
+  ??(hi < result.dataset.headers.len()){
+    header_parts.push(str.json_encode(result.dataset.headers[hi]));
+    hi=hi + 1
+  }{};
+  let headers_json=str.concat("[";str.concat(str.join(header_parts;",");"]"));
+
+  // ── friendly display name from filename ───────────────────────────────────
+  let display_name=upload.guess_name(filename);
+
+  let resp_body=str.concat("{\"ok\":true,";
+    str.concat("\"filename\":";
+    str.concat(str.json_encode(filename);
+    str.concat(",\"display_name\":";
+    str.concat(str.json_encode(display_name);
+    str.concat(",\"col_count\":";
+    str.concat(str.from_i32(result.col_count);
+    str.concat(",\"row_count\":";
+    str.concat(str.from_i32(result.row_count);
+    str.concat(",\"headers\":";
+    str.concat(headers_json;
+    str.concat(",\"preview_rows\":";
+    str.concat(preview_json;
+    ",\"error\":\"\"}")))))))))));
+
+  <http.res.json(200;resp_body)
+}

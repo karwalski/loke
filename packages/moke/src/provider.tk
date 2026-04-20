@@ -1,0 +1,288 @@
+// MK6.2 — moke local compute provider adapter.
+// Registers moke's local compute capability with loke's provider registry so
+// the dispatcher can route data-operation requests to the on-device engine
+// rather than an external LLM. Higher priority than cloud providers — use
+// local first for all data ops, never sending raw rows off-device.
+//
+// P2.7 — Custom LLM provider registration.
+// Exposes a moke-level provider registry so extensions can register their own
+// LLM endpoints. moke registers its own schema-first provider here that
+// intercepts cloud-bound requests, applies the schema-first protocol, and logs
+// the substitution before dispatching.
+
+m=moke.provider;
+i=str:std.string;
+i=http:std.http;
+i=log:std.log;
+i=providers:core.extensions.provider_registry;
+i=compute:moke.compute;
+
+// ── P2.7 — Custom provider registration API ───────────────────────────────────
+
+// Capability flags advertised by a registered provider.
+pub m.$provider_capability{
+  streaming:bool;
+  tool_calling:bool;
+  embedding:bool
+}
+
+// A provider registration record held in the moke registry.
+pub m.$provider_registration{
+  id:str;
+  name:str;
+  description:str;
+  capabilities:$provider_capability
+}
+
+// Internal registry type for registered providers.
+pub m.$provider_store{
+  registrations:@($provider_registration)
+}
+
+// Module-level mutable provider store — populated during init, read at request time.
+let g_provider_store=$provider_store{ registrations=[] };
+
+// Register a custom LLM provider. Replaces any existing entry with the same id.
+pub f=register(reg:$provider_registration){
+  // Remove any existing entry with the same id before appending.
+  existing:@($provider_registration)=g_provider_store.registrations;
+  filtered:@($provider_registration)=[];
+  idx:i32=0;
+  ??(idx<str.len(existing)){
+    entry:$provider_registration=str.get(existing;idx);
+    ??(str.eq(entry.id;reg.id)==false){
+      str.push(filtered;entry)
+    }{};
+    idx=idx+1
+  }{};
+  updated:@($provider_registration)=str.push_copy(filtered;reg);
+  g_provider_store=$provider_store{ registrations=updated }
+}
+
+// Return all registered providers in registration order.
+pub f=list_registered():@($provider_registration){
+  <g_provider_store.registrations
+}
+
+// Find a provider by id. Returns none if not found.
+pub f=get(id:str):?($provider_registration){
+  idx:i32=0;
+  ??(idx<str.len(g_provider_store.registrations)){
+    entry:$provider_registration=str.get(g_provider_store.registrations;idx);
+    ??(str.eq(entry.id;id)){
+      <?(entry)
+    }{};
+    idx=idx+1
+  }{};
+  <?()
+}
+
+// ── Schema-first provider self-registration ───────────────────────────────────
+// Called from extensions/core.tk init(). Registers the schema-first provider
+// so the loke dispatcher knows it is available as a cloud intercept layer.
+
+pub f=register_schema_first_provider(){
+  caps:$provider_capability={
+    streaming=false;
+    tool_calling=false;
+    embedding=false
+  };
+  reg:$provider_registration={
+    id="moke.schema_first";
+    name="moke Schema-First Interceptor";
+    description="Intercepts cloud-bound requests, replaces raw tabular data with a TOON-compressed schema profile, and logs the substitution. Raw row data never leaves the device.";
+    capabilities=caps
+  };
+  register(reg);
+  log.info("moke.provider: schema-first provider registered")
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+// Request body sent to the local compute endpoint.
+pub m.$local_compute_request{
+  op:str;
+  column:str;
+  group_by:str;
+  filter_col:str;
+  filter_val:str;
+  top_n:i32
+}
+
+// Response returned by the local compute handler.
+pub m.$local_compute_response{
+  ok:bool;
+  result:compute.$result;
+  error:str
+}
+
+// ── make_provider ─────────────────────────────────────────────────────────────
+
+// Return the moke local compute provider definition ready for registration.
+// Priority 100 means it is preferred over all cloud providers when the
+// dispatcher considers candidates for a data-operation request.
+pub f=make_provider():providers.$custom_provider{
+  let caps=providers.$provider_caps{
+    streaming=false;
+    tool_calling=false;
+    embedding=false;
+    max_context=0
+  };
+  <providers.$custom_provider{
+    id="moke.local_compute";
+    name="moke Local Compute";
+    base_url="http://127.0.0.1:11432/internal/compute";
+    caps=caps;
+    priority=100
+  }
+}
+
+// ── handle_compute ────────────────────────────────────────────────────────────
+
+// Parse a JSON request body, extract op/column/group_by/filter/top_n, delegate
+// to compute.execute, and return a typed response. On any parse failure the
+// error field is set and ok=false; the caller should surface this to the user.
+pub f=handle_compute(req_body:str;ds:compute.$dataset):$local_compute_response{
+  let op=str.json_string(req_body;"op");
+  let column=str.json_string(req_body;"column");
+  let group_by=str.json_string(req_body;"group_by");
+  let filter_col=str.json_string(req_body;"filter_col");
+  let filter_val=str.json_string(req_body;"filter_val");
+  let top_n_str=str.json_string(req_body;"top_n");
+  let top_n=0;
+  if str.len(top_n_str) > 0{
+    if str.is_numeric(top_n_str){ top_n=str.parse_i32(top_n_str) }
+  };
+  if str.len(op) == 0{
+    let empty_result=compute.$result{
+      op="";
+      column="";
+      value="";
+      rows=@();
+      labels=@();
+      values=@()
+    };
+    <$local_compute_response{
+      ok=false;
+      result=empty_result;
+      error="missing required field: op"
+    }
+  };
+  let q=compute.$query{
+    op=op;
+    column=column;
+    group_by=group_by;
+    filter_col=filter_col;
+    filter_val=filter_val;
+    top_n=top_n;
+    bucket_count=10;
+    join_col=""
+  };
+  log.info(str.concat("moke.provider: dispatching local compute op=";op));
+  let result=compute.execute(ds;q);
+  <$local_compute_response{
+    ok=true;
+    result=result;
+    error=""
+  }
+}
+
+// ── format_result_as_text ─────────────────────────────────────────────────────
+
+// Convert a compute.$result into human-readable text suitable for injecting
+// into an LLM prompt as structured context — no raw row data included.
+// The LLM receives concise factual output so it can reason about the dataset
+// without ever seeing individual cell values.
+pub f=format_result_as_text(result:compute.$result):str{
+  // Scalar ops: count, sum, avg, min, max, correlate
+  if str.eq(result.op;"count"){
+    <str.concat("count=";result.value)
+  };
+  if str.eq(result.op;"sum"){
+    <str.concat(str.concat("sum(";result.column);str.concat(")=";result.value))
+  };
+  if str.eq(result.op;"avg"){
+    <str.concat(str.concat("avg(";result.column);str.concat(")=";result.value))
+  };
+  if str.eq(result.op;"min"){
+    <str.concat(str.concat("min(";result.column);str.concat(")=";result.value))
+  };
+  if str.eq(result.op;"max"){
+    <str.concat(str.concat("max(";result.column);str.concat(")=";result.value))
+  };
+  if str.eq(result.op;"correlate"){
+    <str.concat(str.concat("pearson_r(";result.column);str.concat(")=";result.value))
+  };
+
+  // Multi-value ops: group, count_by, distribution, timeseries
+  if str.eq(result.op;"group") || str.eq(result.op;"count_by") ||
+     str.eq(result.op;"distribution") || str.eq(result.op;"timeseries"){
+    let n=result.labels.len();
+    let total_count=0;
+    let ci=0;
+    ??(ci < n){
+      let v=result.values[ci];
+      if str.is_numeric(v){ total_count=total_count + str.parse_i32(v) };
+      ci=ci + 1
+    }{};
+    let out="top values: ";
+    let shown=0;
+    let limit=5;
+    if limit > n{ limit=n };
+    let li=0;
+    ??(li < limit){
+      if li > 0{ out=str.concat(out;", ") };
+      let label=result.labels[li];
+      let val=result.values[li];
+      let pct_str="";
+      if total_count > 0 && str.is_numeric(val){
+        let pct=str.parse_i32(val) * 100 / total_count;
+        pct_str=str.concat(" (";str.concat(str.from_i32(pct);"%)")  )
+      };
+      out=str.concat(out;str.concat(label;pct_str));
+      li=li + 1
+    }{};
+    if n > limit{
+      out=str.concat(out;str.concat(" + ";str.concat(str.from_i32(n - limit);" more")))
+    };
+    <out
+  };
+
+  // Distinct: just count unique values
+  if str.eq(result.op;"distinct"){
+    <str.concat(str.concat("distinct(";result.column);
+      str.concat("): ";str.from_i32(result.values.len())))
+  };
+
+  // Percentile: tabular p25/p50/p75/p90/p99
+  if str.eq(result.op;"percentile"){
+    let out=str.concat("percentile(";str.concat(result.column;"): "));
+    let ri=0;
+    ??(ri < result.rows.len()){
+      if ri > 0{ out=str.concat(out;", ") };
+      let row=result.rows[ri];
+      if row.len() >= 2{
+        out=str.concat(out;str.concat(row[0];str.concat("=";row[1])))
+      };
+      ri=ri + 1
+    }{};
+    <out
+  };
+
+  // topn / latest: summarise row count
+  if str.eq(result.op;"topn") || str.eq(result.op;"latest"){
+    <str.concat(str.concat(result.op;"(";result.column);
+      str.concat("): ";str.concat(str.from_i32(result.rows.len());" rows")))
+  };
+
+  // join: row count only
+  if str.eq(result.op;"join"){
+    <str.concat("join result: ";str.concat(str.from_i32(result.rows.len());" rows"))
+  };
+
+  // Fallback for unknown ops
+  if str.len(result.value) > 0{
+    <str.concat(str.concat(result.op;"=";result.value))
+  };
+  <str.concat(result.op;" result: no scalar value")
+}

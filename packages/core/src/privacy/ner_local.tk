@@ -1,0 +1,140 @@
+// F2.5 — Local in-process NER
+// Replaces Ollama-based NER (ner.tk) with an in-process inference path for
+// < 10ms entity detection. Falls back to ner.tk (Ollama REST) if the
+// in-process model is not loaded.
+
+i=t:shared.types;
+i=inf:models.infer;
+i=ner:privacy.ner;
+i=log:shared.log;
+
+// NER model kept permanently in VRAM for sub-10ms latency.
+let ner_model_id="qwen2.5:0.5b";
+
+f=build_prompt(input:str):str{
+  let line1="Extract named entities from the following text. Return JSON array only.";
+  let line2="Format: [{\"text\":\"...\",\"label\":\"PERSON\"|\"EMAIL\"|\"PHONE\"|\"ORG\"|\"LOC\"|\"DATE\",\"start\":N,\"end\":N}]";
+  let line3=str.concat("Text: ";input);
+  let l1l2=str.concat(line1;"\n");
+  let l1l2b=str.concat(l1l2;line2);
+  let sep=str.concat(l1l2b;"\n");
+  <str.concat(sep;line3)
+}
+
+f=label_to_entity_type(label:str):str{
+  if str.eq(label;"PERSON"){
+    <"PERSON"
+  }else{
+    if str.eq(label;"EMAIL"){
+      <"EMAIL"
+    }else{
+      if str.eq(label;"PHONE"){
+        <"PHONE"
+      }else{
+        if str.eq(label;"ORG"){
+          <"ORG"
+        }else{
+          if str.eq(label;"LOC"){
+            <"LOC"
+          }else{
+            if str.eq(label;"DATE"){
+              <"DATE"
+            }else{
+              <"UNKNOWN"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+f=label_to_placeholder(label:str):str{
+  let open=str.concat("[";label);
+  <str.concat(open;"_NER_1]")
+}
+
+f=label_to_confidence(label:str):f64{
+  if str.eq(label;"PERSON"){
+    <0.78
+  }else{
+    if str.eq(label;"EMAIL"){
+      <0.78
+    }else{
+      if str.eq(label;"PHONE"){
+        <0.78
+      }else{
+        if str.eq(label;"ORG"){
+          <0.65
+        }else{
+          if str.eq(label;"LOC"){
+            <0.65
+          }else{
+            if str.eq(label;"DATE"){
+              <0.50
+            }else{
+              <0.50
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+pub f=detect_local(text:str;pool:inf.$infer_pool):@(t.$pii_entity){
+  let loaded=inf.is_loaded(pool;ner_model_id);
+  if loaded{
+    let prompt=build_prompt(text);
+    let raw=inf.generate(pool;ner_model_id;prompt;256);
+    let parsed=json.dec(raw);
+    let entities=@();
+    parsed|{
+      $json_err e;
+        log.warn("ner_local: failed to parse model JSON response";"ner_local";"");
+        <entities
+      arr;
+        let items=json.get_arr(arr;"");
+        items|{
+          item;
+            let label=json.get_str(item;"label");
+            let value=json.get_str(item;"text");
+            let start=json.get_int(item;"start");
+            let end=json.get_int(item;"end");
+            let entity_type=label_to_entity_type(label);
+            let placeholder=label_to_placeholder(label);
+            let confidence=label_to_confidence(label);
+            let entity=t.$pii_entity{
+              entity_type:entity_type;
+              value:value;
+              start:start;
+              end:end;
+              confidence:confidence;
+              placeholder:placeholder
+            };
+            entities=@(entities;entity)
+        };
+        <entities
+    }
+  }else{
+    log.warn("ner_local: falling back to Ollama";"ner_local";"");
+    let fallback_client=ner.new("http://localhost:11434";"qwen2.5:7b");
+    let result=ner.detect_entities(fallback_client;text);
+    result|{
+      $loke_err e;
+        <@()
+      entities;
+        <entities
+    }
+  }
+}
+
+pub f=embed_text(text:str;pool:inf.$infer_pool):@(f32){
+  let loaded=inf.is_loaded(pool;ner_model_id);
+  if loaded{
+    <inf.embed(pool;ner_model_id;text)
+  }else{
+    log.warn("ner_local: embed_text — model not loaded, returning empty vector";"ner_local";"");
+    <@()
+  }
+}

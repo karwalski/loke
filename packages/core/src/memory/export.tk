@@ -1,0 +1,235 @@
+// M1.6 — Memory export.
+// Exports the memory palace to JSON, CSV, or Markdown for backup, portability,
+// or DSAR compliance. Also supports importing from a prior JSON export.
+
+i=mt:core.memory.types;
+i=db:std.db;
+i=fs:std.fs;
+i=str:std.str;
+i=log:shared.log;
+i=json:std.json;
+
+pub m.$export_format{
+  $json;
+  $csv;
+  $markdown
+}
+
+pub m.$memory_export{
+  count:i32;
+  path:str;
+  format:str;
+  ts:i64
+}
+
+// Escapes a string for safe inclusion inside a CSV field.
+// Wraps in double-quotes and doubles any embedded double-quotes.
+f=csv_escape(s:str):str{
+  let escaped=str.replace(s;"\"";  "\"\"");
+  <str.concat("\"";str.concat(escaped;"\""))
+}
+
+// Formats a single memory drawer record as a Markdown block.
+// Produces a level-2 heading with the id, then metadata and content.
+f=format_memory_md(id:str;content:str;tags:str;score:f32;ts:i64):str{
+  let header=str.concat("## ";str.concat(id;"\n"));
+  let meta_tags=str.concat("**Tags:** ";str.concat(tags;"\n"));
+  let meta_score=str.concat("**Score:** ";str.concat(str.from_float(score);"\n"));
+  let meta_ts=str.concat("**Timestamp:** ";str.concat(str.from_int(ts);"\n"));
+  let body=str.concat("\n";str.concat(content;"\n\n---\n\n"));
+  <str.concat(header;str.concat(meta_tags;str.concat(meta_score;str.concat(meta_ts;body))))
+}
+
+// Serialises a single row to a JSON object string.
+f=row_to_json(row:$json.row):str{
+  let id=csv_escape(json.get_str(row;"id"));
+  let wing=json.get_str(row;"wing");
+  let hall=json.get_str(row;"hall");
+  let room=json.get_str(row;"room");
+  let role=json.get_str(row;"role");
+  let content=json.get_str(row;"content");
+  let tags=json.get_str(row;"tags");
+  let score=json.get_float(row;"score");
+  let ts=json.get_int(row;"created_at");
+  // Inline JSON object — real serialisation would use json.encode; approximated here
+  let obj=str.concat("{");
+  let obj=str.concat(obj;str.concat("\"id\":";str.concat(csv_escape(json.get_str(row;"id"));",")));
+  let obj=str.concat(obj;str.concat("\"wing\":";str.concat(csv_escape(wing);",")));
+  let obj=str.concat(obj;str.concat("\"hall\":";str.concat(csv_escape(hall);",")));
+  let obj=str.concat(obj;str.concat("\"room\":";str.concat(csv_escape(room);",")));
+  let obj=str.concat(obj;str.concat("\"role\":";str.concat(csv_escape(role);",")));
+  let obj=str.concat(obj;str.concat("\"content\":";str.concat(csv_escape(content);",")));
+  let obj=str.concat(obj;str.concat("\"tags\":";str.concat(csv_escape(tags);",")));
+  let obj=str.concat(obj;str.concat("\"score\":";str.concat(str.from_float(score);",")));
+  let obj=str.concat(obj;str.concat("\"created_at\":";str.concat(str.from_int(ts);"}")));
+  <obj
+}
+
+// Builds the file content string for the given rows and format.
+f=build_content(rows:@($json.row);format:$export_format):str{
+  format|{
+    $export_format.$json {
+      let lines=rows.map|row{ str.concat("  ";row_to_json(row)) };
+      <str.concat("[\n";str.concat(lines.join(",\n");"\n]"))
+    };
+    $export_format.$csv {
+      let header="\"id\",\"wing\",\"hall\",\"room\",\"role\",\"content\",\"tags\",\"score\",\"created_at\"\n";
+      let data_lines=rows.map|row{
+        str.concat(
+          csv_escape(json.get_str(row;"id"));str.concat(",";
+          str.concat(csv_escape(json.get_str(row;"wing"));str.concat(",";
+          str.concat(csv_escape(json.get_str(row;"hall"));str.concat(",";
+          str.concat(csv_escape(json.get_str(row;"room"));str.concat(",";
+          str.concat(csv_escape(json.get_str(row;"role"));str.concat(",";
+          str.concat(csv_escape(json.get_str(row;"content"));str.concat(",";
+          str.concat(csv_escape(json.get_str(row;"tags"));str.concat(",";
+          str.concat(str.from_float(json.get_float(row;"score"));str.concat(",";
+          str.from_int(json.get_int(row;"created_at"))))))))))))))))
+      };
+      <str.concat(header;data_lines.join("\n"))
+    };
+    $export_format.$markdown {
+      let title="# Memory Palace Export\n\n";
+      let blocks=rows.map|row{
+        format_memory_md(
+          json.get_str(row;"id");
+          json.get_str(row;"content");
+          json.get_str(row;"tags");
+          json.get_float(row;"score");
+          json.get_int(row;"created_at")
+        )
+      };
+      <str.concat(title;blocks.join(""))
+    }
+  }
+}
+
+// Returns a short format label string for the export record.
+f=format_label(format:$export_format):str{
+  format|{
+    $export_format.$json     { <"json" };
+    $export_format.$csv      { <"csv" };
+    $export_format.$markdown { <"markdown" }
+  }
+}
+
+// Exports all memories to out_path in the specified format.
+pub f=export_all(palace:$mt.palace;out_path:str;format:$export_format;now:i64):$memory_export{
+  db.query(
+    palace.conn;
+    "SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,md.created_at, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id ORDER BY md.created_at ASC"
+  )|{
+    $ok:rows {
+      let content=build_content(rows;format);
+      fs.write(out_path;content)|{
+        $ok:_ {
+          log.info(str.concat("exported ";str.concat(str.from_int(rows.len);str.concat(" memories to: ";out_path)));"export";"system");
+          <$memory_export{
+            count:rows.len;
+            path:out_path;
+            format:format_label(format);
+            ts:now
+          }
+        };
+        $err:_ {
+          log.warn(str.concat("export write failed: ";out_path);"export";"system");
+          <$memory_export{count:0;path:out_path;format:format_label(format);ts:now}
+        }
+      }
+    };
+    $err:_ {
+      log.warn("export_all: db query failed";"export";"system");
+      <$memory_export{count:0;path:out_path;format:format_label(format);ts:now}
+    }
+  }
+}
+
+// Exports memories created between from_ts and to_ts (inclusive) to out_path.
+pub f=export_range(palace:$mt.palace;from_ts:i64;to_ts:i64;out_path:str;format:$export_format;now:i64):$memory_export{
+  let from_s=str.from_int(from_ts);
+  let to_s=str.from_int(to_ts);
+  db.query_params(
+    palace.conn;
+    "SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,md.created_at, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id WHERE md.created_at >= ? AND md.created_at <= ? ORDER BY md.created_at ASC";
+    @(from_s;to_s)
+  )|{
+    $ok:rows {
+      let content=build_content(rows;format);
+      fs.write(out_path;content)|{
+        $ok:_ {
+          log.info(str.concat("exported range ";str.concat(from_s;str.concat(" to ";str.concat(to_s;str.concat(": ";out_path)))));"export";"system");
+          <$memory_export{
+            count:rows.len;
+            path:out_path;
+            format:format_label(format);
+            ts:now
+          }
+        };
+        $err:_ {
+          log.warn(str.concat("export_range write failed: ";out_path);"export";"system");
+          <$memory_export{count:0;path:out_path;format:format_label(format);ts:now}
+        }
+      }
+    };
+    $err:_ {
+      log.warn("export_range: db query failed";"export";"system");
+      <$memory_export{count:0;path:out_path;format:format_label(format);ts:now}
+    }
+  }
+}
+
+// Imports memories from a JSON export file produced by export_all/$json.
+// Each object in the array is inserted as a drawer row; duplicates are skipped.
+// Returns the number of records successfully imported.
+pub f=import_json(palace:$mt.palace;path:str):i32{
+  fs.read(path)|{
+    $ok:raw {
+      json.parse_array(raw)|{
+        $ok:items {
+          let count=0;
+          items.each|item{
+            let id=json.get_str(item;"id");
+            let wing=json.get_str(item;"wing");
+            let hall=json.get_str(item;"hall");
+            let room=json.get_str(item;"room");
+            let role=json.get_str(item;"role");
+            let content=json.get_str(item;"content");
+            let tags=json.get_str(item;"tags");
+            let score_s=str.from_float(json.get_float(item;"score"));
+            let ts_s=str.from_int(json.get_int(item;"created_at"));
+            db.exec_params(
+              palace.conn;
+              "INSERT OR IGNORE INTO memory_drawers (id,wing,hall,room,role,content,created_at) VALUES (?,?,?,?,?,?,?)";
+              @(id;wing;hall;room;role;content;ts_s)
+            )|{
+              $ok:_ {
+                // Also populate scores table if present
+                db.exec_params(
+                  palace.conn;
+                  "INSERT OR IGNORE INTO memory_scores (id,tags,score,accessed_at) VALUES (?,?,?,?)";
+                  @(id;tags;score_s;ts_s)
+                )|{
+                  $ok:_ { let count=count + 1 };
+                  $err:_ {}
+                }
+              };
+              $err:_ {
+                log.warn(str.concat("import_json: skipped duplicate id: ";id);"export";"system")
+              }
+            }
+          };
+          log.info(str.concat("imported ";str.concat(str.from_int(count);" memories from JSON"));"export";"system");
+          <count
+        };
+        $err:_ {
+          log.warn(str.concat("import_json: failed to parse JSON array from: ";path);"export";"system");
+          <0
+        }
+      }
+    };
+    $err:_ {
+      log.warn(str.concat("import_json: could not read file: ";path);"export";"system");
+      <0
+    }
+  }
+}

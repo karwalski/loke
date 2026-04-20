@@ -1,0 +1,248 @@
+// MK3.2 — Multi-turn dashboard generation flow.
+// Orchestrates three phases:
+//   Phase 1 — LLM designs the dashboard DDL from a schema TOON + user question.
+//   Phase 2 — Local compute results are injected into the resolved DDL.
+//   Phase 3 — Resolved DDL is serialised to JSON for client-side rendering.
+// A separate refine() function enables iterative improvement after the first
+// render, preserving request_id for audit-log continuity.
+
+m=moke.dashboard_flow;
+i=str:std.string;
+i=http:std.http;
+i=ddl:moke.ddl;
+
+// ── Phase enum and state ──────────────────────────────────────────────────────
+
+pub m.$flow_phase{ $schema_sent; $ddl_received; $queries_resolved; $rendered }
+
+pub m.$flow_state{
+  phase:str;
+  schema_toon:str;
+  dashboard:$ddl.dashboard;
+  request_id:str;
+  error:str
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+// extract_json finds the first JSON object in an LLM response.
+// Preference order: ```json ... ``` fenced block, then bare { ... } object.
+f=extract_json(text:str):str{
+  // Try fenced ```json block first.
+  let fence_start=str.index_of(text;"```json");
+  if fence_start >= 0{
+    let after_fence=str.slice(text;fence_start + 7;str.len(text));
+    let fence_end=str.index_of(after_fence;"```");
+    if fence_end >= 0{
+      <str.trim(str.slice(after_fence;0;fence_end))
+    };
+  };
+  // Fall back to bare JSON object: find first { and matching closing }.
+  let brace_open=str.index_of(text;"{");
+  if brace_open < 0{ <"" };
+  let depth=0;
+  let i=brace_open;
+  let found_end=-1;
+  ??(i < str.len(text)){
+    let ch=str.char_at(text;i);
+    ??(str.eq(ch;"{")){ depth=depth+1 }{};
+    ??(str.eq(ch;"}")){ depth=depth-1 }{};
+    ??(depth == 0){
+      found_end=i;
+      i=str.len(text)
+    }{
+      i=i+1
+    }
+  }{};
+  if found_end < 0{ <"" };
+  <str.trim(str.slice(text;brace_open;found_end+1))
+}
+
+// build_phase1_prompt assembles the LLM prompt for dashboard design.
+f=build_phase1_prompt(schema_toon:str;user_question:str):str{
+  let p="You have access to this dataset. User asks: ";
+  p=str.concat(p;user_question);
+  p=str.concat(p;"\n\nDesign a dashboard as a JSON DDL object with the following top-level fields:\n");
+  p=str.concat(p;"  title (string), summary (string), cards (array).\n\n");
+  p=str.concat(p;"Each card must have:\n");
+  p=str.concat(p;"  id (unique string), kind (one of: metric, chart, table, text, list),\n");
+  p=str.concat(p;"  title (string), col_span (integer 1-3).\n\n");
+  p=str.concat(p;"For metric cards include a 'metric' object with: label, query_op, query_col, unit.\n");
+  p=str.concat(p;"For chart cards include a 'chart' object with: chart_type (line/bar/pie/area/scatter), x_col, y_col, query_op.\n");
+  p=str.concat(p;"For table cards include a 'table' object with: columns (string array), query_op, sort_col, limit.\n\n");
+  p=str.concat(p;"Respond with ONLY the JSON object, no explanation.\n\n");
+  p=str.concat(p;"Dataset schema:\n");
+  p=str.concat(p;schema_toon);
+  <p
+}
+
+// parse_ddl_from_json converts a raw JSON string into a $ddl.dashboard struct.
+// This is a best-effort parser — fields are extracted via string scanning so
+// that the flow degrades gracefully when the LLM produces slightly malformed
+// JSON rather than failing hard.
+f=parse_ddl_from_json(json:str):$ddl.dashboard{
+  let title_start=str.index_of(json;"\"title\"");
+  let title="Untitled Dashboard";
+  if title_start >= 0{
+    let after_key=str.slice(json;title_start+7;str.len(json));
+    let colon=str.index_of(after_key;":");
+    if colon >= 0{
+      let after_colon=str.trim(str.slice(after_key;colon+1;str.len(after_key)));
+      if str.char_at(after_colon;0) == "\""{
+        let close=str.index_of(str.slice(after_colon;1;str.len(after_colon));"\"");
+        if close >= 0{
+          title=str.slice(after_colon;1;close+1)
+        }
+      }
+    }
+  };
+  let summary_start=str.index_of(json;"\"summary\"");
+  let summary="";
+  if summary_start >= 0{
+    let after_key=str.slice(json;summary_start+9;str.len(json));
+    let colon=str.index_of(after_key;":");
+    if colon >= 0{
+      let after_colon=str.trim(str.slice(after_key;colon+1;str.len(after_key)));
+      if str.char_at(after_colon;0) == "\""{
+        let close=str.index_of(str.slice(after_colon;1;str.len(after_colon));"\"");
+        if close >= 0{
+          summary=str.slice(after_colon;1;close+1)
+        }
+      }
+    }
+  };
+  // Build a minimal dashboard — card-level parsing is handled client-side from
+  // the raw JSON. We store the raw JSON in the summary field when it is empty
+  // so the client can reconstruct cards without a second round-trip.
+  let dash=ddl.new_dashboard(title;summary);
+  <dash
+}
+
+// ── Phase 1: Ask LLM to design the dashboard DDL ─────────────────────────────
+
+pub f=phase1_request(schema_toon:str;user_question:str;request_id:str):$flow_state{
+  let prompt=build_phase1_prompt(schema_toon;user_question);
+  let body="{\"text\":" + "\"" + str.replace(prompt;"\"","\\\"") + "\""
+    + ",\"system_prompt\":\"You are a dashboard design assistant. Output only valid JSON.\""
+    + ",\"tolerance\":\"patient\""
+    + ",\"mode\":\"dashboard\""
+    + ",\"request_id\":\"" + request_id + "\""
+    + "}";
+  let empty_dash=ddl.new_dashboard("";"");
+  let err_state=$flow_state{
+    phase="ddl_received";
+    schema_toon=schema_toon;
+    dashboard=empty_dash;
+    request_id=request_id;
+    error="pipeline unreachable"
+  };
+  let res=http.post("http://127.0.0.1:11430/api/pipeline";body;"application/json");
+  if !res.ok{
+    <err_state
+  };
+  let raw_json=extract_json(res.body);
+  if str.len(raw_json) == 0{
+    let bad_state=$flow_state{
+      phase="ddl_received";
+      schema_toon=schema_toon;
+      dashboard=empty_dash;
+      request_id=request_id;
+      error="no JSON found in LLM response"
+    };
+    <bad_state
+  };
+  let dash=parse_ddl_from_json(raw_json);
+  // Stash the raw JSON as summary when the parser yields an empty title so the
+  // client renderer can attempt its own parse.
+  if str.len(dash.title) == 0 || dash.title == "Untitled Dashboard"{
+    dash.summary=raw_json
+  };
+  <$flow_state{
+    phase="ddl_received";
+    schema_toon=schema_toon;
+    dashboard=dash;
+    request_id=request_id;
+    error=""
+  }
+}
+
+// ── Phase 2: Inject local compute results into resolved cards ─────────────────
+// compute_results is a parallel array of result strings matching cards by index.
+// Cards without a compute result receive an empty string (no-op).
+
+pub f=phase2_resolve(state:$flow_state;compute_results:@(str)):$flow_state{
+  let i=0;
+  state.dashboard.cards.each(card{
+    if i < compute_results.len(){
+      let result=compute_results[i];
+      // Inject result into the card title as a resolved value annotation so
+      // the client renderer can display it without further API calls.
+      if str.len(result) > 0 && card.kind == "metric"{
+        card.metric.label=card.metric.label + " [" + result + "]"
+      };
+    };
+    i=i+1;
+  });
+  <$flow_state{
+    phase="queries_resolved";
+    schema_toon=state.schema_toon;
+    dashboard=state.dashboard;
+    request_id=state.request_id;
+    error=""
+  }
+}
+
+// ── Phase 3: Serialise resolved dashboard to JSON for client rendering ─────────
+
+pub f=phase3_render(state:$flow_state):str{
+  let json=ddl.to_json(state.dashboard);
+  <json
+}
+
+// ── Refine: iterative improvement via a follow-up LLM turn ───────────────────
+
+pub f=refine(state:$flow_state;instruction:str):$flow_state{
+  let current_json=ddl.to_json(state.dashboard);
+  let prompt="Refine this dashboard: ";
+  prompt=str.concat(prompt;current_json);
+  prompt=str.concat(prompt;"\n\nInstruction: ");
+  prompt=str.concat(prompt;instruction);
+  prompt=str.concat(prompt;"\n\nRespond with ONLY the updated JSON object, no explanation.");
+  let body="{\"text\":" + "\"" + str.replace(prompt;"\"","\\\"") + "\""
+    + ",\"system_prompt\":\"You are a dashboard design assistant. Output only valid JSON.\""
+    + ",\"tolerance\":\"patient\""
+    + ",\"mode\":\"dashboard\""
+    + ",\"request_id\":\"" + state.request_id + "-refine\""
+    + "}";
+  let res=http.post("http://127.0.0.1:11430/api/pipeline";body;"application/json");
+  if !res.ok{
+    <$flow_state{
+      phase=state.phase;
+      schema_toon=state.schema_toon;
+      dashboard=state.dashboard;
+      request_id=state.request_id;
+      error="refine: pipeline unreachable"
+    }
+  };
+  let raw_json=extract_json(res.body);
+  if str.len(raw_json) == 0{
+    <$flow_state{
+      phase=state.phase;
+      schema_toon=state.schema_toon;
+      dashboard=state.dashboard;
+      request_id=state.request_id;
+      error="refine: no JSON in LLM response"
+    }
+  };
+  let dash=parse_ddl_from_json(raw_json);
+  if str.len(dash.title) == 0 || dash.title == "Untitled Dashboard"{
+    dash.summary=raw_json
+  };
+  <$flow_state{
+    phase="ddl_received";
+    schema_toon=state.schema_toon;
+    dashboard=dash;
+    request_id=state.request_id;
+    error=""
+  }
+}

@@ -1,0 +1,81 @@
+// F5.6 — Latency-tolerance-aware routing
+// Adjusts model selection criteria based on the caller's declared latency
+// tolerance, filtering out models that cannot meet timing requirements.
+
+i=t:shared.types;
+i=sel:router.selector;
+i=log:shared.log;
+
+pub m.$latency_constraint{
+  tolerance:t.$latency_tolerance;
+  max_ttft_ms:i32;
+  max_total_ms:i32
+}
+
+// Interactive: user is waiting — sub-500 ms TTFT, 10 s total.
+pub constraint_interactive=$latency_constraint{
+  tolerance:t.$latency_tolerance.INTERACTIVE;
+  max_ttft_ms:500;
+  max_total_ms:10000
+}
+
+// Considered: user can wait a moment — 2 s TTFT, 60 s total.
+pub constraint_considered=$latency_constraint{
+  tolerance:t.$latency_tolerance.CONSIDERED;
+  max_ttft_ms:2000;
+  max_total_ms:60000
+}
+
+// Background: async job, timing uncritical — 30 s TTFT, 1 h total.
+pub constraint_background=$latency_constraint{
+  tolerance:t.$latency_tolerance.BACKGROUND;
+  max_ttft_ms:30000;
+  max_total_ms:3600000
+}
+
+// Returns the appropriate $latency_constraint for a given $latency_tolerance.
+pub f=constraint_for(tolerance:t.$latency_tolerance):$latency_constraint{
+  tolerance|{
+    t.$latency_tolerance.INTERACTIVE; <constraint_interactive;
+    t.$latency_tolerance.CONSIDERED;  <constraint_considered;
+    t.$latency_tolerance.BACKGROUND;  <constraint_background
+  }
+}
+
+// Filters a list of model specs to those that can satisfy the constraint.
+// Heuristic: if max_ttft_ms < 1000, cloud models are excluded (prefer local
+// to avoid network round-trip latency); if max_ttft_ms >= 2000, all models
+// are eligible.
+pub f=filter_by_latency(candidates:@(t.$model_spec);constraint:$latency_constraint):@(t.$model_spec){
+  if constraint.max_ttft_ms < 1000 {
+    // Interactive: keep only local models
+    let filtered=t.filter_models(candidates;f=(spec:t.$model_spec):bool{
+      spec.provider == t.$provider.OLLAMA || spec.provider == t.$provider.LOCAL
+    });
+    log.info("latency_router: INTERACTIVE — restricted to local models";"latency_router";"");
+    <filtered
+  }else{
+    // Considered / Background: all models eligible
+    <candidates
+  }
+}
+
+// Returns an updated $sel.$selection_criteria with latency constraints applied.
+// Sets prefer_local=true when tolerance is INTERACTIVE so the selector
+// prioritises on-device models before considering cloud.
+pub f=apply_latency_routing(criteria:sel.$selection_criteria;tolerance:t.$latency_tolerance):sel.$selection_criteria{
+  let constraint=constraint_for(tolerance);
+  let force_local=tolerance == t.$latency_tolerance.INTERACTIVE;
+  let updated=sel.$selection_criteria{
+    task:criteria.task;
+    sensitivity:criteria.sensitivity;
+    tolerance:criteria.tolerance;
+    prefer_local:force_local || criteria.prefer_local;
+    max_cost_per_1k:criteria.max_cost_per_1k;
+    require_tools:criteria.require_tools
+  };
+  let ttft_str=t.i32_to_str(constraint.max_ttft_ms);
+  let msg=t.str_concat("latency_router: applied constraint max_ttft_ms=";ttft_str);
+  log.info(msg;"latency_router";"");
+  <updated
+}

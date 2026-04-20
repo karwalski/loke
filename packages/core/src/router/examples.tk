@@ -1,0 +1,99 @@
+// F6.3 — Routing examples store.
+// Stores labelled (prompt_embedding, model_id) pairs for few-shot routing.
+// When RouteLLM is unavailable this provides a local fallback based on
+// historical routing decisions the user has confirmed.
+
+i=vs:std.vecstore;
+i=log:shared.log;
+i=json:std.json;
+i=str:std.str;
+i=time:std.time;
+
+// --- Types ---
+
+pub m.$routing_example{
+  prompt_snippet:str;
+  model_id:str;
+  confirmed_at:i64
+}
+
+// --- Store and collection ---
+
+// Opens the vector store at the given data directory.
+pub f=open(data_dir:str):vs.$vec_store{
+  <vs.open(data_dir)
+}
+
+// Returns the routing_examples collection from the given store.
+pub f=collection(store:vs.$vec_store):vs.$vec_collection{
+  <vs.collection(store;"routing_examples")
+}
+
+// --- Add example ---
+
+// Upserts a confirmed routing example into the collection.
+// Payload is JSON: {"model": model_id, "snippet": prompt_snippet, "at": now}.
+pub f=add_example(col:vs.$vec_collection;prompt_embedding:@(f32);model_id:str;prompt_snippet:str):bool{
+  let now=time.now_unix();
+  let payload=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat("{\"model\":";json.quote(model_id));
+            ",\"snippet\":");
+          json.quote(prompt_snippet));
+        ",\"at\":");
+      str.from_i64(now));
+    "}");
+  let id=str.rand_hex(16);
+  <vs.upsert(col;id;prompt_embedding;payload)
+}
+
+// --- Find similar ---
+
+// Searches the collection for routing examples similar to the query embedding.
+// Uses min_score=0.85. Returns the matched examples as a parsed array.
+pub f=find_similar(col:vs.$vec_collection;query_embedding:@(f32);top_k:i32):@($routing_example){
+  let results=vs.search(col;query_embedding;top_k;0.85);
+  let examples=@();
+  results.each|r{
+    let parsed=json.decode(r.payload);
+    parsed|{
+      $ok:p {
+        let model_id=json.get_str(p;"model");
+        let snippet=json.get_str(p;"snippet");
+        let confirmed_at=json.get_i64(p;"at");
+        let ex=$routing_example{
+          prompt_snippet:snippet;
+          model_id:model_id;
+          confirmed_at:confirmed_at
+        };
+        let examples=examples.append(ex)
+      };
+      $err:e {
+        log.warn("examples: failed to parse routing example payload";"examples";"")
+      }
+    }
+  };
+  <examples
+}
+
+// --- Format examples ---
+
+// Returns a human-readable list of routing examples.
+// Each line: "({model}) {snippet}"
+pub f=format_examples(examples:@($routing_example)):str{
+  if examples.len == 0{
+    <"(no routing examples)"
+  }else{
+    let lines=examples.map|ex{
+      str.concat(
+        str.concat(
+          str.concat("(";ex.model_id);
+          ") ");
+        ex.prompt_snippet)
+    };
+    <str.join(lines;"\n")
+  }
+}

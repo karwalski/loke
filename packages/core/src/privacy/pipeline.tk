@@ -1,0 +1,625 @@
+// F3.6 — Privacy pipeline orchestrator
+// Runs multiple detection layers in sequence (regex → NER → Presidio),
+// deduplicates overlapping spans, anonymises, and injects the guardian prompt.
+
+i=t:shared.types;
+i=str:std.str;
+i=log:shared.log;
+i=regex:core.privacy.regex;
+i=presidio:core.privacy.presidio;
+i=ner:core.privacy.ner;
+i=ph:core.privacy.placeholder;
+i=guardian:core.privacy.guardian;
+
+pub m.$pipeline_config{
+  presidio_url:str;
+  ollama_url:str;
+  ner_model_id:str;
+  use_presidio:bool;
+  use_ner:bool;
+  dry_run:bool
+}
+
+pub m.$pipeline_stage{
+  $regex_scan;
+  $ner_scan;
+  $presidio_scan;
+  $dedup;
+  $anonymise;
+  $guardian_inject
+}
+
+pub m.$stage_result{
+  stage:$pipeline_stage;
+  entities_found:u32;
+  duration_ms:u32;
+  skipped:bool;
+  skip_reason:str
+}
+
+pub m.$pipeline_run{
+  result:$pii_detection_result;
+  stages:@($stage_result);
+  total_entities:u32;
+  final_system_prompt:str;
+  request_id:str
+}
+
+// Creates a pipeline config with sensible defaults
+pub f=new_config(presidio_url:str;ollama_url:str):$pipeline_config{
+  <$pipeline_config{
+    presidio_url:presidio_url;
+    ollama_url:ollama_url;
+    ner_model_id:"qwen2.5:7b";
+    use_presidio:true;
+    use_ner:true;
+    dry_run:false
+  }
+}
+
+// Returns true if level_a represents higher sensitivity than level_b
+f=is_higher_sensitivity(level_a:$sensitivity_level;level_b:$sensitivity_level):bool{
+  if level_a==$restricted{
+    <true
+  }else{
+    if level_a==$confidential{
+      if level_b==$restricted{
+        <false
+      }else{
+        <true
+      }
+    }else{
+      if level_a==$internal{
+        if level_b==$restricted{
+          <false
+        }else{
+          if level_b==$confidential{
+            <false
+          }else{
+            <true
+          }
+        }
+      }else{
+        <false
+      }
+    }
+  }
+}
+
+// Removes overlapping entity spans, keeping the one with highest confidence.
+// Simple O(n²) approach: sort by start, skip any entity that overlaps a kept entity.
+pub f=dedup_entities(entities:@($pii_entity)):@($pii_entity){
+  let kept=@();
+  let count=entities.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let candidate=str.array_get(entities;i);
+      let overlaps=false;
+      let ki=0;
+      let kept_count=str.array_len(kept);
+      loop{
+        if ki>=kept_count{
+          break
+        }else{
+          let existing=str.array_get(kept;ki);
+          // Check for span overlap: candidate overlaps existing if
+          // candidate.start < existing.end AND candidate.end > existing.start
+          // Since NER entities may have start=end=0 (no offsets), skip overlap
+          // check for those and keep all zero-offset entities.
+          if candidate.start==0{
+            // No offset info — cannot compare spans, keep as-is
+            ki=kept_count
+          }else{
+            if existing.start==0{
+              // Existing has no offset — skip overlap check
+              ki=ki+1
+            }else{
+              if candidate.start<existing.end{
+                if candidate.end>existing.start{
+                  // Overlapping — prefer higher confidence
+                  if candidate.confidence>existing.confidence{
+                    // Replace existing with candidate: rebuild kept without existing
+                    let new_kept=@();
+                    let ri=0;
+                    loop{
+                      if ri>=kept_count{
+                        break
+                      }else{
+                        let re=str.array_get(kept;ri);
+                        if ri==ki{
+                          // skip — will add candidate below
+                          ri=ri+1
+                        }else{
+                          new_kept=@(new_kept;re);
+                          ri=ri+1
+                        }
+                      }
+                    };
+                    kept=new_kept;
+                    overlaps=false;
+                    ki=kept_count
+                  }else{
+                    overlaps=true;
+                    ki=kept_count
+                  }
+                }else{
+                  ki=ki+1
+                }
+              }else{
+                ki=ki+1
+              }
+            }
+          }
+        }
+      };
+      if overlaps{
+        // skip candidate — a higher-confidence existing entity covers this span
+        i=i+1
+      }else{
+        kept=@(kept;candidate);
+        i=i+1
+      }
+    }
+  };
+  <kept
+}
+
+// Determines the highest sensitivity level across a list of entities
+f=max_sensitivity(entities:@($pii_entity)):$sensitivity_level{
+  let level=$public;
+  let count=entities.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let entity=str.array_get(entities;i);
+      // Derive sensitivity from confidence as a proxy (entities don't carry level directly)
+      // Presidio/NER entities already encoded confidence; use entity_type heuristic
+      if str.eq(entity.entity_type;"CREDIT_CARD"){
+        level=$restricted
+      }else{
+        if str.eq(entity.entity_type;"US_SSN"){
+          level=$restricted
+        }else{
+          if str.eq(entity.entity_type;"AU_TFN"){
+            level=$restricted
+          }else{
+            if str.eq(entity.entity_type;"credit_card"){
+              level=$restricted
+            }else{
+              if str.eq(entity.entity_type;"au_tfn"){
+                level=$restricted
+              }else{
+                if str.eq(entity.entity_type;"ssn_us"){
+                  level=$restricted
+                }else{
+                  if str.eq(entity.entity_type;"api_key"){
+                    level=$restricted
+                  }else{
+                    if is_higher_sensitivity($confidential;level){
+                      if str.eq(entity.entity_type;"PERSON"){
+                        level=$confidential
+                      }else{
+                        if str.eq(entity.entity_type;"EMAIL_ADDRESS"){
+                          level=$confidential
+                        }else{
+                          if str.eq(entity.entity_type;"PHONE_NUMBER"){
+                            level=$confidential
+                          }else{
+                            if str.eq(entity.entity_type;"MEDICAL"){
+                              level=$confidential
+                            }else{
+                              if str.eq(entity.entity_type;"FINANCIAL"){
+                                level=$confidential
+                              }else{
+                                if str.eq(entity.entity_type;"email"){
+                                  if is_higher_sensitivity($confidential;level){
+                                    level=$confidential
+                                  }else{
+                                    // keep current
+                                  }
+                                }else{
+                                  if is_higher_sensitivity($internal;level){
+                                    level=$internal
+                                  }else{
+                                    // keep current
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }else{
+                      // level already >= confidential, keep
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      };
+      i=i+1
+    }
+  };
+  <level
+}
+
+// Builds the anonymised text by replacing each entity value with its placeholder
+f=anonymise_text(text:str;entities:@($pii_entity)):str{
+  let result=text;
+  let count=entities.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let entity=str.array_get(entities;i);
+      result=str.replace(result;entity.value;entity.placeholder);
+      i=i+1
+    }
+  };
+  <result
+}
+
+// Counts entities matching a specific sensitivity label (as str comparison on type)
+f=count_restricted(entities:@($pii_entity)):u32{
+  let n=0;
+  let count=entities.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let entity=str.array_get(entities;i);
+      if str.eq(entity.entity_type;"CREDIT_CARD"){
+        n=n+1
+      }else{
+        if str.eq(entity.entity_type;"US_SSN"){
+          n=n+1
+        }else{
+          if str.eq(entity.entity_type;"AU_TFN"){
+            n=n+1
+          }else{
+            if str.eq(entity.entity_type;"credit_card"){
+              n=n+1
+            }else{
+              if str.eq(entity.entity_type;"au_tfn"){
+                n=n+1
+              }else{
+                if str.eq(entity.entity_type;"ssn_us"){
+                  n=n+1
+                }else{
+                  if str.eq(entity.entity_type;"api_key"){
+                    n=n+1
+                  }else{
+                    // not restricted
+                  }
+                }
+              }
+            }
+          }
+        }
+      };
+      i=i+1
+    }
+  };
+  <n
+}
+
+f=count_confidential(entities:@($pii_entity)):u32{
+  let n=0;
+  let count=entities.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let entity=str.array_get(entities;i);
+      if str.eq(entity.entity_type;"PERSON"){
+        n=n+1
+      }else{
+        if str.eq(entity.entity_type;"EMAIL_ADDRESS"){
+          n=n+1
+        }else{
+          if str.eq(entity.entity_type;"PHONE_NUMBER"){
+            n=n+1
+          }else{
+            if str.eq(entity.entity_type;"MEDICAL"){
+              n=n+1
+            }else{
+              if str.eq(entity.entity_type;"FINANCIAL"){
+                n=n+1
+              }else{
+                if str.eq(entity.entity_type;"email"){
+                  n=n+1
+                }else{
+                  if str.eq(entity.entity_type;"phone_au"){
+                    n=n+1
+                  }else{
+                    if str.eq(entity.entity_type;"phone_us"){
+                      n=n+1
+                    }else{
+                      if str.eq(entity.entity_type;"au_abn"){
+                        n=n+1
+                      }else{
+                        // not confidential
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      };
+      i=i+1
+    }
+  };
+  <n
+}
+
+// Returns a human-readable summary of a completed pipeline run
+pub f=summarise_run(run:$pipeline_run):str{
+  let total=str.from_u32(run.total_entities);
+  let restricted_count=count_restricted(run.result.entities);
+  let confidential_count=count_confidential(run.result.entities);
+  let r_str=str.from_u32(restricted_count);
+  let c_str=str.from_u32(confidential_count);
+  let stage_count=str.from_u32(run.stages.len);
+  let anonymised_label="Anonymised.";
+  if run.result.sensitivity==$public{
+    let anonymised_label="No PII detected."
+  }else{
+    // keep Anonymised.
+  };
+  let part1=str.concat("Privacy pipeline: ";total);
+  let part2=str.concat(part1;" entities detected (");
+  let part3=str.concat(part2;r_str);
+  let part4=str.concat(part3;" RESTRICTED, ");
+  let part5=str.concat(part4;c_str);
+  let part6=str.concat(part5;" CONFIDENTIAL) across ");
+  let part7=str.concat(part6;stage_count);
+  let part8=str.concat(part7;" stages. ");
+  let result=str.concat(part8;anonymised_label);
+  <result
+}
+
+// Executes the full privacy pipeline against the supplied text and system prompt.
+// Stages: regex → NER → Presidio → dedup → anonymise → guardian inject
+pub f=run(text:str;base_system_prompt:str;config:$pipeline_config):$pipeline_run{
+  let request_id=str.rand_hex(16);
+  log.info("pipeline start";"pipeline";request_id);
+
+  let stages=@();
+  let all_entities=@();
+
+  // ── Stage 1: Regex scan (always runs) ────────────────────────────────────
+  let regex_result=regex.detect(text);
+  let regex_entity_count=str.array_len(regex_result.entities);
+  let regex_stage=$stage_result{
+    stage:$regex_scan;
+    entities_found:regex_entity_count;
+    duration_ms:0;
+    skipped:false;
+    skip_reason:""
+  };
+  stages=@(stages;regex_stage);
+  let ei=0;
+  loop{
+    if ei>=regex_entity_count{
+      break
+    }else{
+      let entity=str.array_get(regex_result.entities;ei);
+      all_entities=@(all_entities;entity);
+      ei=ei+1
+    }
+  };
+
+  // ── Stage 2: NER scan (if use_ner) ───────────────────────────────────────
+  if config.use_ner{
+    let ner_client=ner.new(config.ollama_url;config.ner_model_id);
+    let ner_available=ner.is_available(ner_client);
+    if ner_available{
+      let ner_result=ner.detect_entities(ner_client;text);
+      ner_result|{
+        $loke_err e;
+          log.warn("NER scan failed — skipping";"pipeline";request_id);
+          let ner_stage=$stage_result{
+            stage:$ner_scan;
+            entities_found:0;
+            duration_ms:0;
+            skipped:true;
+            skip_reason:"NER detect_entities returned error"
+          };
+          stages=@(stages;ner_stage)
+        ner_entities;
+          let ner_count=str.array_len(ner_entities);
+          let ni=0;
+          loop{
+            if ni>=ner_count{
+              break
+            }else{
+              let entity=str.array_get(ner_entities;ni);
+              all_entities=@(all_entities;entity);
+              ni=ni+1
+            }
+          };
+          let ner_stage=$stage_result{
+            stage:$ner_scan;
+            entities_found:ner_count;
+            duration_ms:0;
+            skipped:false;
+            skip_reason:""
+          };
+          stages=@(stages;ner_stage)
+      }
+    }else{
+      log.warn("NER unavailable — skipping NER scan";"pipeline";request_id);
+      let ner_stage=$stage_result{
+        stage:$ner_scan;
+        entities_found:0;
+        duration_ms:0;
+        skipped:true;
+        skip_reason:"Ollama unreachable"
+      };
+      stages=@(stages;ner_stage)
+    }
+  }else{
+    let ner_stage=$stage_result{
+      stage:$ner_scan;
+      entities_found:0;
+      duration_ms:0;
+      skipped:true;
+      skip_reason:"use_ner=false"
+    };
+    stages=@(stages;ner_stage)
+  };
+
+  // ── Stage 3: Presidio scan (if use_presidio) ─────────────────────────────
+  if config.use_presidio{
+    let presidio_client=presidio.new(config.presidio_url);
+    let presidio_available=presidio.is_available(presidio_client);
+    if presidio_available{
+      let presidio_result=presidio.analyze(presidio_client;text);
+      presidio_result|{
+        $loke_err e;
+          log.warn("Presidio scan failed — degraded mode";"pipeline";request_id);
+          let presidio_stage=$stage_result{
+            stage:$presidio_scan;
+            entities_found:0;
+            duration_ms:0;
+            skipped:true;
+            skip_reason:"Presidio analyze returned error"
+          };
+          stages=@(stages;presidio_stage)
+        raw_presidio_entities;
+          let pii_from_presidio=presidio.to_pii_entities(raw_presidio_entities;text);
+          let presidio_count=str.array_len(pii_from_presidio);
+          let pri=0;
+          loop{
+            if pri>=presidio_count{
+              break
+            }else{
+              let entity=str.array_get(pii_from_presidio;pri);
+              all_entities=@(all_entities;entity);
+              pri=pri+1
+            }
+          };
+          let presidio_stage=$stage_result{
+            stage:$presidio_scan;
+            entities_found:presidio_count;
+            duration_ms:0;
+            skipped:false;
+            skip_reason:""
+          };
+          stages=@(stages;presidio_stage)
+      }
+    }else{
+      log.warn("Presidio unavailable — running in degraded mode";"pipeline";request_id);
+      let presidio_stage=$stage_result{
+        stage:$presidio_scan;
+        entities_found:0;
+        duration_ms:0;
+        skipped:true;
+        skip_reason:"Presidio sidecar unreachable"
+      };
+      stages=@(stages;presidio_stage)
+    }
+  }else{
+    let presidio_stage=$stage_result{
+      stage:$presidio_scan;
+      entities_found:0;
+      duration_ms:0;
+      skipped:true;
+      skip_reason:"use_presidio=false"
+    };
+    stages=@(stages;presidio_stage)
+  };
+
+  // ── Stage 4: Dedup ───────────────────────────────────────────────────────
+  let deduped=dedup_entities(all_entities);
+  let dedup_count=str.array_len(deduped);
+  let dedup_stage=$stage_result{
+    stage:$dedup;
+    entities_found:dedup_count;
+    duration_ms:0;
+    skipped:false;
+    skip_reason:""
+  };
+  stages=@(stages;dedup_stage);
+
+  // ── Stage 5: Anonymise ───────────────────────────────────────────────────
+  let anonymised_text=text;
+  let sensitivity=$public;
+  if config.dry_run{
+    // dry_run: detect but do not rewrite the text
+    sensitivity=max_sensitivity(deduped);
+    let anon_stage=$stage_result{
+      stage:$anonymise;
+      entities_found:dedup_count;
+      duration_ms:0;
+      skipped:true;
+      skip_reason:"dry_run=true"
+    };
+    stages=@(stages;anon_stage)
+  }else{
+    anonymised_text=anonymise_text(text;deduped);
+    sensitivity=max_sensitivity(deduped);
+    let anon_stage=$stage_result{
+      stage:$anonymise;
+      entities_found:dedup_count;
+      duration_ms:0;
+      skipped:false;
+      skip_reason:""
+    };
+    stages=@(stages;anon_stage)
+  };
+
+  // ── Stage 6: Guardian inject ─────────────────────────────────────────────
+  let final_system_prompt=guardian.build_system_prompt(base_system_prompt);
+  let guardian_stage=$stage_result{
+    stage:$guardian_inject;
+    entities_found:0;
+    duration_ms:0;
+    skipped:false;
+    skip_reason:""
+  };
+  stages=@(stages;guardian_stage);
+
+  log.info("pipeline complete";"pipeline";request_id);
+
+  let pii_result=t.$pii_detection_result{
+    original:text;
+    anonymised:anonymised_text;
+    entities:deduped;
+    sensitivity:sensitivity
+  };
+
+  <$pipeline_run{
+    result:pii_result;
+    stages:stages;
+    total_entities:dedup_count;
+    final_system_prompt:final_system_prompt;
+    request_id:request_id
+  }
+}
+
+// Same as run but forces dry_run=true — detects PII without rewriting text.
+// Useful for preview/diff views in the UI.
+pub f=run_dry(text:str;config:$pipeline_config):$pipeline_run{
+  let dry_config=$pipeline_config{
+    presidio_url:config.presidio_url;
+    ollama_url:config.ollama_url;
+    ner_model_id:config.ner_model_id;
+    use_presidio:config.use_presidio;
+    use_ner:config.use_ner;
+    dry_run:true
+  };
+  <run(text;"";dry_config)
+}

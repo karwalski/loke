@@ -1,0 +1,214 @@
+// M1.3 — Semantic memory search (MVP: keyword-based using SQLite index).
+// Full vector-store semantic search is deferred to M1.3 full implementation.
+
+i=t:shared.types;
+i=mt:core.memory.types;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=json:std.json;
+
+// Common English stop words to exclude from keyword indexing.
+pub f=stop_words():@(str){
+  <@(
+    "the";"a";"an";"and";"or";"but";"in";"on";"at";"to";"for";"of";"with";"by";
+    "is";"was";"are";"be";"been";"have";"has";"had";"do";"does";"did";"will";
+    "would";"could";"should";"may";"might";"not";"no";"it";"its";"this";"that";
+    "i";"you";"we";"they";"he";"she"
+  )
+}
+
+// Returns true if word is in the stop words list.
+f=is_stop_word(word:str):bool{
+  let stops=stop_words();
+  let found=false;
+  stops.each|sw{
+    if str.eq(sw;word){
+      let found=true
+    }
+  };
+  <found
+}
+
+// Extracts keywords from a string: split on spaces, lowercase, filter stop words and short words.
+f=extract_keywords(text:str):@(str){
+  let words=str.split(str.to_lower(text);" ");
+  let keywords=words.filter|w{
+    let long_enough=str.len(w) > 3;
+    let not_stop=!is_stop_word(w);
+    long_enough && not_stop
+  };
+  <keywords
+}
+
+// Indexes a drawer's content keywords into memory_index.
+// Words from the content receive weight 1.0.
+pub f=index_drawer(palace:$mt.palace;drawer:$mt.drawer):void|$loke_err{
+  let keywords=extract_keywords(drawer.content);
+  keywords.each|kw{
+    db.exec_params(
+      palace.conn;
+      "INSERT OR REPLACE INTO memory_index (drawer_id, keyword, weight) VALUES (?, ?, 1.0)";
+      @(drawer.id;kw)
+    )|{
+      $ok:_ {};
+      $err:e {
+        log.warn(str.concat("failed to index keyword: ";kw);"search";"system")
+      }
+    }
+  };
+  <$ok(void)
+}
+
+// Searches the index for drawers matching the query keywords and returns top-N results.
+pub f=search(palace:$mt.palace;query:str;limit:u32):@($mt.search_result)|$loke_err{
+  let keywords=extract_keywords(query);
+  if keywords.len == 0{
+    <$ok(@())
+  }else{
+    // Collect scored drawer ids by summing weights across all matching keywords
+    let scored=@();
+    keywords.each|kw{
+      let like_kw=str.concat(kw;"%");
+      db.query_params(
+        palace.conn;
+        "SELECT drawer_id, SUM(weight) as score FROM memory_index WHERE keyword LIKE ? GROUP BY drawer_id";
+        @(like_kw)
+      )|{
+        $ok:rows {
+          rows.each|row{
+            let did=json.get_str(row;"drawer_id");
+            let sc=json.get_float(row;"score");
+            // Merge into scored: if exists, add score; otherwise append
+            let found=false;
+            scored.each|entry{
+              if str.eq(entry.drawer_id;did){
+                let entry.score=entry.score + sc;
+                let found=true
+              }
+            };
+            if !found{
+              let scored=scored.append($search_score{drawer_id:did;score:sc})
+            }
+          }
+        };
+        $err:_ {}
+      }
+    };
+
+    // Sort by score descending and take top limit entries
+    let sorted=scored.sort_by_desc|entry{ entry.score };
+    let limit_s=str.from_int(limit);
+    let top=sorted.take(limit);
+
+    // Fetch drawer details and build results
+    let results=@();
+    top.each|entry{
+      db.query_params(
+        palace.conn;
+        "SELECT id,wing,hall,room,content,created_at FROM memory_drawers WHERE id=?";
+        @(entry.drawer_id)
+      )|{
+        $ok:rows {
+          if rows.len > 0{
+            let row=rows[0];
+            let content=json.get_str(row;"content");
+            let excerpt=if str.len(content) > 200{
+              str.slice(content;0;200)
+            }else{
+              content
+            };
+            let result=$mt.search_result{
+              drawer_id:json.get_str(row;"id");
+              location:$mt.palace_location{
+                wing:json.get_str(row;"wing");
+                hall:json.get_str(row;"hall");
+                room:json.get_str(row;"room")
+              };
+              content_excerpt:excerpt;
+              relevance_score:entry.score;
+              created_at:json.get_str(row;"created_at")
+            };
+            let results=results.append(result)
+          }
+        };
+        $err:_ {}
+      }
+    };
+    <$ok(results)
+  }
+}
+
+// Searches the index filtered to a specific wing.
+pub f=search_in_wing(palace:$mt.palace;query:str;wing:str;limit:u32):@($mt.search_result)|$loke_err{
+  let keywords=extract_keywords(query);
+  if keywords.len == 0{
+    <$ok(@())
+  }else{
+    let scored=@();
+    keywords.each|kw{
+      let like_kw=str.concat(kw;"%");
+      db.query_params(
+        palace.conn;
+        "SELECT mi.drawer_id, SUM(mi.weight) as score FROM memory_index mi JOIN memory_drawers md ON mi.drawer_id=md.id WHERE mi.keyword LIKE ? AND md.wing=? GROUP BY mi.drawer_id";
+        @(like_kw;wing)
+      )|{
+        $ok:rows {
+          rows.each|row{
+            let did=json.get_str(row;"drawer_id");
+            let sc=json.get_float(row;"score");
+            let found=false;
+            scored.each|entry{
+              if str.eq(entry.drawer_id;did){
+                let entry.score=entry.score + sc;
+                let found=true
+              }
+            };
+            if !found{
+              let scored=scored.append($search_score{drawer_id:did;score:sc})
+            }
+          }
+        };
+        $err:_ {}
+      }
+    };
+
+    let sorted=scored.sort_by_desc|entry{ entry.score };
+    let top=sorted.take(limit);
+
+    let results=@();
+    top.each|entry{
+      db.query_params(
+        palace.conn;
+        "SELECT id,wing,hall,room,content,created_at FROM memory_drawers WHERE id=?";
+        @(entry.drawer_id)
+      )|{
+        $ok:rows {
+          if rows.len > 0{
+            let row=rows[0];
+            let content=json.get_str(row;"content");
+            let excerpt=if str.len(content) > 200{
+              str.slice(content;0;200)
+            }else{
+              content
+            };
+            let result=$mt.search_result{
+              drawer_id:json.get_str(row;"id");
+              location:$mt.palace_location{
+                wing:json.get_str(row;"wing");
+                hall:json.get_str(row;"hall");
+                room:json.get_str(row;"room")
+              };
+              content_excerpt:excerpt;
+              relevance_score:entry.score;
+              created_at:json.get_str(row;"created_at")
+            };
+            let results=results.append(result)
+          }
+        };
+        $err:_ {}
+      }
+    };
+    <$ok(results)
+  }
+}

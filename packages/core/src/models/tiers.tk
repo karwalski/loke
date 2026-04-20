@@ -1,0 +1,209 @@
+// F2.6 — Tiered inference engine
+// Determines Ollama/llama.cpp configuration for each inference tier.
+// Interactive: low latency, full GPU offload.
+// Considered: partial offload, medium latency (~30s).
+// Background: minimal GPU, large context, streaming from disk viable.
+
+i=t:shared.types;
+i=hw:core.models.hardware;
+i=str:std.str;
+i=log:shared.log;
+
+// --- Types ---
+
+pub m.$tier_config{
+  tier:$model_tier;
+  num_gpu_layers:i32;
+  use_mmap:bool;
+  use_mlock:bool;
+  ctx_size:u32;
+  batch_size:u32
+}
+
+pub m.$tier_selection{
+  tier:$model_tier;
+  config:$tier_config;
+  reason:str;
+  estimated_tok_s:f64;
+  model_id:str
+}
+
+// --- Config for tier ---
+
+// Returns the Ollama/llama.cpp configuration for the given tier.
+pub f=config_for_tier(tier:$model_tier):$tier_config{
+  tier|{
+    $interactive {
+      <$tier_config{
+        tier:$model_tier.$interactive;
+        num_gpu_layers:-1;
+        use_mmap:false;
+        use_mlock:true;
+        ctx_size:4096;
+        batch_size:512
+      }
+    };
+    $considered {
+      <$tier_config{
+        tier:$model_tier.$considered;
+        num_gpu_layers:20;
+        use_mmap:true;
+        use_mlock:false;
+        ctx_size:8192;
+        batch_size:256
+      }
+    };
+    $background {
+      <$tier_config{
+        tier:$model_tier.$background;
+        num_gpu_layers:4;
+        use_mmap:true;
+        use_mlock:false;
+        ctx_size:32768;
+        batch_size:64
+      }
+    }
+  }
+}
+
+// --- Tier selection ---
+
+// Selects the best inference tier given latency tolerance, hardware profile,
+// model size, and model ID. Estimates tok/s via hw.estimate_tier_viability.
+pub f=select_tier(tolerance:$latency_tolerance;profile:$hw.hardware_profile;model_size_gb:f64;model_id:str):$tier_selection{
+  let viability=hw.estimate_tier_viability(profile;model_size_gb);
+  let cid=log.new_correlation_id();
+
+  let selected_tier=tolerance|{
+    $instant {
+      // $instant always wants interactive; fall back to $considered with warning
+      if viability.interactive{
+        $model_tier.$interactive
+      }else{
+        log.warn(
+          str.concat("select_tier: $instant requested but hardware cannot run ";str.concat(model_id;" interactively — falling back to $considered"));
+          "tiers";
+          cid
+        );
+        $model_tier.$considered
+      }
+    };
+    $patient {
+      // Prefer interactive if hardware supports it, else considered
+      if viability.interactive{
+        $model_tier.$interactive
+      }else{
+        $model_tier.$considered
+      }
+    };
+    $background {
+      $model_tier.$background
+    }
+  };
+
+  let estimated_tok_s=selected_tier|{
+    $interactive viability.interactive_tok_s;
+    $considered  viability.considered_tok_s;
+    $background  viability.background_tok_s
+  };
+
+  let reason=tolerance|{
+    $instant {
+      if viability.interactive{
+        "instant tolerance — full GPU offload"
+      }else{
+        "instant tolerance — hardware insufficient for interactive; using considered"
+      }
+    };
+    $patient {
+      if viability.interactive{
+        "patient tolerance — hardware supports interactive"
+      }else{
+        "patient tolerance — model too large for interactive; using considered"
+      }
+    };
+    $background {
+      "background tolerance — minimal GPU, large context window"
+    }
+  };
+
+  let config=config_for_tier(selected_tier);
+
+  let tok_s_s=str.from_float(estimated_tok_s);
+  log.info(
+    str.concat(
+      "select_tier: ";
+      str.concat(
+        model_id;
+        str.concat(
+          " → ";
+          str.concat(
+            tier_label(selected_tier);
+            str.concat(" (~";str.concat(tok_s_s;" tok/s)"))
+          )
+        )
+      )
+    );
+    "tiers";
+    cid
+  );
+
+  <$tier_selection{
+    tier:selected_tier;
+    config:config;
+    reason:reason;
+    estimated_tok_s:estimated_tok_s;
+    model_id:model_id
+  }
+}
+
+// --- Ollama options JSON ---
+
+// Returns a JSON string of Ollama options to pass as the `options` field
+// in generate/chat requests.
+pub f=apply_to_ollama_opts(config:$tier_config):str{
+  let gpu_s=str.from_int(config.num_gpu_layers as i64);
+  let mmap_s=if config.use_mmap{"true"}else{"false"};
+  let mlock_s=if config.use_mlock{"true"}else{"false"};
+  let ctx_s=str.from_int(config.ctx_size as i64);
+  let batch_s=str.from_int(config.batch_size as i64);
+  <str.concat(
+    "{\"num_gpu\":";
+    str.concat(
+      gpu_s;
+      str.concat(
+        ",\"use_mmap\":";
+        str.concat(
+          mmap_s;
+          str.concat(
+            ",\"use_mlock\":";
+            str.concat(
+              mlock_s;
+              str.concat(
+                ",\"num_ctx\":";
+                str.concat(
+                  ctx_s;
+                  str.concat(
+                    ",\"num_batch\":";
+                    str.concat(batch_s;"}")
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+}
+
+// --- Tier label ---
+
+// Returns a human-readable label for the given tier.
+pub f=tier_label(tier:$model_tier):str{
+  tier|{
+    $interactive "Interactive (instant)";
+    $considered  "Considered (~30s)";
+    $background  "Background (minutes)"
+  }
+}

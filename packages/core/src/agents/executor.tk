@@ -1,0 +1,97 @@
+// AG1.3 (continued) — Agent task executor.
+// Runs an agent's prompt through the loke privacy pipeline within sandbox constraints.
+// LLM dispatch is stubbed — full API key integration follows in the next step.
+
+i=t:shared.types;
+i=at:core.agents.types;
+i=sb:core.agents.sandbox;
+i=pipeline:core.privacy.pipeline;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$executor_config{
+  presidio_url:str;
+  ollama_url:str;
+  pipeline_config:$pipeline.pipeline_config
+}
+
+// Creates an executor config with a default pipeline config.
+pub f=new_config(presidio_url:str;ollama_url:str):$executor_config{
+  let pc=pipeline.new_config(presidio_url;ollama_url);
+  <$executor_config{
+    presidio_url:presidio_url;
+    ollama_url:ollama_url;
+    pipeline_config:pc
+  }
+}
+
+// Executes an agent task:
+//   1. Create sandbox
+//   2. Check cost limit before running
+//   3. Run privacy pipeline on the constructed prompt
+//   4. Log pipeline result (entities found, sensitivity)
+//   5. If RESTRICTED data detected and agent lacks explicit permission → violation + error result
+//   6. Log completion
+//   7. Return sandbox_result (LLM call is stubbed — dispatch requires API keys in next step)
+pub f=execute(agent:$at.agent_def;context:str;config:$executor_config;cid:str):$sb.sandbox_result{
+  let sandbox=sb.new_sandbox(agent);
+
+  // Step 2: check cost limit — estimate a nominal pre-flight cost of 0.0 (unknown until LLM call)
+  let cost_ok=sb.check_cost_limit(sandbox;0.0);
+  if cost_ok{
+    // proceed
+  }else{
+    log.error(str.concat("agent cost limit exceeded before run: ";agent.id);"executor";cid);
+    let violation="cost limit exceeded";
+    sandbox.violations=@(sandbox.violations;violation);
+    <sb.to_result(sandbox;"cost limit exceeded";false)
+  };
+
+  // Step 3: build prompt and run privacy pipeline
+  let prompt=str.concat(agent.prompt_template;" Context: ";context);
+  let pipeline_run=pipeline.run(prompt;"";config.pipeline_config);
+
+  // Step 4: log pipeline result
+  let entity_count=str.from_u32(pipeline_run.total_entities);
+  let sensitivity_label=pipeline_run.result.sensitivity|{
+    $t.sensitivity_level.$public;       <"PUBLIC";
+    $t.sensitivity_level.$internal;     <"INTERNAL";
+    $t.sensitivity_level.$confidential; <"CONFIDENTIAL";
+    $t.sensitivity_level.$restricted;   <"RESTRICTED"
+  };
+  let log_msg=str.concat(
+    str.concat(
+      str.concat("pipeline complete — entities=";entity_count);
+      " sensitivity=");
+    sensitivity_label);
+  log.info(log_msg;"executor";cid);
+
+  // Step 5: RESTRICTED data check — deny unless agent has an explicit model permission
+  // (model permission acts as the agent's acknowledgement of handling sensitive data)
+  let is_restricted=pipeline_run.result.sensitivity|{
+    $t.sensitivity_level.$public;       <false;
+    $t.sensitivity_level.$internal;     <false;
+    $t.sensitivity_level.$confidential; <false;
+    $t.sensitivity_level.$restricted;   <true
+  };
+  if is_restricted{
+    let model_perm=$at.agent_permission.$model(agent.model_preference);
+    let has_model_perm=sb.check_permission(sandbox;model_perm);
+    if has_model_perm{
+      // agent has acknowledged model access — allow restricted data through
+    }else{
+      let violation="RESTRICTED data detected but agent lacks explicit model permission";
+      sandbox.violations=@(sandbox.violations;violation);
+      log.error(str.concat("executor denied — ";violation);"executor";cid);
+      <sb.to_result(sandbox;violation;false)
+    }
+  }else{
+    // sensitivity below RESTRICTED — proceed
+  };
+
+  // Step 6: log completion (LLM call stubbed)
+  log.info(str.concat("agent execution complete (LLM stubbed): ";agent.id);"executor";cid);
+
+  // Step 7: return result with anonymised prompt as output (LLM response stubbed)
+  <sb.to_result(sandbox;pipeline_run.result.anonymised;true)
+}

@@ -1,0 +1,261 @@
+// M1.4 — Knowledge graph.
+// Entities and typed relations layered on top of the vector store.
+// Supports upsert, traversal (BFS up to depth N), substring search, and deletion.
+
+i=mt:core.memory.types;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=json:std.json;
+
+pub m.$entity{
+  id:str;
+  name:str;
+  kind:str;
+  summary:str;
+  confidence:f32;
+  created_at:i64
+}
+
+pub m.$relation{
+  from_id:str;
+  to_id:str;
+  kind:str;
+  weight:f32;
+  created_at:i64
+}
+
+pub m.$graph_result{
+  entities:@($entity);
+  relations:@($relation)
+}
+
+// Inserts or replaces an entity record in memory_graph_entities.
+pub f=upsert_entity(palace:$mt.palace;e:$entity):bool{
+  let conf_s=str.from_float(e.confidence);
+  let ts_s=str.from_int(e.created_at);
+  db.exec_params(
+    palace.conn;
+    "INSERT OR REPLACE INTO memory_graph_entities (id,name,kind,summary,confidence,created_at) VALUES (?,?,?,?,?,?)";
+    @(e.id;e.name;e.kind;e.summary;conf_s;ts_s)
+  )|{
+    $ok:_ {
+      log.debug(str.concat("upserted entity: ";e.id);"graph";"system");
+      <true
+    };
+    $err:_ {
+      log.warn(str.concat("failed to upsert entity: ";e.id);"graph";"system");
+      <false
+    }
+  }
+}
+
+// Inserts a directed relation between two entities.
+pub f=add_relation(palace:$mt.palace;r:$relation):bool{
+  let weight_s=str.from_float(r.weight);
+  let ts_s=str.from_int(r.created_at);
+  db.exec_params(
+    palace.conn;
+    "INSERT INTO memory_graph_relations (from_id,to_id,kind,weight,created_at) VALUES (?,?,?,?,?)";
+    @(r.from_id;r.to_id;r.kind;weight_s;ts_s)
+  )|{
+    $ok:_ {
+      log.debug(str.concat("added relation: ";str.concat(r.from_id;str.concat(" -[";str.concat(r.kind;str.concat("]-> ";r.to_id)))));"graph";"system");
+      <true
+    };
+    $err:_ {
+      log.warn("failed to add relation";"graph";"system");
+      <false
+    }
+  }
+}
+
+// Collects entity ids from a row set.
+f=ids_from_rows(rows:@($json.row)):@(str){
+  let ids=@();
+  rows.each|row{
+    let ids=ids.append(json.get_str(row;"id"))
+  };
+  <ids
+}
+
+// Returns true if the given id is already present in the array.
+f=already_visited(visited:@(str);id:str):bool{
+  let found=false;
+  visited.each|v{
+    if str.eq(v;id){
+      let found=true
+    }
+  };
+  <found
+}
+
+// Builds an $entity from a db row.
+f=entity_from_row(row:$json.row):$entity{
+  <$entity{
+    id:json.get_str(row;"id");
+    name:json.get_str(row;"name");
+    kind:json.get_str(row;"kind");
+    summary:json.get_str(row;"summary");
+    confidence:json.get_float(row;"confidence");
+    created_at:json.get_int(row;"created_at")
+  }
+}
+
+// Builds a $relation from a db row.
+f=relation_from_row(row:$json.row):$relation{
+  <$relation{
+    from_id:json.get_str(row;"from_id");
+    to_id:json.get_str(row;"to_id");
+    kind:json.get_str(row;"kind");
+    weight:json.get_float(row;"weight");
+    created_at:json.get_int(row;"created_at")
+  }
+}
+
+// Traverses the graph outward from entity_id up to depth hops using BFS.
+// Returns all entities and relations encountered within the traversal boundary.
+pub f=neighbours(palace:$mt.palace;entity_id:str;depth:i32):$graph_result{
+  let entities=@();
+  let relations=@();
+  let visited=@(entity_id);
+  let frontier=@(entity_id);
+
+  // Seed: load the root entity itself
+  db.query_params(
+    palace.conn;
+    "SELECT id,name,kind,summary,confidence,created_at FROM memory_graph_entities WHERE id=?";
+    @(entity_id)
+  )|{
+    $ok:rows {
+      if rows.len > 0{
+        let entities=entities.append(entity_from_row(rows[0]))
+      }
+    };
+    $err:_ {}
+  };
+
+  let remaining=depth;
+  let continue=true;
+  // BFS: expand frontier one hop per iteration
+  frontier.each_while|_{ continue }{
+    if remaining <= 0{
+      let continue=false
+    }else{
+      let next_frontier=@();
+      frontier.each|fid{
+        // Outgoing edges
+        db.query_params(
+          palace.conn;
+          "SELECT from_id,to_id,kind,weight,created_at FROM memory_graph_relations WHERE from_id=?";
+          @(fid)
+        )|{
+          $ok:rel_rows {
+            rel_rows.each|rrow{
+              let rel=relation_from_row(rrow);
+              let relations=relations.append(rel);
+              if !already_visited(visited;rel.to_id){
+                let visited=visited.append(rel.to_id);
+                let next_frontier=next_frontier.append(rel.to_id);
+                db.query_params(
+                  palace.conn;
+                  "SELECT id,name,kind,summary,confidence,created_at FROM memory_graph_entities WHERE id=?";
+                  @(rel.to_id)
+                )|{
+                  $ok:erows {
+                    if erows.len > 0{
+                      let entities=entities.append(entity_from_row(erows[0]))
+                    }
+                  };
+                  $err:_ {}
+                }
+              }
+            }
+          };
+          $err:_ {}
+        };
+        // Incoming edges
+        db.query_params(
+          palace.conn;
+          "SELECT from_id,to_id,kind,weight,created_at FROM memory_graph_relations WHERE to_id=?";
+          @(fid)
+        )|{
+          $ok:rel_rows {
+            rel_rows.each|rrow{
+              let rel=relation_from_row(rrow);
+              let relations=relations.append(rel);
+              if !already_visited(visited;rel.from_id){
+                let visited=visited.append(rel.from_id);
+                let next_frontier=next_frontier.append(rel.from_id);
+                db.query_params(
+                  palace.conn;
+                  "SELECT id,name,kind,summary,confidence,created_at FROM memory_graph_entities WHERE id=?";
+                  @(rel.from_id)
+                )|{
+                  $ok:erows {
+                    if erows.len > 0{
+                      let entities=entities.append(entity_from_row(erows[0]))
+                    }
+                  };
+                  $err:_ {}
+                }
+              }
+            }
+          };
+          $err:_ {}
+        }
+      };
+      let frontier=next_frontier;
+      let remaining=remaining - 1
+    }
+  };
+
+  <$graph_result{entities:entities;relations:relations}
+}
+
+// Searches entities by substring match on name or summary, case-insensitive.
+pub f=search_entities(palace:$mt.palace;query:str):@($entity){
+  let like_q=str.concat("%";str.concat(query;"%"));
+  db.query_params(
+    palace.conn;
+    "SELECT id,name,kind,summary,confidence,created_at FROM memory_graph_entities WHERE name LIKE ? OR summary LIKE ? ORDER BY confidence DESC";
+    @(like_q;like_q)
+  )|{
+    $ok:rows {
+      let results=rows.map|row{ entity_from_row(row) };
+      <results
+    };
+    $err:_ {
+      log.warn(str.concat("graph entity search failed for: ";query);"graph";"system");
+      <@()
+    }
+  }
+}
+
+// Deletes an entity and all its associated relations (incoming and outgoing).
+pub f=delete_entity(palace:$mt.palace;id:str):bool{
+  db.exec_params(
+    palace.conn;
+    "DELETE FROM memory_graph_relations WHERE from_id=? OR to_id=?";
+    @(id;id)
+  )|{
+    $ok:_ {};
+    $err:_ {
+      log.warn(str.concat("failed to delete relations for entity: ";id);"graph";"system")
+    }
+  };
+  db.exec_params(
+    palace.conn;
+    "DELETE FROM memory_graph_entities WHERE id=?";
+    @(id)
+  )|{
+    $ok:_ {
+      log.info(str.concat("deleted entity: ";id);"graph";"system");
+      <true
+    };
+    $err:_ {
+      log.warn(str.concat("failed to delete entity: ";id);"graph";"system");
+      <false
+    }
+  }
+}

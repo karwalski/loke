@@ -1,0 +1,116 @@
+// AG1.2 — Agent scheduler.
+// Evaluates which agents are due to run based on their schedule or trigger type.
+
+i=t:shared.types;
+i=at:core.agents.types;
+i=reg:core.agents.registry;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$schedule_check{
+  agent_id:str;
+  should_run:bool;
+  reason:str
+}
+
+// Determines whether an agent is due to run at the given epoch time.
+// $manual   → never auto-fires
+// $schedule → simplified MVP: hourly/daily/weekly patterns always return true with pending note
+// $file_change / $webhook / $mcp_event → event-driven, return false
+pub f=check_due(agent:$at.agent_def;current_time_epoch:u64):$schedule_check{
+  agent.trigger|{
+    $at.trigger_type.$manual;
+      <$schedule_check{
+        agent_id:agent.id;
+        should_run:false;
+        reason:"manual trigger — does not auto-fire"
+      };
+    $at.trigger_type.$schedule cron;
+      // MVP: recognise common patterns and return true pending full cron parser
+      if str.eq(cron;"0 * * * *"){
+        <$schedule_check{
+          agent_id:agent.id;
+          should_run:true;
+          reason:"schedule check pending full cron parser"
+        }
+      }else{
+        if str.eq(cron;"0 2 * * *"){
+          <$schedule_check{
+            agent_id:agent.id;
+            should_run:true;
+            reason:"schedule check pending full cron parser"
+          }
+        }else{
+          if str.eq(cron;"0 2 * * 0"){
+            <$schedule_check{
+              agent_id:agent.id;
+              should_run:true;
+              reason:"schedule check pending full cron parser"
+            }
+          }else{
+            <$schedule_check{
+              agent_id:agent.id;
+              should_run:false;
+              reason:str.concat("unrecognised cron pattern: ";cron)
+            }
+          }
+        }
+      };
+    $at.trigger_type.$file_change path;
+      <$schedule_check{
+        agent_id:agent.id;
+        should_run:false;
+        reason:"file_change trigger — file watching handled separately"
+      };
+    $at.trigger_type.$webhook path;
+      <$schedule_check{
+        agent_id:agent.id;
+        should_run:false;
+        reason:"webhook trigger — event-driven"
+      };
+    $at.trigger_type.$mcp_event name;
+      <$schedule_check{
+        agent_id:agent.id;
+        should_run:false;
+        reason:"mcp_event trigger — event-driven"
+      }
+  }
+}
+
+// Checks all enabled agents and returns only those that should run.
+pub f=check_all_due(registry:$reg.agent_registry;current_time_epoch:u64):@($schedule_check){
+  let enabled=reg.list_enabled(registry);
+  let count=enabled.len;
+  let result=@();
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let agent=str.array_get(enabled;i);
+      let check=check_due(agent;current_time_epoch);
+      if check.should_run{
+        result=@(result;check)
+      }else{
+        // not due — skip
+      };
+      i=i+1
+    }
+  };
+  <result
+}
+
+// Creates a run record for a manual trigger and records it in the registry.
+pub f=trigger_manual(registry:mut $reg.agent_registry;agent_id:str;cid:str):$at.agent_run|$t.loke_err{
+  let agent_result=reg.find(registry;agent_id);
+  agent_result|{
+    $t.loke_err e;
+      log.error(str.concat("trigger_manual: agent not found: ";agent_id);"scheduler";cid);
+      <$t.loke_err.$config_err(str.concat("agent not found: ";agent_id))
+    agent;
+      let run=at.new_run(agent_id;"manual");
+      reg.record_run(registry;run);
+      log.info(str.concat("manual trigger fired for agent: ";agent_id);"scheduler";cid);
+      <run
+  }
+}

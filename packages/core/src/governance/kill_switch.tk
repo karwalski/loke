@@ -1,0 +1,146 @@
+// G4.6 — Kill switch dashboard widget.
+// Handles state persistence and UI-facing status for the nuclear option —
+// stopping ALL LLM traffic immediately. Enforcement is in gateway.tk via is_blocked().
+
+i=t:shared.types;
+i=db:core.storage.db;
+i=set:core.storage.settings;
+i=str:std.str;
+i=log:shared.log;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+// auto_release_at=0 means manual release required.
+pub m.$kill_switch_state{
+  engaged:bool;
+  engaged_at:i64;
+  engaged_by:str;
+  reason:str;
+  auto_release_at:i64
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+pub let setting_key="governance.kill_switch.engaged";
+
+// ── State persistence ─────────────────────────────────────────────────────────
+
+// Reads kill switch state from settings. Defaults to disengaged if keys are absent.
+pub f=load_state(store:db.$store):$kill_switch_state{
+  let engaged=set.get_bool(store;setting_key)|{
+    $ok:v v;
+    $err:e false
+  };
+  let engaged_at=set.get_int(store;"governance.kill_switch.engaged_at")|{
+    $ok:v v;
+    $err:e 0
+  };
+  let engaged_by=set.get_str(store;"governance.kill_switch.engaged_by")|{
+    $ok:v v;
+    $err:e ""
+  };
+  let reason=set.get_str(store;"governance.kill_switch.reason")|{
+    $ok:v v;
+    $err:e ""
+  };
+  let auto_release_at=set.get_int(store;"governance.kill_switch.auto_release_at")|{
+    $ok:v v;
+    $err:e 0
+  };
+  <$kill_switch_state{
+    engaged:engaged;
+    engaged_at:engaged_at;
+    engaged_by:engaged_by;
+    reason:reason;
+    auto_release_at:auto_release_at
+  }
+}
+
+// ── Operations ────────────────────────────────────────────────────────────────
+
+// Engages the kill switch, persisting state to settings.
+// auto_release_minutes=0 means manual release required.
+pub f=engage(store:db.$store;reason:str;auto_release_minutes:i32):bool{
+  let now=str.now_unix();
+  let auto_release_at=if auto_release_minutes > 0{
+    now+(str.to_int(str.from_int(auto_release_minutes))*60)
+  }else{
+    0
+  };
+  set.set_bool(store;setting_key;true;"governance");
+  set.set_int(store;"governance.kill_switch.engaged_at";now;"governance");
+  set.set_str(store;"governance.kill_switch.engaged_by";"system";"governance");
+  set.set_str(store;"governance.kill_switch.reason";reason;"governance");
+  set.set_int(store;"governance.kill_switch.auto_release_at";auto_release_at;"governance");
+  log.warn(str.concat("Kill switch ENGAGED: ";reason);"kill-switch";"system");
+  <true
+}
+
+// Releases the kill switch and clears state.
+pub f=release(store:db.$store):bool{
+  set.set_bool(store;setting_key;false;"governance");
+  set.set_int(store;"governance.kill_switch.engaged_at";0;"governance");
+  set.set_str(store;"governance.kill_switch.engaged_by";"";"governance");
+  set.set_str(store;"governance.kill_switch.reason";"";"governance");
+  set.set_int(store;"governance.kill_switch.auto_release_at";0;"governance");
+  log.info("Kill switch released";"kill-switch";"system");
+  <true
+}
+
+// Checks if auto-release is due and calls release() if so. Returns true if released.
+pub f=check_auto_release(store:db.$store):bool{
+  let state=load_state(store);
+  if state.auto_release_at > 0{
+    let now=str.now_unix();
+    if now > state.auto_release_at{
+      release(store);
+      <true
+    }else{
+      <false
+    }
+  }else{
+    <false
+  }
+}
+
+// Returns true if the kill switch is currently engaged.
+// Auto-release is checked first so a lapsed timer clears naturally on read.
+pub f=is_engaged(store:db.$store):bool{
+  check_auto_release(store);
+  let state=load_state(store);
+  <state.engaged
+}
+
+// ── Widget rendering ───────────────────────────────────────────────────────────
+
+// Returns a compact kill switch status widget for the governance dashboard.
+pub f=format_widget(state:$kill_switch_state):str{
+  if state.engaged{
+    let line1="┌─ Kill Switch ─────────────────────┐\n";
+    let line2="│ Status: ⚠ ENGAGED                 │\n";
+    let reason_padded=str.pad_right(str.concat("│ Reason: ";state.reason);36);
+    let line3=str.concat(reason_padded;"│\n");
+    let line4="│ All LLM traffic blocked           │\n";
+    let line5="│ [Release]                         │\n";
+    let line6="└───────────────────────────────────┘";
+    <str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(line1;line2);
+            line3);
+          line4);
+        line5);
+      line6)
+  }else{
+    let line1="┌─ Kill Switch ─────────────────────┐\n";
+    let line2="│ Status: DISENGAGED [safe to use]  │\n";
+    let line3="│ [Engage] — stops all LLM traffic  │\n";
+    let line4="└───────────────────────────────────┘";
+    <str.concat(
+      str.concat(
+        str.concat(line1;line2);
+        line3);
+      line4)
+  }
+}

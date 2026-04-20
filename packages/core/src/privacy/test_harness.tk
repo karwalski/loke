@@ -1,0 +1,248 @@
+// F3.9 — Privacy pipeline test harness
+// End-to-end tests verifying PII detection, anonymisation, and guardian presence.
+// Entry point: run_all_tests():bool
+
+i=t:shared.types;
+i=regex:core.privacy.regex;
+i=pipeline:core.privacy.pipeline;
+i=guardian:core.privacy.guardian;
+i=ph:core.privacy.placeholder;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$test_case{
+  name:str;
+  input:str;
+  expect_entities:u32;
+  expect_sensitivity:str;
+  expect_pii_types:@(str)
+}
+
+pub m.$test_result{
+  name:str;
+  passed:bool;
+  message:str
+}
+
+// Compares two strings; returns a passing result if equal, failing result with diff if not.
+pub f=assert_eq_str(label:str;got:str;want:str):$test_result{
+  if str.eq(got;want){
+    <$test_result{name:label;passed:true;message:"ok"}
+  }else{
+    let msg=str.concat("expected \"";str.concat(want;str.concat("\" got \"";str.concat(got;"\""))));
+    <$test_result{name:label;passed:false;message:msg}
+  }
+}
+
+// Asserts got >= min; returns a passing result if so, failing result otherwise.
+pub f=assert_gt_u32(label:str;got:u32;min:u32):$test_result{
+  if got >= min{
+    <$test_result{name:label;passed:true;message:"ok"}
+  }else{
+    let got_s=str.from_int(got);
+    let min_s=str.from_int(min);
+    let msg=str.concat("expected at least ";str.concat(min_s;str.concat(" entity, got ";got_s)));
+    <$test_result{name:label;passed:false;message:msg}
+  }
+}
+
+// Asserts val is true; returns a passing result if so, failing result otherwise.
+pub f=assert_true(label:str;val:bool):$test_result{
+  if val{
+    <$test_result{name:label;passed:true;message:"ok"}
+  }else{
+    <$test_result{name:label;passed:false;message:"expected true, got false"}
+  }
+}
+
+// Returns the canonical test suite for the privacy pipeline.
+pub f=test_cases():@($test_case){
+  <@(
+    $test_case{
+      name:"email detection";
+      input:"Contact john.smith@example.com for info";
+      expect_entities:1;
+      expect_sensitivity:"CONFIDENTIAL";
+      expect_pii_types:@("email")
+    };
+    $test_case{
+      name:"phone AU";
+      input:"Call us on 0412 345 678";
+      expect_entities:1;
+      expect_sensitivity:"CONFIDENTIAL";
+      expect_pii_types:@("phone")
+    };
+    $test_case{
+      name:"credit card";
+      input:"Card: 4111 1111 1111 1111";
+      expect_entities:1;
+      expect_sensitivity:"RESTRICTED";
+      expect_pii_types:@("credit_card")
+    };
+    $test_case{
+      name:"api key";
+      input:"Key: sk-ant-abc123xyz456def789ghi";
+      expect_entities:1;
+      expect_sensitivity:"RESTRICTED";
+      expect_pii_types:@("api_key")
+    };
+    $test_case{
+      name:"no PII";
+      input:"The weather is nice today";
+      expect_entities:0;
+      expect_sensitivity:"PUBLIC";
+      expect_pii_types:@()
+    };
+    $test_case{
+      name:"multiple PII";
+      input:"John (john@example.com, 0412 345 678)";
+      expect_entities:2;
+      expect_sensitivity:"CONFIDENTIAL";
+      expect_pii_types:@("email";"phone")
+    };
+    $test_case{
+      name:"au tfn";
+      input:"My TFN is 123 456 789";
+      expect_entities:1;
+      expect_sensitivity:"RESTRICTED";
+      expect_pii_types:@("au_tfn")
+    }
+  )
+}
+
+// Converts a $sensitivity_level variant to its canonical uppercase string.
+f=sensitivity_to_str(s:$sensitivity_level):str{
+  s|{
+    $sensitivity_level.$public      { <"PUBLIC" };
+    $sensitivity_level.$internal    { <"INTERNAL" };
+    $sensitivity_level.$confidential{ <"CONFIDENTIAL" };
+    $sensitivity_level.$restricted  { <"RESTRICTED" }
+  }
+}
+
+// Runs a single test case against the regex detector and guardian.
+// Returns one result per assertion performed.
+pub f=run_test_case(tc:$test_case):@($test_result){
+  let detection=regex.detect(tc.input);
+  let entity_count=str.array_len(detection.entities);
+  let sensitivity_str=sensitivity_to_str(detection.sensitivity);
+  let results=@();
+
+  // Assert entity count
+  if tc.expect_entities > 0{
+    let r=assert_gt_u32(
+      str.concat(tc.name;": entity count");
+      entity_count;
+      tc.expect_entities
+    );
+    let results=str.array_push(results;r)
+  }else{
+    // Expect exactly zero entities
+    let zero_label=str.concat(tc.name;": no entities expected");
+    let r=if entity_count == 0{
+      $test_result{name:zero_label;passed:true;message:"ok"}
+    }else{
+      let got_s=str.from_int(entity_count);
+      $test_result{
+        name:zero_label;
+        passed:false;
+        message:str.concat("expected 0 entities, got ";got_s)
+      }
+    };
+    let results=str.array_push(results;r)
+  };
+
+  // Assert sensitivity
+  let sens_r=assert_eq_str(
+    str.concat(tc.name;": sensitivity");
+    sensitivity_str;
+    tc.expect_sensitivity
+  );
+  let results=str.array_push(results;sens_r);
+
+  // Assert guardian present after pipeline run
+  let system_with_guardian=guardian.build_system_prompt("");
+  let guardian_r=assert_true(
+    str.concat(tc.name;": guardian present");
+    guardian.is_guardian_present(system_with_guardian)
+  );
+  let results=str.array_push(results;guardian_r);
+
+  <results
+}
+
+// Runs all test cases; logs PASS/FAIL per case; returns true if every assertion passes.
+pub f=run_all_tests():bool{
+  let cases=test_cases();
+  let case_count=str.array_len(cases);
+  let all_passed=true;
+  let ci=0;
+  loop{
+    if ci >= case_count{
+      break
+    }else{
+      let tc=str.array_get(cases;ci);
+      let results=run_test_case(tc);
+      let result_count=str.array_len(results);
+      let case_passed=true;
+      let ri=0;
+      loop{
+        if ri >= result_count{
+          break
+        }else{
+          let r=str.array_get(results;ri);
+          if !r.passed{
+            let case_passed=false;
+            let all_passed=false;
+            log.warn(
+              str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message)));
+              "test_harness";
+              "system"
+            )
+          };
+          ri=ri+1
+        }
+      };
+      if case_passed{
+        log.info(
+          str.concat("PASS ";str.concat(tc.name;str.concat(" (";str.concat(str.from_int(result_count);" assertions)"))));
+          "test_harness";
+          "system"
+        )
+      };
+      ci=ci+1
+    }
+  };
+  <all_passed
+}
+
+// Formats all collected test results into a human-readable report string.
+pub f=format_results(results:@($test_result)):str{
+  let header="Privacy Pipeline Tests\n======================";
+  let body="";
+  let pass_count=0;
+  let fail_count=0;
+  let count=str.array_len(results);
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let r=str.array_get(results;i);
+      let line=if r.passed{
+        let pass_count=pass_count+1;
+        str.concat("PASS ";r.name)
+      }else{
+        let fail_count=fail_count+1;
+        str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message)))
+      };
+      let body=str.concat(body;str.concat("\n";line));
+      i=i+1
+    }
+  };
+  let total=pass_count+fail_count;
+  let total_s=str.from_int(total);
+  let pass_s=str.from_int(pass_count);
+  let summary=str.concat("\nResult: ";str.concat(pass_s;str.concat("/";str.concat(total_s;" passed"))));
+  <str.concat(header;str.concat(body;summary))
+}

@@ -1,0 +1,314 @@
+// M2.5 — Memory MCP server
+// Exposes memory palace tools to connected LLMs via the MCP protocol.
+// Entry points: memory_tools() and handle_memory_tool(name;args_json;data_dir).
+
+i=t:shared.types;
+i=proto:core.mcp.protocol;
+i=mt:core.memory.types;
+i=palace:core.memory.palace;
+i=stor:core.memory.storage;
+i=search:core.memory.search;
+i=aaak:core.memory.aaak;
+i=context:core.memory.context;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+// ── Tool definitions ──────────────────────────────────────────────────────────
+
+// Returns all six memory MCP tool definitions.
+pub f=memory_tools():@($proto.mcp_tool){
+  <@(
+    $proto.mcp_tool{
+      name:"memory.search";
+      description:"Search your memory palace for relevant past conversations and facts";
+      input_schema:"{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"},\"wing\":{\"type\":\"string\"}},\"required\":[\"query\",\"limit\"]}"
+    };
+    $proto.mcp_tool{
+      name:"memory.store";
+      description:"Store a fact or note in your memory palace";
+      input_schema:"{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"role\":{\"type\":\"string\"},\"wing\":{\"type\":\"string\"}},\"required\":[\"content\",\"role\"]}"
+    };
+    $proto.mcp_tool{
+      name:"memory.context";
+      description:"Load relevant memory context for the current task";
+      input_schema:"{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"token_budget\":{\"type\":\"integer\"}},\"required\":[\"task\",\"token_budget\"]}"
+    };
+    $proto.mcp_tool{
+      name:"memory.status";
+      description:"Get memory palace statistics";
+      input_schema:"{\"type\":\"object\",\"properties\":{}}"
+    };
+    $proto.mcp_tool{
+      name:"memory.facts";
+      description:"Search for specific facts or decisions in memory";
+      input_schema:"{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}"
+    };
+    $proto.mcp_tool{
+      name:"memory.diary_write";
+      description:"Write an entry to the agent diary";
+      input_schema:"{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"agent_id\",\"entry\"]}"
+    }
+  )
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// Handles memory.search: searches the palace, returns a JSON array of results.
+f=handle_search(p:$palace.palace;args_json:str):$proto.tool_result{
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e {
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err("invalid args JSON");is_error:true}
+    };
+    obj {
+      let query=json.get_str(obj;"query");
+      let limit=json.get_int(obj;"limit");
+      let wing=json.get_str(obj;"wing");
+      let results=if str.len(wing) > 0{
+        search.search_in_wing(p;query;wing;limit)
+      }else{
+        search.search(p;query;limit)
+      };
+      results|{
+        $ok:rs {
+          let count=str.array_len(rs);
+          let items="";
+          let i=0;
+          loop{
+            if i >= count{
+              break
+            }else{
+              let r=str.array_get(rs;i);
+              let loc=str.concat(r.location.wing;str.concat("/";str.concat(r.location.hall;str.concat("/";r.location.room))));
+              let score_s=str.from_float(r.relevance_score);
+              let excerpt_escaped=str.replace(r.content_excerpt;"\"";"\\\"");
+              let entry=str.concat(
+                "{\"drawer_id\":\"";str.concat(
+                r.drawer_id;str.concat(
+                "\",\"location\":\"";str.concat(
+                loc;str.concat(
+                "\",\"excerpt\":\"";str.concat(
+                excerpt_escaped;str.concat(
+                "\",\"score\":";str.concat(
+                score_s;"}"
+              )))))))
+              );
+              if i == 0{
+                let items=entry
+              }else{
+                let items=str.concat(items;str.concat(",";entry))
+              };
+              i=i+1
+            }
+          };
+          let result_json=str.concat("[";str.concat(items;"]"));
+          <$proto.tool_result{content_type:"text";text:result_json;is_error:false}
+        };
+        $err:e {
+          log.warn("memory.search failed";"mcp_server";"system");
+          <$proto.tool_result{content_type:"text";text:proto.tool_result_err("search failed");is_error:true}
+        }
+      }
+    }
+  }
+}
+
+// Handles memory.store: stores a turn in the palace, returns confirmation JSON.
+f=handle_store(p:$palace.palace;args_json:str):$proto.tool_result{
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e {
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err("invalid args JSON");is_error:true}
+    };
+    obj {
+      let content=json.get_str(obj;"content");
+      let role=json.get_str(obj;"role");
+      stor.store_turn(p;role;content;"manual";"user";0;$sensitivity_level.$public)|{
+        $ok:_ {
+          let drawer_id=str.rand_hex(16);
+          let result=str.concat("{\"ok\":true,\"drawer_id\":\"";str.concat(drawer_id;"\"}"));
+          <$proto.tool_result{content_type:"text";text:result;is_error:false}
+        };
+        $err:e {
+          log.warn("memory.store failed";"mcp_server";"system");
+          <$proto.tool_result{content_type:"text";text:proto.tool_result_err("store failed");is_error:true}
+        }
+      }
+    }
+  }
+}
+
+// Handles memory.context: loads layered context for a task, returns context string + token estimate.
+f=handle_context(p:$palace.palace;args_json:str):$proto.tool_result{
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e {
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err("invalid args JSON");is_error:true}
+    };
+    obj {
+      let task=json.get_str(obj;"task");
+      let token_budget=json.get_int(obj;"token_budget");
+      let ctx=context.load_context(p;task;"user";token_budget);
+      let ctx_str=context.to_context_string(ctx);
+      let ctx_escaped=str.replace(ctx_str;"\"";"\\\"");
+      let tokens_s=str.from_int(ctx.total_tokens_estimate);
+      let result=str.concat(
+        "{\"context\":\"";str.concat(
+        ctx_escaped;str.concat(
+        "\",\"tokens_estimate\":";str.concat(
+        tokens_s;"}"
+      ))))
+      );
+      <$proto.tool_result{content_type:"text";text:result;is_error:false}
+    }
+  }
+}
+
+// Handles memory.status: queries palace statistics, returns counts as JSON.
+f=handle_status(p:$palace.palace):$proto.tool_result{
+  palace.status(p)|{
+    $ok:s {
+      let drawers_s=str.from_int(s.total_drawers);
+      let closets_s=str.from_int(s.total_closets);
+      let wings_s=str.from_int(s.total_wings);
+      let result=str.concat(
+        "{\"total_drawers\":";str.concat(
+        drawers_s;str.concat(
+        ",\"total_closets\":";str.concat(
+        closets_s;str.concat(
+        ",\"total_wings\":";str.concat(
+        wings_s;"}"
+      )))))
+      );
+      <$proto.tool_result{content_type:"text";text:result;is_error:false}
+    };
+    $err:e {
+      log.warn("memory.status failed";"mcp_server";"system");
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err("status query failed");is_error:true}
+    }
+  }
+}
+
+// Handles memory.facts: searches with limit 5, AAAK-encodes results for compact output.
+f=handle_facts(p:$palace.palace;args_json:str):$proto.tool_result{
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e {
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err("invalid args JSON");is_error:true}
+    };
+    obj {
+      let query=json.get_str(obj;"query");
+      search.search(p;query;5)|{
+        $ok:rs {
+          let level=aaak.default_level();
+          let count=str.array_len(rs);
+          let encoded_parts="";
+          let i=0;
+          loop{
+            if i >= count{
+              break
+            }else{
+              let r=str.array_get(rs;i);
+              let encoded=aaak.encode_fact(r.content_excerpt;level);
+              let loc=str.concat(r.location.wing;str.concat("/";r.location.hall));
+              let tagged=str.concat("[";str.concat(loc;str.concat("] ";encoded)));
+              if i == 0{
+                let encoded_parts=tagged
+              }else{
+                let encoded_parts=str.concat(encoded_parts;str.concat(" | ";tagged))
+              };
+              i=i+1
+            }
+          };
+          let escaped=str.replace(encoded_parts;"\"";"\\\"");
+          let result=str.concat("{\"facts\":\"";str.concat(escaped;"\"}"));
+          <$proto.tool_result{content_type:"text";text:result;is_error:false}
+        };
+        $err:e {
+          log.warn("memory.facts search failed";"mcp_server";"system");
+          <$proto.tool_result{content_type:"text";text:proto.tool_result_err("facts search failed");is_error:true}
+        }
+      }
+    }
+  }
+}
+
+// Handles memory.diary_write: stores an agent diary entry in wing=agent-diaries.
+f=handle_diary_write(p:$palace.palace;args_json:str):$proto.tool_result{
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e {
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err("invalid args JSON");is_error:true}
+    };
+    obj {
+      let agent_id=json.get_str(obj;"agent_id");
+      let entry=json.get_str(obj;"entry");
+      // Build a drawer directly into the agent-diaries wing
+      let location=$mt.palace_location{wing:"agent-diaries";hall:agent_id;room:"diary"};
+      let drawer_id=str.rand_hex(16);
+      let drawer=$mt.drawer{
+        id:drawer_id;
+        location:location;
+        role:"agent";
+        content:entry;
+        session_id:"diary";
+        model_id:agent_id;
+        tokens:0;
+        sensitivity:$sensitivity_level.$internal;
+        created_at:""
+      };
+      stor.store_drawer(p;drawer)|{
+        $ok:_ {
+          <$proto.tool_result{content_type:"text";text:"{\"ok\":true}";is_error:false}
+        };
+        $err:e {
+          log.warn(str.concat("memory.diary_write failed for agent: ";agent_id);"mcp_server";"system");
+          <$proto.tool_result{content_type:"text";text:proto.tool_result_err("diary write failed");is_error:true}
+        }
+      }
+    }
+  }
+}
+
+// ── Dispatcher ────────────────────────────────────────────────────────────────
+
+// Opens the palace from data_dir and dispatches the named tool to its handler.
+pub f=handle_memory_tool(name:str;args_json:str;data_dir:str):$proto.tool_result{
+  palace.open(data_dir)|{
+    $ok:p {
+      if str.eq(name;"memory.search"){
+        <handle_search(p;args_json)
+      }else{
+        if str.eq(name;"memory.store"){
+          <handle_store(p;args_json)
+        }else{
+          if str.eq(name;"memory.context"){
+            <handle_context(p;args_json)
+          }else{
+            if str.eq(name;"memory.status"){
+              <handle_status(p)
+            }else{
+              if str.eq(name;"memory.facts"){
+                <handle_facts(p;args_json)
+              }else{
+                if str.eq(name;"memory.diary_write"){
+                  <handle_diary_write(p;args_json)
+                }else{
+                  let msg=str.concat("unknown memory tool: ";name);
+                  log.warn(msg;"mcp_server";"system");
+                  <$proto.tool_result{content_type:"text";text:proto.tool_result_err(msg);is_error:true}
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+    $err:e {
+      let msg=str.concat("failed to open memory palace at: ";data_dir);
+      log.warn(msg;"mcp_server";"system");
+      <$proto.tool_result{content_type:"text";text:proto.tool_result_err(msg);is_error:true}
+    }
+  }
+}

@@ -1,0 +1,334 @@
+// F4.5 — Token budget manager
+// Tracks token spend and cost against configurable period limits.
+// Enforces daily and monthly caps; logs warnings when approaching thresholds.
+
+i=t:shared.types;
+i=str:std.str;
+i=log:shared.log;
+
+// --- Types ---
+
+pub m.$budget_period{
+  $daily;
+  $weekly;
+  $monthly
+}
+
+pub m.$budget_limit{
+  period:$budget_period;
+  max_tokens:u32;
+  max_cost_usd:f64;
+  warn_at_pct:f64
+}
+
+pub m.$budget_usage{
+  period_start:str;
+  tokens_used:u32;
+  cost_usd:f64;
+  request_count:u32
+}
+
+pub m.$budget_check{
+  allowed:bool;
+  reason:str;
+  tokens_remaining:u32;
+  cost_remaining:f64;
+  pct_used:f64
+}
+
+pub m.$budget_manager{
+  limits:@($budget_limit);
+  usage:@($budget_usage)
+}
+
+// --- Constructor ---
+
+// Initialises a budget manager with the provided limits and empty usage records.
+// One $budget_usage entry is created per limit, initialised to zero.
+pub f=new(limits:@($budget_limit)):$budget_manager{
+  let usage=limits.map|lim{
+    $budget_usage{
+      period_start:"";
+      tokens_used:0;
+      cost_usd:0.0;
+      request_count:0
+    }
+  };
+  <$budget_manager{limits:limits;usage:usage}
+}
+
+// --- Default limits ---
+
+// Returns standard loke default limits:
+//   Daily:   100,000 tokens / $5.00 / warn at 80%
+//   Monthly: 1,000,000 tokens / $50.00 / warn at 80%
+pub f=default_limits():@($budget_limit){
+  <@(
+    $budget_limit{
+      period:$budget_period.$daily;
+      max_tokens:100000;
+      max_cost_usd:5.0;
+      warn_at_pct:80.0
+    };
+    $budget_limit{
+      period:$budget_period.$monthly;
+      max_tokens:1000000;
+      max_cost_usd:50.0;
+      warn_at_pct:80.0
+    }
+  )
+}
+
+// --- Internal: period label ---
+
+f=period_label(period:$budget_period):str{
+  period|{
+    $daily   "daily";
+    $weekly  "weekly";
+    $monthly "monthly"
+  }
+}
+
+// --- Check ---
+
+// Checks whether a request is within all configured limits.
+// If any limit would be exceeded, returns allowed=false.
+// Logs a warning if any limit is at or above warn_at_pct.
+// Returns the most restrictive $budget_check across all limits.
+pub f=check(manager:$budget_manager;estimated_tokens:u32;estimated_cost:f64):$budget_check{
+  let allowed=true;
+  let reason="";
+  let tokens_remaining=4294967295;
+  let cost_remaining=99999999.0;
+  let pct_used=0.0;
+  let cid=log.new_correlation_id();
+
+  let limit_count=manager.limits.len;
+  let i=0;
+  loop{
+    if i >= limit_count{
+      break
+    }else{
+      let lim=manager.limits[i];
+      let usg=manager.usage[i];
+
+      // Calculate new totals if this request proceeds
+      let new_tokens=usg.tokens_used + estimated_tokens;
+      let new_cost=usg.cost_usd + estimated_cost;
+
+      // Token percentage after this request
+      let tok_pct=if lim.max_tokens==0{
+        0.0
+      }else{
+        (new_tokens as f64 / lim.max_tokens as f64) * 100.0
+      };
+
+      // Cost percentage after this request
+      let cost_pct=if lim.max_cost_usd==0.0{
+        0.0
+      }else{
+        (new_cost / lim.max_cost_usd) * 100.0
+      };
+
+      let period_s=period_label(lim.period);
+
+      // Check token limit
+      if new_tokens > lim.max_tokens{
+        allowed=false;
+        let rem_s=str.from_int(0);
+        let used_s=str.from_int(usg.tokens_used as i64);
+        let max_s=str.from_int(lim.max_tokens as i64);
+        reason=str.concat(period_s;str.concat(" token limit exceeded: used ";str.concat(used_s;str.concat("/";max_s))));
+        tokens_remaining=0;
+        pct_used=100.0
+      }else{
+        // Check cost limit
+        if new_cost > lim.max_cost_usd{
+          allowed=false;
+          reason=str.concat(period_s;" cost limit exceeded");
+          cost_remaining=0.0;
+          pct_used=100.0
+        }else{
+          // Within limits — check warn threshold
+          let effective_pct=if tok_pct > cost_pct{tok_pct}else{cost_pct};
+          if effective_pct >= lim.warn_at_pct{
+            let pct_s=str.from_float(effective_pct);
+            log.warn(
+              str.concat(period_s;str.concat(" budget at ";str.concat(pct_s;"%")));
+              "budget";
+              cid
+            )
+          };
+
+          // Update most-restrictive tokens_remaining
+          let this_tok_rem=lim.max_tokens - new_tokens;
+          if this_tok_rem < tokens_remaining{
+            tokens_remaining=this_tok_rem
+          };
+
+          // Update most-restrictive cost_remaining
+          let this_cost_rem=lim.max_cost_usd - new_cost;
+          if this_cost_rem < cost_remaining{
+            cost_remaining=this_cost_rem
+          };
+
+          // Track highest pct_used
+          if effective_pct > pct_used{
+            pct_used=effective_pct
+          }
+        }
+      };
+
+      i=i+1
+    }
+  };
+
+  if allowed{
+    if str.len(reason)==0{
+      reason="within budget"
+    }
+  };
+
+  <$budget_check{
+    allowed:allowed;
+    reason:reason;
+    tokens_remaining:tokens_remaining;
+    cost_remaining:cost_remaining;
+    pct_used:pct_used
+  }
+}
+
+// --- Record ---
+
+// Adds token and cost usage to every period's usage record.
+// (All active periods accumulate together; reset_period handles rollover.)
+pub f=record(manager:mut $budget_manager;tokens:u32;cost:f64):void{
+  let count=manager.usage.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let usg=manager.usage[i];
+      manager.usage[i]=$budget_usage{
+        period_start:usg.period_start;
+        tokens_used:usg.tokens_used + tokens;
+        cost_usd:usg.cost_usd + cost;
+        request_count:usg.request_count + 1
+      };
+      i=i+1
+    }
+  };
+  <()
+}
+
+// --- Reset period ---
+
+// Clears usage for all limits matching the given period.
+pub f=reset_period(manager:mut $budget_manager;period:$budget_period):void{
+  let count=manager.limits.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let lim=manager.limits[i];
+      let matches=lim.period|{
+        $daily   period|{$daily true; $weekly false; $monthly false};
+        $weekly  period|{$daily false; $weekly true; $monthly false};
+        $monthly period|{$daily false; $weekly false; $monthly true}
+      };
+      if matches{
+        manager.usage[i]=$budget_usage{
+          period_start:"";
+          tokens_used:0;
+          cost_usd:0.0;
+          request_count:0
+        }
+      };
+      i=i+1
+    }
+  };
+  <()
+}
+
+// --- Format usage ---
+
+// Returns a human-readable usage summary for CLI display.
+pub f=format_usage(manager:$budget_manager):str{
+  let lines=@();
+  let count=manager.limits.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let lim=manager.limits[i];
+      let usg=manager.usage[i];
+      let period_s=period_label(lim.period);
+      let tok_pct=if lim.max_tokens==0{
+        0.0
+      }else{
+        (usg.tokens_used as f64 / lim.max_tokens as f64) * 100.0
+      };
+      let cost_pct=if lim.max_cost_usd==0.0{
+        0.0
+      }else{
+        (usg.cost_usd / lim.max_cost_usd) * 100.0
+      };
+      let used_tok_s=str.from_int(usg.tokens_used as i64);
+      let max_tok_s=str.from_int(lim.max_tokens as i64);
+      let tok_pct_s=str.from_float(tok_pct);
+      let cost_s=str.from_float(usg.cost_usd);
+      let max_cost_s=str.from_float(lim.max_cost_usd);
+      let cost_pct_s=str.from_float(cost_pct);
+      let req_s=str.from_int(usg.request_count as i64);
+      let line=str.concat(
+        period_s;
+        str.concat(
+          ": tokens ";
+          str.concat(
+            used_tok_s;
+            str.concat(
+              "/";
+              str.concat(
+                max_tok_s;
+                str.concat(
+                  " (";
+                  str.concat(
+                    tok_pct_s;
+                    str.concat(
+                      "%)  cost $";
+                      str.concat(
+                        cost_s;
+                        str.concat(
+                          "/$";
+                          str.concat(
+                            max_cost_s;
+                            str.concat(
+                              " (";
+                              str.concat(
+                                cost_pct_s;
+                                str.concat(
+                                  "%)  requests: ";
+                                  req_s
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      );
+      lines=@(lines;line);
+      i=i+1
+    }
+  };
+  <str.join(lines;"\n")
+}

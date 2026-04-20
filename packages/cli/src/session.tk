@@ -1,0 +1,265 @@
+// A2.4 — Multi-session terminal management
+
+i=t:shared.types;
+i=log:shared.log;
+i=out:cli.output;
+i=db:storage.db;
+i=str:std.str;
+
+pub m.$session{
+  id:str;
+  name:str;
+  created_at:i64;
+  last_active:i64;
+  request_count:i32;
+  active:bool
+}
+
+pub f=ensure_table(store:db.$store):bool{
+  let sql="CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, name TEXT, created_at INT, last_active INT, request_count INT DEFAULT 0, active INT DEFAULT 1)";
+  let result=db.exec(store;sql)|{
+    $ok:v true;
+    $err:e false
+  };
+  <result
+}
+
+pub f=new_session(store:db.$store;name:str):$session{
+  let id=str.hex_id();
+  let now=db.now_unix();
+  let sql=str.concat(
+    "INSERT INTO sessions (id, name, created_at, last_active, request_count, active) VALUES ('";
+    str.concat(
+      id;
+      str.concat(
+        "', '";
+        str.concat(
+          name;
+          str.concat(
+            "', ";
+            str.concat(
+              str.from_int64(now);
+              str.concat(
+                ", ";
+                str.concat(
+                  str.from_int64(now);
+                  ", 0, 1)"
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+  db.exec(store;sql)|{
+    $ok:v ();
+    $err:e ()
+  };
+  <$session{
+    id=id;
+    name=name;
+    created_at=now;
+    last_active=now;
+    request_count=0;
+    active=true
+  }
+}
+
+pub f=list_sessions(store:db.$store):@($session){
+  let sql="SELECT id, name, created_at, last_active, request_count, active FROM sessions ORDER BY last_active DESC";
+  let rows=db.query(store;sql)|{
+    $ok:v v;
+    $err:e <@()
+  };
+  let sessions=@();
+  let i=0;
+  loop i<str.len(rows){
+    let row=rows[i];
+    let s=$session{
+      id=db.row_str(row;"id");
+      name=db.row_str(row;"name");
+      created_at=db.row_int64(row;"created_at");
+      last_active=db.row_int64(row;"last_active");
+      request_count=db.row_int(row;"request_count");
+      active=db.row_bool(row;"active")
+    };
+    let sessions=str.arr_append(sessions;s);
+    let i=i+1
+  };
+  <sessions
+}
+
+pub f=get_active(store:db.$store):?($session){
+  let sql="SELECT id, name, created_at, last_active, request_count, active FROM sessions WHERE active=1 ORDER BY last_active DESC LIMIT 1";
+  let rows=db.query(store;sql)|{
+    $ok:v v;
+    $err:e <?()
+  };
+  if str.len(rows)<1{
+    <?()
+  }else{
+    let row=rows[0];
+    <?($session{
+      id=db.row_str(row;"id");
+      name=db.row_str(row;"name");
+      created_at=db.row_int64(row;"created_at");
+      last_active=db.row_int64(row;"last_active");
+      request_count=db.row_int(row;"request_count");
+      active=db.row_bool(row;"active")
+    })
+  }
+}
+
+pub f=switch_to(store:db.$store;name:str):bool{
+  let now=db.now_unix();
+  let sql_deactivate="UPDATE sessions SET active=0";
+  db.exec(store;sql_deactivate)|{
+    $ok:v ();
+    $err:e <false
+  };
+  let sql_activate=str.concat(
+    "UPDATE sessions SET active=1, last_active=";
+    str.concat(
+      str.from_int64(now);
+      str.concat(" WHERE name='";str.concat(name;"'"))
+    )
+  );
+  let result=db.exec(store;sql_activate)|{
+    $ok:v true;
+    $err:e false
+  };
+  <result
+}
+
+pub f=close_session(store:db.$store;name:str):bool{
+  let sql=str.concat(
+    "UPDATE sessions SET active=0 WHERE name='";
+    str.concat(name;"'")
+  );
+  let result=db.exec(store;sql)|{
+    $ok:v true;
+    $err:e false
+  };
+  <result
+}
+
+pub f=record_request(store:db.$store;session_id:str):bool{
+  let now=db.now_unix();
+  let sql=str.concat(
+    "UPDATE sessions SET request_count=request_count+1, last_active=";
+    str.concat(
+      str.from_int64(now);
+      str.concat(" WHERE id='";str.concat(session_id;"'"))
+    )
+  );
+  let result=db.exec(store;sql)|{
+    $ok:v true;
+    $err:e false
+  };
+  <result
+}
+
+pub f=format_sessions(sessions:@($session)):str{
+  let header="Name             | ID               | Requests | Last Active          | Status";
+  let sep  ="-----------------|------------------|----------|----------------------|--------";
+  let body=str.concat(header;str.concat("\n";sep));
+  let i=0;
+  loop i<str.len(sessions){
+    let s=sessions[i];
+    let status=if s.active{"● active"}else{"  idle"};
+    let last=str.format_unix(s.last_active);
+    let line=str.concat(
+      "\n";
+      str.concat(
+        str.pad_right(s.name;16);
+        str.concat(
+          " | ";
+          str.concat(
+            str.pad_right(s.id;16);
+            str.concat(
+              " | ";
+              str.concat(
+                str.pad_left(str.from_int(s.request_count);8);
+                str.concat(
+                  " | ";
+                  str.concat(
+                    str.pad_right(last;20);
+                    str.concat(" | ";status)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    );
+    let body=str.concat(body;line);
+    let i=i+1
+  };
+  <body
+}
+
+pub f=run(subcommand:str;args:@(str);store:db.$store):i32{
+  let ok=ensure_table(store);
+  if str.eq(subcommand;"list"){
+    let sessions=list_sessions(store);
+    out.print_line(format_sessions(sessions));
+    <0
+  }else{
+    if str.eq(subcommand;"new"){
+      if str.len(args)<1{
+        out.print_error("usage: loke session new <name>");
+        <1
+      }else{
+        let name=args[0];
+        let s=new_session(store;name);
+        out.print_line(str.concat("Created session: ";s.name));
+        <0
+      }
+    }else{
+      if str.eq(subcommand;"switch"){
+        if str.len(args)<1{
+          out.print_error("usage: loke session switch <name>");
+          <1
+        }else{
+          let name=args[0];
+          let switched=switch_to(store;name);
+          if switched{
+            out.print_line(str.concat("Switched to session: ";name));
+            <0
+          }else{
+            out.print_error(str.concat("session not found: ";name));
+            <1
+          }
+        }
+      }else{
+        if str.eq(subcommand;"close"){
+          if str.len(args)<1{
+            out.print_error("usage: loke session close <name>");
+            <1
+          }else{
+            let name=args[0];
+            let closed=close_session(store;name);
+            if closed{
+              out.print_line(str.concat("Closed session: ";name));
+              <0
+            }else{
+              out.print_error(str.concat("session not found: ";name));
+              <1
+            }
+          }
+        }else{
+          out.print_line("usage: loke session <subcommand> [args]
+
+subcommands:
+  list           list all sessions
+  new <name>     create a new named session
+  switch <name>  switch to a named session
+  close <name>   close a named session");
+          <1
+        }
+      }
+    }
+  }
+}

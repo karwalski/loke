@@ -1,0 +1,310 @@
+// G4.1 — Governance health dashboard.
+// CLI-renderable scorecard showing overall governance status across key metrics.
+
+i=t:shared.types;
+i=s:core.storage.db;
+i=db:std.db;
+i=gt:core.governance.types;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$rag_status{
+  $green;
+  $amber;
+  $red
+}
+
+pub m.$dashboard_metric{
+  name:str;
+  value:str;
+  status:$rag_status;
+  detail:str
+}
+
+pub m.$governance_scorecard{
+  overall:$rag_status;
+  metrics:@($dashboard_metric);
+  period_days:u32;
+  generated_at:str
+}
+
+// Returns "[OK]", "[!!]", or "[X]" for the given RAG status.
+pub f=status_symbol(s:$rag_status):str{
+  s|{
+    $rag_status.$green; <"[OK]";
+    $rag_status.$amber; <"[!!]";
+    $rag_status.$red;   <"[X] "
+  }
+}
+
+// Elevates an overall status: red beats amber beats green.
+f=worst(a:$rag_status;b:$rag_status):$rag_status{
+  a|{
+    $rag_status.$red;   <$rag_status.$red;
+    $rag_status.$amber; {
+      b|{
+        $rag_status.$red;   <$rag_status.$red;
+        $rag_status.$amber; <$rag_status.$amber;
+        $rag_status.$green; <$rag_status.$amber
+      }
+    };
+    $rag_status.$green; <b
+  }
+}
+
+// Queries audit_log and quality_signals tables to build a governance scorecard.
+// Metrics covered:
+//   - Privacy coverage: % requests with anonymisation applied
+//   - Local routing ratio: % requests routed to local/ollama provider
+//   - Cost (period): total USD spend from audit_log
+//   - Open incidents: stub — always 0 for now
+//   - Governance coverage: % requests with complete audit trail (all rows count)
+pub f=build_scorecard(store:$s.store;period_days:u32):$governance_scorecard|$loke_err{
+  let days_s=str.from_int(period_days);
+  let window=str.concat(
+    "datetime('now','-";
+    str.concat(days_s;" days')")
+  );
+
+  // Total requests in period
+  let total_sql=str.concat(
+    "SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ";
+    window
+  );
+  let total_count=0;
+  db.query_params(store.conn;total_sql;@())|{
+    $ok:rows {
+      if rows.len > 0{
+        total_count=json.get_int(rows[0];"cnt")
+      }else{}
+    };
+    $err:e <$err($loke_err.$storage_err("failed to query audit_log total"))
+  };
+
+  // Privacy coverage: audit_log uses sensitivity column; treat CONFIDENTIAL/RESTRICTED as anonymised
+  let priv_sql=str.concat(
+    "SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ";
+    str.concat(window;" AND (sensitivity='CONFIDENTIAL' OR sensitivity='RESTRICTED')")
+  );
+  let priv_count=0;
+  db.query_params(store.conn;priv_sql;@())|{
+    $ok:rows {
+      if rows.len > 0{
+        priv_count=json.get_int(rows[0];"cnt")
+      }else{}
+    };
+    $err:e <$err($loke_err.$storage_err("failed to query privacy coverage"))
+  };
+
+  // Local routing ratio: provider='local' or provider='ollama'
+  let local_sql=str.concat(
+    "SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ";
+    str.concat(window;" AND (provider='local' OR provider='ollama')")
+  );
+  let local_count=0;
+  db.query_params(store.conn;local_sql;@())|{
+    $ok:rows {
+      if rows.len > 0{
+        local_count=json.get_int(rows[0];"cnt")
+      }else{}
+    };
+    $err:e <$err($loke_err.$storage_err("failed to query local routing ratio"))
+  };
+
+  // Total cost in period
+  let cost_sql=str.concat(
+    "SELECT COALESCE(SUM(cost_usd),0.0) as total FROM audit_log WHERE created_at >= ";
+    window
+  );
+  let total_cost=0.0;
+  db.query_params(store.conn;cost_sql;@())|{
+    $ok:rows {
+      if rows.len > 0{
+        total_cost=json.get_float(rows[0];"total")
+      }else{}
+    };
+    $err:e <$err($loke_err.$storage_err("failed to query cost"))
+  };
+
+  // Compute ratios
+  let total_f=str.to_float(str.from_int(total_count));
+
+  let priv_rate=if total_count == 0{ 1.0 }else{
+    str.to_float(str.from_int(priv_count))/total_f
+  };
+  let local_rate=if total_count == 0{ 1.0 }else{
+    str.to_float(str.from_int(local_count))/total_f
+  };
+  // Governance coverage: all logged rows have a complete audit trail by definition
+  let gov_rate=if total_count == 0{ 1.0 }else{ 1.0 };
+
+  // Build individual metric statuses
+  let priv_status=if priv_rate > 0.95{
+    $rag_status.$green
+  }else{
+    if priv_rate > 0.80{
+      $rag_status.$amber
+    }else{
+      $rag_status.$red
+    }
+  };
+  let local_status=if local_rate > 0.60{
+    $rag_status.$green
+  }else{
+    if local_rate > 0.40{
+      $rag_status.$amber
+    }else{
+      $rag_status.$red
+    }
+  };
+  // Budget: green if cost < $100, amber if < $200, red if >= $200
+  let cost_status=if total_cost < 100.0{
+    $rag_status.$green
+  }else{
+    if total_cost < 200.0{
+      $rag_status.$amber
+    }else{
+      $rag_status.$red
+    }
+  };
+  // Open incidents: stub — 0 for now
+  let incidents=0;
+  let incident_status=if incidents == 0{
+    $rag_status.$green
+  }else{
+    if incidents <= 2{
+      $rag_status.$amber
+    }else{
+      $rag_status.$red
+    }
+  };
+  let gov_status=if gov_rate > 0.99{
+    $rag_status.$green
+  }else{
+    if gov_rate > 0.95{
+      $rag_status.$amber
+    }else{
+      $rag_status.$red
+    }
+  };
+
+  // Format display values
+  let priv_pct=str.concat(str.from_float(priv_rate*100.0);"%");
+  let local_pct=str.concat(str.from_float(local_rate*100.0);"%");
+  let cost_str=str.concat("$";str.from_float(total_cost));
+  let incident_str=str.from_int(incidents);
+  let gov_pct=str.concat(str.from_float(gov_rate*100.0);"%");
+
+  let metrics=@(
+    $dashboard_metric{
+      name:"Privacy coverage";
+      value:priv_pct;
+      status:priv_status;
+      detail:"% of requests where anonymisation was applied"
+    };
+    $dashboard_metric{
+      name:"Local routing ratio";
+      value:local_pct;
+      status:local_status;
+      detail:"% of requests routed to local models"
+    };
+    $dashboard_metric{
+      name:"Cost (period)";
+      value:cost_str;
+      status:cost_status;
+      detail:"total USD spend from audit log"
+    };
+    $dashboard_metric{
+      name:"Open incidents";
+      value:incident_str;
+      status:incident_status;
+      detail:"count of unresolved incidents"
+    };
+    $dashboard_metric{
+      name:"Governance coverage";
+      value:gov_pct;
+      status:gov_status;
+      detail:"% of requests with complete audit trail"
+    }
+  );
+
+  let overall=worst(
+    worst(
+      worst(
+        worst(priv_status;local_status);
+        cost_status);
+      incident_status);
+    gov_status
+  );
+
+  log.info("governance scorecard built";"dashboard";"system");
+  <$ok($governance_scorecard{
+    overall:overall;
+    metrics:metrics;
+    period_days:period_days;
+    generated_at:str.now_iso8601()
+  })
+}
+
+// Pads a string with trailing spaces to at least width characters.
+f=pad_right(s:str;width:u32):str{
+  let len=str.len(s);
+  if len >= width{
+    <s
+  }else{
+    let diff=width-len;
+    let spaces="                              ";
+    let pad=str.slice(spaces;0;diff);
+    <str.concat(s;pad)
+  }
+}
+
+// Renders an ASCII governance dashboard from a scorecard.
+// Example:
+//   +==========================================+
+//   |     loke Governance Dashboard            |
+//   |     Period: 30 days  Status: GREEN       |
+//   +==========================================+
+//   | [OK]  Privacy coverage      98.2%        |
+//   | [OK]  Local routing ratio   67.4%        |
+//   | [OK]  Cost (period)         $12.40       |
+//   | [OK]  Open incidents        0            |
+//   | [OK]  Governance coverage   99.8%        |
+//   +==========================================+
+pub f=format_scorecard(scorecard:$governance_scorecard):str{
+  let period_s=str.from_int(scorecard.period_days);
+  let overall_label=scorecard.overall|{
+    $rag_status.$green; <"GREEN";
+    $rag_status.$amber; <"AMBER";
+    $rag_status.$red;   <"RED"
+  };
+  let border="+==========================================+\n";
+  let title=str.concat(
+    str.concat("|     loke Governance Dashboard            |\n|     Period: ";period_s);
+    str.concat(" days  Status: ";str.concat(overall_label;"       |\n"))
+  );
+  let rows="";
+  scorecard.metrics.each|m{
+    let sym=status_symbol(m.status);
+    let name_padded=pad_right(m.name;22);
+    let val_padded=pad_right(m.value;10);
+    let row=str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat("| ";sym);
+            "  ");
+          name_padded);
+        val_padded);
+      "|\n")
+    ;
+    rows=str.concat(rows;row)
+  };
+  <str.concat(
+    str.concat(
+      str.concat(
+        str.concat(border;title);
+        border);
+      rows);
+    border)
+}

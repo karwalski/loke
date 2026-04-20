@@ -1,0 +1,580 @@
+// G4.6 — AI-specific governance.
+// Model approval lists, prompt injection detection, hallucination risk flagging,
+// and output filtering. Complements the general-purpose rules engine (G3.2) with
+// checks that are specific to LLM interactions.
+
+m=core.governance.ai_gov;
+i=str:std.string;
+i=db:std.db;
+i=log:shared.log;
+
+// Approval policy for a specific model.
+// tier: "local", "cloud-economy", "cloud-standard", "cloud-premium"
+// max_sensitivity: maximum $sensitivity_level ordinal this model may handle
+//   0=public, 1=internal, 2=confidential, 3=restricted
+// requires_audit: whether every request to this model must be written to the audit log
+pub m.$model_policy{
+  model_id:str;
+  approved:bool;
+  tier:str;
+  max_sensitivity:i32;
+  requires_audit:bool
+}
+
+// Risk assessment for an incoming prompt.
+// injection_score: 0.0–1.0 likelihood of prompt-injection attempt
+// hallucination_risk: "low", "medium", "high"
+// sensitive_request: true when medical/legal/financial keywords detected
+// notes: human-readable flags that fired
+pub m.$prompt_risk{
+  injection_score:f32;
+  hallucination_risk:str;
+  sensitive_request:bool;
+  notes:@(str)
+}
+
+// Risk assessment for a model output.
+// pii_in_output: true when PII patterns detected in the output text
+// factual_claim_count: rough count of sentences asserting facts (numbers/dates/names)
+// risk_level: "low", "medium", "high"
+pub m.$output_risk{
+  pii_in_output:bool;
+  factual_claim_count:i32;
+  risk_level:str
+}
+
+// Creates the model_policies table if it does not already exist.
+pub f=ensure_table(store:db.$store):bool{
+  let sql="CREATE TABLE IF NOT EXISTS model_policies (
+  model_id TEXT PRIMARY KEY,
+  approved INTEGER NOT NULL DEFAULT 0,
+  tier TEXT NOT NULL DEFAULT 'cloud-standard',
+  max_sensitivity INTEGER NOT NULL DEFAULT 1,
+  requires_audit INTEGER NOT NULL DEFAULT 0
+)";
+  db.exec_params(store.conn;sql;@())|{
+    $ok:_ <true;
+    $err:e {
+      log.warn("failed to create model_policies table";"ai_gov";"system");
+      <false
+    }
+  }
+}
+
+// Builds a default-approved local-model policy for any model_id that starts with
+// a known local prefix (ollama/, local/, llama, mistral, phi, gemma, qwen).
+// Cloud models that are not in the store get a not-approved sentinel policy.
+f=is_local_model(model_id:str):bool{
+  if str.starts_with(model_id;"ollama/"){
+    <true
+  }else{
+    if str.starts_with(model_id;"local/"){
+      <true
+    }else{
+      if str.starts_with(model_id;"llama"){
+        <true
+      }else{
+        if str.starts_with(model_id;"mistral"){
+          <true
+        }else{
+          if str.starts_with(model_id;"phi"){
+            <true
+          }else{
+            if str.starts_with(model_id;"gemma"){
+              <true
+            }else{
+              if str.starts_with(model_id;"qwen"){
+                <true
+              }else{
+                <false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Looks up the model policy for model_id in the store.
+// Local models (by prefix) are auto-approved with max_sensitivity=3 (all data classes)
+// and requires_audit=false when no explicit policy exists.
+// Cloud models not in the store return an unapproved sentinel policy — callers must
+// check policy.approved before routing to a cloud provider.
+pub f=check_model(store:db.$store;model_id:str):$model_policy{
+  db.query_params(
+    store.conn;
+    "SELECT model_id,approved,tier,max_sensitivity,requires_audit FROM model_policies WHERE model_id=? LIMIT 1";
+    @(model_id)
+  )|{
+    $ok:rows {
+      if rows.len==0{
+        // no stored policy — derive a default
+        if is_local_model(model_id){
+          log.debug(
+            str.concat("ai_gov: auto-approving local model: ";model_id);
+            "ai_gov";
+            "system"
+          );
+          <$model_policy{
+            model_id:model_id;
+            approved:true;
+            tier:"local";
+            max_sensitivity:3;
+            requires_audit:false
+          }
+        }else{
+          log.warn(
+            str.concat("ai_gov: no policy found for cloud model: ";model_id);
+            "ai_gov";
+            "system"
+          );
+          <$model_policy{
+            model_id:model_id;
+            approved:false;
+            tier:"cloud-standard";
+            max_sensitivity:0;
+            requires_audit:true
+          }
+        }
+      }else{
+        let row=rows.get(0);
+        <$model_policy{
+          model_id:json.get_str(row;"model_id");
+          approved:json.get_int(row;"approved")==1;
+          tier:json.get_str(row;"tier");
+          max_sensitivity:json.get_int(row;"max_sensitivity");
+          requires_audit:json.get_int(row;"requires_audit")==1
+        }
+      }
+    };
+    $err:e {
+      log.warn(str.concat("ai_gov: failed to query policy for: ";model_id);"ai_gov";"system");
+      // fail closed for cloud models, fail open for local
+      if is_local_model(model_id){
+        <$model_policy{
+          model_id:model_id;
+          approved:true;
+          tier:"local";
+          max_sensitivity:3;
+          requires_audit:false
+        }
+      }else{
+        <$model_policy{
+          model_id:model_id;
+          approved:false;
+          tier:"cloud-standard";
+          max_sensitivity:0;
+          requires_audit:true
+        }
+      }
+    }
+  }
+}
+
+// Upserts a model policy into the store.
+// Returns true on success, false on failure.
+pub f=approve_model(store:db.$store;policy:$model_policy):bool{
+  let approved_s=if policy.approved{ "1" }else{ "0" };
+  let max_sens_s=str.from_int(policy.max_sensitivity);
+  let requires_audit_s=if policy.requires_audit{ "1" }else{ "0" };
+  db.exec_params(
+    store.conn;
+    "INSERT INTO model_policies (model_id,approved,tier,max_sensitivity,requires_audit)
+     VALUES (?,?,?,?,?)
+     ON CONFLICT(model_id) DO UPDATE SET
+       approved=excluded.approved,
+       tier=excluded.tier,
+       max_sensitivity=excluded.max_sensitivity,
+       requires_audit=excluded.requires_audit";
+    @(policy.model_id;approved_s;policy.tier;max_sens_s;requires_audit_s)
+  )|{
+    $ok:_ {
+      log.info(
+        str.concat(
+          str.concat("ai_gov: model policy saved: ";policy.model_id);
+          if policy.approved{ " (approved)" }else{ " (NOT approved)" }
+        );
+        "ai_gov";
+        "system"
+      );
+      <true
+    };
+    $err:e {
+      log.warn(str.concat("ai_gov: failed to save policy for: ";policy.model_id);"ai_gov";"system");
+      <false
+    }
+  }
+}
+
+// Assesses an incoming prompt for injection attempts, hallucination risk, and
+// sensitive topic detection.
+//
+// Injection patterns checked (case-insensitive substring match):
+//   "ignore previous instructions", "ignore all previous", "pretend you are",
+//   "you are now", "jailbreak", "DAN", "do anything now",
+//   "disregard your", "override your instructions"
+//
+// Hallucination risk heuristics:
+//   long prompts (>400 chars) with question words or superlatives → higher risk
+//   prompts requesting statistics, citations, or specific dates → medium/high risk
+//
+// Sensitive keywords: medical, legal, financial, investment, diagnosis, prescription,
+//   lawsuit, contract, tax, compliance
+pub f=assess_prompt(prompt:str):$prompt_risk{
+  let notes=@();
+  let injection_hits=0;
+
+  // injection pattern checks
+  if str.contains_ignore_case(prompt;"ignore previous instructions"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'ignore previous instructions'")
+  }else{};
+  if str.contains_ignore_case(prompt;"ignore all previous"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'ignore all previous'")
+  }else{};
+  if str.contains_ignore_case(prompt;"pretend you are"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'pretend you are'")
+  }else{};
+  if str.contains_ignore_case(prompt;"you are now"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'you are now'")
+  }else{};
+  if str.contains_ignore_case(prompt;"jailbreak"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'jailbreak'")
+  }else{};
+  if str.contains_ignore_case(prompt;"do anything now"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'DAN / do anything now'")
+  }else{};
+  if str.contains(prompt;"DAN"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'DAN'")
+  }else{};
+  if str.contains_ignore_case(prompt;"disregard your"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'disregard your'")
+  }else{};
+  if str.contains_ignore_case(prompt;"override your instructions"){
+    injection_hits=injection_hits+1;
+    notes=@(notes;"injection: 'override your instructions'")
+  }else{};
+
+  // injection score: clamp to 1.0, each hit adds 0.25
+  let injection_hits_f=str.to_float(str.from_int(injection_hits));
+  let raw_score=injection_hits_f*0.25;
+  let injection_score=if raw_score>1.0{ 1.0 }else{ raw_score };
+
+  // hallucination risk heuristics
+  let prompt_len=str.len(prompt);
+  let hall_hits=0;
+  if prompt_len>400{
+    hall_hits=hall_hits+1
+  }else{};
+  if str.contains_ignore_case(prompt;"according to"){
+    hall_hits=hall_hits+1;
+    notes=@(notes;"hallucination-risk: cites sources")
+  }else{};
+  if str.contains_ignore_case(prompt;"statistics"){
+    hall_hits=hall_hits+1;
+    notes=@(notes;"hallucination-risk: requests statistics")
+  }else{};
+  if str.contains_ignore_case(prompt;"citation"){
+    hall_hits=hall_hits+1;
+    notes=@(notes;"hallucination-risk: requests citation")
+  }else{};
+  if str.contains_ignore_case(prompt;"exactly when"){
+    hall_hits=hall_hits+1;
+    notes=@(notes;"hallucination-risk: requests exact date/event")
+  }else{};
+  if str.contains_ignore_case(prompt;"what is the current"){
+    hall_hits=hall_hits+1;
+    notes=@(notes;"hallucination-risk: requests current information")
+  }else{};
+  let hallucination_risk=if hall_hits>=3{
+    "high"
+  }else{
+    if hall_hits>=1{
+      "medium"
+    }else{
+      "low"
+    }
+  };
+
+  // sensitive topic detection
+  let sensitive=false;
+  if str.contains_ignore_case(prompt;"medical"){
+    sensitive=true;
+    notes=@(notes;"sensitive: medical keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"diagnosis"){
+    sensitive=true;
+    notes=@(notes;"sensitive: diagnosis keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"prescription"){
+    sensitive=true;
+    notes=@(notes;"sensitive: prescription keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"legal"){
+    sensitive=true;
+    notes=@(notes;"sensitive: legal keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"lawsuit"){
+    sensitive=true;
+    notes=@(notes;"sensitive: lawsuit keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"contract"){
+    sensitive=true;
+    notes=@(notes;"sensitive: contract keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"financial"){
+    sensitive=true;
+    notes=@(notes;"sensitive: financial keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"investment"){
+    sensitive=true;
+    notes=@(notes;"sensitive: investment keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"tax"){
+    sensitive=true;
+    notes=@(notes;"sensitive: tax keyword")
+  }else{};
+  if str.contains_ignore_case(prompt;"compliance"){
+    sensitive=true;
+    notes=@(notes;"sensitive: compliance keyword")
+  }else{};
+
+  <$prompt_risk{
+    injection_score:injection_score;
+    hallucination_risk:hallucination_risk;
+    sensitive_request:sensitive;
+    notes:notes
+  }
+}
+
+// Assesses a model output for PII leakage, factual claim density, and overall risk.
+//
+// PII patterns checked (heuristic, not a full DLP scan — route to Presidio for production):
+//   email-like patterns (contains "@" and "."), credit-card-like runs of digits,
+//   phone-number-like patterns, national insurance / SSN digit patterns
+//
+// Factual claim count: sentences that contain at least one digit or a month name
+//   are counted as asserting a fact. Each such sentence increments the counter.
+//
+// Risk level:
+//   pii_in_output=true → "high" regardless of factual_claim_count
+//   factual_claim_count >= 8 → "high"
+//   factual_claim_count >= 3 → "medium"
+//   otherwise → "low"
+pub f=assess_output(output:str):$output_risk{
+  // PII heuristics
+  let pii=false;
+  if str.contains(output;"@"){
+    // email-like: also requires a dot after the @
+    if str.contains(output;".com"){
+      pii=true
+    }else{
+      if str.contains(output;".co."){
+        pii=true
+      }else{
+        if str.contains(output;".org"){
+          pii=true
+        }else{
+          if str.contains(output;".net"){
+            pii=true
+          }else{}
+        }
+      }
+    }
+  }else{};
+  // credit-card-like: four groups of four digits separated by spaces or dashes
+  if str.matches(output;"\\d{4}[- ]\\d{4}[- ]\\d{4}[- ]\\d{4}"){
+    pii=true
+  }else{};
+  // phone-like patterns: (+XX) or sequences such as 07xxx xxxxxx
+  if str.matches(output;"\\+\\d{1,3}[\\s.-]?\\d{3,5}[\\s.-]?\\d{4,6}"){
+    pii=true
+  }else{};
+  // SSN-like: NNN-NN-NNNN
+  if str.matches(output;"\\d{3}-\\d{2}-\\d{4}"){
+    pii=true
+  }else{};
+
+  // factual claim count: split on sentence boundaries and check each
+  let sentences=str.split(output;".");
+  let factual_count=0;
+  let month_words=@("January";"February";"March";"April";"May";"June";"July";"August";"September";"October";"November";"December");
+  sentences.each|sentence{
+    let has_digit=str.matches(sentence;"\\d");
+    let has_month=false;
+    month_words.each|month{
+      if str.contains(sentence;month){
+        has_month=true
+      }else{}
+    };
+    if has_digit{
+      factual_count=factual_count+1
+    }else{
+      if has_month{
+        factual_count=factual_count+1
+      }else{}
+    }
+  };
+
+  let risk_level=if pii{
+    "high"
+  }else{
+    if factual_count>=8{
+      "high"
+    }else{
+      if factual_count>=3{
+        "medium"
+      }else{
+        "low"
+      }
+    }
+  };
+
+  <$output_risk{
+    pii_in_output:pii;
+    factual_claim_count:factual_count;
+    risk_level:risk_level
+  }
+}
+
+// Returns built-in model policies for commonly used models in loke deployments.
+//
+// Local models (ollama variants, llama, mistral, phi, gemma):
+//   approved=true, tier="local", max_sensitivity=3, requires_audit=false
+//
+// Cloud economy models (gpt-3.5-turbo, claude-haiku, gemini-flash):
+//   approved=false by default, tier="cloud-economy", max_sensitivity=1, requires_audit=true
+//
+// Cloud standard models (gpt-4o-mini, claude-sonnet):
+//   approved=false by default, tier="cloud-standard", max_sensitivity=2, requires_audit=true
+//
+// Cloud premium models (gpt-4o, claude-opus, gemini-ultra):
+//   approved=false by default, tier="cloud-premium", max_sensitivity=1, requires_audit=true
+pub f=default_policies():@($model_policy){
+  // local models — always safe to run on-device
+  let ollama_llama3=$model_policy{
+    model_id:"ollama/llama3";
+    approved:true;
+    tier:"local";
+    max_sensitivity:3;
+    requires_audit:false
+  };
+  let ollama_mistral=$model_policy{
+    model_id:"ollama/mistral";
+    approved:true;
+    tier:"local";
+    max_sensitivity:3;
+    requires_audit:false
+  };
+  let ollama_phi3=$model_policy{
+    model_id:"ollama/phi3";
+    approved:true;
+    tier:"local";
+    max_sensitivity:3;
+    requires_audit:false
+  };
+  let ollama_gemma2=$model_policy{
+    model_id:"ollama/gemma2";
+    approved:true;
+    tier:"local";
+    max_sensitivity:3;
+    requires_audit:false
+  };
+  let ollama_qwen2=$model_policy{
+    model_id:"ollama/qwen2";
+    approved:true;
+    tier:"local";
+    max_sensitivity:3;
+    requires_audit:false
+  };
+  // cloud economy — low-cost, low-sensitivity only
+  let gpt35=$model_policy{
+    model_id:"gpt-3.5-turbo";
+    approved:false;
+    tier:"cloud-economy";
+    max_sensitivity:1;
+    requires_audit:true
+  };
+  let claude_haiku=$model_policy{
+    model_id:"claude-3-haiku-20240307";
+    approved:false;
+    tier:"cloud-economy";
+    max_sensitivity:1;
+    requires_audit:true
+  };
+  let gemini_flash=$model_policy{
+    model_id:"gemini-1.5-flash";
+    approved:false;
+    tier:"cloud-economy";
+    max_sensitivity:1;
+    requires_audit:true
+  };
+  // cloud standard — capable, confidential data allowed with approval
+  let gpt4o_mini=$model_policy{
+    model_id:"gpt-4o-mini";
+    approved:false;
+    tier:"cloud-standard";
+    max_sensitivity:2;
+    requires_audit:true
+  };
+  let claude_sonnet=$model_policy{
+    model_id:"claude-sonnet-4-5";
+    approved:false;
+    tier:"cloud-standard";
+    max_sensitivity:2;
+    requires_audit:true
+  };
+  let gemini_pro=$model_policy{
+    model_id:"gemini-1.5-pro";
+    approved:false;
+    tier:"cloud-standard";
+    max_sensitivity:2;
+    requires_audit:true
+  };
+  // cloud premium — powerful, public/internal data only, full audit trail required
+  let gpt4o=$model_policy{
+    model_id:"gpt-4o";
+    approved:false;
+    tier:"cloud-premium";
+    max_sensitivity:1;
+    requires_audit:true
+  };
+  let claude_opus=$model_policy{
+    model_id:"claude-opus-4-5";
+    approved:false;
+    tier:"cloud-premium";
+    max_sensitivity:1;
+    requires_audit:true
+  };
+  let gemini_ultra=$model_policy{
+    model_id:"gemini-ultra";
+    approved:false;
+    tier:"cloud-premium";
+    max_sensitivity:1;
+    requires_audit:true
+  };
+  <@(
+    ollama_llama3;
+    ollama_mistral;
+    ollama_phi3;
+    ollama_gemma2;
+    ollama_qwen2;
+    gpt35;
+    claude_haiku;
+    gemini_flash;
+    gpt4o_mini;
+    claude_sonnet;
+    gemini_pro;
+    gpt4o;
+    claude_opus;
+    gemini_ultra
+  )
+}

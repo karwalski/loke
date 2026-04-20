@@ -1,0 +1,162 @@
+// P2.8 — Governance rule hook API.
+// Allows applications to inject custom blocking logic into the governance
+// gateway without forking governance/gateway.tk. Each registered $rule_hook
+// is invoked by the gateway after the standard policy evaluation; its
+// $hook_decision is merged with the policy outcome — any "block" decision
+// from any hook overrides an otherwise-allowed request.
+//
+// Note on function pointers: toke 0.1 does not support storing function
+// pointers as data. The registry stores hook descriptors (id + metadata) only.
+// The ooke extension dispatch table maps each hook id to the real evaluation
+// function at runtime. An unrecognised id produces an "allow" decision so that
+// a missing hook does not silently block requests — log a warning if the id
+// lookup fails.
+
+m=core.extensions.gateway_hooks;
+i=str:std.string;
+i=log:std.log;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+// Descriptor for a registered governance rule hook.
+// severity controls how the gateway surface layer treats a "warn" decision:
+//   "block" — hook may emit block or warn decisions; block is always honoured
+//   "warn"  — hook decisions are surfaced as warnings but never hard-block
+//   "log"   — hook decisions are audit-logged only, no user-visible effect
+pub m.$rule_hook{
+  id:str;
+  description:str;
+  severity:str
+}
+
+// The outcome of a single hook evaluation.
+// action: "allow" | "block" | "warn"
+// ts: unix milliseconds at decision time
+pub m.$hook_decision{
+  hook_id:str;
+  action:str;
+  reason:str;
+  ts:i64
+}
+
+// Registry of all registered rule hooks.
+pub m.$rule_hook_registry{
+  hooks:@($rule_hook)
+}
+
+// ── Functions ─────────────────────────────────────────────────────────────────
+
+// Returns an empty rule hook registry.
+pub f=new_registry():$rule_hook_registry{
+  <$rule_hook_registry{
+    hooks:@()
+  }
+}
+
+// Adds a rule hook to the registry and returns the updated registry.
+// If a hook with the same id already exists it is replaced so callers can
+// update descriptions or severity without removing first.
+pub f=register(reg:$rule_hook_registry;hook:$rule_hook):$rule_hook_registry{
+  let without=@();
+  let count=str.array_len(reg.hooks);
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let existing=str.array_get(reg.hooks;i);
+      if str.eq(existing.id;hook.id){
+        ()
+      }else{
+        without=@(without;existing)
+      };
+      i=i+1
+    }
+  };
+  log.info(
+    str.concat("gateway rule hook registered: ";str.concat(hook.id;str.concat(" severity=";hook.severity)));
+    "gateway_hooks";
+    "system");
+  <$rule_hook_registry{
+    hooks:@(without;hook)
+  }
+}
+
+// Removes the hook with the given id from the registry.
+pub f=unregister(reg:$rule_hook_registry;id:str):$rule_hook_registry{
+  let result=@();
+  let count=str.array_len(reg.hooks);
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let existing=str.array_get(reg.hooks;i);
+      if str.eq(existing.id;id){
+        ()
+      }else{
+        result=@(result;existing)
+      };
+      i=i+1
+    }
+  };
+  log.info(str.concat("gateway rule hook unregistered: ";id);"gateway_hooks";"system");
+  <$rule_hook_registry{
+    hooks:result
+  }
+}
+
+// Returns all registered rule hooks in insertion order.
+pub f=list(reg:$rule_hook_registry):@($rule_hook){
+  <reg.hooks
+}
+
+// Factory: returns an allow decision for the given hook id.
+pub f=allow_decision(hook_id:str):$hook_decision{
+  <$hook_decision{
+    hook_id:hook_id;
+    action:"allow";
+    reason:"";
+    ts:0
+  }
+}
+
+// Factory: returns a block decision with an explanatory reason.
+pub f=block_decision(hook_id:str;reason:str):$hook_decision{
+  <$hook_decision{
+    hook_id:hook_id;
+    action:"block";
+    reason:reason;
+    ts:0
+  }
+}
+
+// Factory: returns a warn decision with an explanatory reason.
+pub f=warn_decision(hook_id:str;reason:str):$hook_decision{
+  <$hook_decision{
+    hook_id:hook_id;
+    action:"warn";
+    reason:reason;
+    ts:0
+  }
+}
+
+// Logs a hook decision at the appropriate log level.
+// block → error, warn → warn, allow → info.
+pub f=log_decision(d:$hook_decision):void{
+  let msg=str.concat(
+    str.concat("gateway hook decision: ";d.hook_id);
+    str.concat(
+      str.concat(" action=";d.action);
+      str.concat(" reason=";d.reason)));
+  if str.eq(d.action;"block"){
+    log.error(msg;"gateway_hooks";d.hook_id)
+  }else{
+    if str.eq(d.action;"warn"){
+      log.warn(msg;"gateway_hooks";d.hook_id)
+    }else{
+      log.info(msg;"gateway_hooks";d.hook_id)
+    }
+  };
+  <()
+}

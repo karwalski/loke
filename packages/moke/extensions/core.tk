@@ -1,0 +1,114 @@
+// moke ooke extension init.
+// Loaded once when the ooke server starts. Registers moke's pipeline hooks,
+// gateway rule hooks, and custom provider into the loke core extension
+// registries, then exposes accessor functions for use by page handlers.
+//
+// Hook dispatch: toke 0.1 cannot store function pointers as data. Hook IDs
+// registered here (e.g. "moke.schema_first") are mapped to real evaluation
+// functions by the ooke extension dispatch table at runtime. Each ID must
+// appear as a named export from this module (or a module it imports) so ooke
+// can resolve the binding. Unrecognised IDs at dispatch time produce a no-op
+// allow decision with a warning log.
+
+m=moke.extension.core;
+i=hooks:core.extensions.pipeline_hooks;
+i=gw_hooks:core.extensions.gateway_hooks;
+i=providers:core.extensions.provider_registry;
+i=moke_hooks:moke.hooks;
+i=moke_provider:moke.provider;
+i=log:std.log;
+
+// ── Module-level globals ──────────────────────────────────────────────────────
+// Mutated during init(), read-only at request time.
+
+let g_hook_registry    = hooks.new_registry();
+let g_gw_registry      = gw_hooks.new_registry();
+let g_provider_store   = providers.new_store();
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+// Called by ooke at server start before the first request is handled.
+pub f=init(ooke_cfg:$ookecfg):void{
+  // ── Pipeline hook: moke.schema_first ──────────────────────────────────────
+  // Runs after the NER stage so entity spans are already detected; rewrites
+  // the anonymised text to enforce schema-first constraints before the
+  // anonymise stage propagates the text further.
+  g_hook_registry=hooks.register(
+    g_hook_registry;
+    "moke.schema_first";
+    hooks.SLOT_AFTER_NER
+  );
+
+  // ── Gateway rule hook: moke.raw_data_guard ────────────────────────────────
+  // Blocks requests that contain raw (un-anonymised) structured data patterns
+  // that loke's standard policy layer does not specifically target.
+  let guard=$gw_hooks.rule_hook{
+    id:"moke.raw_data_guard";
+    description:"Blocks requests containing raw structured data outside NER coverage";
+    severity:"block"
+  };
+  g_gw_registry=gw_hooks.register(g_gw_registry;guard);
+
+  // ── Custom provider: moke.local_compute ───────────────────────────────────
+  // Registers the moke local compute endpoint as an available provider.
+  // No streaming or tool-calling — embedding-capable queries are routed
+  // elsewhere; this endpoint handles schema validation workloads only.
+  let caps=$providers.provider_caps{
+    streaming:false;
+    tool_calling:false;
+    embedding:false;
+    max_context:8192
+  };
+  let local_provider=$providers.custom_provider{
+    id:"moke.local_compute";
+    name:"moke Local Compute";
+    base_url:"http://127.0.0.1:11432/internal";
+    caps:caps;
+    priority:10
+  };
+  g_provider_store=providers.register(g_provider_store;local_provider);
+
+  // ── P2.6 — Privacy pipeline hook: moke.schema_first ──────────────────────
+  // Register the schema-first hook in moke's own pipeline hook registry
+  // (after-anonymise slot). The ooke dispatch table resolves the key
+  // "moke.hooks.schema_first_hook" to moke_hooks.schema_first_hook at
+  // call time.
+  moke_hooks.register_after_anonymise(
+    "moke.schema_first";
+    "moke.hooks.schema_first_hook"
+  );
+
+  // ── P2.7 — Schema-first provider self-registration ────────────────────────
+  moke_provider.register_schema_first_provider();
+
+  // ── P2.8 — Governance rule hook: moke.raw_data_guard ─────────────────────
+  // Register the raw-data-guard rule hook in moke's own rule hook registry.
+  // The dispatch key resolves to moke_hooks.raw_data_guard_hook.
+  moke_hooks.register_rule_hook(
+    "moke.raw_data_guard";
+    "moke.hooks.raw_data_guard_hook"
+  );
+
+  log.info("moke extension initialised";"moke.extension.core";"system");
+  <()
+}
+
+// Called by ooke during graceful shutdown before the process exits.
+pub f=onshutdown():void{
+  log.info("moke extension shutting down";"moke.extension.core";"system");
+  <()
+}
+
+// ── Accessors ─────────────────────────────────────────────────────────────────
+
+pub f=get_hook_registry():$hooks.hook_registry{
+  <g_hook_registry
+}
+
+pub f=get_gw_registry():$gw_hooks.rule_hook_registry{
+  <g_gw_registry
+}
+
+pub f=get_provider_store():$providers.provider_store{
+  <g_provider_store
+}

@@ -1,0 +1,152 @@
+// M1.1 — Palace structure.
+// Open/create the memory database and navigate the Wing → Hall → Room hierarchy.
+
+i=t:shared.types;
+i=mt:core.memory.types;
+i=schema:core.memory.schema;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$palace{
+  conn:$db_conn;
+  data_dir:str
+}
+
+// Opens the memory database at data_dir/memory.db, running schema creation if needed.
+pub f=open(data_dir:str):$palace|$loke_err{
+  let path=str.concat(data_dir;"/memory.db");
+  db.open(path)|{
+    $ok:conn {
+      schema.create_tables(conn)|{
+        $ok:_ {
+          log.info("memory palace opened";"palace";"system");
+          <$ok($palace{conn:conn;data_dir:data_dir})
+        };
+        $err:e <$err(e)
+      }
+    };
+    $err:e <$err($storage_err(str.concat("failed to open memory database: ";path)))
+  }
+}
+
+// Returns the set of wing names present in the database, merged with the default wing names.
+pub f=list_wings(palace:$palace):@(str)|$loke_err{
+  db.query(palace.conn;"SELECT DISTINCT wing FROM memory_drawers ORDER BY wing")|{
+    $ok:rows {
+      let db_wings=rows.map|row{ json.get_str(row;"wing") };
+      let defaults=mt.default_wings();
+      // Collect default wing names not already in db_wings
+      let all_wings=db_wings;
+      defaults.each|w{
+        let already=false;
+        db_wings.each|existing{
+          if str.eq(existing;w.name){
+            let already=true
+          }
+        };
+        if !already{
+          let all_wings=all_wings.append(w.name)
+        }
+      };
+      <$ok(all_wings)
+    };
+    $err:e <$err($storage_err("failed to query wings"))
+  }
+}
+
+// Returns distinct hall names within a wing.
+pub f=list_halls(palace:$palace;wing:str):@(str)|$loke_err{
+  db.query_params(palace.conn;"SELECT DISTINCT hall FROM memory_drawers WHERE wing=? ORDER BY hall";@(wing))|{
+    $ok:rows {
+      let halls=rows.map|row{ json.get_str(row;"hall") };
+      <$ok(halls)
+    };
+    $err:e <$err($storage_err(str.concat("failed to query halls for wing: ";wing)))
+  }
+}
+
+// Returns distinct room names within a wing/hall pair.
+pub f=list_rooms(palace:$palace;wing:str;hall:str):@(str)|$loke_err{
+  db.query_params(palace.conn;"SELECT DISTINCT room FROM memory_drawers WHERE wing=? AND hall=? ORDER BY room";@(wing;hall))|{
+    $ok:rows {
+      let rooms=rows.map|row{ json.get_str(row;"room") };
+      <$ok(rooms)
+    };
+    $err:e <$err($storage_err(str.concat("failed to query rooms for: ";str.concat(wing;str.concat("/";hall)))))
+  }
+}
+
+// Returns aggregate counts for the palace.
+pub f=status(palace:$palace):$mt.palace_status|$loke_err{
+  db.query(palace.conn;"SELECT COUNT(*) as n FROM memory_drawers")|{
+    $ok:drawer_rows {
+      let total_drawers=json.get_int(drawer_rows[0];"n");
+      db.query(palace.conn;"SELECT COUNT(*) as n FROM memory_closets")|{
+        $ok:closet_rows {
+          let total_closets=json.get_int(closet_rows[0];"n");
+          db.query(palace.conn;"SELECT COUNT(DISTINCT wing) as n FROM memory_drawers")|{
+            $ok:wing_rows {
+              let total_wings=json.get_int(wing_rows[0];"n");
+              <$ok($mt.palace_status{
+                total_drawers:total_drawers;
+                total_closets:total_closets;
+                total_wings:total_wings;
+                storage_bytes:0
+              })
+            };
+            $err:e <$err($storage_err("failed to count wings"))
+          }
+        };
+        $err:e <$err($storage_err("failed to count closets"))
+      }
+    };
+    $err:e <$err($storage_err("failed to count drawers"))
+  }
+}
+
+// Returns a formatted multi-line string showing the full palace hierarchy.
+// Format: Wing: work\n  Hall: Projects (12 drawers)\n    Room: loke (8 drawers)\n  ...
+pub f=walk(palace:$palace):str|$loke_err{
+  list_wings(palace)|{
+    $ok:wings {
+      let out="";
+      wings.each|wing{
+        let wing_line=str.concat("Wing: ";wing);
+        let out=str.concat(out;str.concat(wing_line;"\n"));
+        list_halls(palace;wing)|{
+          $ok:halls {
+            halls.each|hall{
+              db.query_params(palace.conn;"SELECT COUNT(*) as n FROM memory_drawers WHERE wing=? AND hall=?";@(wing;hall))|{
+                $ok:hrows {
+                  let hall_count=str.from_int(json.get_int(hrows[0];"n"));
+                  let hall_line=str.concat("  Hall: ";str.concat(hall;str.concat(" (";str.concat(hall_count;" drawers)"))));
+                  let out=str.concat(out;str.concat(hall_line;"\n"));
+                  list_rooms(palace;wing;hall)|{
+                    $ok:rooms {
+                      rooms.each|room{
+                        db.query_params(palace.conn;"SELECT COUNT(*) as n FROM memory_drawers WHERE wing=? AND hall=? AND room=?";@(wing;hall;room))|{
+                          $ok:rrows {
+                            let room_count=str.from_int(json.get_int(rrows[0];"n"));
+                            let room_line=str.concat("    Room: ";str.concat(room;str.concat(" (";str.concat(room_count;" drawers)"))));
+                            let out=str.concat(out;str.concat(room_line;"\n"))
+                          };
+                          $err:_ {}
+                        }
+                      }
+                    };
+                    $err:_ {}
+                  }
+                };
+                $err:_ {}
+              }
+            }
+          };
+          $err:_ {}
+        }
+      };
+      <$ok(out)
+    };
+    $err:e <$err(e)
+  }
+}

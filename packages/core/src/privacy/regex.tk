@@ -1,0 +1,125 @@
+// F3.1 — Regex-based PII detector
+// Target throughput: 10 MB/s. Zero external dependencies.
+
+i=t:shared.types;
+i=pat:core.privacy.patterns;
+i=ph:core.privacy.placeholder;
+i=str:std.str;
+
+// Internal type describing a single named pattern with metadata
+m.$pattern_def{
+  name:str;
+  pattern:str;
+  sensitivity:$sensitivity_level;
+  confidence:f64
+}
+
+// Returns all built-in pattern definitions
+pub f=get_patterns():@($pattern_def){
+  <@(
+    $pattern_def{name:"email";pattern:pat.pat_email;sensitivity:$confidential;confidence:0.95};
+    $pattern_def{name:"phone_au";pattern:pat.pat_phone_au;sensitivity:$confidential;confidence:0.92};
+    $pattern_def{name:"phone_us";pattern:pat.pat_phone_us;sensitivity:$confidential;confidence:0.92};
+    $pattern_def{name:"credit_card";pattern:pat.pat_credit_card;sensitivity:$restricted;confidence:0.99};
+    $pattern_def{name:"ip_v4";pattern:pat.pat_ip_v4;sensitivity:$internal;confidence:0.80};
+    $pattern_def{name:"au_tfn";pattern:pat.pat_au_tfn;sensitivity:$restricted;confidence:0.99};
+    $pattern_def{name:"au_abn";pattern:pat.pat_au_abn;sensitivity:$confidential;confidence:0.85};
+    $pattern_def{name:"ssn_us";pattern:pat.pat_ssn_us;sensitivity:$restricted;confidence:0.99};
+    $pattern_def{name:"url";pattern:pat.pat_url;sensitivity:$internal;confidence:0.60};
+    $pattern_def{name:"api_key";pattern:pat.pat_api_key;sensitivity:$restricted;confidence:0.99}
+  )
+}
+
+// Returns true if level_a is higher sensitivity than level_b
+f=is_higher_sensitivity(level_a:$sensitivity_level;level_b:$sensitivity_level):bool{
+  if level_a==$restricted{
+    <true
+  }else{
+    if level_a==$confidential{
+      if level_b==$restricted{
+        <false
+      }else{
+        <true
+      }
+    }else{
+      if level_a==$internal{
+        if level_b==$restricted{
+          <false
+        }else{
+          if level_b==$confidential{
+            <false
+          }else{
+            <true
+          }
+        }
+      }else{
+        <false
+      }
+    }
+  }
+}
+
+// Core detection logic shared by detect and detect_with_patterns
+f=run_detection(text:str;patterns:@($pattern_def)):$pii_detection_result{
+  let ph_map=ph.new_map();
+  let entities=@();
+  let sensitivity=$public;
+  let anonymised=text;
+  let pat_count=str.array_len(patterns);
+  let pi=0;
+  loop{
+    if pi>=pat_count{
+      break
+    }else{
+      let pdef=str.array_get(patterns;pi);
+      let matches=str.find_all(text;pdef.pattern);
+      let match_count=str.array_len(matches);
+      let mi=0;
+      loop{
+        if mi>=match_count{
+          break
+        }else{
+          let matched_value=str.array_get(matches;mi);
+          // Derive a stable index for this entity type from current entity count
+          let entity_index=str.array_len(entities)+1;
+          let placeholder=ph.make_placeholder(pdef.name;entity_index);
+          ph.add_entry(ph_map;matched_value;placeholder;pdef.name);
+          let entity=t.$pii_entity{
+            entity_type:pdef.name;
+            value:matched_value;
+            start:0;
+            end:0;
+            confidence:pdef.confidence;
+            placeholder:placeholder
+          };
+          entities=str.array_push(entities;entity);
+          anonymised=str.replace(anonymised;matched_value;placeholder);
+          if is_higher_sensitivity(pdef.sensitivity;sensitivity){
+            sensitivity=pdef.sensitivity
+          }else{
+            // keep current sensitivity
+          };
+          mi=mi+1
+        }
+      };
+      pi=pi+1
+    }
+  };
+  <t.$pii_detection_result{
+    original:text;
+    anonymised:anonymised;
+    entities:entities;
+    sensitivity:sensitivity
+  }
+}
+
+// Detect PII using all built-in patterns
+pub f=detect(text:str):$pii_detection_result{
+  let patterns=get_patterns();
+  <run_detection(text;patterns)
+}
+
+// Detect PII using caller-supplied patterns (allows extension by other modules)
+pub f=detect_with_patterns(text:str;patterns:@($pattern_def)):$pii_detection_result{
+  <run_detection(text;patterns)
+}

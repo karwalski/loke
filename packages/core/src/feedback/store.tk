@@ -1,0 +1,206 @@
+// X5.1 — Feedback storage.
+// Persists feedback entries locally and supports opt-in batch submission
+// to the development pipeline via the pending_submission / mark_submitted cycle.
+
+i=t:shared.types;
+i=ft:core.feedback.types;
+i=s:core.storage.db;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+
+// Creates the feedback table if it does not already exist.
+pub f=ensure_table(store:$s.store):void|$loke_err{
+  let sql="CREATE TABLE IF NOT EXISTS feedback (
+  id TEXT PRIMARY KEY,
+  rating TEXT NOT NULL,
+  feature_area TEXT NOT NULL,
+  request_id TEXT,
+  model_id TEXT,
+  use_case TEXT,
+  risk_level TEXT,
+  comment TEXT,
+  submitted INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+)";
+  db.exec_params(store.conn;sql;@())|{
+    $ok:_ <$ok(void);
+    $err:e <$err($loke_err.$storage_err("failed to create feedback table"))
+  }
+}
+
+// Inserts a feedback entry into the database.
+pub f=save(store:$s.store;entry:$ft.feedback_entry):void|$loke_err{
+  let rating_s=ft.rating_label(entry.rating);
+  let area_s=ft.area_label(entry.feature_area);
+  db.exec_params(
+    store.conn;
+    "INSERT INTO feedback (id,rating,feature_area,request_id,model_id,use_case,risk_level,comment,submitted,created_at) VALUES (?,?,?,?,?,?,?,?,0,'now()')";
+    @(
+      entry.id;
+      rating_s;
+      area_s;
+      entry.request_id;
+      entry.model_id;
+      entry.use_case;
+      entry.risk_level;
+      entry.comment
+    )
+  )|{
+    $ok:_ {
+      log.debug(
+        str.concat("feedback saved: ";entry.id);
+        "feedback";
+        entry.request_id
+      );
+      <$ok(void)
+    };
+    $err:e <$err($loke_err.$storage_err(str.concat("failed to save feedback: ";entry.id)))
+  }
+}
+
+// Returns aggregated feedback statistics for the past N days.
+pub f=get_summary(store:$s.store;days:u32):$ft.feedback_summary|$loke_err{
+  let days_s=str.from_int(days);
+  let sql=str.concat(
+    "SELECT rating FROM feedback WHERE created_at >= datetime('now','-";
+    str.concat(days_s;" days')")
+  );
+  db.query_params(store.conn;sql;@())|{
+    $ok:rows {
+      let total=rows.len;
+      let thumbs_up_count=0;
+      let thumbs_down_count=0;
+      rows.each|row{
+        let r=json.get_str(row;"rating");
+        if str.eq(r;"thumbs_up"){
+          thumbs_up_count=thumbs_up_count+1
+        }else{
+          if str.eq(r;"thumbs_down"){
+            thumbs_down_count=thumbs_down_count+1
+          }else{}
+        }
+      };
+      let rate=if total == 0{
+        0.0
+      }else{
+        str.to_float(str.from_int(thumbs_up_count))/str.to_float(str.from_int(total))
+      };
+      <$ok($ft.feedback_summary{
+        total:total;
+        thumbs_up:thumbs_up_count;
+        thumbs_down:thumbs_down_count;
+        thumbs_up_rate:rate;
+        top_issues:@()
+      })
+    };
+    $err:e <$err($loke_err.$storage_err("failed to query feedback summary"))
+  }
+}
+
+// Returns all feedback entries that have not yet been submitted to the pipeline.
+pub f=pending_submission(store:$s.store):@($ft.feedback_entry)|$loke_err{
+  db.query_params(
+    store.conn;
+    "SELECT id,rating,feature_area,request_id,model_id,use_case,risk_level,comment,created_at FROM feedback WHERE submitted=0";
+    @()
+  )|{
+    $ok:rows {
+      let entries=rows.map|row{
+        let rating_s=json.get_str(row;"rating");
+        let rating=if str.eq(rating_s;"thumbs_up"){
+          $ft.feedback_rating.$thumbs_up
+        }else{
+          if str.eq(rating_s;"thumbs_down"){
+            $ft.feedback_rating.$thumbs_down
+          }else{
+            $ft.feedback_rating.$neutral
+          }
+        };
+        let area_s=json.get_str(row;"feature_area");
+        let area=if str.eq(area_s;"Chat response"){
+          $ft.feature_area.$chat_response
+        }else{
+          if str.eq(area_s;"Privacy detection"){
+            $ft.feature_area.$privacy_detection
+          }else{
+            if str.eq(area_s;"Routing decision"){
+              $ft.feature_area.$routing_decision
+            }else{
+              if str.eq(area_s;"Governance warning"){
+                $ft.feature_area.$governance_warning
+              }else{
+                if str.eq(area_s;"Agent output"){
+                  $ft.feature_area.$agent_output
+                }else{
+                  if str.eq(area_s;"Compression"){
+                    $ft.feature_area.$compression
+                  }else{
+                    if str.eq(area_s;"Dashboard"){
+                      $ft.feature_area.$dashboard
+                    }else{
+                      $ft.feature_area.$other(area_s)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        };
+        $ft.feedback_entry{
+          id:json.get_str(row;"id");
+          rating:rating;
+          feature_area:area;
+          request_id:json.get_str(row;"request_id");
+          model_id:json.get_str(row;"model_id");
+          use_case:json.get_str(row;"use_case");
+          risk_level:json.get_str(row;"risk_level");
+          comment:json.get_str(row;"comment");
+          created_at:json.get_str(row;"created_at")
+        }
+      };
+      <$ok(entries)
+    };
+    $err:e <$err($loke_err.$storage_err("failed to query pending feedback"))
+  }
+}
+
+// Marks a list of feedback entries as submitted (submitted=1).
+pub f=mark_submitted(store:$s.store;ids:@(str)):void|$loke_err{
+  ids.each|id{
+    db.exec_params(
+      store.conn;
+      "UPDATE feedback SET submitted=1 WHERE id=?";
+      @(id)
+    )|{
+      $ok:_ {};
+      $err:e <$err($loke_err.$storage_err(str.concat("failed to mark feedback submitted: ";id)))
+    }
+  };
+  log.debug(
+    str.concat("marked ";str.concat(str.from_int(ids.len);" feedback entries submitted"));
+    "feedback";
+    "system"
+  );
+  <$ok(void)
+}
+
+// Returns a one-line formatted summary string.
+// Example: "Feedback: 47 total | 89% thumbs-up | 5 thumbs-down"
+pub f=format_summary(summary:$ft.feedback_summary):str{
+  let total_s=str.from_int(summary.total);
+  let pct=summary.thumbs_up_rate*100.0;
+  let pct_s=str.concat(str.from_float(pct);"%");
+  let down_s=str.from_int(summary.thumbs_down);
+  <str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat("Feedback: ";total_s);
+            " total | ");
+          pct_s);
+        " thumbs-up | ");
+      down_s);
+    " thumbs-down")
+}

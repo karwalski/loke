@@ -1,0 +1,329 @@
+// G2.3 — Data subject access requests (DSAR).
+// Handles the right of access, right to erasure, and right to portability
+// under GDPR (Art. 15, 17, 20) and the Australian Privacy Act 1988.
+//
+// Kinds:
+//   "access"      — export all personal data held for a user to a JSON file
+//   "erasure"     — delete all rows where user_id matches across known tables
+//   "portability" — same as access but formatted for machine readability
+//
+// SLA: requests must be actioned within 30 days.
+
+i=db:std.db;
+i=str:std.str;
+i=fs:std.fs;
+i=log:shared.log;
+i=time:std.time;
+
+pub m.$dsar_request{
+  id:str;
+  kind:str;
+  user_id:str;
+  submitted_at:i64;
+  completed_at:i64;
+  status:str
+}
+
+pub let status_pending="pending";
+pub let status_processing="processing";
+pub let status_completed="completed";
+pub let status_failed="failed";
+
+// Creates the dsar_requests table if it does not already exist.
+pub f=ensure_table(store:db.$store):bool{
+  let sql="CREATE TABLE IF NOT EXISTS dsar_requests (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  submitted_at INTEGER NOT NULL,
+  completed_at INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+)";
+  db.exec_params(store.conn;sql;@())|{
+    $ok:_ <true;
+    $err:e {
+      log.warn("failed to create dsar_requests table";"dsar";"system");
+      <false
+    }
+  }
+}
+
+// Submits a new DSAR.  kind must be "access", "erasure", or "portability".
+// Returns the new $dsar_request record.
+pub f=submit(store:db.$store;kind:str;user_id:str):$dsar_request{
+  let id=str.rand_hex(16);
+  let now=time.now_unix();
+  let now_s=str.from_int(now);
+  db.exec_params(
+    store.conn;
+    "INSERT INTO dsar_requests (id,kind,user_id,submitted_at,completed_at,status) VALUES (?,?,?,?,0,'pending')";
+    @(id;kind;user_id;now_s)
+  )|{
+    $ok:_ {
+      log.info(
+        str.concat(
+          str.concat(
+            str.concat("DSAR submitted kind=";kind);
+            " user=");
+          user_id
+        );
+        "dsar";
+        user_id
+      )
+    };
+    $err:e {
+      log.warn(
+        str.concat("failed to persist DSAR for user=";user_id);
+        "dsar";
+        user_id
+      )
+    }
+  };
+  <$dsar_request{
+    id:id;
+    kind:kind;
+    user_id:user_id;
+    submitted_at:now;
+    completed_at:0;
+    status:status_pending
+  }
+}
+
+// Updates a DSAR's status in the store.
+f=set_status(store:db.$store;id:str;new_status:str;completed_at:i64):bool{
+  let ts_s=str.from_int(completed_at);
+  db.exec_params(
+    store.conn;
+    "UPDATE dsar_requests SET status=?,completed_at=? WHERE id=?";
+    @(new_status;ts_s;id)
+  )|{
+    $ok:_ <true;
+    $err:e {
+      log.warn(str.concat("failed to update DSAR status id=";id);"dsar";"system");
+      <false
+    }
+  }
+}
+
+// Queries all rows from a table where user_id matches and serialises them to a JSON array string.
+// Returns "[]" on query error or empty result.
+f=export_table(store:db.$store;table:str;user_id:str):str{
+  let sql=str.concat(
+    str.concat("SELECT * FROM ";table);
+    " WHERE user_id=?"
+  );
+  db.query_params(store.conn;sql;@(user_id))|{
+    $ok:rows {
+      if rows.len==0{
+        <"[]"
+      }else{
+        let out="[";
+        let i=0;
+        rows.each|row{
+          let sep=if i==0{ "" }else{ "," };
+          out=str.concat(out;str.concat(sep;json.to_str(row)));
+          i=i+1
+        };
+        <str.concat(out;"]")
+      }
+    };
+    $err:e <"[]"
+  }
+}
+
+// Exports all personal data for a user to a JSON file at out_path.
+// Covers: consent_records, quota_usage, audit_events, dsar_requests, quality_signals.
+// Returns true on success.
+pub f=process_access(store:db.$store;req:$dsar_request;out_path:str):bool{
+  let _ =set_status(store;req.id;status_processing;0);
+  let consent=export_table(store;"consent_records";req.user_id);
+  let quota=export_table(store;"quota_usage";req.user_id);
+  let audit=export_table(store;"audit_events";req.user_id);
+  let dsars=export_table(store;"dsar_requests";req.user_id);
+  let quality=export_table(store;"quality_signals";req.user_id);
+  let payload=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              str.concat(
+                str.concat(
+                  str.concat(
+                    str.concat(
+                      str.concat(
+                        str.concat(
+                          str.concat(
+                            str.concat(
+                              str.concat(
+                                str.concat(
+                                  "{\"user_id\":\"";
+                                  req.user_id);
+                                "\",\"exported_at\":\"");
+                              str.from_int(time.now_unix()));
+                            "\",\"consent_records\":";
+                          consent);
+                        ",\"quota_usage\":";
+                      quota);
+                    ",\"audit_events\":";
+                  audit);
+                ",\"dsar_requests\":";
+              dsars);
+            ",\"quality_signals\":";
+          quality);
+        "}");
+      "");
+    ""
+  );
+  fs.write_text(out_path;payload)|{
+    $ok:_ {
+      let now=time.now_unix();
+      let _ =set_status(store;req.id;status_completed;now);
+      log.info(
+        str.concat(
+          str.concat("DSAR access export written user=";req.user_id);
+          str.concat(" path=";out_path)
+        );
+        "dsar";
+        req.user_id
+      );
+      <true
+    };
+    $err:e {
+      let _ =set_status(store;req.id;status_failed;0);
+      log.warn(
+        str.concat("DSAR access export failed user=";req.user_id);
+        "dsar";
+        req.user_id
+      );
+      <false
+    }
+  }
+}
+
+// Deletes all rows for the user across every table that carries user_id.
+// Tables covered: consent_records, quota_usage, audit_events, quality_signals.
+// The dsar_requests row is intentionally retained for regulatory accountability.
+// Returns true if all deletes succeeded.
+pub f=process_erasure(store:db.$store;req:$dsar_request):bool{
+  let _ =set_status(store;req.id;status_processing;0);
+  let tables=@(
+    "consent_records";
+    "quota_usage";
+    "audit_events";
+    "quality_signals"
+  );
+  let all_ok=true;
+  tables.each|table{
+    let sql=str.concat(
+      str.concat("DELETE FROM ";table);
+      " WHERE user_id=?"
+    );
+    db.exec_params(store.conn;sql;@(req.user_id))|{
+      $ok:_ {
+        log.debug(
+          str.concat(str.concat("erased rows from ";table);str.concat(" for user=";req.user_id));
+          "dsar";
+          req.user_id
+        )
+      };
+      $err:e {
+        log.warn(
+          str.concat(str.concat("failed to erase from ";table);str.concat(" for user=";req.user_id));
+          "dsar";
+          req.user_id
+        );
+        all_ok=false
+      }
+    }
+  };
+  let now=time.now_unix();
+  if all_ok{
+    let _ =set_status(store;req.id;status_completed;now);
+    log.info(
+      str.concat("DSAR erasure completed user=";req.user_id);
+      "dsar";
+      req.user_id
+    )
+  }else{
+    let _ =set_status(store;req.id;status_failed;0);
+    log.warn(
+      str.concat("DSAR erasure completed with errors user=";req.user_id);
+      "dsar";
+      req.user_id
+    )
+  };
+  <all_ok
+}
+
+// Returns the current state of a DSAR by id.
+// Returns a sentinel with status="not_found" if the id is unknown.
+pub f=status(store:db.$store;id:str):$dsar_request{
+  db.query_params(
+    store.conn;
+    "SELECT id,kind,user_id,submitted_at,completed_at,status FROM dsar_requests WHERE id=? LIMIT 1";
+    @(id)
+  )|{
+    $ok:rows {
+      if rows.len==0{
+        <$dsar_request{
+          id:id;
+          kind:"";
+          user_id:"";
+          submitted_at:0;
+          completed_at:0;
+          status:"not_found"
+        }
+      }else{
+        let row=rows.get(0);
+        <$dsar_request{
+          id:json.get_str(row;"id");
+          kind:json.get_str(row;"kind");
+          user_id:json.get_str(row;"user_id");
+          submitted_at:json.get_int(row;"submitted_at");
+          completed_at:json.get_int(row;"completed_at");
+          status:json.get_str(row;"status")
+        }
+      }
+    };
+    $err:e {
+      log.warn(str.concat("failed to query DSAR id=";id);"dsar";"system");
+      <$dsar_request{
+        id:id;
+        kind:"";
+        user_id:"";
+        submitted_at:0;
+        completed_at:0;
+        status:"not_found"
+      }
+    }
+  }
+}
+
+// Returns all DSAR requests with status "pending" or "processing",
+// ordered by submitted_at ascending (oldest first) to support SLA monitoring.
+pub f=list_pending(store:db.$store):@($dsar_request){
+  db.query_params(
+    store.conn;
+    "SELECT id,kind,user_id,submitted_at,completed_at,status FROM dsar_requests
+     WHERE status IN ('pending','processing') ORDER BY submitted_at ASC";
+    @()
+  )|{
+    $ok:rows {
+      <rows.map|row{
+        $dsar_request{
+          id:json.get_str(row;"id");
+          kind:json.get_str(row;"kind");
+          user_id:json.get_str(row;"user_id");
+          submitted_at:json.get_int(row;"submitted_at");
+          completed_at:json.get_int(row;"completed_at");
+          status:json.get_str(row;"status")
+        }
+      }
+    };
+    $err:e {
+      log.warn("failed to list pending DSARs";"dsar";"system");
+      <@()
+    }
+  }
+}

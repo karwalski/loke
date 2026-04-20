@@ -1,0 +1,347 @@
+// G3.2 — Advanced rules engine.
+// Evaluates compound governance rules beyond the simple keyword-match in the policy loader.
+// Supports AND/OR/NOT logic, context-aware conditions, sliding-window rate limits,
+// and custom threshold rules.
+
+m=core.governance.rules_engine;
+i=str:std.string;
+i=db:std.db;
+i=log:shared.log;
+i=time:std.time;
+
+// The logical operator applied across conditions in a $compound_rule.
+pub m.$rule_op{
+  $and;
+  $or;
+  $not
+}
+
+// A single condition comparing a context field to a value.
+// op: "eq", "gt", "lt", "contains", "matches"
+pub m.$condition{
+  field:str;
+  op:str;
+  value:str
+}
+
+// A named compound rule combining multiple conditions under a logical operator.
+// action: "allow", "warn", "throttle", "deny"
+// severity: "low", "medium", "high"
+pub m.$compound_rule{
+  id:str;
+  name:str;
+  logic:$rule_op;
+  conditions:@($condition);
+  action:str;
+  severity:str
+}
+
+// Contextual state available to the rules engine during evaluation.
+// sensitivity: 0=public, 1=internal, 2=confidential, 3=restricted
+// model_tier: "local", "cloud-economy", "cloud-standard", "cloud-premium"
+// request_count: number of requests from this scope in the current window
+// hour_of_day: 0–23 UTC
+// scope: user/team/role identifier
+pub m.$eval_context{
+  sensitivity:i32;
+  model_tier:str;
+  request_count:i32;
+  hour_of_day:i32;
+  scope:str
+}
+
+// The outcome of evaluating a single compound rule.
+pub m.$eval_result{
+  rule_id:str;
+  matched:bool;
+  action:str;
+  reason:str
+}
+
+// Creates the rate_limit_events table if it does not already exist.
+// Each row records one request event keyed by scope and unix timestamp (seconds).
+pub f=ensure_table(store:db.$store):bool{
+  let sql="CREATE TABLE IF NOT EXISTS rate_limit_events (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  event_ts INTEGER NOT NULL
+)";
+  db.exec_params(store.conn;sql;@())|{
+    $ok:_ <true;
+    $err:e {
+      log.warn("failed to create rate_limit_events table";"rules_engine";"system");
+      <false
+    }
+  }
+}
+
+// Evaluates a single condition against the fields of an $eval_context.
+// Supported fields: "sensitivity", "model_tier", "request_count", "hour_of_day", "scope"
+// Numeric ops (gt/lt) apply to i32 fields; string ops (eq/contains/matches) apply to str fields.
+// Returns false for unknown fields or operators.
+f=eval_condition(cond:$condition;ctx:$eval_context):bool{
+  if cond.field=="sensitivity"{
+    let ctx_val=ctx.sensitivity;
+    let cmp_val=str.to_int(cond.value);
+    if cond.op=="eq"{
+      <ctx_val==cmp_val
+    }else{
+      if cond.op=="gt"{
+        <ctx_val>cmp_val
+      }else{
+        if cond.op=="lt"{
+          <ctx_val<cmp_val
+        }else{
+          <false
+        }
+      }
+    }
+  }else{
+    if cond.field=="model_tier"{
+      if cond.op=="eq"{
+        <ctx.model_tier==cond.value
+      }else{
+        if cond.op=="contains"{
+          <str.contains(ctx.model_tier;cond.value)
+        }else{
+          if cond.op=="matches"{
+            <str.matches(ctx.model_tier;cond.value)
+          }else{
+            <false
+          }
+        }
+      }
+    }else{
+      if cond.field=="request_count"{
+        let ctx_val=ctx.request_count;
+        let cmp_val=str.to_int(cond.value);
+        if cond.op=="eq"{
+          <ctx_val==cmp_val
+        }else{
+          if cond.op=="gt"{
+            <ctx_val>cmp_val
+          }else{
+            if cond.op=="lt"{
+              <ctx_val<cmp_val
+            }else{
+              <false
+            }
+          }
+        }
+      }else{
+        if cond.field=="hour_of_day"{
+          let ctx_val=ctx.hour_of_day;
+          let cmp_val=str.to_int(cond.value);
+          if cond.op=="eq"{
+            <ctx_val==cmp_val
+          }else{
+            if cond.op=="gt"{
+              <ctx_val>cmp_val
+            }else{
+              if cond.op=="lt"{
+                <ctx_val<cmp_val
+              }else{
+                <false
+              }
+            }
+          }
+        }else{
+          if cond.field=="scope"{
+            if cond.op=="eq"{
+              <ctx.scope==cond.value
+            }else{
+              if cond.op=="contains"{
+                <str.contains(ctx.scope;cond.value)
+              }else{
+                if cond.op=="matches"{
+                  <str.matches(ctx.scope;cond.value)
+                }else{
+                  <false
+                }
+              }
+            }
+          }else{
+            log.warn(str.concat("eval_condition: unknown field: ";cond.field);"rules_engine";"system");
+            <false
+          }
+        }
+      }
+    }
+  }
+}
+
+// Evaluates all conditions in a compound rule under the rule's logical operator.
+// $and — all conditions must pass.
+// $or  — at least one condition must pass.
+// $not — the first condition must NOT pass (subsequent conditions ignored).
+// Returns a populated $eval_result with matched=true when the rule fires.
+pub f=evaluate(rule:$compound_rule;ctx:$eval_context):$eval_result{
+  let matched=rule.logic|{
+    $rule_op.$and;
+      let all_pass=true;
+      rule.conditions.each|cond{
+        if all_pass{
+          if eval_condition(cond;ctx){
+            // still passing — continue
+          }else{
+            all_pass=false
+          }
+        }else{}
+      };
+      <all_pass;
+    $rule_op.$or;
+      let any_pass=false;
+      rule.conditions.each|cond{
+        if any_pass{
+          // short-circuit — already matched
+        }else{
+          if eval_condition(cond;ctx){
+            any_pass=true
+          }else{}
+        }
+      };
+      <any_pass;
+    $rule_op.$not;
+      if rule.conditions.len==0{
+        <false
+      }else{
+        let first=rule.conditions.get(0);
+        <eval_condition(first;ctx)==false
+      }
+  };
+  let reason=if matched{
+    str.concat(str.concat("Rule matched: ";rule.name);str.concat(" → ";rule.action))
+  }else{
+    str.concat("Rule not matched: ";rule.name)
+  };
+  <$eval_result{
+    rule_id:rule.id;
+    matched:matched;
+    action:if matched{ rule.action }else{ "allow" };
+    reason:reason
+  }
+}
+
+// Runs every rule in the list against the context.
+// Returns only the results where matched=true.
+pub f=evaluate_all(rules:@($compound_rule);ctx:$eval_context):@($eval_result){
+  let results=@();
+  rules.each|rule{
+    let result=evaluate(rule;ctx);
+    if result.matched{
+      results=@(results;result)
+    }else{}
+  };
+  <results
+}
+
+// Sliding-window rate limit check.
+// Records the current event and counts events for the given scope within
+// the past window_seconds. Returns true when the count is within the limit
+// (i.e. the request should proceed), false when the limit is exceeded.
+// Stale events older than window_seconds are pruned on each call.
+pub f=rate_check(store:db.$store;scope:str;limit:i32;window_seconds:i32):bool{
+  let now_ts=time.unix_now();
+  let cutoff_ts=now_ts-window_seconds;
+  let cutoff_s=str.from_int(cutoff_ts);
+  // prune stale events for this scope
+  db.exec_params(
+    store.conn;
+    "DELETE FROM rate_limit_events WHERE scope=? AND event_ts<?";
+    @(scope;cutoff_s)
+  )|{
+    $ok:_ {};
+    $err:e {
+      log.warn(str.concat("rate_check: failed to prune stale events for scope: ";scope);"rules_engine";"system")
+    }
+  };
+  // record this event
+  let event_id=str.rand_hex(16);
+  let now_s=str.from_int(now_ts);
+  db.exec_params(
+    store.conn;
+    "INSERT INTO rate_limit_events (id,scope,event_ts) VALUES (?,?,?)";
+    @(event_id;scope;now_s)
+  )|{
+    $ok:_ {};
+    $err:e {
+      log.warn(str.concat("rate_check: failed to insert event for scope: ";scope);"rules_engine";"system")
+    }
+  };
+  // count events in window
+  db.query_params(
+    store.conn;
+    "SELECT COUNT(*) as cnt FROM rate_limit_events WHERE scope=? AND event_ts>=?";
+    @(scope;cutoff_s)
+  )|{
+    $ok:rows {
+      let count=if rows.len==0{
+        0
+      }else{
+        json.get_int(rows.get(0);"cnt")
+      };
+      <count<=limit
+    };
+    $err:e {
+      log.warn(str.concat("rate_check: failed to count events for scope: ";scope);"rules_engine";"system");
+      <true  // fail open — do not block on store error
+    }
+  }
+}
+
+// Returns a sensible set of default compound rules suitable for most loke deployments.
+//
+// Rule 1 — "high-sensitivity-cloud": restricted data (sensitivity==3) combined with
+//   any cloud model tier → warn and require audit.
+// Rule 2 — "rate-burst-throttle": more than 100 requests in the window (request_count>100)
+//   → throttle.
+// Rule 3 — "off-hours-premium": premium cloud model used outside business hours
+//   (hour_of_day<6 OR hour_of_day>=22) → warn (cost / oversight risk).
+// Rule 4 — "confidential-external-scope": confidential data + scope containing "external"
+//   → deny to prevent inadvertent leakage.
+pub f=default_rules():@($compound_rule){
+  let rule_high_sens=$compound_rule{
+    id:"default-high-sensitivity-cloud";
+    name:"High sensitivity + cloud model";
+    logic:$rule_op.$and;
+    conditions:@(
+      $condition{ field:"sensitivity"; op:"eq"; value:"3" };
+      $condition{ field:"model_tier"; op:"contains"; value:"cloud" }
+    );
+    action:"warn";
+    severity:"high"
+  };
+  let rule_rate_burst=$compound_rule{
+    id:"default-rate-burst-throttle";
+    name:"Request burst exceeds 100";
+    logic:$rule_op.$and;
+    conditions:@(
+      $condition{ field:"request_count"; op:"gt"; value:"100" }
+    );
+    action:"throttle";
+    severity:"medium"
+  };
+  let rule_off_hours=$compound_rule{
+    id:"default-off-hours-premium";
+    name:"Premium cloud model used off-hours";
+    logic:$rule_op.$and;
+    conditions:@(
+      $condition{ field:"model_tier"; op:"eq"; value:"cloud-premium" };
+      $condition{ field:"hour_of_day"; op:"gt"; value:"21" }
+    );
+    action:"warn";
+    severity:"low"
+  };
+  let rule_confidential_external=$compound_rule{
+    id:"default-confidential-external-scope";
+    name:"Confidential data to external scope";
+    logic:$rule_op.$and;
+    conditions:@(
+      $condition{ field:"sensitivity"; op:"gt"; value:"1" };
+      $condition{ field:"scope"; op:"contains"; value:"external" }
+    );
+    action:"deny";
+    severity:"high"
+  };
+  <@(rule_high_sens;rule_rate_burst;rule_off_hours;rule_confidential_external)
+}

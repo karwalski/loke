@@ -1,0 +1,337 @@
+// F7.4 — MCP server tool registry
+// Defines and dispatches the five tools exposed by loke's MCP server:
+//   anonymise, compress, decompress, profile, analyse
+
+i=t:shared.types;
+i=proto:core.mcp.protocol;
+i=privacy:core.privacy.pipeline;
+i=toon:core.optimiser.toon;
+i=profiler:core.optimiser.profiler;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+// ── Tool definitions ──────────────────────────────────────────────────────────
+
+f=tool_anonymise():$proto.mcp_tool{
+  <$proto.mcp_tool{
+    name:"anonymise";
+    description:"Detect and anonymise PII in text. Returns anonymised text and detected entities.";
+    input_schema:"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"presidio_url\":{\"type\":\"string\"},\"ollama_url\":{\"type\":\"string\"}},\"required\":[\"text\"]}"
+  }
+}
+
+f=tool_compress():$proto.mcp_tool{
+  <$proto.mcp_tool{
+    name:"compress";
+    description:"Convert JSON data to TOON format for token-efficient LLM context.";
+    input_schema:"{\"type\":\"object\",\"properties\":{\"json\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"table\",\"object\"]}},\"required\":[\"json\"]}"
+  }
+}
+
+f=tool_profile():$proto.mcp_tool{
+  <$proto.mcp_tool{
+    name:"profile";
+    description:"Profile a JSON dataset and return a compact schema for LLM context.";
+    input_schema:"{\"type\":\"object\",\"properties\":{\"json\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"json\"]}"
+  }
+}
+
+f=tool_decompress():$proto.mcp_tool{
+  <$proto.mcp_tool{
+    name:"decompress";
+    description:"Convert TOON format back to JSON.";
+    input_schema:"{\"type\":\"object\",\"properties\":{\"toon\":{\"type\":\"string\"}},\"required\":[\"toon\"]}"
+  }
+}
+
+f=tool_analyse():$proto.mcp_tool{
+  <$proto.mcp_tool{
+    name:"analyse";
+    description:"Analyse text sensitivity and return privacy risk assessment.";
+    input_schema:"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}"
+  }
+}
+
+// Returns all tool definitions.
+pub f=all_tools():@($proto.mcp_tool){
+  <@(
+    tool_anonymise();
+    tool_compress();
+    tool_profile();
+    tool_decompress();
+    tool_analyse()
+  )
+}
+
+// ── Sensitivity label helpers ─────────────────────────────────────────────────
+
+f=sensitivity_label(level:$sensitivity_level):str{
+  level|{
+    $public    "PUBLIC";
+    $internal  "INTERNAL";
+    $confidential "CONFIDENTIAL";
+    $restricted "RESTRICTED"
+  }
+}
+
+f=safe_to_send(level:$sensitivity_level):bool{
+  level|{
+    $public    true;
+    $internal  true;
+    $confidential false;
+    $restricted false
+  }
+}
+
+// ── Tool handlers ─────────────────────────────────────────────────────────────
+
+// anonymise — run full privacy pipeline and return annotated result
+f=handle_anonymise(args_json:str;presidio_url:str;ollama_url:str):$proto.tool_result{
+  let cid=log.new_correlation_id();
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e;
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_err("anonymise: invalid args JSON");
+        is_error:true
+      }
+    obj;
+      let text=json.get_str(obj;"text");
+      // Allow per-call URL overrides; fall back to server config values
+      let purl=json.get_str_or(obj;"presidio_url";presidio_url);
+      let ourl=json.get_str_or(obj;"ollama_url";ollama_url);
+      let config=privacy.new_config(purl;ourl);
+      let run=privacy.run(text;"";config);
+      let entity_count=str.from_int(run.total_entities);
+      let sens_label=sensitivity_label(run.result.sensitivity);
+      let safe_str=if safe_to_send(run.result.sensitivity){"true"}else{"false"};
+      let anon_escaped=str.replace(run.result.anonymised;"\"";"\\\"");
+      let orig_escaped=str.replace(run.result.original;"\"";"\\\"");
+      let p1=str.concat("{\"anonymised\":\"";anon_escaped);
+      let p2=str.concat(p1;"\",\"original\":\"");
+      let p3=str.concat(p2;orig_escaped);
+      let p4=str.concat(p3;"\",\"entities_found\":");
+      let p5=str.concat(p4;entity_count);
+      let p6=str.concat(p5;",\"sensitivity\":\"");
+      let p7=str.concat(p6;sens_label);
+      let p8=str.concat(p7;"\",\"request_id\":\"");
+      let p9=str.concat(p8;run.request_id);
+      let result_json=str.concat(p9;"\"}");
+      log.info(str.concat("anonymise: ";entity_count;" entities found");"mcp-tools";cid);
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_ok(result_json);
+        is_error:false
+      }
+  }
+}
+
+// compress — convert JSON to TOON
+f=handle_compress(args_json:str):$proto.tool_result{
+  let cid=log.new_correlation_id();
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e;
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_err("compress: invalid args JSON");
+        is_error:true
+      }
+    obj;
+      let raw_json=json.get_str(obj;"json");
+      let format=json.get_str_or(obj;"format";"auto");
+      let opts=toon.default_opts();
+      let toon_result=toon.json_to_toon(raw_json;opts);
+      toon_result|{
+        $loke_err e;
+          <$proto.tool_result{
+            content_type:"text";
+            text:proto.tool_result_err("compress: failed to convert JSON to TOON");
+            is_error:true
+          }
+        toon_str;
+          let savings=toon.measure_savings(raw_json;toon_str);
+          let savings_int=savings as i64;
+          let savings_str=str.from_int(savings_int);
+          let toon_escaped=str.replace(toon_str;"\"";"\\\"");
+          let result_p1=str.concat("{\"toon\":\"";toon_escaped);
+          let result_p2=str.concat(result_p1;"\",\"savings_pct\":");
+          let result_json=str.concat(result_p2;str.concat(savings_str;"}"));
+          log.info(str.concat("compress: ";savings_str;"% savings");"mcp-tools";cid);
+          <$proto.tool_result{
+            content_type:"text";
+            text:proto.tool_result_ok(result_json);
+            is_error:false
+          }
+      }
+  }
+}
+
+// profile — extract compact TOON schema from a JSON array
+f=handle_profile(args_json:str):$proto.tool_result{
+  let cid=log.new_correlation_id();
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e;
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_err("profile: invalid args JSON");
+        is_error:true
+      }
+    obj;
+      let raw_json=json.get_str(obj;"json");
+      let name=json.get_str_or(obj;"name";"dataset");
+      let profile_result=profiler.profile_json_array(raw_json;name);
+      profile_result|{
+        $loke_err e;
+          <$proto.tool_result{
+            content_type:"text";
+            text:proto.tool_result_err("profile: failed to profile JSON array");
+            is_error:true
+          }
+        dataset_profile;
+          let schema=profiler.to_toon_schema(dataset_profile);
+          let schema_escaped=str.replace(schema;"\"";"\\\"");
+          log.info(str.concat("profile: schema for ";name);"mcp-tools";cid);
+          <$proto.tool_result{
+            content_type:"text";
+            text:proto.tool_result_ok(schema_escaped);
+            is_error:false
+          }
+      }
+  }
+}
+
+// decompress — convert TOON back to JSON
+f=handle_decompress(args_json:str):$proto.tool_result{
+  let cid=log.new_correlation_id();
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e;
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_err("decompress: invalid args JSON");
+        is_error:true
+      }
+    obj;
+      let toon_str=json.get_str(obj;"toon");
+      let json_result=toon.toon_to_json(toon_str);
+      json_result|{
+        $loke_err e;
+          <$proto.tool_result{
+            content_type:"text";
+            text:proto.tool_result_err("decompress: failed to decode TOON");
+            is_error:true
+          }
+        recovered_json;
+          let json_escaped=str.replace(recovered_json;"\"";"\\\"");
+          let result_p1=str.concat("{\"json\":\"";json_escaped);
+          let result_json=str.concat(result_p1;"\"}");
+          log.debug("decompress: TOON decoded";"mcp-tools";cid);
+          <$proto.tool_result{
+            content_type:"text";
+            text:proto.tool_result_ok(result_json);
+            is_error:false
+          }
+      }
+  }
+}
+
+// analyse — fast regex-only PII sensitivity scan
+f=handle_analyse(args_json:str):$proto.tool_result{
+  let cid=log.new_correlation_id();
+  let parsed=json.dec(args_json);
+  parsed|{
+    $json_err e;
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_err("analyse: invalid args JSON");
+        is_error:true
+      }
+    obj;
+      let text=json.get_str(obj;"text");
+      // Fast path: regex only, no NER, no Presidio
+      let config=privacy.new_config("";"");
+      let dry_run_config=$privacy.pipeline_config{
+        presidio_url:"";
+        ollama_url:"";
+        ner_model_id:"";
+        use_presidio:false;
+        use_ner:false;
+        dry_run:true
+      };
+      let run=privacy.run(text;"";dry_run_config);
+      let entity_count=run.total_entities;
+      let entity_count_str=str.from_int(entity_count);
+      let sens_label=sensitivity_label(run.result.sensitivity);
+      let safe=safe_to_send(run.result.sensitivity);
+      let safe_str=if safe{"true"}else{"false"};
+      // Build entities JSON array
+      let entities_json="[";
+      let ei=0;
+      let ent_count=str.array_len(run.result.entities);
+      loop{
+        if ei>=ent_count{
+          break
+        }else{
+          let entity=str.array_get(run.result.entities;ei);
+          let type_esc=str.replace(entity.entity_type;"\"";"\\\"");
+          let val_esc=str.replace(entity.value;"\"";"\\\"");
+          let entry=str.concat("{\"type\":\"";str.concat(type_esc;str.concat("\",\"value\":\"";str.concat(val_esc;"\"}")))));
+          if ei==0{
+            entities_json=str.concat(entities_json;entry)
+          }else{
+            entities_json=str.concat(entities_json;str.concat(",";entry))
+          };
+          ei=ei+1
+        }
+      };
+      entities_json=str.concat(entities_json;"]");
+      let p1=str.concat("{\"sensitivity\":\"";sens_label);
+      let p2=str.concat(p1;"\",\"entity_count\":");
+      let p3=str.concat(p2;entity_count_str);
+      let p4=str.concat(p3;",\"entities\":");
+      let p5=str.concat(p4;entities_json);
+      let p6=str.concat(p5;",\"safe_to_send\":");
+      let result_json=str.concat(p6;str.concat(safe_str;"}"));
+      log.info(str.concat("analyse: ";entity_count_str;" entities, sensitivity=";sens_label);"mcp-tools";cid);
+      <$proto.tool_result{
+        content_type:"text";
+        text:proto.tool_result_ok(result_json);
+        is_error:false
+      }
+  }
+}
+
+// ── Dispatcher ────────────────────────────────────────────────────────────────
+
+// Dispatches a tool call by name to the correct handler.
+pub f=handle_tool(name:str;args_json:str;presidio_url:str;ollama_url:str):$proto.tool_result{
+  if str.eq(name;"anonymise"){
+    <handle_anonymise(args_json;presidio_url;ollama_url)
+  }else{
+    if str.eq(name;"compress"){
+      <handle_compress(args_json)
+    }else{
+      if str.eq(name;"profile"){
+        <handle_profile(args_json)
+      }else{
+        if str.eq(name;"decompress"){
+          <handle_decompress(args_json)
+        }else{
+          if str.eq(name;"analyse"){
+            <handle_analyse(args_json)
+          }else{
+            <$proto.tool_result{
+              content_type:"text";
+              text:proto.tool_result_err(str.concat("unknown tool: ";name));
+              is_error:true
+            }
+          }
+        }
+      }
+    }
+  }
+}

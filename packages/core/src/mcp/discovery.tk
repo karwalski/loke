@@ -1,0 +1,268 @@
+// F7.5 — Local MCP server discovery.
+// Discovers MCP servers running on localhost by scanning well-known ports
+// and checking for the MCP health endpoint.
+
+i=t:shared.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+pub m.$discovered_server{
+  host:str;
+  port:i32;
+  name:str;
+  version:str;
+  tools_count:i32
+}
+
+pub m.$discovery_result{
+  servers:@($discovered_server);
+  scanned_ports:i32;
+  found:i32;
+  scan_ms:i32
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+// Well-known ports where MCP servers are likely to be found.
+// 11434=Ollama, 11435=mcp-toke, 11436=mcp-broker, 11437=mcp-memory
+pub let well_known_ports:@(i32)=@(11434;11435;11436;11437;3000;8080;8000;5000);
+
+// ── Port probing ──────────────────────────────────────────────────────────────
+
+// Probes a single port for an MCP server. Returns None on any error or non-200 response.
+pub f=probe_port(host:str;port:i32):?($discovered_server){
+  let port_s=str.from_int(port);
+  let base_url=str.concat(str.concat("http://";host);str.concat(":";port_s));
+  let health_url=str.concat(base_url;"/health");
+
+  let health_resp=http.get(health_url);
+  health_resp|{
+    $http_err e;
+      <?(none);
+    raw;
+      // Fetch MCP initialize to get server name and version
+      let init_url=str.concat(base_url;"/mcp");
+      let init_body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"loke-discovery\",\"version\":\"0.1.0\"}}}";
+      let init_resp=http.post(init_url;init_body;"application/json");
+      let server_name="unknown";
+      let server_version="unknown";
+      init_resp|{
+        $http_err e; // leave defaults
+          {};
+        init_raw;
+          let parsed=json.dec(init_raw);
+          parsed|{
+            $json_err e; {};
+            obj;
+              let result_val=json.get_val(obj;"result");
+              let info_val=json.get_val(result_val;"serverInfo");
+              let name=json.get_str(info_val;"name");
+              let version=json.get_str(info_val;"version");
+              if str.len(name) > 0{
+                server_name=name
+              }else{};
+              if str.len(version) > 0{
+                server_version=version
+              }else{}
+          }
+      };
+
+      // Count available tools via tools/list
+      let tools_url=str.concat(base_url;"/mcp");
+      let tools_body="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":null}";
+      let tools_count=0;
+      let tools_resp=http.post(tools_url;tools_body;"application/json");
+      tools_resp|{
+        $http_err e; {};
+        tools_raw;
+          let tools_parsed=json.dec(tools_raw);
+          tools_parsed|{
+            $json_err e; {};
+            tools_obj;
+              let result_val=json.get_val(tools_obj;"result");
+              let tools_arr=json.get_arr(result_val;"tools");
+              tools_count=tools_arr.len
+          }
+      };
+
+      log.debug(
+        str.concat(
+          str.concat("discovered MCP server at ";base_url);
+          str.concat(" name=";server_name));
+        "mcp-discovery";
+        "system"
+      );
+      <?(some($discovered_server{
+        host:host;
+        port:port;
+        name:server_name;
+        version:server_version;
+        tools_count:tools_count
+      }))
+  }
+}
+
+// ── Scanning ──────────────────────────────────────────────────────────────────
+
+// Probes all well_known_ports on localhost and returns a discovery result with timing.
+pub f=scan_localhost():$discovery_result{
+  let start_ms=str.now_millis();
+  let servers=@();
+  well_known_ports.each|port{
+    let found=probe_port("localhost";port);
+    found|{
+      ?(none) {};
+      ?(some:s)
+        servers=@(servers;s)
+    }
+  };
+  let end_ms=str.now_millis();
+  let elapsed=end_ms-start_ms;
+  let found_count=servers.len;
+  log.info(
+    str.concat(
+      str.concat("MCP scan complete: found ";str.from_int(found_count));
+      " servers");
+    "mcp-discovery";
+    "system"
+  );
+  <$discovery_result{
+    servers:servers;
+    scanned_ports:well_known_ports.len;
+    found:found_count;
+    scan_ms:elapsed
+  }
+}
+
+// Probes ports in the range start_port..=end_port on localhost.
+// Capped at 100 ports to avoid hanging.
+pub f=scan_range(start_port:i32;end_port:i32):$discovery_result{
+  let cap=100;
+  let start_ms=str.now_millis();
+  let servers=@();
+  let scanned=0;
+  let port=start_port;
+  let limit=if (end_port-start_port)+1 > cap{
+    start_port+cap-1
+  }else{
+    end_port
+  };
+  // Iterate from start_port to limit inclusive via a counted loop
+  let range_len=(limit-start_port)+1;
+  let i=0;
+  if range_len > 0{
+    let done=false;
+    if true{
+      let p=start_port;
+      let count=0;
+      if true{
+        // unroll via each on a synthetic range
+        @(p).each|_x{} // placeholder: real toke has range syntax
+      }else{}
+    }else{}
+  }else{};
+  // Use a while-equivalent recursive helper for the port scan
+  let result=scan_range_from(start_port;limit;servers;0;start_ms);
+  <result
+}
+
+// Tail-recursive helper for scan_range.
+f=scan_range_from(port:i32;limit:i32;acc:@($discovered_server);scanned:i32;start_ms:i64):$discovery_result{
+  if port > limit{
+    let end_ms=str.now_millis();
+    let elapsed=end_ms-start_ms;
+    let found_count=acc.len;
+    <$discovery_result{
+      servers:acc;
+      scanned_ports:scanned;
+      found:found_count;
+      scan_ms:elapsed
+    }
+  }else{
+    let found=probe_port("localhost";port);
+    let next_acc=found|{
+      ?(none) <acc;
+      ?(some:s) <@(acc;s)
+    };
+    <scan_range_from(port+1;limit;next_acc;scanned+1;start_ms)
+  }
+}
+
+// ── Formatting ────────────────────────────────────────────────────────────────
+
+// Pads a string with trailing spaces to at least width characters.
+f=pad_right(s:str;width:i32):str{
+  let len=str.len(s);
+  if len >= width{
+    <s
+  }else{
+    let diff=width-len;
+    let spaces="                                        ";
+    let pad=str.slice(spaces;0;diff);
+    <str.concat(s;pad)
+  }
+}
+
+// Renders a table of discovered servers plus a summary line.
+pub f=format_result(result:$discovery_result):str{
+  let header=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          pad_right("Host";16);
+          pad_right("Port";8));
+        pad_right("Name";24));
+      pad_right("Version";16));
+    "Tools\n"
+  );
+  let separator=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat("---------------- ";
+            "-------- ");
+          "------------------------ ");
+        "---------------- ");
+      "-----\n");
+    "")
+  ;
+  let rows="";
+  result.servers.each|s{
+    let port_s=str.from_int(s.port);
+    let tools_s=str.from_int(s.tools_count);
+    let row=str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              pad_right(s.host;16);
+              pad_right(port_s;8));
+            pad_right(s.name;24));
+          pad_right(s.version;16));
+        tools_s);
+      "\n")
+    ;
+    rows=str.concat(rows;row)
+  };
+  let scanned_s=str.from_int(result.scanned_ports);
+  let found_s=str.from_int(result.found);
+  let ms_s=str.from_int(result.scan_ms);
+  let summary=str.concat(
+    str.concat(
+      str.concat(
+        str.concat("Found ";found_s);
+        str.concat(" MCP servers on ";scanned_s));
+      str.concat(" ports scanned (";ms_s));
+    "ms)");
+  <str.concat(
+    str.concat(
+      str.concat(
+        str.concat(header;separator);
+        rows);
+      "\n");
+    summary)
+}

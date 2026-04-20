@@ -1,0 +1,73 @@
+i=t:companion.types
+i=http:std.http
+i=json:std.json
+i=log:shared.log
+
+m.$exo_config{ host:str; port:i32 }
+m.$exo_node{ id:str; device:str; memory_gb:f32; models:@(str) }
+m.$exo_cluster{ nodes:@($exo_node); total_memory_gb:f32 }
+
+pub f=default_config():$exo_config{
+  <$exo_config{ host="localhost"; port=52415 }
+}
+
+pub f=is_available(cfg:$exo_config):bool{
+  url="http://{cfg.host}:{cfg.port}/v1/health";
+  resp=http.get(url);
+  |{ resp.$ok:r <r.status==200 };
+  |{ resp.$err:_ <false }
+}
+
+pub f=cluster_status(cfg:$exo_config):$exo_cluster{
+  url="http://{cfg.host}:{cfg.port}/v1/nodes";
+  resp=http.get(url);
+  |{ resp.$err:_
+    <$exo_cluster{ nodes=[]; total_memory_gb=0.0 }
+  };
+  r=resp.$ok;
+  |{ r.status!=200:
+    <$exo_cluster{ nodes=[]; total_memory_gb=0.0 }
+  };
+  parsed=json.decode(r.body);
+  raw_nodes=parsed["nodes"] as @(json.$val);
+  nodes=@($exo_node)[];
+  total=0.0;
+  i=0;
+  |{ i<raw_nodes.len():
+    n=raw_nodes[i];
+    id=n["id"] as str;
+    device=n["device"] as str;
+    memory_gb=n["memory_gb"] as f32;
+    models=n["models"] as @(str);
+    nodes.push($exo_node{ id=id; device=device; memory_gb=memory_gb; models=models });
+    total=total+memory_gb;
+    i=i+1
+  };
+  <$exo_cluster{ nodes=nodes; total_memory_gb=total }
+}
+
+pub f=generate(cfg:$exo_config;model:str;prompt:str;max_tokens:i32):str{
+  url="http://{cfg.host}:{cfg.port}/v1/chat/completions";
+  body=json.encode({ model=model; messages=[{ role="user"; content=prompt }]; max_tokens=max_tokens });
+  resp=http.post(url;body);
+  |{ resp.$err:_ <"" };
+  r=resp.$ok;
+  |{ r.status!=200: <"" };
+  parsed=json.decode(r.body);
+  choices=parsed["choices"] as @(json.$val);
+  |{ choices.len()==0: <"" };
+  <choices[0]["message"]["content"] as str
+}
+
+pub f=format_cluster(c:$exo_cluster):str{
+  n=c.nodes.len();
+  parts="Exo cluster: {n} nodes, {c.total_memory_gb}GB total | ";
+  i=0;
+  |{ i<n:
+    node=c.nodes[i];
+    parts="{parts}{node.device}({node.memory_gb}GB)";
+    |{ i<n-1: parts="{parts}, " };
+    i=i+1
+  };
+  <parts
+}

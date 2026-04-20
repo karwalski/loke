@@ -1,0 +1,255 @@
+// A2.2 — loke proxy <tool> — coding LLM proxy mode
+
+i=t:shared.types;
+i=log:shared.log;
+i=out:cli.output;
+i=net:std.net;
+i=http:std.http;
+i=json:std.json;
+i=pipe:core.privacy.pipeline;
+i=disp:providers.dispatcher;
+i=cfg:shared.config;
+i=str:std.str;
+
+pub m.$proxy_config{
+  port:i32;
+  target_tool:str;
+  verbose:bool;
+  dry_run:bool
+}
+
+pub m.$proxy_session{
+  id:str;
+  tool:str;
+  requests_intercepted:i32;
+  entities_redacted:i32;
+  tokens_saved:i32;
+  started_at:i64
+}
+
+pub let default_port = 11431;
+
+pub f=default_config(tool:str):$proxy_config{
+  <$proxy_config{
+    port=11431;
+    target_tool=tool;
+    verbose=false;
+    dry_run=false
+  }
+}
+
+pub f=parse_opts(args:@(str)):$proxy_config{
+  let port=11431;
+  let tool="";
+  let verbose=false;
+  let dry_run=false;
+  let i=0;
+  loop i<str.len(args){
+    let arg=args[i];
+    if str.eq(arg;"--port"){
+      let i=i+1;
+      if i<str.len(args){
+        let port=str.to_int(args[i])
+      }
+    }else{
+      if str.eq(arg;"--verbose"){
+        let verbose=true
+      }else{
+        if str.eq(arg;"--dry-run"){
+          let dry_run=true
+        }else{
+          if str.len(tool)<1{
+            let tool=arg
+          }
+        }
+      }
+    };
+    let i=i+1
+  };
+  <$proxy_config{
+    port=port;
+    target_tool=tool;
+    verbose=verbose;
+    dry_run=dry_run
+  }
+}
+
+pub f=handle_request(req_body:str;session:$proxy_session;cfg:$proxy_config;pipe_cfg:pipe.$pipeline_config):str{
+  let cid=log.new_correlation_id();
+
+  let parsed=json.parse(req_body)|{
+    $ok:v v;
+    $err:e;
+      log.error(str.concat("proxy: failed to parse request body — ";e);"proxy";cid);
+      <"{\"error\":\"invalid request body\"}"
+  };
+
+  let text=json.get_str(parsed;"prompt")|{
+    $ok:v v;
+    $err:e;
+      let messages=json.get_arr(parsed;"messages")|{
+        $ok:v json.arr_to_str(v);
+        $err:e ""
+      }
+  };
+
+  let pipe_result=pipe.run(text;pipe_cfg)|{
+    $ok:v v;
+    $err:e;
+      log.error(str.concat("proxy: pipeline error — ";e);"proxy";cid);
+      <"{\"error\":\"pipeline failure\"}"
+  };
+
+  if cfg.verbose{
+    log.info(
+      str.concat(
+        "proxy: redacted ";
+        str.concat(str.from_int(pipe_result.entity_count);" entities")
+      );
+      "proxy";
+      cid
+    )
+  };
+
+  if cfg.dry_run{
+    <"{\"content\":\"[dry-run: would send to LLM]\"}"
+  };
+
+  let anon_body=json.set_str(parsed;"prompt";pipe_result.anonymised);
+  let anon_req=json.to_str(anon_body);
+
+  let raw_response=disp.forward(anon_req;cfg.target_tool)|{
+    $ok:v v;
+    $err:e;
+      log.error(str.concat("proxy: dispatch error — ";e);"proxy";cid);
+      <"{\"error\":\"upstream failure\"}"
+  };
+
+  let restored=pipe.restore(raw_response;pipe_result.mapping)|{
+    $ok:v v;
+    $err:e;
+      log.error(str.concat("proxy: restore error — ";e);"proxy";cid);
+      raw_response
+  };
+
+  <restored
+}
+
+pub f=start(cfg:$proxy_config;loke_cfg:cfg.$loke_config):i32{
+  let cid=log.new_correlation_id();
+
+  out.print_line(
+    str.concat(
+      "loke proxy listening on localhost:";
+      str.concat(
+        str.from_int(cfg.port);
+        str.concat(" \xe2\x86\x92 intercepting ";cfg.target_tool)
+      )
+    )
+  );
+  out.print_line(
+    str.concat(
+      "Set your tool to use proxy: export ANTHROPIC_BASE_URL=http://localhost:";
+      str.from_int(cfg.port)
+    )
+  );
+
+  let pipe_cfg=pipe.default_config();
+
+  let session=$proxy_session{
+    id=log.new_correlation_id();
+    tool=cfg.target_tool;
+    requests_intercepted=0;
+    entities_redacted=0;
+    tokens_saved=0;
+    started_at=net.now_unix()
+  };
+
+  let listener=net.listen(cfg.port)|{
+    $ok:v v;
+    $err:e;
+      out.print_error(str.concat("proxy: failed to bind port — ";e));
+      <1
+  };
+
+  log.info(
+    str.concat("proxy: listening on port ";str.from_int(cfg.port));
+    "proxy";
+    cid
+  );
+
+  let running=true;
+  loop running{
+    let conn=net.accept(listener)|{
+      $ok:v v;
+      $err:e;
+        log.error(str.concat("proxy: accept error — ";e);"proxy";cid);
+        let running=false;
+        net.close(listener);
+        <0
+    };
+    let req_body=net.read_body(conn)|{
+      $ok:v v;
+      $err:e;
+        log.error(str.concat("proxy: read error — ";e);"proxy";cid);
+        net.close_conn(conn);
+        ""
+    };
+    if str.len(req_body)>0{
+      let response=handle_request(req_body;session;cfg;pipe_cfg);
+      net.write(conn;response)|{
+        $ok:v ();
+        $err:e log.error(str.concat("proxy: write error — ";e);"proxy";cid)
+      };
+      let session=$proxy_session{
+        id=session.id;
+        tool=session.tool;
+        requests_intercepted=session.requests_intercepted+1;
+        entities_redacted=session.entities_redacted;
+        tokens_saved=session.tokens_saved;
+        started_at=session.started_at
+      }
+    };
+    net.close_conn(conn)
+  };
+
+  out.print_line("loke proxy shutdown");
+  out.print_line(
+    str.concat(
+      "session stats — requests intercepted: ";
+      str.from_int(session.requests_intercepted)
+    )
+  );
+  out.print_line(
+    str.concat(
+      "session stats — entities redacted: ";
+      str.from_int(session.entities_redacted)
+    )
+  );
+  out.print_line(
+    str.concat(
+      "session stats — tokens saved: ";
+      str.from_int(session.tokens_saved)
+    )
+  );
+
+  <0
+}
+
+pub f=usage():str{
+  <"usage: loke proxy <tool> [options]
+
+tools:
+  claude-code    intercept Claude Code traffic
+  codex          intercept OpenAI Codex traffic
+  gemini-cli     intercept Gemini CLI traffic
+
+options:
+  --port N       listen port (default: 11431)
+  --verbose      log redacted entity counts per request
+  --dry-run      intercept and anonymise but do not forward to LLM
+
+example:
+  loke proxy claude-code --verbose
+  export ANTHROPIC_BASE_URL=http://localhost:11431"
+}

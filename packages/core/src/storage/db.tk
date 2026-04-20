@@ -1,0 +1,68 @@
+// Database connection manager with migration runner
+
+i=t:shared.types;
+i=db:std.db;
+i=str:std.str;
+i=m:core.storage.migrations;
+
+pub m.$store{
+  conn:$db_conn;
+  data_dir:str
+}
+
+pub f=open(data_dir:str):$store|$loke_err{
+  let path=str.concat(data_dir;"/loke.db");
+  db.open(path)|{
+    $ok:conn {
+      run_migrations(conn)|{
+        $ok:_ <$ok($store{conn:conn;data_dir:data_dir});
+        $err:e <$err(e)
+      }
+    };
+    $err:e <$err($storage_err(str.concat("failed to open database: ";path)))
+  }
+}
+
+pub f=run_migrations(conn:$db_conn):void|$loke_err{
+  let create_sql="CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL,
+  description TEXT NOT NULL
+)";
+  db.exec(conn;create_sql)|{
+    $ok:_ {};
+    $err:e <$err($storage_err("failed to create schema_migrations table"))
+  };
+  let migrations=m.all_migrations();
+  let i=0;
+  let count=migrations.len;
+  // Apply each migration if not already recorded
+  migrations.each|mg{
+    let ver_str=str.from_int(mg.version);
+    let check_sql=str.concat("SELECT version FROM schema_migrations WHERE version=";ver_str);
+    db.query_one(conn;check_sql)|{
+      $ok:_ {};
+      $err:_ {
+        // Migration not yet applied — run it
+        db.exec(conn;mg.sql)|{
+          $ok:_ {};
+          $err:e <$err($storage_err(str.concat("migration failed: ";mg.description)))
+        };
+        let insert_sql=str.concat(
+          "INSERT INTO schema_migrations (version,applied_at,description) VALUES (";
+          str.concat(ver_str;str.concat(",'now()','";str.concat(mg.description;"');")))
+        );
+        db.exec_params(conn;"INSERT INTO schema_migrations (version,applied_at,description) VALUES (?,?,?)";@(ver_str;"now()";mg.description))|{
+          $ok:_ {};
+          $err:e <$err($storage_err(str.concat("failed to record migration: ";mg.description)))
+        }
+      }
+    }
+  };
+  <$ok(void)
+}
+
+pub f=close(store:$store):void{
+  // No-op: db connection lifecycle managed by ooke runtime
+  <void
+}

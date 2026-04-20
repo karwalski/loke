@@ -1,0 +1,96 @@
+// F6.2 partial — Audit log writer
+// Append-only event log with hash chain for tamper detection
+// TODO: replace simplified hash (correlation_id+event_type concat) with a proper
+//       cryptographic hash (e.g. SHA-256) once std.crypto is available
+
+i=t:shared.types;
+i=db:std.db;
+i=s:core.storage.db;
+i=str:std.str;
+i=json:std.json;
+
+pub m.$audit_event{
+  event_type:str;
+  use_case:str;
+  model_id:str;
+  provider:str;
+  sensitivity:str;
+  risk_tier:str;
+  tokens_in:u32;
+  tokens_out:u32;
+  cost_usd:f64;
+  duration_ms:u32;
+  correlation_id:str
+}
+
+pub f=log_event(store:$s.store;event:$audit_event):void|$loke_err{
+  let id=str.rand_hex(16);
+
+  // Retrieve hash of the most recent row for chain integrity
+  let prev_hash_val="";
+  db.query_one(store.conn;"SELECT hash FROM audit_log ORDER BY created_at DESC LIMIT 1")|{
+    $ok:row {
+      let prev_hash_val=json.get_str(row;"hash")
+    };
+    $err:_ {}
+  };
+
+  // Simplified hash: concat of correlation_id and event_type
+  // TODO: replace with proper cryptographic hash once std.crypto is available
+  let hash=str.concat(event.correlation_id;event.event_type);
+
+  let tokens_in_s=str.from_int(event.tokens_in);
+  let tokens_out_s=str.from_int(event.tokens_out);
+  let cost_s=str.from_float(event.cost_usd);
+  let duration_s=str.from_int(event.duration_ms);
+
+  db.exec_params(
+    store.conn;
+    "INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'now()')";
+    @(
+      id;
+      event.event_type;
+      event.use_case;
+      event.model_id;
+      event.provider;
+      event.sensitivity;
+      event.risk_tier;
+      tokens_in_s;
+      tokens_out_s;
+      cost_s;
+      duration_s;
+      event.correlation_id;
+      prev_hash_val;
+      hash
+    )
+  )|{
+    $ok:_ <$ok(void);
+    $err:e <$err($storage_err("failed to insert audit event"))
+  }
+}
+
+pub f=get_recent(store:$s.store;limit:u32):@($audit_event)|$loke_err{
+  let limit_s=str.from_int(limit);
+  let sql=str.concat("SELECT event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id FROM audit_log ORDER BY created_at DESC LIMIT ";limit_s);
+  db.query(store.conn;sql)|{
+    $ok:rows {
+      let events=rows.map|row{
+        $audit_event{
+          event_type:json.get_str(row;"event_type");
+          use_case:json.get_str(row;"use_case");
+          model_id:json.get_str(row;"model_id");
+          provider:json.get_str(row;"provider");
+          sensitivity:json.get_str(row;"sensitivity");
+          risk_tier:json.get_str(row;"risk_tier");
+          tokens_in:json.get_int(row;"tokens_in");
+          tokens_out:json.get_int(row;"tokens_out");
+          cost_usd:json.get_float(row;"cost_usd");
+          duration_ms:json.get_int(row;"duration_ms");
+          correlation_id:json.get_str(row;"correlation_id")
+        }
+      };
+      <$ok(events)
+    };
+    $err:e <$err($storage_err("failed to query audit log"))
+  }
+}

@@ -1,0 +1,204 @@
+// A5.2 — AI-assisted report drafting.
+// Uses the loke pipeline itself to draft GitHub issue reports from context.
+
+m=core.feedback.draft;
+
+i=http:std.http;
+i=str:std.str;
+i=arr:std.arr;
+i=log:shared.log;
+
+pub m.$draft_context{
+  request_id:str;
+  user_description:str;
+  pipeline_logs:@(str);
+  model_used:str;
+  provider:str;
+  latency_ms:i32;
+  error_code:?(str)
+}
+
+pub m.$draft_result{
+  title:str;
+  body:str;
+  labels:@(str);
+  severity:str;
+  confidence:f32
+}
+
+pub f=build_draft_prompt(ctx:$draft_context):str{
+  let log_count=arr.len(ctx.pipeline_logs);
+  let capped_logs=if log_count > 50{
+    arr.slice(ctx.pipeline_logs;0;50)
+  }else{
+    ctx.pipeline_logs
+  };
+  let logs_joined=arr.join(capped_logs;"\n");
+  let error_section=?(ctx.error_code){
+    use code { str.concat("\nError code: ";code) }
+  }:{
+    ""
+  };
+  let prompt=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              str.concat(
+                str.concat(
+                  str.concat(
+                    str.concat(
+                      str.concat(
+                        "You are helping draft a GitHub issue for the loke project.\n\n";
+                        "## User Description\n");
+                      ctx.user_description);
+                    "\n\n## Pipeline Context\n");
+                  str.concat("Model: ";ctx.model_used));
+                str.concat("\nProvider: ";ctx.provider));
+              str.concat("\nLatency (ms): ";str.from_int(ctx.latency_ms)));
+            error_section);
+          "\n\n## Pipeline Logs (last 50 lines)\n```\n");
+        logs_joined);
+      "\n```\n\n");
+    "## Instructions\n\
+Draft a GitHub issue in JSON format with these exact fields:\n\
+- \"title\": a concise title under 72 characters\n\
+- \"body\": a markdown body with sections: Description, Steps to Reproduce, Expected Behaviour, Actual Behaviour\n\
+- \"labels\": an array of relevant labels chosen only from [\"bug\",\"enhancement\",\"privacy\",\"performance\",\"ux\"]\n\
+- \"severity\": one of [\"critical\",\"high\",\"medium\",\"low\"]\n\
+- \"confidence\": a float between 0.0 and 1.0 reflecting your confidence in the draft\n\n\
+Respond with only valid JSON, no extra text.\n");
+  <prompt
+}
+
+pub f=parse_draft_response(raw:str):$draft_result{
+  let title=if str.contains(raw;"\"title\""){
+    let after=str.slice(raw;str.index_of(raw;"\"title\"");str.len(raw));
+    let colon_pos=str.index_of(after;":");
+    let val_start=str.index_of(str.slice(after;colon_pos;str.len(after));"\"");
+    let from_quote=str.slice(after;colon_pos + val_start + 1;str.len(after));
+    let end_quote=str.index_of(from_quote;"\"");
+    str.slice(from_quote;0;end_quote)
+  }else{
+    "Untitled issue"
+  };
+  let body=if str.contains(raw;"\"body\""){
+    let after=str.slice(raw;str.index_of(raw;"\"body\"");str.len(raw));
+    let colon_pos=str.index_of(after;":");
+    let val_start=str.index_of(str.slice(after;colon_pos;str.len(after));"\"");
+    let from_quote=str.slice(after;colon_pos + val_start + 1;str.len(after));
+    let end_quote=str.index_of(from_quote;"\"");
+    str.slice(from_quote;0;end_quote)
+  }else{
+    ""
+  };
+  let severity=if str.contains(raw;"\"critical\""){
+    "critical"
+  }else if str.contains(raw;"\"high\""){
+    "high"
+  }else if str.contains(raw;"\"low\""){
+    "low"
+  }else{
+    "medium"
+  };
+  let labels=@();
+  let labels=if str.contains(raw;"\"bug\""){ arr.push(labels;"bug") }else{ labels };
+  let labels=if str.contains(raw;"\"enhancement\""){ arr.push(labels;"enhancement") }else{ labels };
+  let labels=if str.contains(raw;"\"privacy\""){ arr.push(labels;"privacy") }else{ labels };
+  let labels=if str.contains(raw;"\"performance\""){ arr.push(labels;"performance") }else{ labels };
+  let labels=if str.contains(raw;"\"ux\""){ arr.push(labels;"ux") }else{ labels };
+  let confidence=if str.contains(raw;"\"confidence\""){
+    let after=str.slice(raw;str.index_of(raw;"\"confidence\"");str.len(raw));
+    let colon_pos=str.index_of(after;":");
+    let val_region=str.slice(after;colon_pos + 1;colon_pos + 10);
+    let trimmed=str.trim(val_region);
+    str.to_f32(trimmed)
+  }else{
+    0.5
+  };
+  <$draft_result{
+    title:title;
+    body:body;
+    labels:labels;
+    severity:severity;
+    confidence:confidence
+  }
+}
+
+pub f=draft(ctx:$draft_context;api_key:str):$draft_result{
+  let prompt=build_draft_prompt(ctx);
+  let payload=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          "{\"prompt\":\"";
+          str.escape_json(prompt));
+        "\",\"request_id\":\"");
+      ctx.request_id);
+    "\"}");
+  let resp=http.post(
+    "http://127.0.0.1:11430/api/pipeline";
+    payload;
+    @(
+      http.header("Content-Type";"application/json");
+      http.header("Authorization";str.concat("Bearer ";api_key))
+    )
+  );
+  resp|{
+    $ok:r {
+      log.info(
+        str.concat("draft pipeline response received for request: ";ctx.request_id);
+        "feedback.draft";
+        ctx.request_id
+      );
+      <parse_draft_response(r.body)
+    };
+    $err:e {
+      log.warn(
+        str.concat("draft pipeline request failed: ";e.message);
+        "feedback.draft";
+        ctx.request_id
+      );
+      <$draft_result{
+        title:"Issue report (draft failed)";
+        body:str.concat("## Description\n";ctx.user_description);
+        labels:@("bug");
+        severity:"medium";
+        confidence:0.0
+      }
+    }
+  }
+}
+
+pub f=format_preview(draft:$draft_result):str{
+  let label_line=str.concat("Labels: ";arr.join(draft.labels;", "));
+  let severity_line=str.concat("Severity: ";draft.severity);
+  let confidence_pct=str.concat(
+    str.from_int(str.to_i32(str.from_f32(draft.confidence * 100.0)));
+    "%"
+  );
+  let confidence_line=str.concat("Confidence: ";confidence_pct);
+  let divider="---";
+  <str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              str.concat(
+                str.concat(
+                  str.concat(
+                    str.concat(
+                      str.concat("# ";draft.title);
+                      "\n\n");
+                    draft.body);
+                  "\n\n");
+                divider);
+              "\n");
+            label_line);
+          "\n");
+        severity_line);
+      "\n");
+    confidence_line)
+}

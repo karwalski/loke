@@ -1,0 +1,256 @@
+m=core.privacy.web_meta;
+i=str:std.string;
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+pub m.$tracker{
+  name:str;
+  kind:str;
+  url:str;
+}
+
+pub m.$web_privacy{
+  url:str;
+  https:bool;
+  trackers:@($tracker);
+  cookie_count:i32;
+  form_fields:@(str);
+  privacy_grade:str;
+  notes:@(str);
+}
+
+// ── Known tracker patterns ─────────────────────────────────────────────────
+
+// "google-analytics.com"  → name: "Google Analytics",    kind: "analytics"
+// "connect.facebook.net"  → name: "Meta Pixel",           kind: "advertising"
+// "static.hotjar.com"     → name: "Hotjar",               kind: "session-recording"
+// "cdn.segment.com"       → name: "Segment",              kind: "analytics"
+// "bat.bing.com"          → name: "Bing Ads",             kind: "advertising"
+// "snap.licdn.com"        → name: "LinkedIn Insight",     kind: "advertising"
+
+f=_known_tracker(src_url:str):?($tracker){
+  if str.contains(src_url; "google-analytics.com"){
+    <$tracker{ name:"Google Analytics"; kind:"analytics"; url:src_url }
+  };
+  if str.contains(src_url; "connect.facebook.net"){
+    <$tracker{ name:"Meta Pixel"; kind:"advertising"; url:src_url }
+  };
+  if str.contains(src_url; "static.hotjar.com"){
+    <$tracker{ name:"Hotjar"; kind:"session-recording"; url:src_url }
+  };
+  if str.contains(src_url; "cdn.segment.com"){
+    <$tracker{ name:"Segment"; kind:"analytics"; url:src_url }
+  };
+  if str.contains(src_url; "bat.bing.com"){
+    <$tracker{ name:"Bing Ads"; kind:"advertising"; url:src_url }
+  };
+  if str.contains(src_url; "snap.licdn.com"){
+    <$tracker{ name:"LinkedIn Insight"; kind:"advertising"; url:src_url }
+  };
+  <?(none)
+}
+
+// ── analyse_headers ────────────────────────────────────────────────────────
+// Scan response headers for trackers (Set-Cookie, referrer-policy, etc.)
+// and check the URL scheme for HTTPS enforcement.
+
+pub f=analyse_headers(url:str; headers:@(str)):$web_privacy{
+  let is_https=str.starts_with(url; "https://");
+  let cookies:@(str)=@();
+  let trackers:@($tracker)=@();
+  let notes:@(str)=@();
+
+  for h in headers{
+    let lower=str.to_lower(h);
+
+    // Count Set-Cookie headers; flag tracking cookies by common names
+    if str.starts_with(lower; "set-cookie:"){
+      cookies=@.push(cookies; h);
+      if str.contains(lower; "_ga") or str.contains(lower; "_fbp") or str.contains(lower; "_hjid") or str.contains(lower; "ajs_"){
+        notes=@.push(notes; str.concat("Tracking cookie detected in header: "; h));
+      };
+    };
+
+    // Referrer-Policy weaknesses
+    if str.starts_with(lower; "referrer-policy:"){
+      if str.contains(lower; "unsafe-url") or str.contains(lower; "no-referrer-policy"){
+        notes=@.push(notes; "Weak Referrer-Policy — full URL may be sent to third parties");
+      };
+    };
+
+    // Missing security headers are informational notes
+    if str.starts_with(lower; "x-frame-options:"){ };  // present — good, no note needed
+
+    // X-Tracking-Id is a non-standard but observed header in some ad stacks
+    if str.starts_with(lower; "x-tracking-id:"){
+      notes=@.push(notes; str.concat("Non-standard tracking header present: "; h));
+    };
+  };
+
+  // Check for absent security headers by scanning the full list
+  let has_csp=@.any(headers; f(h:str):bool{ <str.starts_with(str.to_lower(h); "content-security-policy:") });
+  let has_referrer=@.any(headers; f(h:str):bool{ <str.starts_with(str.to_lower(h); "referrer-policy:") });
+
+  if not has_csp{
+    notes=@.push(notes; "No Content-Security-Policy header — third-party scripts cannot be restricted");
+  };
+  if not has_referrer{
+    notes=@.push(notes; "No Referrer-Policy header — referrer data may leak to third parties");
+  };
+  if not is_https{
+    notes=@.push(notes; "Page served over HTTP — traffic is unencrypted and can be intercepted");
+  };
+
+  <$web_privacy{
+    url:url;
+    https:is_https;
+    trackers:trackers;
+    cookie_count:@.len(cookies);
+    form_fields:@();
+    privacy_grade:"";   // populated by grade()
+    notes:notes;
+  }
+}
+
+// ── analyse_html ───────────────────────────────────────────────────────────
+// Extend an existing $web_privacy analysis with signals found in the HTML body:
+// known tracker script src patterns, input field types, form counts.
+
+pub f=analyse_html(meta:$web_privacy; html:str):$web_privacy{
+  let lower=str.to_lower(html);
+  let trackers=meta.trackers;
+  let form_fields=meta.form_fields;
+  let notes=meta.notes;
+
+  // Detect known tracker script URLs embedded in HTML
+  let candidates=@(str){
+    "google-analytics.com";
+    "connect.facebook.net";
+    "static.hotjar.com";
+    "cdn.segment.com";
+    "bat.bing.com";
+    "snap.licdn.com";
+  };
+
+  for c in candidates{
+    if str.contains(lower; c){
+      let t=_known_tracker(c);
+      if ?(is_some; t){
+        // Avoid duplicates — only append if not already recorded
+        let already=@.any(trackers; f(existing:$tracker):bool{ <str.eq(existing.url; c) });
+        if not already{
+          trackers=@.push(trackers; ?(unwrap; t));
+        };
+      };
+    };
+  };
+
+  // Detect data-collection form fields by input type/name patterns
+  let field_patterns=@(str){
+    "type=\"email\"";
+    "type=\"tel\"";
+    "name=\"email\"";
+    "name=\"phone\"";
+    "name=\"first_name\"";
+    "name=\"last_name\"";
+    "name=\"fullname\"";
+    "name=\"address\"";
+    "name=\"postcode\"";
+    "name=\"dob\"";
+    "name=\"date_of_birth\"";
+    "autocomplete=\"email\"";
+    "autocomplete=\"tel\"";
+    "autocomplete=\"name\"";
+  };
+
+  for p in field_patterns{
+    if str.contains(lower; p){
+      let already=@.any(form_fields; f(f:str):bool{ <str.eq(f; p) });
+      if not already{
+        form_fields=@.push(form_fields; p);
+      };
+    };
+  };
+
+  if @.len(form_fields) > 0{
+    notes=@.push(notes; str.concat(
+      "Page contains data-collection form fields: ";
+      str.join(form_fields; ", ")
+    ));
+  };
+
+  // Re-grade with updated tracker count
+  let updated=$web_privacy{
+    url:meta.url;
+    https:meta.https;
+    trackers:trackers;
+    cookie_count:meta.cookie_count;
+    form_fields:form_fields;
+    privacy_grade:meta.privacy_grade;
+    notes:notes;
+  };
+  <$web_privacy{
+    url:updated.url;
+    https:updated.https;
+    trackers:updated.trackers;
+    cookie_count:updated.cookie_count;
+    form_fields:updated.form_fields;
+    privacy_grade:grade(updated);
+    notes:updated.notes;
+  }
+}
+
+// ── grade ──────────────────────────────────────────────────────────────────
+// A = https + 0 trackers
+// B = https + 1–2 trackers
+// C = https + 3–5 trackers
+// D = https + 6+ trackers
+// F = no https (regardless of tracker count)
+
+pub f=grade(meta:$web_privacy):str{
+  if not meta.https{ <"F" };
+  let n=@.len(meta.trackers);
+  if n == 0{ <"A" };
+  if n <= 2{ <"B" };
+  if n <= 5{ <"C" };
+  <"D"
+}
+
+// ── format_report ──────────────────────────────────────────────────────────
+// Returns a multi-line human-readable report suitable for logging or display.
+
+pub f=format_report(meta:$web_privacy):str{
+  let lines:@(str)=@();
+
+  lines=@.push(lines; str.concat("Privacy grade : "; meta.privacy_grade));
+  lines=@.push(lines; str.concat("URL           : "; meta.url));
+  lines=@.push(lines; str.concat("HTTPS         : "; if meta.https{ "yes" } else { "no" }));
+  lines=@.push(lines; str.concat("Cookies       : "; str.from_i32(meta.cookie_count)));
+
+  if @.len(meta.trackers) == 0{
+    lines=@.push(lines; "Trackers      : none detected");
+  } else {
+    lines=@.push(lines; str.concat("Trackers      : "; str.from_i32(@.len(meta.trackers))));
+    for t in meta.trackers{
+      lines=@.push(lines; str.concat("  • "; t.name; " ("; t.kind; ") — "; t.url));
+    };
+  };
+
+  if @.len(meta.form_fields) > 0{
+    lines=@.push(lines; "Form fields   :");
+    for f in meta.form_fields{
+      lines=@.push(lines; str.concat("  • "; f));
+    };
+  } else {
+    lines=@.push(lines; "Form fields   : none detected");
+  };
+
+  if @.len(meta.notes) > 0{
+    lines=@.push(lines; "Notes:");
+    for n in meta.notes{
+      lines=@.push(lines; str.concat("  ! "; n));
+    };
+  };
+
+  <str.join(lines; "\n")
+}

@@ -1,0 +1,220 @@
+// A2.1 — loke ask — direct LLM prompting via CLI
+
+i=t:shared.types;
+i=log:shared.log;
+i=out:cli.output;
+i=pipe:core.privacy.pipeline;
+i=disp:providers.dispatcher;
+i=router:core.router.router;
+i=gw:core.governance.gateway;
+i=cfg:shared.config;
+i=str:std.str;
+
+pub m.$ask_opts{
+  prompt:str;
+  model:str;
+  dry_run:bool;
+  stream:bool;
+  system_prompt:str;
+  tolerance:str
+}
+
+pub f=default_opts():$ask_opts{
+  <$ask_opts{
+    prompt:"";
+    model:"";
+    dry_run:false;
+    stream:false;
+    system_prompt:"";
+    tolerance:"instant"
+  }
+}
+
+pub f=parse_opts(args:@(str)):$ask_opts{
+  let opts=default_opts();
+  let i=0;
+  let argc=str.len(args);
+  loop i<argc{
+    let arg=args[i];
+    if str.eq(arg;"--model"){
+      let i=i+1;
+      if i<argc{
+        let opts=$ask_opts{
+          prompt:opts.prompt;
+          model:args[i];
+          dry_run:opts.dry_run;
+          stream:opts.stream;
+          system_prompt:opts.system_prompt;
+          tolerance:opts.tolerance
+        }
+      }
+    };
+    if str.eq(arg;"--dry-run"){
+      let opts=$ask_opts{
+        prompt:opts.prompt;
+        model:opts.model;
+        dry_run:true;
+        stream:opts.stream;
+        system_prompt:opts.system_prompt;
+        tolerance:opts.tolerance
+      }
+    };
+    if str.eq(arg;"--stream"){
+      let opts=$ask_opts{
+        prompt:opts.prompt;
+        model:opts.model;
+        dry_run:opts.dry_run;
+        stream:true;
+        system_prompt:opts.system_prompt;
+        tolerance:opts.tolerance
+      }
+    };
+    if str.eq(arg;"--system"){
+      let i=i+1;
+      if i<argc{
+        let opts=$ask_opts{
+          prompt:opts.prompt;
+          model:opts.model;
+          dry_run:opts.dry_run;
+          stream:opts.stream;
+          system_prompt:args[i];
+          tolerance:opts.tolerance
+        }
+      }
+    };
+    if str.eq(arg;"--tolerance"){
+      let i=i+1;
+      if i<argc{
+        let opts=$ask_opts{
+          prompt:opts.prompt;
+          model:opts.model;
+          dry_run:opts.dry_run;
+          stream:opts.stream;
+          system_prompt:opts.system_prompt;
+          tolerance:args[i]
+        }
+      }
+    };
+    if str.starts_with(arg;"--"){
+      let i=i+1
+    };
+    if str.eq(opts.prompt;""){
+      let opts=$ask_opts{
+        prompt:arg;
+        model:opts.model;
+        dry_run:opts.dry_run;
+        stream:opts.stream;
+        system_prompt:opts.system_prompt;
+        tolerance:opts.tolerance
+      }
+    };
+    let i=i+1
+  };
+  <opts
+}
+
+pub f=run(opts:$ask_opts;cfg:cfg.$loke_config):i32{
+  if str.eq(opts.prompt;""){
+    out.print_error("prompt required. Usage: loke ask \"your question\"");
+    <1
+  };
+
+  let cid=log.new_correlation_id();
+  log.info("loke ask starting";"cli.ask";cid);
+
+  out.print_pipeline_stage("Privacy Filter";"scanning...";"PII detection and anonymisation");
+
+  let pipeline_cfg=pipe.default_config();
+  let pipe_result=pipe.run(opts.prompt;pipeline_cfg)|{
+    $ok:v v;
+    $err:e{
+      log.warn(str.concat("privacy pipeline error: ";e);"cli.ask";cid);
+      pipe.fallback_result(opts.prompt)
+    }
+  };
+
+  let badge=out.sensitivity_badge(pipe_result.sensitivity_level);
+  out.print_line(
+    str.concat(
+      "  sensitivity: ";
+      str.concat(
+        badge;
+        str.concat(
+          "  entities found: ";
+          str.int_to_str(pipe_result.entity_count)
+        )
+      )
+    )
+  );
+
+  if opts.dry_run{
+    out.print_line(str.concat("  anonymised prompt: ";pipe_result.anonymised_text));
+    <0
+  };
+
+  out.print_pipeline_stage("Router";"selecting model...";"capability and sensitivity routing");
+
+  let decision=router.route($router.$route_request{
+    anonymised_prompt:pipe_result.anonymised_text;
+    sensitivity_level:pipe_result.sensitivity_level;
+    preferred_model:opts.model;
+    tolerance:opts.tolerance
+  })|{
+    $ok:v v;
+    $err:e{
+      log.warn(str.concat("router error: ";e);"cli.ask";cid);
+      router.default_decision(opts.model)
+    }
+  };
+
+  out.print_pipeline_stage(
+    "LLM";
+    "sending request...";
+    str.concat("model: ";decision.model_id)
+  );
+
+  let dispatch_result=disp.dispatch($disp.$dispatch_request{
+    model_id:decision.model_id;
+    prompt:pipe_result.anonymised_text;
+    system_prompt:opts.system_prompt;
+    stream:opts.stream
+  })|{
+    $ok:v v;
+    $err:e{
+      out.print_error(str.concat("dispatch failed: ";e));
+      <1
+    }
+  };
+
+  out.print_line(dispatch_result.response_text);
+
+  out.print_pipeline_stage("Audit";"logged";"interaction recorded to local store");
+
+  log.info("loke ask complete";"cli.ask";cid);
+  <0
+}
+
+pub f=usage():str{
+  <str.concat(
+    "Usage: loke ask \"<prompt>\" [options]\n";
+    str.concat(
+      "\n";
+      str.concat(
+        "Options:\n";
+        str.concat(
+          "  --model <id>       model to use (default: router decides)\n";
+          str.concat(
+            "  --dry-run          show anonymised prompt without sending to LLM\n";
+            str.concat(
+              "  --stream           stream response tokens as they arrive\n";
+              str.concat(
+                "  --system <prompt>  system prompt to prepend\n";
+                "  --tolerance <t>    latency tolerance: instant|background (default: instant)\n"
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+}

@@ -1,0 +1,329 @@
+// AG1.4 — Agent observability and debugging.
+// Provides statistics computation, run history formatting, debug traces, and pause logic.
+
+i=t:shared.types;
+i=at:core.agents.types;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$log_line{
+  timestamp:str;
+  level:str;
+  message:str;
+  agent_id:str;
+  run_id:str
+}
+
+pub m.$agent_stats{
+  agent_id:str;
+  total_runs:u32;
+  successful_runs:u32;
+  failed_runs:u32;
+  total_tokens:u32;
+  total_cost_usd:f64;
+  avg_duration_ms:u32;
+  last_run_at:str;
+  consecutive_failures:u32
+}
+
+pub m.$debug_trace{
+  run_id:str;
+  agent_id:str;
+  steps:@(str);
+  input_prompt:str;
+  pipeline_result:str;
+  model_selected:str;
+  output:str;
+  duration_ms:u32
+}
+
+// Compute statistics from run history for a specific agent.
+// Counts totals, computes averages, finds consecutive failures from the most recent runs.
+pub f=compute_stats(runs:@($at.agent_run);agent_id:str):$agent_stats{
+  let total=0;
+  let successful=0;
+  let failed=0;
+  let total_tokens=0;
+  let total_cost=0.0;
+  let total_duration=0;
+  let last_run_at="";
+  let consecutive_failures=0;
+  let counting_failures=true;
+
+  let count=runs.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let run=str.array_get(runs;i);
+      if str.eq(run.agent_id;agent_id){
+        total=total+1;
+        total_tokens=total_tokens+run.tokens_used;
+        total_cost=total_cost+run.cost_usd;
+        total_duration=total_duration+run.duration_ms;
+        if str.eq(last_run_at;""){
+          last_run_at=run.started_at
+        }else{
+          // keep the most recently seen (already set from earlier iteration)
+        };
+        if str.eq(run.outcome;"success"){
+          successful=successful+1;
+          counting_failures=false
+        }else{
+          failed=failed+1;
+          if counting_failures{
+            consecutive_failures=consecutive_failures+1
+          }else{
+            // stop counting once we have hit a success
+          }
+        }
+      }else{
+        // different agent — skip
+      };
+      i=i+1
+    }
+  };
+
+  let avg_dur=0;
+  if total>0{
+    avg_dur=total_duration/total
+  }else{
+    // no runs — avg stays 0
+  };
+
+  <$agent_stats{
+    agent_id:agent_id;
+    total_runs:total;
+    successful_runs:successful;
+    failed_runs:failed;
+    total_tokens:total_tokens;
+    total_cost_usd:total_cost;
+    avg_duration_ms:avg_dur;
+    last_run_at:last_run_at;
+    consecutive_failures:consecutive_failures
+  }
+}
+
+// Returns a table-formatted string of run history (most recent first, up to limit).
+pub f=format_run_history(runs:@($at.agent_run);limit:u32):str{
+  let header=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            "ID       | Started             | Duration | Tokens | Cost  | Outcome";
+            "\n"
+          );
+          "-------- | ------------------- | -------- | ------ | ----- | -------"
+        );
+        "\n"
+      );
+      ""
+    );
+    ""
+  );
+  let rows="";
+  let count=runs.len;
+  let i=0;
+  let shown=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      if shown>=limit{
+        break
+      }else{
+        let run=str.array_get(runs;i);
+        let dur_s=str.concat(str.from_u32(run.duration_ms/1000);"s");
+        let cost_str=str.concat("$";str.from_float(run.cost_usd));
+        let row=str.concat(
+          str.concat(
+            str.concat(
+              str.concat(
+                str.concat(
+                  str.concat(
+                    str.concat(
+                      str.concat(
+                        str.concat(
+                          str.concat(
+                            str.concat(run.id;" | ");
+                            run.started_at
+                          );
+                          " | "
+                        );
+                        dur_s
+                      );
+                      " | "
+                    );
+                    str.from_u32(run.tokens_used)
+                  );
+                  " | "
+                );
+                cost_str
+              );
+              " | "
+            );
+            run.outcome
+          );
+          "\n"
+        );
+        rows=str.concat(rows;row);
+        shown=shown+1
+      }
+    };
+    i=i+1
+  };
+  <str.concat(header;rows)
+}
+
+// Formatted stats summary for `loke agents stats <id>`.
+pub f=format_stats(stats:$agent_stats):str{
+  let total_str=str.from_u32(stats.total_runs);
+  let ok_str=str.from_u32(stats.successful_runs);
+  let fail_str=str.from_u32(stats.failed_runs);
+  let total_cost_str=str.concat("$";str.from_float(stats.total_cost_usd));
+  let avg_cost=0.0;
+  if stats.total_runs>0{
+    avg_cost=stats.total_cost_usd/(stats.total_runs as f64)
+  }else{
+    // no runs
+  };
+  let avg_cost_str=str.concat("$";str.from_float(avg_cost));
+  let avg_dur_str=str.concat(str.from_u32(stats.avg_duration_ms/1000);"s");
+
+  let line1=str.concat("Agent: ";stats.agent_id);
+  let line2=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat("Runs: ";total_str);
+          " total ("
+        );
+        ok_str
+      );
+      " ok, "
+    );
+    str.concat(fail_str;" failed)")
+  );
+  let line3=str.concat(
+    str.concat(
+      str.concat(
+        str.concat("Cost: ";total_cost_str);
+        " total, "
+      );
+      avg_cost_str
+    );
+    " avg"
+  );
+  let line4=str.concat("Duration: avg ";avg_dur_str);
+  let line5=str.concat("Last run: ";stats.last_run_at);
+
+  <str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              str.concat(
+                str.concat(line1;"\n");
+                line2
+              );
+              "\n"
+            );
+            line3
+          );
+          "\n"
+        );
+        line4
+      );
+      "\n"
+    );
+    line5
+  )
+}
+
+// Creates an empty debug trace for the given run.
+pub f=new_debug_trace(run_id:str;agent_id:str;input:str):$debug_trace{
+  <$debug_trace{
+    run_id:run_id;
+    agent_id:agent_id;
+    steps:@();
+    input_prompt:input;
+    pipeline_result:"";
+    model_selected:"";
+    output:"";
+    duration_ms:0
+  }
+}
+
+// Appends a step string to the trace.
+pub f=add_step(trace:mut $debug_trace;step:str):void{
+  trace.steps=@(trace.steps;step)
+}
+
+// Records the model selected for this run.
+pub f=record_model(trace:mut $debug_trace;model_id:str):void{
+  trace.model_selected=model_id
+}
+
+// Records the output and duration of this run.
+pub f=record_output(trace:mut $debug_trace;output:str;duration_ms:u32):void{
+  trace.output=output;
+  trace.duration_ms=duration_ms
+}
+
+// Returns a step-by-step trace string for debug mode display.
+pub f=format_trace(trace:$debug_trace):str{
+  let header=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat("Trace: ";trace.run_id);
+            " (agent: "
+          );
+          trace.agent_id
+        );
+        ")\n"
+      );
+      str.concat("Model: ";trace.model_selected)
+    );
+    "\n"
+  );
+
+  let steps_str="Steps:\n";
+  let count=trace.steps.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let step=str.array_get(trace.steps;i);
+      let n=str.concat(str.from_u32(i+1);". ");
+      steps_str=str.concat(steps_str;str.concat(str.concat(n;step);"\n"));
+      i=i+1
+    }
+  };
+
+  let footer=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat("Duration: ";str.from_u32(trace.duration_ms/1000));
+          "s\nOutput: "
+        );
+        trace.output
+      );
+      "\n"
+    );
+    ""
+  );
+
+  <str.concat(str.concat(header;steps_str);footer)
+}
+
+// Returns true if consecutive_failures >= max_consecutive_failures.
+pub f=should_pause(stats:$agent_stats;max_consecutive_failures:u32):bool{
+  <stats.consecutive_failures>=max_consecutive_failures
+}

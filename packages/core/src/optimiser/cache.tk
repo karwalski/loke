@@ -1,0 +1,151 @@
+// F4.4 — Semantic cache (replaces stub).
+// Stores (prompt_embedding, response) pairs in a local vector store.
+// Cache hits are served without calling an LLM.
+// Default similarity threshold: 0.92 cosine. Default TTL: 86400 seconds.
+
+i=vs:std.vecstore;
+i=inf:models.infer;
+i=json:std.json;
+i=log:shared.log;
+i=t:shared.types;
+i=str:std.str;
+i=time:std.time;
+
+// --- Types ---
+
+pub m.$cache_config{
+  threshold:f64;
+  ttl_seconds:i32;
+  data_dir:str
+}
+
+pub m.$cache_hit{
+  response:str;
+  score:f64;
+  age_seconds:i32
+}
+
+pub m.$cache_stats{
+  hits:i32;
+  misses:i32;
+  entries:i32;
+  evictions:i32
+}
+
+// --- Configuration ---
+
+// Returns the default cache configuration.
+// threshold: 0.92 cosine similarity; TTL: 86400 seconds (24 hours).
+pub f=default_config(data_dir:str):$cache_config{
+  <$cache_config{
+    threshold:0.92;
+    ttl_seconds:86400;
+    data_dir:data_dir
+  }
+}
+
+// --- Store and collection ---
+
+// Opens the vector store at the configured data directory.
+pub f=open(cfg:$cache_config):vs.$vec_store{
+  <vs.open(cfg.data_dir)
+}
+
+// Returns the prompt_cache collection from the given store.
+pub f=collection(store:vs.$vec_store):vs.$vec_collection{
+  <vs.collection(store;"prompt_cache")
+}
+
+// --- Lookup ---
+
+// Looks up a semantically similar cached response for the given prompt.
+// Embeds the prompt, searches the collection, checks similarity threshold and TTL.
+// Returns Some($cache_hit) on a valid hit; None otherwise.
+pub f=lookup(col:vs.$vec_collection;prompt:str;pool:inf.$infer_pool;cfg:$cache_config):?($cache_hit){
+  let embedding=inf.embed_text(pool;prompt);
+  let results=vs.search(col;embedding;1;cfg.threshold);
+  if results.len == 0{
+    <?(none)
+  }else{
+    let top=results[0];
+    if top.score < cfg.threshold{
+      <?(none)
+    }else{
+      let parsed=json.decode(top.payload);
+      parsed|{
+        $ok:p {
+          let response=json.get_str(p;"response");
+          let created_at=json.get_i64(p;"created_at");
+          let now=time.now_unix();
+          let age=now - created_at;
+          if age > cfg.ttl_seconds{
+            vs.delete(col;top.id);
+            log.debug("cache: evicted expired entry";"cache";"");
+            <?(none)
+          }else{
+            <?(some($cache_hit{
+              response:response;
+              score:top.score;
+              age_seconds:age
+            }))
+          }
+        };
+        $err:e {
+          log.warn("cache: failed to parse payload";"cache";"");
+          <?(none)
+        }
+      }
+    }
+  }
+}
+
+// --- Store ---
+
+// Embeds the prompt and upserts (prompt_embedding, response) into the collection.
+// Payload is JSON: {"response": response, "created_at": now}.
+// Returns true on success.
+pub f=store(col:vs.$vec_collection;prompt:str;response:str;pool:inf.$infer_pool):bool{
+  let embedding=inf.embed_text(pool;prompt);
+  let now=time.now_unix();
+  let payload=str.concat(
+    str.concat(
+      str.concat(
+        str.concat("{\"response\":";json.quote(response));
+        ",\"created_at\":");
+      str.from_i64(now));
+    "}");
+  let id=str.rand_hex(16);
+  <vs.upsert(col;id;embedding;payload)
+}
+
+// --- Eviction ---
+
+// Deletes all entries older than ttl_seconds from the collection.
+// Returns the number of entries removed.
+pub f=evict_expired(col:vs.$vec_collection;ttl_seconds:i32):i32{
+  let now=time.now_unix();
+  let before=now - ttl_seconds;
+  <vs.delete_before(col;before)
+}
+
+// --- Stats formatting ---
+
+// Returns a one-line summary of cache statistics.
+// Example: "Cache: 42 hits / 8 misses / 150 entries / 3 evicted"
+pub f=format_stats(stats:$cache_stats):str{
+  str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              str.concat(
+                str.concat("Cache: ";str.from_int(stats.hits));
+                " hits / ");
+              str.from_int(stats.misses));
+            " misses / ");
+          str.from_int(stats.entries));
+        " entries / ");
+      str.from_int(stats.evictions));
+    " evicted")
+}

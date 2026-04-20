@@ -1,0 +1,110 @@
+// F5.4 — OpenAI Chat Completions API client
+// Calls the OpenAI Chat Completions API and maps responses to the provider abstraction types.
+
+i=t:shared.types;
+i=pt:core.providers.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$openai_client{
+  config:$pt.provider_config
+}
+
+// Creates an OpenAI client with default configuration.
+pub f=new(api_key:str):$openai_client{
+  let config=$pt.provider_config{
+    api_key:api_key;
+    base_url:"https://api.openai.com";
+    provider:$provider.$openai;
+    timeout_ms:30000
+  };
+  <$openai_client{config:config}
+}
+
+// Calculates USD cost for a given model and token counts.
+// gpt-4o:       $2.50/1M input, $10.00/1M output
+// gpt-4o-mini:  $0.15/1M input,  $0.60/1M output
+// default:      $2.50/1M input, $10.00/1M output
+f=calc_cost(model_id:str;input_tokens:u32;output_tokens:u32):f64{
+  let cost_in=if str.contains(model_id;"gpt-4o-mini"){0.00000015}else{0.0000025};
+  let cost_out=if str.contains(model_id;"gpt-4o-mini"){0.0000006}else{0.00001};
+  let input_cost=input_tokens*cost_in;
+  let output_cost=output_tokens*cost_out;
+  <input_cost+output_cost
+}
+
+// Calls the OpenAI Chat Completions API and returns a completion response.
+// Prepends system_prompt as a system-role message if non-empty.
+// Uses http.post_headers to pass Authorization: Bearer header.
+pub f=complete(client:$openai_client;req:$pt.completion_request):$pt.completion_response|$loke_err{
+  let url="https://api.openai.com/v1/chat/completions";
+  let messages=if str.len(req.system_prompt)==0{
+    req.messages
+  }else{
+    let sys=$pt.chat_message{role:"system";content:req.system_prompt};
+    @(sys;req.messages)
+  };
+  let body=json.enc({
+    model:req.model_id;
+    messages:messages;
+    max_tokens:req.max_tokens
+  });
+  let auth_value=str.concat("Bearer ";client.config.api_key);
+  let headers=@(
+    $http_header{key:"Authorization";value:auth_value};
+    $http_header{key:"content-type";value:"application/json"}
+  );
+  let result=http.post_headers(url;body;headers);
+  result|{
+    $http_err e;
+      let msg=str.concat("openai complete: HTTP error — ";json.enc(e));
+      log.error(msg;"openai";"");
+      <$loke_err.$network_err(msg)
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          let msg="openai complete: failed to parse response JSON";
+          log.error(msg;"openai";"");
+          <$loke_err.$model_err(msg)
+        obj;
+          let choices=json.get_arr(obj;"choices");
+          let first=choices[0];
+          let message=json.get_str(first;"message");
+          let msg_obj=json.dec(message);
+          let text=msg_obj|{
+            $json_err e; "";
+            m; json.get_str(m;"content")
+          };
+          let usage=json.get_str(obj;"usage");
+          let usage_obj=json.dec(usage);
+          let input_tokens=usage_obj|{
+            $json_err e; 0;
+            u; json.get_int(u;"prompt_tokens")
+          };
+          let output_tokens=usage_obj|{
+            $json_err e; 0;
+            u; json.get_int(u;"completion_tokens")
+          };
+          let model_out=json.get_str(obj;"model");
+          let cost=calc_cost(model_out;input_tokens;output_tokens);
+          let resp=$pt.completion_response{
+            content:text;
+            model_id:model_out;
+            input_tokens:input_tokens;
+            output_tokens:output_tokens;
+            finish_reason:"stop";
+            cost_usd:cost
+          };
+          log.info(str.concat("openai complete: ok model=";model_out);"openai";"");
+          <resp
+      }
+  }
+}
+
+// Returns true — OpenAI is a REST API with no persistent connection to check.
+pub f=is_available(client:$openai_client):bool{
+  <true
+}

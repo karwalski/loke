@@ -1,0 +1,160 @@
+// F1.7 partial — Health check system for `loke doctor`
+
+i=t:shared.types;
+i=http:std.http;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$health_status{
+  $ok;
+  $degraded(str);
+  $down(str)
+}
+
+pub m.$subsystem_health{
+  name:str;
+  status:$health_status;
+  detail:str
+}
+
+pub m.$health_report{
+  overall:$health_status;
+  subsystems:@($subsystem_health)
+}
+
+pub f=check_ollama(ollama_url:str):$subsystem_health{
+  let url=str.concat(ollama_url;"/api/tags");
+  let result=http.get_timeout(url;3000);
+  result|{
+    $http_err e;
+      <$subsystem_health{
+        name="Ollama";
+        status=$health_status.$down("Ollama not running — start with: ollama serve");
+        detail="unreachable"
+      }
+    body;
+      <$subsystem_health{
+        name="Ollama";
+        status=$health_status.$ok;
+        detail="reachable"
+      }
+  }
+}
+
+pub f=check_presidio(presidio_url:str):$subsystem_health{
+  let url=str.concat(presidio_url;"/health");
+  let result=http.get_status(url);
+  result|{
+    $http_err e;
+      <$subsystem_health{
+        name="Presidio (NER)";
+        status=$health_status.$degraded("Presidio unavailable — NER accuracy reduced to regex-only");
+        detail="unreachable"
+      }
+    resp;
+      if resp.status==200{
+        <$subsystem_health{
+          name="Presidio (NER)";
+          status=$health_status.$ok;
+          detail="reachable"
+        }
+      }else{
+        <$subsystem_health{
+          name="Presidio (NER)";
+          status=$health_status.$degraded("Presidio unavailable — NER accuracy reduced to regex-only");
+          detail=str.concat("status ";str.from_int(resp.status))
+        }
+      }
+  }
+}
+
+pub f=check_llmlingua(llmlingua_url:str):$subsystem_health{
+  let url=str.concat(llmlingua_url;"/health");
+  let result=http.get_status(url);
+  result|{
+    $http_err e;
+      <$subsystem_health{
+        name="LLMLingua";
+        status=$health_status.$degraded("LLMLingua unavailable — token compression disabled");
+        detail="unreachable"
+      }
+    resp;
+      if resp.status==200{
+        <$subsystem_health{
+          name="LLMLingua";
+          status=$health_status.$ok;
+          detail="reachable"
+        }
+      }else{
+        <$subsystem_health{
+          name="LLMLingua";
+          status=$health_status.$degraded("LLMLingua unavailable — token compression disabled");
+          detail=str.concat("status ";str.from_int(resp.status))
+        }
+      }
+  }
+}
+
+pub f=check_all(ollama_url:str;presidio_url:str;llmlingua_url:str):$health_report{
+  let ollama=check_ollama(ollama_url);
+  let presidio=check_presidio(presidio_url);
+  let llmlingua=check_llmlingua(llmlingua_url);
+  let subsystems=@(ollama;presidio;llmlingua);
+  let overall=ollama.status|{
+    $ok;
+      let has_degraded=false;
+      presidio.status|{
+        $ok ();
+        $degraded d let has_degraded=true;
+        $down d let has_degraded=true
+      };
+      llmlingua.status|{
+        $ok ();
+        $degraded d let has_degraded=true;
+        $down d let has_degraded=true
+      };
+      if has_degraded{
+        <$health_status.$degraded("one or more optional subsystems unavailable")
+      }else{
+        <$health_status.$ok
+      }
+    $degraded d;
+      <$health_status.$down("Ollama is not running")
+    $down d;
+      <$health_status.$down("Ollama is not running")
+  };
+  <$health_report{
+    overall=overall;
+    subsystems=subsystems
+  }
+}
+
+pub f=format_report(report:$health_report):str{
+  let overall_str=report.overall|{
+    $ok "ok";
+    $degraded d str.concat("degraded: ";d);
+    $down d str.concat("down: ";d)
+  };
+  let header=str.concat("loke doctor — overall: ";overall_str);
+  let sep="----------------------------------------";
+  let body=str.concat(header;str.concat("\n";sep));
+  let i=0;
+  loop i<str.len(report.subsystems){
+    let sub=report.subsystems[i];
+    let status_str=sub.status|{
+      $ok "  ok";
+      $degraded d str.concat("  degraded — ";d);
+      $down d str.concat("  down — ";d)
+    };
+    let line=str.concat(
+      "\n";
+      str.concat(
+        sub.name;
+        str.concat("\n";status_str)
+      )
+    );
+    let body=str.concat(body;line);
+    let i=i+1
+  };
+  <body
+}

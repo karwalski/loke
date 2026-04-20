@@ -1,0 +1,342 @@
+// F2.7 — Background inference queue
+// Simple persistent job queue for Background-tier requests.
+// Priority order: user > agent > evaluation.
+
+i=t:shared.types;
+i=str:std.str;
+i=log:shared.log;
+
+// --- Types ---
+
+pub m.$job_status{
+  $pending;
+  $running;
+  $completed;
+  $failed(str);
+  $cancelled
+}
+
+pub m.$job_priority{
+  $user;
+  $agent;
+  $evaluation
+}
+
+pub m.$queue_job{
+  id:str;
+  model_id:str;
+  prompt:str;
+  priority:$job_priority;
+  status:$job_status;
+  created_at:str;
+  started_at:str;
+  completed_at:str;
+  result:str;
+  error:str;
+  estimated_tok_s:f64
+}
+
+pub m.$job_queue{
+  jobs:@($queue_job);
+  max_concurrent:u32
+}
+
+// --- Constructor ---
+
+// Creates an empty job queue with max_concurrent=1.
+pub f=new_queue():$job_queue{
+  <$job_queue{
+    jobs:@();
+    max_concurrent:1
+  }
+}
+
+// --- Enqueue ---
+
+// Adds a new $pending job to the queue. Returns the generated job ID.
+pub f=enqueue(queue:mut $job_queue;model_id:str;prompt:str;priority:$job_priority):str{
+  let id=str.rand_hex(8);
+  let cid=log.new_correlation_id();
+  let job=$queue_job{
+    id:id;
+    model_id:model_id;
+    prompt:prompt;
+    priority:priority;
+    status:$job_status.$pending;
+    created_at:"";
+    started_at:"";
+    completed_at:"";
+    result:"";
+    error:"";
+    estimated_tok_s:0.0
+  };
+  queue.jobs=@(queue.jobs;job);
+  log.info(str.concat("queue: enqueued job ";id);"queue";cid);
+  <id
+}
+
+// --- Internal: priority rank (lower = higher priority) ---
+
+f=priority_rank(p:$job_priority):u32{
+  p|{
+    $user       0;
+    $agent      1;
+    $evaluation 2
+  }
+}
+
+// --- Next pending ---
+
+// Returns the highest-priority pending job (user > agent > evaluation).
+// Returns $model_err if no pending jobs exist.
+pub f=next_pending(queue:$job_queue):$queue_job|$loke_err{
+  let found=false;
+  let best=$queue_job{
+    id:"";
+    model_id:"";
+    prompt:"";
+    priority:$job_priority.$evaluation;
+    status:$job_status.$pending;
+    created_at:"";
+    started_at:"";
+    completed_at:"";
+    result:"";
+    error:"";
+    estimated_tok_s:0.0
+  };
+  let best_rank=3;
+
+  queue.jobs|{
+    job;
+      let is_pending=job.status|{
+        $pending    true;
+        $running    false;
+        $completed  false;
+        $failed:_   false;
+        $cancelled  false
+      };
+      if is_pending{
+        let rank=priority_rank(job.priority);
+        if rank < best_rank{
+          best=job;
+          best_rank=rank;
+          found=true
+        }
+      }
+  };
+
+  if found{
+    <$ok(best)
+  }else{
+    <$err($loke_err.$model_err("queue: no pending jobs"))
+  }
+}
+
+// --- Mark running ---
+
+// Updates the job with the given ID to $running and sets started_at.
+pub f=mark_running(queue:mut $job_queue;job_id:str):void{
+  let count=queue.jobs.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let job=queue.jobs[i];
+      if str.eq(job.id;job_id){
+        queue.jobs[i]=$queue_job{
+          id:job.id;
+          model_id:job.model_id;
+          prompt:job.prompt;
+          priority:job.priority;
+          status:$job_status.$running;
+          created_at:job.created_at;
+          started_at:"now";
+          completed_at:job.completed_at;
+          result:job.result;
+          error:job.error;
+          estimated_tok_s:job.estimated_tok_s
+        }
+      };
+      i=i+1
+    }
+  };
+  <()
+}
+
+// --- Mark completed ---
+
+// Updates the job with the given ID to $completed, stores result and completed_at.
+pub f=mark_completed(queue:mut $job_queue;job_id:str;result:str):void{
+  let count=queue.jobs.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let job=queue.jobs[i];
+      if str.eq(job.id;job_id){
+        queue.jobs[i]=$queue_job{
+          id:job.id;
+          model_id:job.model_id;
+          prompt:job.prompt;
+          priority:job.priority;
+          status:$job_status.$completed;
+          created_at:job.created_at;
+          started_at:job.started_at;
+          completed_at:"now";
+          result:result;
+          error:job.error;
+          estimated_tok_s:job.estimated_tok_s
+        }
+      };
+      i=i+1
+    }
+  };
+  <()
+}
+
+// --- Mark failed ---
+
+// Updates the job with the given ID to $failed(error).
+pub f=mark_failed(queue:mut $job_queue;job_id:str;error:str):void{
+  let count=queue.jobs.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let job=queue.jobs[i];
+      if str.eq(job.id;job_id){
+        queue.jobs[i]=$queue_job{
+          id:job.id;
+          model_id:job.model_id;
+          prompt:job.prompt;
+          priority:job.priority;
+          status:$job_status.$failed(error);
+          created_at:job.created_at;
+          started_at:job.started_at;
+          completed_at:job.completed_at;
+          result:job.result;
+          error:error;
+          estimated_tok_s:job.estimated_tok_s
+        }
+      };
+      i=i+1
+    }
+  };
+  <()
+}
+
+// --- Cancel ---
+
+// Sets the job with the given ID to $cancelled.
+pub f=cancel(queue:mut $job_queue;job_id:str):void{
+  let count=queue.jobs.len;
+  let i=0;
+  loop{
+    if i >= count{
+      break
+    }else{
+      let job=queue.jobs[i];
+      if str.eq(job.id;job_id){
+        queue.jobs[i]=$queue_job{
+          id:job.id;
+          model_id:job.model_id;
+          prompt:job.prompt;
+          priority:job.priority;
+          status:$job_status.$cancelled;
+          created_at:job.created_at;
+          started_at:job.started_at;
+          completed_at:job.completed_at;
+          result:job.result;
+          error:job.error;
+          estimated_tok_s:job.estimated_tok_s
+        }
+      };
+      i=i+1
+    }
+  };
+  <()
+}
+
+// --- List jobs ---
+
+// Returns all jobs in the queue.
+pub f=list_jobs(queue:$job_queue):@($queue_job){
+  <queue.jobs
+}
+
+// --- Internal: status label ---
+
+f=status_label(status:$job_status):str{
+  status|{
+    $pending    "pending";
+    $running    "running";
+    $completed  "completed";
+    $failed:e   str.concat("failed: ";e);
+    $cancelled  "cancelled"
+  }
+}
+
+// --- Internal: priority label ---
+
+f=priority_label(p:$job_priority):str{
+  p|{
+    $user       "user";
+    $agent      "agent";
+    $evaluation "eval"
+  }
+}
+
+// --- Format list ---
+
+// Returns a table-format string suitable for `loke queue list`.
+// Columns: ID | Priority | Status | Model | Prompt (truncated)
+pub f=format_list(queue:$job_queue):str{
+  if queue.jobs.len==0{
+    <"No jobs in queue."
+  }else{
+    let header="ID       | Pri   | Status    | Model                | Prompt";
+    let sep    ="---------|-------|-----------|----------------------|-----------------------------";
+    let rows=queue.jobs.map|job{
+      let id_col=str.concat(job.id;"        ");
+      let id_8=str.slice(id_col;0;8);
+      let pri_col=str.concat(priority_label(job.priority);"     ");
+      let pri_5=str.slice(pri_col;0;5);
+      let stat_col=str.concat(status_label(job.status);"          ");
+      let stat_9=str.slice(stat_col;0;9);
+      let model_col=str.concat(job.model_id;"                    ");
+      let model_20=str.slice(model_col;0;20);
+      let prompt_preview=if str.len(job.prompt) > 29{
+        str.concat(str.slice(job.prompt;0;26);"...")
+      }else{
+        job.prompt
+      };
+      str.concat(
+        id_8;
+        str.concat(
+          " | ";
+          str.concat(
+            pri_5;
+            str.concat(
+              " | ";
+              str.concat(
+                stat_9;
+                str.concat(
+                  " | ";
+                  str.concat(
+                    model_20;
+                    str.concat(" | ";prompt_preview)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    };
+    let body=str.join(rows;"\n");
+    <str.concat(header;str.concat("\n";str.concat(sep;str.concat("\n";body))))
+  }
+}

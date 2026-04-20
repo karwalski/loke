@@ -1,0 +1,68 @@
+i=t:companion.types
+i=ch:companion.channel
+i=tls:std.tls
+i=json:std.json
+i=log:shared.log
+i=pt:providers.types
+
+m.$remote_request{ model:str; prompt:str; max_tokens:i32 }
+m.$remote_response{ text:str; tokens_used:i32; latency_ms:i32; ok:bool; err:str }
+
+pub f=execute(companion:t.$companion;keypair:tls.$tls_keypair;req:$remote_request):$remote_response{
+  conn_opt=ch.connect(companion;keypair);
+  |{ conn_opt.$none:
+    <$remote_response{ text=""; tokens_used=0; latency_ms=0; ok=false; err="connection failed" }
+  };
+  conn=conn_opt.$some;
+  payload=json.encode({ type="generate"; model=req.model; prompt=req.prompt; max_tokens=req.max_tokens });
+  sent=ch.send(conn;payload);
+  |{ sent.$false:
+    ch.close(conn);
+    <$remote_response{ text=""; tokens_used=0; latency_ms=0; ok=false; err="send failed" }
+  };
+  raw_opt=ch.recv(conn);
+  |{ raw_opt.$none:
+    ch.close(conn);
+    <$remote_response{ text=""; tokens_used=0; latency_ms=0; ok=false; err="no response" }
+  };
+  raw=raw_opt.$some;
+  ch.close(conn);
+  parsed=json.decode(raw);
+  text=parsed["text"] as str;
+  tokens_used=parsed["tokens_used"] as i32;
+  latency_ms=parsed["latency_ms"] as i32;
+  <$remote_response{ text=text; tokens_used=tokens_used; latency_ms=latency_ms; ok=true; err="" }
+}
+
+pub f=status(companion:t.$companion;keypair:tls.$tls_keypair):t.$companion_status{
+  conn_opt=ch.connect(companion;keypair);
+  |{ conn_opt.$none:
+    <t.$companion_status{ companion_id=companion.id; online=false; models=[]; gpu_gb=0.0; ram_gb=0.0 }
+  };
+  conn=conn_opt.$some;
+  payload=json.encode({ type="status" });
+  sent=ch.send(conn;payload);
+  |{ sent.$false:
+    ch.close(conn);
+    <t.$companion_status{ companion_id=companion.id; online=false; models=[]; gpu_gb=0.0; ram_gb=0.0 }
+  };
+  raw_opt=ch.recv(conn);
+  |{ raw_opt.$none:
+    ch.close(conn);
+    <t.$companion_status{ companion_id=companion.id; online=false; models=[]; gpu_gb=0.0; ram_gb=0.0 }
+  };
+  raw=raw_opt.$some;
+  ch.close(conn);
+  parsed=json.decode(raw);
+  models=parsed["models"] as @(str);
+  gpu_gb=parsed["gpu_gb"] as f32;
+  ram_gb=parsed["ram_gb"] as f32;
+  <t.$companion_status{ companion_id=companion.id; online=true; models=models; gpu_gb=gpu_gb; ram_gb=ram_gb }
+}
+
+pub f=format_status(s:t.$companion_status):str{
+  state="offline";
+  |{ s.online: state="online" };
+  n=s.models.len();
+  <"Companion {s.companion_id}: {state} | {n} models | {s.gpu_gb}GB GPU | {s.ram_gb}GB RAM"
+}

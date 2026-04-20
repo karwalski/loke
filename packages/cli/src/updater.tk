@@ -1,0 +1,219 @@
+// A6.3 — Auto-update flow
+// On startup, checks for a newer release via GitHub API.
+// Downloads, checksums, and replaces the running binary.
+
+m=cli.updater;
+
+i=fs:std.fs;
+i=str:std.string;
+i=http:std.http;
+i=sh:std.shell;
+
+pub m.$update_info{
+  current:str;
+  latest:str;
+  download_url:str;
+  release_notes:str;
+  is_newer:bool
+}
+
+pub m.$update_result{
+  ok:bool;
+  message:str
+}
+
+// Snooze key written to ~/.loke/settings — value is unix timestamp of snooze
+let snooze_key="loke.updater.snooze_until";
+let snooze_path="~/.loke/updater_snooze";
+let releases_url="https://api.github.com/repos/karwalski/loke/releases/latest";
+let snooze_duration_secs=86400;
+
+pub f=check(current_version:str):$update_info{
+  let resp=http.get_json(releases_url)|{
+    $ok:v v;
+    $err:e;
+      <$update_info{
+        current=current_version;
+        latest=current_version;
+        download_url="";
+        release_notes="";
+        is_newer=false
+      }
+  };
+
+  let latest=str.trim_prefix(
+    str.get_json_str(resp;"tag_name");
+    "v"
+  );
+
+  let release_notes=str.get_json_str(resp;"body");
+
+  // Resolve platform asset URL — prefer arm64 on macOS, x86_64 on Windows
+  let os_name=sh.run("uname -s").stdout;
+  let arch_name=sh.run("uname -m").stdout;
+
+  let asset_suffix=??(str.contains(os_name;"Darwin")){
+    ??(str.contains(arch_name;"arm64")){
+      "loke-macos-arm64"
+    }{
+      "loke-macos-x86_64"
+    }
+  }{
+    "loke-windows-x86_64.exe"
+  };
+
+  let assets=str.get_json_arr(resp;"assets");
+  let download_url="";
+  let i=0;
+  loop i<str.len(assets){
+    let asset=assets[i];
+    let asset_name=str.get_json_str(asset;"name");
+    if str.contains(asset_name;asset_suffix){
+      let download_url=str.get_json_str(asset;"browser_download_url")
+    };
+    let i=i+1
+  };
+
+  let is_newer=_version_gt(latest;current_version);
+
+  <$update_info{
+    current=current_version;
+    latest=latest;
+    download_url=download_url;
+    release_notes=release_notes;
+    is_newer=is_newer
+  }
+}
+
+pub f=download(info:$update_info;dest_dir:str):str{
+  let filename=str.concat("loke-";str.concat(info.latest;"-update"));
+  let dest_path=str.concat(dest_dir;str.concat("/";filename));
+
+  http.download(info.download_url;dest_path)|{
+    $ok:_ dest_path;
+    $err:e ""
+  }
+}
+
+pub f=verify_checksum(bin_path:str;expected_sha256:str):bool{
+  // Compute SHA-256 via platform utility — shasum -a 256 on macOS, sha256sum on Linux
+  let os_name=sh.run("uname -s").stdout;
+  let cmd=??(str.contains(os_name;"Darwin")){
+    str.concat("shasum -a 256 ";bin_path)
+  }{
+    str.concat("sha256sum ";bin_path)
+  };
+
+  let res=sh.run(cmd);
+  if res.exit_code!=0{
+    <false
+  };
+
+  // Output format: "<hash>  <filename>" — extract first token
+  let computed=str.split_first(str.trim(res.stdout);" ");
+  <str.eq(computed;expected_sha256)
+}
+
+pub f=apply(new_bin_path:str;current_bin_path:str):$update_result{
+  // Back up current binary
+  let bak_path=str.concat(current_bin_path;".bak");
+  let cp_bak=sh.run(str.concat("cp ";str.concat(current_bin_path;str.concat(" ";bak_path))));
+  if cp_bak.exit_code!=0{
+    <$update_result{
+      ok=false;
+      message=str.concat("backup failed: ";cp_bak.stderr)
+    }
+  };
+
+  // Replace with new binary
+  let mv_res=sh.run(str.concat("mv ";str.concat(new_bin_path;str.concat(" ";current_bin_path))));
+  if mv_res.exit_code!=0{
+    // Attempt to restore backup before surfacing error
+    sh.run(str.concat("mv ";str.concat(bak_path;str.concat(" ";current_bin_path))));
+    <$update_result{
+      ok=false;
+      message=str.concat("replace failed: ";mv_res.stderr)
+    }
+  };
+
+  // Ensure executable permission
+  let chmod_res=sh.run(str.concat("chmod +x ";current_bin_path));
+  if chmod_res.exit_code!=0{
+    <$update_result{
+      ok=false;
+      message=str.concat("chmod failed: ";chmod_res.stderr)
+    }
+  };
+
+  // Smoke-test: verify new binary responds to --version
+  let smoke=sh.run(str.concat(current_bin_path;" --version"));
+  if smoke.exit_code!=0{
+    // Restore backup — new binary is broken
+    sh.run(str.concat("mv ";str.concat(bak_path;str.concat(" ";current_bin_path))));
+    <$update_result{
+      ok=false;
+      message="new binary failed smoke test — restored previous version"
+    }
+  };
+
+  <$update_result{
+    ok=true;
+    message=str.concat("updated successfully — backup at ";bak_path)
+  }
+}
+
+pub f=prompt_update(info:$update_info):bool{
+  if !info.is_newer{
+    <false
+  };
+
+  // Read snooze timestamp — if within snooze window, suppress prompt
+  let now_secs=str.to_int(sh.run("date +%s").stdout);
+  let snooze_raw=fs.read_text(snooze_path)|{
+    $ok:v v;
+    $err:e ""
+  };
+  if str.len(snooze_raw)>0{
+    let snooze_until=str.to_int(str.trim(snooze_raw));
+    if now_secs<snooze_until{
+      <false
+    }
+  };
+
+  // Write a new snooze timestamp so we do not prompt again until tomorrow
+  let next_snooze=str.from_int(now_secs+snooze_duration_secs);
+  fs.write_text(snooze_path;next_snooze);
+
+  <true
+}
+
+// --- Internal helpers ---
+
+// Returns true when version string a is strictly greater than b.
+// Compares semver segments numerically: major, minor, patch.
+f=_version_gt(a:str;b:str):bool{
+  let a_parts=str.split(a;".");
+  let b_parts=str.split(b;".");
+
+  let a_major=str.to_int(_part_or(a_parts;0;"0"));
+  let b_major=str.to_int(_part_or(b_parts;0;"0"));
+  if a_major>b_major{ <true };
+  if a_major<b_major{ <false };
+
+  let a_minor=str.to_int(_part_or(a_parts;1;"0"));
+  let b_minor=str.to_int(_part_or(b_parts;1;"0"));
+  if a_minor>b_minor{ <true };
+  if a_minor<b_minor{ <false };
+
+  let a_patch=str.to_int(_part_or(a_parts;2;"0"));
+  let b_patch=str.to_int(_part_or(b_parts;2;"0"));
+  <a_patch>b_patch
+}
+
+f=_part_or(parts:@(str);idx:i32;fallback:str):str{
+  ??(idx<str.len(parts)){
+    parts[idx]
+  }{
+    fallback
+  }
+}

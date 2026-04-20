@@ -1,0 +1,158 @@
+// F3.2/F3.3 — NLP NER via Ollama
+// Uses the local LLM to detect named entities the regex layer missed.
+// Calls Ollama's chat API directly to avoid circular dependency with shared models.
+
+i=t:shared.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$ner_client{
+  ollama_url:str;
+  model_id:str
+}
+
+// Creates a new NER client. Default model is qwen2.5:7b.
+pub f=new(ollama_url:str;model_id:str):$ner_client{
+  <$ner_client{ollama_url:ollama_url;model_id:model_id}
+}
+
+// Returns true if the Ollama instance is reachable (GET /api/tags)
+pub f=is_available(client:$ner_client):bool{
+  let url=str.concat(client.ollama_url;"/api/tags");
+  let result=http.get_timeout(url;2000);
+  result|{
+    $http_err e;
+      <false
+    body;
+      <true
+  }
+}
+
+// Maps a NER entity type string to a sensitivity level
+f=ner_sensitivity(entity_type:str):$sensitivity_level{
+  if str.eq(entity_type;"MEDICAL"){
+    <$confidential
+  }else{
+    if str.eq(entity_type;"FINANCIAL"){
+      <$confidential
+    }else{
+      if str.eq(entity_type;"PERSON"){
+        <$confidential
+      }else{
+        if str.eq(entity_type;"LOCATION"){
+          <$internal
+        }else{
+          if str.eq(entity_type;"ORGANIZATION"){
+            <$internal
+          }else{
+            if str.eq(entity_type;"DATE"){
+              <$internal
+            }else{
+              <$internal
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Maps a NER entity type string to a confidence score
+f=ner_confidence(entity_type:str):f64{
+  if str.eq(entity_type;"MEDICAL"){
+    <0.78
+  }else{
+    if str.eq(entity_type;"FINANCIAL"){
+      <0.78
+    }else{
+      if str.eq(entity_type;"PERSON"){
+        <0.78
+      }else{
+        if str.eq(entity_type;"LOCATION"){
+          <0.65
+        }else{
+          if str.eq(entity_type;"ORGANIZATION"){
+            <0.65
+          }else{
+            if str.eq(entity_type;"DATE"){
+              <0.50
+            }else{
+              <0.50
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Builds a simple placeholder string for NER entities: [TYPE_NER_1]
+f=make_ner_placeholder(entity_type:str):str{
+  let open=str.concat("[";entity_type);
+  let mid=str.concat(open;"_NER_1]");
+  <mid
+}
+
+// Uses Ollama chat API to detect named entities in text.
+// Instructs the model to return a JSON array: [{"type":"PERSON","value":"..."},...]
+// Valid types: PERSON, LOCATION, ORGANIZATION, DATE, MEDICAL, FINANCIAL
+pub f=detect_entities(client:$ner_client;text:str):@($pii_entity)|$loke_err{
+  let url=str.concat(client.ollama_url;"/api/chat");
+  let system_msg="You are a named entity recognition system. Extract named entities from the text and return ONLY a JSON array. No explanation.";
+  let user_msg=str.concat("Extract entities from: ";text);
+  let body=json.enc({
+    model:client.model_id;
+    messages:@(
+      {role:"system";content:system_msg};
+      {role:"user";content:user_msg}
+    );
+    stream:false
+  });
+  let result=http.post(url;body;"application/json");
+  result|{
+    $http_err e;
+      <$loke_err.$network_err("ner detect_entities: failed to reach Ollama /api/chat")
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          <$loke_err.$privacy_err("ner detect_entities: failed to parse Ollama response JSON")
+        obj;
+          let message_obj=json.get_str(obj;"message");
+          let msg_parsed=json.dec(message_obj);
+          msg_parsed|{
+            $json_err e;
+              <$loke_err.$privacy_err("ner detect_entities: failed to parse message field")
+            msg_obj;
+              let content=json.get_str(msg_obj;"content");
+              let arr_parsed=json.dec(content);
+              arr_parsed|{
+                $json_err e;
+                  <$loke_err.$privacy_err("ner detect_entities: model response is not valid JSON array")
+                arr;
+                  let entities=@();
+                  let items=json.get_arr(arr;"");
+                  items|{
+                    item;
+                      let entity_type=json.get_str(item;"type");
+                      let value=json.get_str(item;"value");
+                      let placeholder=make_ner_placeholder(entity_type);
+                      let confidence=ner_confidence(entity_type);
+                      let entity=t.$pii_entity{
+                        entity_type:entity_type;
+                        value:value;
+                        start:0;
+                        end:0;
+                        confidence:confidence;
+                        placeholder:placeholder
+                      };
+                      entities=@(entities;entity)
+                  };
+                  <entities
+              }
+          }
+      }
+  }
+}

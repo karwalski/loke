@@ -1,0 +1,162 @@
+// G1.1 — Governance gateway.
+// Single mandatory entry point for all AI interactions in loke.
+// Every request must pass through submit() before reaching any LLM provider.
+
+i=t:shared.types;
+i=gt:core.governance.types;
+i=uc:core.governance.use_cases;
+i=pol:core.governance.policy;
+i=log:shared.log;
+i=str:std.str;
+
+pub m.$gateway{
+  registry:$uc.use_case_registry;
+  kill_switch_active:bool;
+  kill_switch_reason:str
+}
+
+// Creates a gateway with a default use case registry and the kill switch off.
+pub f=new():$gateway{
+  let registry=uc.new_registry();
+  <$gateway{
+    registry:registry;
+    kill_switch_active:false;
+    kill_switch_reason:""
+  }
+}
+
+// Returns a default $routing_decision placeholder used when no routing has been performed yet.
+f=default_routing():$routing_decision{
+  let spec=$model_spec{
+    id:"";
+    provider:$provider.$local;
+    context_window:0;
+    cost_per_1k_input:0.0;
+    cost_per_1k_output:0.0;
+    tier:$model_tier.$interactive
+  };
+  <$routing_decision{
+    model:spec;
+    reason:"pending";
+    tier:$model_tier.$interactive;
+    estimated_cost:0.0;
+    estimated_latency_ms:0
+  }
+}
+
+// The main governance entry point.
+// All AI interactions must pass through this function.
+//
+// Steps:
+//   1. Kill switch check
+//   2. Use case lookup (default to chat-completion on miss, deny with message)
+//   3. Risk classification
+//   4. Policy evaluation
+//   5. Control selection
+//   6. Structured logging
+//   7. Return $gateway_decision
+pub f=submit(gw:$gateway;req:$gt.gateway_request):$gt.gateway_decision|$loke_err{
+  // Step 1: kill switch
+  if gw.kill_switch_active{
+    let reason=str.concat("Kill switch active: ";gw.kill_switch_reason);
+    let decision=$gt.gateway_decision{
+      request_id:req.request_id;
+      policy_decision:$gt.policy_decision.$deny(reason);
+      risk_tier:$gt.risk_tier.$high;
+      routing:default_routing();
+      controls_applied:@("kill-switch");
+      explanation:reason;
+      timestamp:str.now_iso8601()
+    };
+    log.error(str.concat("gateway deny — ";reason);"gateway";req.correlation_id);
+    <decision
+  }else{
+    // Step 2: use case lookup
+    let use_case_result=uc.find(gw.registry;req.use_case_id);
+    let use_case_risk=$gt.risk_tier.$low;
+    use_case_result|{
+      $loke_err e;
+        let deny_msg=str.concat("Unknown use case: ";req.use_case_id);
+        let decision=$gt.gateway_decision{
+          request_id:req.request_id;
+          policy_decision:$gt.policy_decision.$deny(deny_msg);
+          risk_tier:$gt.risk_tier.$high;
+          routing:default_routing();
+          controls_applied:@("audit-logging");
+          explanation:deny_msg;
+          timestamp:str.now_iso8601()
+        };
+        log.error(str.concat("gateway deny — ";deny_msg);"gateway";req.correlation_id);
+        <decision
+      found_uc;
+        use_case_risk=found_uc.risk_level;
+        // Step 3: classify risk
+        let risk=pol.classify_risk(req.sensitivity;use_case_risk;req.estimated_cost);
+        // Step 4: evaluate policy
+        let policy=pol.evaluate(risk;req.sensitivity;req.model_id;req.use_case_id);
+        // Step 5: controls
+        let controls=pol.controls_for_risk(risk;req.sensitivity);
+        // Step 6: log at appropriate level
+        let risk_str=gt.risk_label(risk);
+        let decision_str=gt.decision_label(policy);
+        let log_msg=str.concat(
+          str.concat(
+            str.concat(
+              str.concat("gateway ";decision_str);
+              " use_case=");
+            req.use_case_id);
+          str.concat(" risk=";risk_str));
+        policy|{
+          $gt.policy_decision.$allow;
+            log.info(log_msg;"gateway";req.correlation_id);
+          $gt.policy_decision.$allow_with_warning warning;
+            log.warn(log_msg;"gateway";req.correlation_id);
+          $gt.policy_decision.$require_approval msg;
+            log.warn(log_msg;"gateway";req.correlation_id);
+          $gt.policy_decision.$deny msg;
+            log.error(log_msg;"gateway";req.correlation_id)
+        };
+        // Step 7: build decision
+        let explanation=policy|{
+          $gt.policy_decision.$allow;                  <"Request approved";
+          $gt.policy_decision.$allow_with_warning w;   <w;
+          $gt.policy_decision.$require_approval msg;   <msg;
+          $gt.policy_decision.$deny msg;               <msg
+        };
+        let decision=$gt.gateway_decision{
+          request_id:req.request_id;
+          policy_decision:policy;
+          risk_tier:risk;
+          routing:default_routing();
+          controls_applied:controls;
+          explanation:explanation;
+          timestamp:str.now_iso8601()
+        };
+        <decision
+    }
+  }
+}
+
+// Activates the kill switch, preventing all AI interactions until deactivated.
+pub f=activate_kill_switch(gw:mut $gateway;reason:str):void{
+  gw.kill_switch_active=true;
+  gw.kill_switch_reason=reason;
+  log.error(str.concat("kill switch activated: ";reason);"gateway";"system")
+}
+
+// Deactivates the kill switch and restores normal operation.
+pub f=deactivate_kill_switch(gw:mut $gateway):void{
+  gw.kill_switch_active=false;
+  gw.kill_switch_reason="";
+  log.info("kill switch deactivated";"gateway";"system")
+}
+
+// Returns true if the decision blocks the request from proceeding to the LLM.
+pub f=is_blocked(decision:$gt.gateway_decision):bool{
+  decision.policy_decision|{
+    $gt.policy_decision.$allow;                  <false;
+    $gt.policy_decision.$allow_with_warning msg; <false;
+    $gt.policy_decision.$require_approval msg;   <true;
+    $gt.policy_decision.$deny msg;               <true
+  }
+}

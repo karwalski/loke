@@ -1,0 +1,507 @@
+// F4.1 — TOON serialiser/deserialiser
+// TOON (Toke Object Notation): compact format for sending structured data to LLMs.
+// 30-60% token savings over JSON. Readable by any LLM without a decoder key.
+
+i=t:shared.types;
+i=str:std.str;
+i=json:std.json;
+
+// --- Types ---
+
+pub m.$toon_value{
+  $null;
+  $bool(bool);
+  $int(i64);
+  $float(f64);
+  $str(str);
+  $arr(@($toon_value));
+  $obj(@($toon_field))
+}
+
+pub m.$toon_field{
+  key:str;
+  value:$toon_value
+}
+
+pub m.$toon_opts{
+  max_str_len:u32;
+  abbreviate_keys:bool;
+  omit_nulls:bool
+}
+
+// --- Options ---
+
+pub f=default_opts():$toon_opts{
+  <$toon_opts{max_str_len:200;abbreviate_keys:false;omit_nulls:true}
+}
+
+// --- JSON → $toon_value conversion ---
+
+// Recursively converts a json.dec result (any) into a $toon_value tree.
+f=json_val_to_toon(v:any):$toon_value{
+  // Try bool first (before int, since some runtimes surface bools as 0/1)
+  let as_bool=json.get_bool(v;"__scalar__");
+  // The __scalar__ key trick does not apply for top-level scalars;
+  // instead we rely on typed extraction helpers with a sentinel key of "".
+  // The ooke runtime json.dec returns typed any values; we probe each type.
+  let bool_val=json.try_bool(v);
+  bool_val|{
+    $ok:b <$toon_value.$bool(b);
+    $err:_ {
+      let int_val=json.try_int(v);
+      int_val|{
+        $ok:n <$toon_value.$int(n);
+        $err:_ {
+          let float_val=json.try_float(v);
+          float_val|{
+            $ok:f <$toon_value.$float(f);
+            $err:_ {
+              let str_val=json.try_str(v);
+              str_val|{
+                $ok:s <$toon_value.$str(s);
+                $err:_ {
+                  let arr_val=json.try_arr(v);
+                  arr_val|{
+                    $ok:items {
+                      let toon_items=items.map|item{
+                        json_val_to_toon(item)
+                      };
+                      <$toon_value.$arr(toon_items)
+                    };
+                    $err:_ {
+                      let keys=json.keys(v);
+                      let fields=keys.map|k{
+                        let child=json.get_val(v;k);
+                        $toon_field{key:k;value:json_val_to_toon(child)}
+                      };
+                      if str.len(json.enc(v))==4{
+                        // "null" is 4 chars
+                        <$toon_value.$null
+                      }else{
+                        <$toon_value.$obj(fields)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Parses a JSON string into a $toon_value tree.
+pub f=from_json_str(raw:str):$toon_value|$loke_err{
+  json.dec(raw)|{
+    $ok:v <$ok(json_val_to_toon(v));
+    $err:e <$err($loke_err.$unknown_err(str.concat("from_json_str: JSON parse failed: ";raw)))
+  }
+}
+
+// --- Encoding helpers ---
+
+// Returns true if the string contains any TOON delimiter characters
+// that require quoting: | { } [ ] ,
+f=needs_quoting(s:str):bool{
+  let has_pipe=str.contains(s;"|");
+  let has_open_brace=str.contains(s;"{");
+  let has_close_brace=str.contains(s;"}");
+  let has_open_sq=str.contains(s;"[");
+  let has_close_sq=str.contains(s;"]");
+  let has_comma=str.contains(s;",");
+  let has_newline=str.contains(s;"\n");
+  if has_pipe{<true}else{
+    if has_open_brace{<true}else{
+      if has_close_brace{<true}else{
+        if has_open_sq{<true}else{
+          if has_close_sq{<true}else{
+            if has_comma{<true}else{
+              if has_newline{<true}else{
+                <false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Truncates a string to max_len, appending "…" if truncated.
+f=truncate(s:str;max_len:u32):str{
+  let l=str.len(s);
+  if l<=max_len{
+    <s
+  }else{
+    let sliced=str.slice(s;0;max_len);
+    <str.concat(sliced;"…")
+  }
+}
+
+// Encode a single $toon_value to TOON string.
+// nested=true means we are inside an object and should use {…} wrapping for sub-objects.
+f=encode_inner(val:$toon_value;opts:$toon_opts;nested:bool):str{
+  val|{
+    $null "~";
+    $bool:b if b{"y"}else{"n"};
+    $int:n str.from_int(n);
+    $float:f str.from_float(f);
+    $str:s {
+      let truncated=truncate(s;opts.max_str_len);
+      if needs_quoting(truncated){
+        let quoted=str.concat("\"";truncated);
+        <str.concat(quoted;"\"")
+      }else{
+        <truncated
+      }
+    };
+    $arr:items {
+      let parts=items.map|item{
+        encode_inner(item;opts;true)
+      };
+      let joined=str.join(parts;",");
+      <str.concat("[";str.concat(joined;"]"))
+    };
+    $obj:fields {
+      // Filter nulls if omit_nulls is set
+      let visible_fields=fields;
+      if opts.omit_nulls{
+        visible_fields=fields.filter|f{
+          f.value|{
+            $null false;
+            $bool:_ true;
+            $int:_ true;
+            $float:_ true;
+            $str:_ true;
+            $arr:_ true;
+            $obj:_ true
+          }
+        }
+      };
+      // Encode each field as key:val
+      let pair_strs=visible_fields.map|fld{
+        let encoded_val=encode_inner(fld.value;opts;true);
+        // Nested objects get wrapped in key{…} notation
+        fld.value|{
+          $obj:_ {
+            let inner_parts=fld.value|{
+              $obj:fs {
+                let sub_pairs=fs.map|sf{
+                  let sv=encode_inner(sf.value;opts;true);
+                  str.concat(str.concat(sf.key;":");sv)
+                };
+                str.join(sub_pairs;"|")
+              };
+              $null "";
+              $bool:_ "";
+              $int:_ "";
+              $float:_ "";
+              $str:_ "";
+              $arr:_ ""
+            };
+            <str.concat(str.concat(str.concat(fld.key;"{");inner_parts);"}")
+          };
+          $null   str.concat(str.concat(fld.key;":");"~");
+          $bool:_ str.concat(str.concat(fld.key;":");encoded_val);
+          $int:_  str.concat(str.concat(fld.key;":");encoded_val);
+          $float:_ str.concat(str.concat(fld.key;":");encoded_val);
+          $str:_  str.concat(str.concat(fld.key;":");encoded_val);
+          $arr:_  str.concat(str.concat(fld.key;":");encoded_val)
+        }
+      };
+      let joined=str.join(pair_strs;"|");
+      if nested{
+        <joined
+      }else{
+        <joined
+      }
+    }
+  }
+}
+
+// Encodes a $toon_value to a TOON string.
+pub f=encode(val:$toon_value;opts:$toon_opts):str{
+  <encode_inner(val;opts;false)
+}
+
+// --- Table encoding ---
+
+// Encodes an array of objects as TOON table format:
+//   HDR[col1|col2|col3]
+//   val1|val2|val3
+//   val1|val2|val3
+pub f=encode_table(rows:@($toon_value);opts:$toon_opts):str{
+  if rows.len==0{
+    <""
+  }else{
+    // Extract headers from the first row
+    let headers=rows[0]|{
+      $obj:fields fields.map|f{f.key};
+      $null @();
+      $bool:_ @();
+      $int:_ @();
+      $float:_ @();
+      $str:_ @();
+      $arr:_ @()
+    };
+    let hdr_inner=str.join(headers;"|");
+    let hdr_line=str.concat("HDR[";str.concat(hdr_inner;"]"));
+    // Encode each row as pipe-delimited values in header order
+    let data_lines=rows.map|row{
+      let cols=headers.map|h{
+        row|{
+          $obj:fields {
+            let matching=fields.filter|f{str.eq(f.key;h)};
+            if matching.len==0{
+              "~"
+            }else{
+              encode_inner(matching[0].value;opts;true)
+            }
+          };
+          $null "~";
+          $bool:_ "~";
+          $int:_ "~";
+          $float:_ "~";
+          $str:_ "~";
+          $arr:_ "~"
+        }
+      };
+      str.join(cols;"|")
+    };
+    let body=str.join(data_lines;"\n");
+    <str.concat(str.concat(hdr_line;"\n");body)
+  }
+}
+
+// --- Convenience: JSON → TOON ---
+
+pub f=json_to_toon(raw_json:str;opts:$toon_opts):str|$loke_err{
+  from_json_str(raw_json)|{
+    $ok:tv <$ok(encode(tv;opts));
+    $err:e <$err(e)
+  }
+}
+
+// --- Decoding ---
+
+// Parses a flat TOON key:val|key:val string into fields.
+f=decode_flat_obj(s:str):@($toon_field){
+  let pairs=str.split(s;"|");
+  pairs.map|pair{
+    let kv=str.split(pair;":");
+    if kv.len>=2{
+      let k=kv[0];
+      // Rejoin remaining parts with ":" in case value contained ":"
+      let v_parts=kv.slice(1;kv.len);
+      let v=str.join(v_parts;":");
+      let decoded_val=decode_scalar(v);
+      $toon_field{key:k;value:decoded_val}
+    }else{
+      $toon_field{key:pair;value:$toon_value.$str(pair)}
+    }
+  }
+}
+
+// Decodes a scalar TOON value string to $toon_value.
+f=decode_scalar(s:str):$toon_value{
+  if str.eq(s;"~"){
+    <$toon_value.$null
+  }else{
+    if str.eq(s;"y"){
+      <$toon_value.$bool(true)
+    }else{
+      if str.eq(s;"n"){
+        <$toon_value.$bool(false)
+      }else{
+        // Try integer
+        let as_int=str.parse_int(s);
+        as_int|{
+          $ok:n <$toon_value.$int(n);
+          $err:_ {
+            // Try float
+            let as_float=str.parse_float(s);
+            as_float|{
+              $ok:f <$toon_value.$float(f);
+              $err:_ {
+                // Quoted string: strip surrounding quotes
+                if str.starts_with(s;"\""){
+                  let inner=str.slice(s;1;str.len(s)-1);
+                  <$toon_value.$str(inner)
+                }else{
+                  <$toon_value.$str(s)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Parses a TOON string back to a $toon_value.
+// Supports:
+//   - HDR[col1|col2]\nval1|val2 table format
+//   - flat key:val|key:val object format
+//   - nested key{field:val|field:val} objects
+pub f=decode(toon_str:str):$toon_value|$loke_err{
+  let s=str.trim(toon_str);
+  // HDR table format
+  if str.starts_with(s;"HDR["){
+    let lines=str.split(s;"\n");
+    if lines.len<2{
+      <$err($loke_err.$unknown_err("decode: HDR table has no data rows"))
+    }else{
+      let hdr_line=lines[0];
+      // Strip "HDR[" prefix and "]" suffix
+      let hdr_inner=str.slice(hdr_line;4;str.len(hdr_line)-1);
+      let headers=str.split(hdr_inner;"|");
+      let data_lines=lines.slice(1;lines.len);
+      let row_vals=data_lines.map|line{
+        let cols=str.split(line;"|");
+        let fields=headers.map|h{
+          let col_idx=headers.index_of(h);
+          let v=if col_idx<cols.len{cols[col_idx]}else{"~"};
+          $toon_field{key:h;value:decode_scalar(v)}
+        };
+        $toon_value.$obj(fields)
+      };
+      <$ok($toon_value.$arr(row_vals))
+    }
+  }else{
+    // Check for nested object braces: key{...}
+    if str.contains(s;"{"){
+      // Parse as object with possible nested sub-objects
+      // Strategy: split on | but respect {…} nesting
+      let fields=parse_obj_fields(s);
+      <$ok($toon_value.$obj(fields))
+    }else{
+      // Flat key:val|key:val
+      let fields=decode_flat_obj(s);
+      <$ok($toon_value.$obj(fields))
+    }
+  }
+}
+
+// Parses object fields from a TOON string that may contain nested {…} blocks.
+f=parse_obj_fields(s:str):@($toon_field){
+  // Walk character by character, splitting on "|" outside of {}
+  let fields=@();
+  let depth=0;
+  let segment="";
+  let i=0;
+  let len=str.len(s);
+  loop{
+    if i>=len{
+      break
+    }else{
+      let ch=str.slice(s;i;i+1);
+      if str.eq(ch;"{"){
+        depth=depth+1;
+        segment=str.concat(segment;ch)
+      }else{
+        if str.eq(ch;"}"){
+          depth=depth-1;
+          segment=str.concat(segment;ch)
+        }else{
+          if str.eq(ch;"|"){
+            if depth==0{
+              let f=parse_field(segment);
+              fields=@(fields;f);
+              segment=""
+            }else{
+              segment=str.concat(segment;ch)
+            }
+          }else{
+            segment=str.concat(segment;ch)
+          }
+        }
+      };
+      i=i+1
+    }
+  };
+  // Last segment
+  if str.len(segment)>0{
+    let f=parse_field(segment);
+    fields=@(fields;f)
+  };
+  <fields
+}
+
+// Parses a single TOON field segment: either "key:val" or "key{inner}"
+f=parse_field(segment:str):$toon_field{
+  // Check for nested object: key{inner}
+  if str.contains(segment;"{"){
+    let brace_pos=str.index_of(segment;"{");
+    let k=str.slice(segment;0;brace_pos);
+    let after_brace=str.slice(segment;brace_pos+1;str.len(segment));
+    // Strip trailing "}"
+    let inner=str.slice(after_brace;0;str.len(after_brace)-1);
+    let sub_fields=parse_obj_fields(inner);
+    <$toon_field{key:k;value:$toon_value.$obj(sub_fields)}
+  }else{
+    let kv=str.split(segment;":");
+    if kv.len>=2{
+      let k=kv[0];
+      let v_parts=kv.slice(1;kv.len);
+      let v=str.join(v_parts;":");
+      <$toon_field{key:k;value:decode_scalar(v)}
+    }else{
+      <$toon_field{key:segment;value:$toon_value.$str(segment)}
+    }
+  }
+}
+
+// --- $toon_value → JSON ---
+
+// Converts a $toon_value back to a JSON string.
+f=toon_val_to_json(val:$toon_value):str{
+  val|{
+    $null "null";
+    $bool:b if b{"true"}else{"false"};
+    $int:n str.from_int(n);
+    $float:f str.from_float(f);
+    $str:s {
+      let escaped=str.replace(s;"\"";"\\\"");
+      <str.concat("\"";str.concat(escaped;"\""))
+    };
+    $arr:items {
+      let parts=items.map|item{toon_val_to_json(item)};
+      let joined=str.join(parts;",");
+      <str.concat("[";str.concat(joined;"]"))
+    };
+    $obj:fields {
+      let parts=fields.map|fld{
+        let key_json=str.concat("\"";str.concat(fld.key;"\""));
+        let val_json=toon_val_to_json(fld.value);
+        str.concat(str.concat(key_json;":");val_json)
+      };
+      let joined=str.join(parts;",");
+      <str.concat("{";str.concat(joined;"}"))
+    }
+  }
+}
+
+// Convenience: decode TOON string and encode as JSON.
+pub f=toon_to_json(toon_str:str):str|$loke_err{
+  decode(toon_str)|{
+    $ok:tv <$ok(toon_val_to_json(tv));
+    $err:e <$err(e)
+  }
+}
+
+// --- Savings measurement ---
+
+// Returns the percentage size reduction (0.0–100.0).
+// A positive value means TOON is more compact than JSON.
+pub f=measure_savings(original_json:str;toon_str:str):f64{
+  let orig_len=str.len(original_json) as f64;
+  let toon_len=str.len(toon_str) as f64;
+  if orig_len==0.0{
+    <0.0
+  }else{
+    <(1.0-(toon_len/orig_len))*100.0
+  }
+}

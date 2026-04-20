@@ -1,0 +1,91 @@
+i=t:shared.types;
+i=net:std.net;
+i=proto:mcp.protocol;
+i=json:std.json;
+i=log:shared.log;
+i=reg:mcp_broker.registry;
+i=agg:mcp_broker.aggregator;
+i=proxy:mcp_broker.proxy;
+
+m.$broker_config{ port:i32; data_dir:str }
+
+pub let default_port=11436;
+
+pub f=handle_request(req_body:str;registry:reg.$broker_registry):str{
+  let parsed=json.parse(req_body);
+  |parsed{
+    $err:e{
+      <proto.error_response(-32700;"Parse error";e)
+    };
+    $ok:doc{
+      let method_res=doc.get_str("method");
+      |method_res{
+        $err:e{
+          <proto.error_response(-32600;"Invalid request";e)
+        };
+        $ok:method{
+          if method=="initialize"{
+            <proto.init_response("moke-mcp-broker";"1.0.0")
+          };
+          if method=="tools/list"{
+            let tools=agg.aggregate_all(registry);
+            <agg.tools_list_response(tools)
+          };
+          if method=="tools/call"{
+            let params_res=doc.get_obj("params");
+            |params_res{
+              $err:e{
+                <proto.error_response(-32602;"Invalid params";e)
+              };
+              $ok:params{
+                let name_res=params.get_str("name");
+                let args_res=params.get_raw("arguments");
+                |name_res{
+                  $err:e{
+                    <proto.error_response(-32602;"Missing tool name";e)
+                  };
+                  $ok:tool_name{
+                    let args_json=|args_res{
+                      $ok:a{ <a };
+                      $err:_{ <"{}" }
+                    };
+                    let result=proxy.proxy_call(tool_name;args_json;registry);
+                    if result.ok{
+                      <result.response_body
+                    }else{
+                      <result.response_body
+                    }
+                  }
+                }
+              }
+            }
+          };
+          <proto.error_response(-32601;"Method not found";nil)
+        }
+      }
+    }
+  }
+}
+
+pub f=start(cfg:$broker_config):bool{
+  log.info("mcp-broker listening on port "+cfg.port.to_str();"server";"start");
+  log.info("data dir: "+cfg.data_dir;"server";"start");
+  let listener=net.listen(cfg.port);
+  |listener{
+    $err:e{
+      log.error("failed to bind port "+cfg.port.to_str()+": "+e;"server";"start");
+      <false
+    };
+    $ok:sock{
+      let registry=reg.new_registry();
+      let defaults=reg.default_servers();
+      let registry=defaults.each|srv{ reg.register(registry;srv) };
+      sock.loop|conn{
+        let body=conn.read_body();
+        let resp=handle_request(body;registry);
+        conn.write_response(200;"application/json";resp)
+      };
+      <true
+    }
+  }
+}

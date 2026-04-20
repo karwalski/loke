@@ -1,0 +1,218 @@
+// POST /api/moke/ml/run    — run a local ML operation on the active dataset
+// POST /api/moke/ml/propose — return AI-assisted analysis suggestions
+//
+// All computation is local — raw row data never leaves the device.
+// MK2.1 (engine) and MK2.2 (proposal) are invoked here.
+
+m=page.moke.api.ml;
+i=http:std.http;
+i=json:std.json;
+i=str:std.string;
+i=engine:moke.ml.engine;
+i=proposal:moke.ml.proposal;
+
+// ── POST /api/moke/ml/run ─────────────────────────────────────────────────────
+// Body: { kind: str, opts: {}, dataset_name: str }
+// kind is one of: "kmeans" | "zscore" | "iqr" | "correlation"
+// opts fields depend on kind (see engine.tk type definitions).
+
+pub f=post_run(req:http.$req):http.$res{
+  let body=req.body;
+
+  let kind=json.get_str(body;"kind")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let opts_raw=json.get_obj(body;"opts")|{
+    $ok:v v;
+    $err:_ "{}"
+  };
+  let dataset_name=json.get_str(body;"dataset_name")|{
+    $ok:v v;
+    $err:_ ""
+  };
+
+  if str.eq(kind;""){
+    <http.res.err(400;"missing required field: kind")
+  };
+
+  // Load dataset from workspace store by name.
+  // The dataset is already in memory from the upload step — retrieve headers
+  // and rows via the workspace module so we never re-read from disk here.
+  let headers=json.get_str_array(body;"headers")|{
+    $ok:v v;
+    $err:_ @()
+  };
+  let rows_json=json.get_str(body;"rows_json")|{
+    $ok:v v;
+    $err:_ "[]"
+  };
+  let rows=json.parse_2d_str_array(rows_json)|{
+    $ok:v v;
+    $err:_ @()
+  };
+
+  // ── dispatch by kind ──────────────────────────────────────────────────────
+  let resp_body="";
+
+  if str.eq(kind;"kmeans"){
+    let k_str=json.get_str(opts_raw;"k")|{ $ok:v v; $err:_ "4" };
+    let max_iter_str=json.get_str(opts_raw;"max_iter")|{ $ok:v v; $err:_ "100" };
+    let k=4;
+    let max_iter=100;
+    if str.is_numeric(k_str){ k=str.parse_i32(k_str) };
+    if str.is_numeric(max_iter_str){ max_iter=str.parse_i32(max_iter_str) };
+    let col_names=json.get_str_array(opts_raw;"columns")|{
+      $ok:v v;
+      $err:_ @()
+    };
+    let opts=engine.$kmeans_opts{
+      k=k;
+      max_iter=max_iter;
+      columns=col_names
+    };
+    let result=engine.kmeans(headers;rows;opts);
+    resp_body=str.concat("{";
+      str.concat("\"ok\":true,\"kind\":\"kmeans\",";
+      str.concat("\"k\":";
+      str.concat(str.from_i32(result.k);
+      str.concat(",\"iterations\":";
+      str.concat(str.from_i32(result.iterations);
+      str.concat(",\"inertia\":";
+      str.concat(str.from_f32(result.inertia);
+      str.concat(",\"assignments\":";
+      str.concat(json.encode_i32_array(result.assignments);
+      "}")))))))))
+  };
+
+  if str.eq(kind;"zscore"){
+    let column=json.get_str(opts_raw;"column")|{ $ok:v v; $err:_ "" };
+    let thresh_str=json.get_str(opts_raw;"threshold")|{ $ok:v v; $err:_ "3.0" };
+    let threshold=3.0;
+    if str.is_float(thresh_str){ threshold=str.to_float(thresh_str) };
+    let opts=engine.$anomaly_opts{
+      column=column;
+      threshold=threshold;
+      method="zscore"
+    };
+    let result=engine.zscore_anomalies(headers;rows;opts);
+    resp_body=str.concat("{";
+      str.concat("\"ok\":true,\"kind\":\"zscore\",";
+      str.concat("\"column\":";
+      str.concat(str.json_encode(result.column);
+      str.concat(",\"method\":\"zscore\",\"threshold\":";
+      str.concat(str.from_f32(result.threshold);
+      str.concat(",\"anomaly_count\":";
+      str.concat(str.from_i32(result.anomalies.len());
+      "}"))))))));
+  };
+
+  if str.eq(kind;"iqr"){
+    let column=json.get_str(opts_raw;"column")|{ $ok:v v; $err:_ "" };
+    let thresh_str=json.get_str(opts_raw;"threshold")|{ $ok:v v; $err:_ "1.5" };
+    let threshold=1.5;
+    if str.is_float(thresh_str){ threshold=str.to_float(thresh_str) };
+    let opts=engine.$anomaly_opts{
+      column=column;
+      threshold=threshold;
+      method="iqr"
+    };
+    let result=engine.iqr_anomalies(headers;rows;opts);
+    resp_body=str.concat("{";
+      str.concat("\"ok\":true,\"kind\":\"iqr\",";
+      str.concat("\"column\":";
+      str.concat(str.json_encode(result.column);
+      str.concat(",\"method\":\"iqr\",\"threshold\":";
+      str.concat(str.from_f32(result.threshold);
+      str.concat(",\"anomaly_count\":";
+      str.concat(str.from_i32(result.anomalies.len());
+      "}"))))))));
+  };
+
+  if str.eq(kind;"correlation"){
+    let results=engine.correlation_matrix(headers;rows);
+    let pairs_parts=@();
+    let ri=0;
+    ??(ri < results.len()){
+      let r=results[ri];
+      let part=str.concat("{\"col_a\":";
+        str.concat(str.json_encode(r.col_a);
+        str.concat(",\"col_b\":";
+        str.concat(str.json_encode(r.col_b);
+        str.concat(",\"pearson_r\":";
+        str.concat(str.from_f32(r.pearson_r);
+        str.concat(",\"strength\":";
+        str.concat(str.json_encode(r.strength);
+        "}")))))));
+      pairs_parts.push(part);
+      ri=ri + 1
+    }{};
+    resp_body=str.concat("{\"ok\":true,\"kind\":\"correlation\",\"pairs\":[";
+      str.concat(str.join(pairs_parts;",");
+      "]}"))
+  };
+
+  if str.len(resp_body) == 0{
+    <http.res.err(400;str.concat("unknown kind: ";kind))
+  };
+
+  <http.res.json(200;resp_body)
+}
+
+// ── POST /api/moke/ml/propose ─────────────────────────────────────────────────
+// Body: { schema_toon: str, num_cols: [str], cat_cols: [str] }
+// Returns ranked analysis suggestions — LLM-assisted with heuristic fallback.
+
+pub f=post_propose(req:http.$req):http.$res{
+  let body=req.body;
+
+  let schema_toon=json.get_str(body;"schema_toon")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let num_cols=json.get_str_array(body;"num_cols")|{
+    $ok:v v;
+    $err:_ @()
+  };
+  let cat_cols=json.get_str_array(body;"cat_cols")|{
+    $ok:v v;
+    $err:_ @()
+  };
+
+  if str.eq(schema_toon;"") && num_cols.len() == 0 && cat_cols.len() == 0{
+    <http.res.err(400;"at least one of schema_toon, num_cols, or cat_cols is required")
+  };
+
+  let result=proposal.from_schema(schema_toon;num_cols;cat_cols);
+
+  // Serialise suggestions to JSON
+  let suggestion_parts=@();
+  let si=0;
+  ??(si < result.suggestions.len()){
+    let s=result.suggestions[si];
+    let col_json=json.encode_str_array(s.columns);
+    let part=str.concat("{\"kind\":";
+      str.concat(str.json_encode(s.kind);
+      str.concat(",\"title\":";
+      str.concat(str.json_encode(s.title);
+      str.concat(",\"description\":";
+      str.concat(str.json_encode(s.description);
+      str.concat(",\"columns\":";
+      str.concat(col_json;
+      str.concat(",\"params\":";
+      str.concat(str.json_encode(s.params);
+      str.concat(",\"rationale\":";
+      str.concat(str.json_encode(s.rationale);
+      "}")))))))))));
+    suggestion_parts.push(part);
+    si=si + 1
+  }{};
+
+  let resp_body=str.concat("{\"ok\":true,\"source\":";
+    str.concat(str.json_encode(result.source);
+    str.concat(",\"suggestions\":[";
+    str.concat(str.join(suggestion_parts;",");
+    "]}"))));
+
+  <http.res.json(200;resp_body)
+}

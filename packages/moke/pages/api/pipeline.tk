@@ -1,0 +1,129 @@
+// POST /api/moke/pipeline — moke pipeline handler.
+// Wraps loke's core privacy pipeline with schema-first preprocessing.
+// Raw data pasted into the prompt is detected and replaced with a concise
+// schema/TOON profile before being forwarded to loke, so row values never
+// leave the device. The console log captures each stage for the UI overlay.
+
+m=page.moke.api.pipeline;
+i=http:std.http;
+i=json:std.json;
+i=str:std.string;
+i=hooks:moke.hooks;
+i=compute:moke.compute;
+i=console_log:moke.console_log;
+
+pub f=post(req:http.$req):http.$res{
+  let body=req.body;
+
+  // Extract request fields
+  let prompt=json.get_str(body;"prompt")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let model=json.get_str(body;"model")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let session_id=json.get_str(body;"session_id")|{
+    $ok:v v;
+    $err:_ "unknown"
+  };
+  let dataset_name=json.get_str(body;"dataset_name")|{
+    $ok:v v;
+    $err:_ "dataset"
+  };
+
+  if str.eq(prompt;""){
+    <http.res.err(400;"missing required field: prompt")
+  };
+
+  // Initialise console log for this request
+  let clog=console_log.new_session(session_id);
+
+  // ── Stage 1: schema-first hook ─────────────────────────────────────────────
+  let t0=std.now_ms();
+  let hook_result=hooks.apply_schema_first(prompt;dataset_name);
+  let t1=std.now_ms();
+
+  let schema_first=hook_result.raw_data_detected;
+  let effective_prompt=hook_result.transformed;
+
+  if schema_first{
+    clog=console_log.append(clog;"schema_extract";"ok";
+      str.concat("raw data replaced with schema profile — ";
+        str.concat(str.from_i32(hook_result.profile.col_count);" columns"));
+      str.to_i32(str.from_i64(t1 - t0)));
+    clog=console_log.append(clog;"profile";"ok";
+      str.concat(str.from_i32(hook_result.profile.row_count);" rows profiled");
+      0)
+  }else{
+    clog=console_log.append(clog;"schema_extract";"skip";
+      "no raw tabular data detected in prompt";
+      str.to_i32(str.from_i64(t1 - t0)))
+  };
+
+  // ── Stage 2: forward to loke pipeline ─────────────────────────────────────
+  let upstream_body="{";
+  upstream_body=str.concat(upstream_body;str.concat("\"text\":";str.json_encode(effective_prompt)));
+  upstream_body=str.concat(upstream_body;",\"system_prompt\":\"\"");
+  upstream_body=str.concat(upstream_body;",\"tolerance\":\"instant\"");
+  upstream_body=str.concat(upstream_body;",\"mode\":\"chat\"");
+  if str.len(model) > 0{
+    upstream_body=str.concat(upstream_body;str.concat(",\"model\":";str.json_encode(model)))
+  };
+  upstream_body=str.concat(upstream_body;"}");
+
+  clog=console_log.append(clog;"llm_call";"ok";
+    str.concat("forwarding to loke pipeline — model=";
+      if str.len(model) > 0{ model }else{ "auto" });
+    0);
+
+  let t2=std.now_ms();
+  let upstream_res=http.post("http://127.0.0.1:11430/api/pipeline";
+    "application/json";upstream_body);
+  let t3=std.now_ms();
+  let upstream_ms=str.to_i32(str.from_i64(t3 - t2));
+
+  if !http.ok(upstream_res){
+    clog=console_log.append(clog;"response";"error";
+      str.concat("loke pipeline returned HTTP ";str.from_i32(http.status(upstream_res)));
+      upstream_ms);
+    let err_body="{";
+    err_body=str.concat(err_body;"\"ok\":false");
+    err_body=str.concat(err_body;str.concat(",\"error\":";
+      str.json_encode(str.concat("upstream error: HTTP ";
+        str.from_i32(http.status(upstream_res))))));
+    err_body=str.concat(err_body;str.concat(",\"schema_first\":";
+      if schema_first{ "true" }else{ "false" }));
+    err_body=str.concat(err_body;",\"raw_data_detected\":false");
+    err_body=str.concat(err_body;str.concat(",\"console_log\":";
+      console_log.to_json(clog)));
+    err_body=str.concat(err_body;"}");
+    <http.res.json(502;err_body)
+  };
+
+  clog=console_log.append(clog;"response";"ok";
+    "loke pipeline response received";upstream_ms);
+
+  // ── Stage 3: merge metadata into response ─────────────────────────────────
+  let upstream_json=http.body(upstream_res);
+
+  // Strip trailing "}" and inject moke metadata fields
+  let base=str.trim(upstream_json);
+  let base_len=str.len(base);
+  let resp_body=base;
+  if base_len > 1{
+    // Remove closing brace, append moke fields, close again
+    let inner=str.slice(base;0;base_len - 1);
+    resp_body=str.concat(inner;",");
+    resp_body=str.concat(resp_body;str.concat("\"schema_first\":";
+      if schema_first{ "true" }else{ "false" }));
+    resp_body=str.concat(resp_body;str.concat(",\"raw_data_detected\":";
+      if schema_first{ "true" }else{ "false" }));
+    resp_body=str.concat(resp_body;str.concat(",\"console_log\":";
+      console_log.to_json(clog)));
+    resp_body=str.concat(resp_body;"}")
+  };
+
+  <http.res.json(200;resp_body)
+}

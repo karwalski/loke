@@ -1,0 +1,105 @@
+// F3.5 — Placeholder reversal engine with DB persistence
+// Stores placeholder↔original mappings in SQLite so they survive restarts.
+// Critical for long-running sessions and agent tasks where the LLM response
+// must be deanonymised after a process restart.
+
+i=t:shared.types;
+i=s:core.storage.db;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$persistent_map{
+  request_id:str;
+  store:$s.store
+}
+
+// Creates a persistent map handle for a given request_id.
+// Does not write to the database — entries are stored via store_entry.
+pub f=new_map(store:$s.store;request_id:str):$persistent_map{
+  <$persistent_map{request_id:request_id;store:store}
+}
+
+// Inserts a single placeholder↔original mapping into the database.
+// expires_at is set 24 h from now as a plain string sentinel; the real
+// timestamp comparison is done in expire_old via SQLite datetime().
+pub f=store_entry(pmap:$persistent_map;original:str;placeholder:str;entity_type:str):void|$loke_err{
+  let id=str.rand_hex(16);
+  db.exec_params(
+    pmap.store.conn;
+    "INSERT INTO placeholder_maps (id,request_id,original,placeholder,entity_type,created_at,expires_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now','+1 day'))";
+    @(id;pmap.request_id;original;placeholder;entity_type)
+  )|{
+    $ok:_ {
+      log.debug("stored placeholder entry";"placeholder_store";pmap.request_id);
+      <$ok(void)
+    };
+    $err:e <$err($storage_err(str.concat("failed to store placeholder entry for request: ";pmap.request_id)))
+  }
+}
+
+// Fetches all mappings for this request_id and iteratively replaces every
+// placeholder in text with the original value, returning deanonymised text.
+pub f=restore(pmap:$persistent_map;text:str):str|$loke_err{
+  db.query_params(
+    pmap.store.conn;
+    "SELECT placeholder,original FROM placeholder_maps WHERE request_id=?";
+    @(pmap.request_id)
+  )|{
+    $ok:rows {
+      let result=text;
+      let count=rows.len;
+      let i=0;
+      loop{
+        if i>=count{
+          break
+        }else{
+          let row=str.array_get(rows;i);
+          let ph=json.get_str(row;"placeholder");
+          let orig=json.get_str(row;"original");
+          result=str.replace(result;ph;orig);
+          i=i+1
+        }
+      };
+      log.debug("restored text from placeholder map";"placeholder_store";pmap.request_id);
+      <$ok(result)
+    };
+    $err:e <$err($storage_err(str.concat("failed to query placeholder_maps for request: ";pmap.request_id)))
+  }
+}
+
+// Convenience wrapper: creates a transient map handle and restores text.
+pub f=restore_text(store:$s.store;request_id:str;text:str):str|$loke_err{
+  let pmap=new_map(store;request_id);
+  <restore(pmap;text)
+}
+
+// Deletes all expired entries from placeholder_maps.
+// Uses SQLite datetime() for proper timestamp comparison.
+pub f=expire_old(store:$s.store):void|$loke_err{
+  db.exec(
+    store.conn;
+    "DELETE FROM placeholder_maps WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
+  )|{
+    $ok:_ {
+      log.info("expired old placeholder map entries";"placeholder_store";"maintenance");
+      <$ok(void)
+    };
+    $err:e <$err($storage_err("failed to expire old placeholder_maps entries"))
+  }
+}
+
+// Returns the number of placeholder entries recorded for a given request_id.
+pub f=count_for_request(store:$s.store;request_id:str):u32|$loke_err{
+  db.query_one_params(
+    store.conn;
+    "SELECT COUNT(*) as cnt FROM placeholder_maps WHERE request_id=?";
+    @(request_id)
+  )|{
+    $ok:row {
+      let n=json.get_int(row;"cnt");
+      <$ok(n)
+    };
+    $err:e <$err($storage_err(str.concat("failed to count placeholder_maps for request: ";request_id)))
+  }
+}

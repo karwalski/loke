@@ -1,0 +1,179 @@
+// X5.3 — Feedback-driven learning loops.
+// Uses accumulated feedback to adjust routing preferences and model selection
+// over time. Signals are derived from per-area thumbs-up rates; adjustments
+// are persisted as settings so the router can read them at startup.
+
+i=t:shared.types;
+i=log:shared.log;
+i=store:feedback.store;
+i=db:storage.db;
+
+pub m.$learning_signal{
+  feature_area:str;
+  thumbs_up_rate:f64;
+  sample_size:i32;
+  confidence:str
+}
+
+pub m.$routing_adjustment{
+  model:str;
+  adjustment:f64;
+  reason:str
+}
+
+pub m.$learning_state{
+  signals:@($learning_signal);
+  adjustments:@($routing_adjustment);
+  computed_at:i64
+}
+
+// Queries the feedback table grouped by feature_area.
+// Computes the thumbs_up_rate for each group and assigns a confidence level:
+//   "low" for fewer than 10 samples, "medium" for 10–50, "high" for more than 50.
+pub f=compute_signals(store:db.$store):@($learning_signal){
+  let sql="SELECT feature_area, COUNT(*) AS total, SUM(CASE WHEN rating='thumbs_up' THEN 1 ELSE 0 END) AS ups FROM feedback GROUP BY feature_area";
+  let rows=db.query_params(store.conn;sql;@())|{
+    $ok:r <r;
+    $err:e {
+      log.warn(
+        str.concat("learning: failed to query signals: ";e.message);
+        "feedback.learning";
+        "system"
+      );
+      <@()
+    }
+  };
+  <rows.map|row{
+    let area=json.get_str(row;"feature_area");
+    let total=json.get_i32(row;"total");
+    let ups=json.get_i32(row;"ups");
+    let rate=if total == 0{
+      0.0
+    }else{
+      str.to_float(str.from_int(ups))/str.to_float(str.from_int(total))
+    };
+    let confidence=if total < 10{
+      "low"
+    }else{
+      if total <= 50{
+        "medium"
+      }else{
+        "high"
+      }
+    };
+    $learning_signal{
+      feature_area:area;
+      thumbs_up_rate:rate;
+      sample_size:total;
+      confidence:confidence
+    }
+  }
+}
+
+// Derives routing adjustments from a set of learning signals.
+// Rules:
+//   - feature_area contains "routing" and thumbs_up_rate < 0.5 → -0.2 (route less)
+//   - thumbs_up_rate > 0.85 and sample_size > 10 → +0.1 (reinforce)
+//   - Otherwise no adjustment is produced for that signal.
+pub f=derive_adjustments(signals:@($learning_signal)):@($routing_adjustment){
+  let result=@();
+  signals.each|signal{
+    if str.contains(signal.feature_area;"routing"){
+      if signal.thumbs_up_rate < 0.5{
+        result.push($routing_adjustment{
+          model:"router";
+          adjustment:-0.2;
+          reason:str.concat("low thumbs-up rate on routing area: ";signal.feature_area)
+        })
+      }else{
+        if signal.thumbs_up_rate > 0.85{
+          if signal.sample_size > 10{
+            result.push($routing_adjustment{
+              model:"router";
+              adjustment:0.1;
+              reason:str.concat("high thumbs-up rate, reinforcing: ";signal.feature_area)
+            })
+          }else{}
+        }else{}
+      }
+    }else{
+      if signal.thumbs_up_rate > 0.85{
+        if signal.sample_size > 10{
+          result.push($routing_adjustment{
+            model:"router";
+            adjustment:0.1;
+            reason:str.concat("high thumbs-up rate, reinforcing: ";signal.feature_area)
+          })
+        }else{}
+      }else{}
+    }
+  };
+  <result
+}
+
+// Persists each adjustment as a setting using the key "learning.adjustment.{model}".
+// The adjustment value is stored as a string. Returns true if at least one
+// adjustment was saved, false if the list was empty or all saves failed.
+pub f=apply_learning(state:$learning_state;store:db.$store):bool{
+  let saved=0;
+  state.adjustments.each|adj{
+    let key=str.concat("learning.adjustment.";adj.model);
+    let val=str.from_float(adj.adjustment);
+    db.exec_params(
+      store.conn;
+      "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+      @(key;val)
+    )|{
+      $ok:_ {
+        saved=saved+1;
+        log.debug(
+          str.concat(str.concat("learning: saved adjustment ";key);" = ";val);
+          "feedback.learning";
+          "system"
+        )
+      };
+      $err:e {
+        log.warn(
+          str.concat("learning: failed to save adjustment: ";key);
+          "feedback.learning";
+          "system"
+        )
+      }
+    }
+  };
+  <saved > 0
+}
+
+// Returns a human-readable table of signals and their derived adjustments.
+pub f=format_learning_state(state:$learning_state):str{
+  let header="=== Learning Signals ===\n";
+  let signal_rows=state.signals.map|s{
+    let rate_pct=str.concat(str.from_float(s.thumbs_up_rate * 100.0);"%");
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat("  ";s.feature_area);
+            " | up_rate=");
+          rate_pct);
+        " | n=");
+      str.concat(str.from_int(s.sample_size);str.concat(" | confidence=";s.confidence)))
+  };
+  let signals_block=str.join(signal_rows;"\n");
+  let adj_header="\n\n=== Routing Adjustments ===\n";
+  let adj_rows=state.adjustments.map|a{
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat("  ";a.model);
+          " | delta=");
+        str.from_float(a.adjustment));
+      str.concat(" | ";a.reason))
+  };
+  let adj_block=if state.adjustments.len == 0{
+    "  (none)"
+  }else{
+    str.join(adj_rows;"\n")
+  };
+  <str.concat(str.concat(str.concat(str.concat(header;signals_block);adj_header);adj_block);"\n")
+}

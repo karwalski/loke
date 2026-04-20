@@ -1,0 +1,277 @@
+// G1.4 — Usage quotas.
+// Tracks and enforces token/cost quotas per user, team, or model.
+// Quotas are defined as rules with a scope, a period, and limits.
+// Usage is persisted to the store and checked on every request.
+
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=time:std.time;
+
+pub m.$quota_rule{
+  id:str;
+  scope:str;
+  limit_tokens:i64;
+  limit_cost_usd:f32;
+  period:str
+}
+
+pub m.$quota_status{
+  rule_id:str;
+  used_tokens:i64;
+  used_cost:f32;
+  remaining_pct:f32;
+  exceeded:bool
+}
+
+// Creates the quota_rules and quota_usage tables if they do not already exist.
+pub f=ensure_tables(store:db.$store):bool{
+  let sql_rules="CREATE TABLE IF NOT EXISTS quota_rules (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  limit_tokens INTEGER NOT NULL DEFAULT 0,
+  limit_cost_usd REAL NOT NULL DEFAULT 0.0,
+  period TEXT NOT NULL
+)";
+  let sql_usage="CREATE TABLE IF NOT EXISTS quota_usage (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  period_key TEXT NOT NULL,
+  used_tokens INTEGER NOT NULL DEFAULT 0,
+  used_cost_usd REAL NOT NULL DEFAULT 0.0,
+  UNIQUE(rule_id, period_key)
+)";
+  db.exec_params(store.conn;sql_rules;@())|{
+    $ok:_ {};
+    $err:e {
+      log.warn("failed to create quota_rules table";"quota";"system");
+      <false
+    }
+  };
+  db.exec_params(store.conn;sql_usage;@())|{
+    $ok:_ <true;
+    $err:e {
+      log.warn("failed to create quota_usage table";"quota";"system");
+      <false
+    }
+  }
+}
+
+// Derives a period key string from the current time and the rule period.
+// "daily"   → "YYYY-MM-DD"
+// "weekly"  → "YYYY-Www"
+// "monthly" → "YYYY-MM"
+// Anything else → "all-time"
+f=period_key(period:str):str{
+  if period=="daily"{
+    <time.format_now("%Y-%m-%d")
+  }else{
+    if period=="weekly"{
+      <time.format_now("%Y-W%V")
+    }else{
+      if period=="monthly"{
+        <time.format_now("%Y-%m")
+      }else{
+        <"all-time"
+      }
+    }
+  }
+}
+
+// Looks up the active quota rule for a given scope.
+// Returns the first matching rule or an empty sentinel if none found.
+f=find_rule(store:db.$store;scope:str):$quota_rule{
+  db.query_params(
+    store.conn;
+    "SELECT id,scope,limit_tokens,limit_cost_usd,period FROM quota_rules WHERE scope=? LIMIT 1";
+    @(scope)
+  )|{
+    $ok:rows {
+      if rows.len==0{
+        <$quota_rule{
+          id:"";
+          scope:scope;
+          limit_tokens:0;
+          limit_cost_usd:0.0;
+          period:""
+        }
+      }else{
+        let row=rows.get(0);
+        <$quota_rule{
+          id:json.get_str(row;"id");
+          scope:json.get_str(row;"scope");
+          limit_tokens:json.get_int(row;"limit_tokens");
+          limit_cost_usd:json.get_float(row;"limit_cost_usd");
+          period:json.get_str(row;"period")
+        }
+      }
+    };
+    $err:e {
+      log.warn(str.concat("failed to find quota rule for scope: ";scope);"quota";"system");
+      <$quota_rule{
+        id:"";
+        scope:scope;
+        limit_tokens:0;
+        limit_cost_usd:0.0;
+        period:""
+      }
+    }
+  }
+}
+
+// Checks the current quota status for a scope against the relevant rule.
+// If no rule exists for the scope, returns a non-exceeded status with 100% remaining.
+// cost is the estimated cost in USD for this request.
+pub f=check(store:db.$store;scope:str;tokens:i64;cost:f32):$quota_status{
+  let rule=find_rule(store;scope);
+  if rule.id==""{
+    <$quota_status{
+      rule_id:"";
+      used_tokens:0;
+      used_cost:0.0;
+      remaining_pct:100.0;
+      exceeded:false
+    }
+  }else{
+    let pk=period_key(rule.period);
+    db.query_params(
+      store.conn;
+      "SELECT used_tokens,used_cost_usd FROM quota_usage WHERE rule_id=? AND period_key=? LIMIT 1";
+      @(rule.id;pk)
+    )|{
+      $ok:rows {
+        let used_tokens=if rows.len==0{
+          0
+        }else{
+          json.get_int(rows.get(0);"used_tokens")
+        };
+        let used_cost=if rows.len==0{
+          0.0
+        }else{
+          json.get_float(rows.get(0);"used_cost_usd")
+        };
+        let token_pct=if rule.limit_tokens>0{
+          let used_f=str.to_float(str.from_int(used_tokens));
+          let limit_f=str.to_float(str.from_int(rule.limit_tokens));
+          (1.0-(used_f/limit_f))*100.0
+        }else{
+          100.0
+        };
+        let cost_pct=if rule.limit_cost_usd>0.0{
+          ((rule.limit_cost_usd-used_cost)/rule.limit_cost_usd)*100.0
+        }else{
+          100.0
+        };
+        let remaining_pct=if token_pct<cost_pct{ token_pct }else{ cost_pct };
+        let exceeded=remaining_pct<=0.0;
+        <$quota_status{
+          rule_id:rule.id;
+          used_tokens:used_tokens;
+          used_cost:used_cost;
+          remaining_pct:remaining_pct;
+          exceeded:exceeded
+        }
+      };
+      $err:e {
+        log.warn(str.concat("failed to query quota usage for scope: ";scope);"quota";"system");
+        <$quota_status{
+          rule_id:rule.id;
+          used_tokens:0;
+          used_cost:0.0;
+          remaining_pct:100.0;
+          exceeded:false
+        }
+      }
+    }
+  }
+}
+
+// Records actual token/cost usage against the rule for a scope.
+// Uses INSERT OR REPLACE with accumulated totals.
+// Returns false if no rule exists for the scope or the write fails.
+pub f=record_usage(store:db.$store;scope:str;tokens:i64;cost:f32):bool{
+  let rule=find_rule(store;scope);
+  if rule.id==""{
+    <false
+  }else{
+    let pk=period_key(rule.period);
+    let id=str.rand_hex(16);
+    let tokens_s=str.from_int(tokens);
+    let cost_s=str.from_float(cost);
+    db.exec_params(
+      store.conn;
+      "INSERT INTO quota_usage (id,rule_id,scope,period_key,used_tokens,used_cost_usd)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(rule_id,period_key) DO UPDATE SET
+         used_tokens=used_tokens+excluded.used_tokens,
+         used_cost_usd=used_cost_usd+excluded.used_cost_usd";
+      @(id;rule.id;scope;pk;tokens_s;cost_s)
+    )|{
+      $ok:_ {
+        log.debug(
+          str.concat(str.concat("quota usage recorded scope=";scope);str.concat(" tokens=";tokens_s));
+          "quota";
+          "system"
+        );
+        <true
+      };
+      $err:e {
+        log.warn(str.concat("failed to record quota usage for scope: ";scope);"quota";"system");
+        <false
+      }
+    }
+  }
+}
+
+// Upserts a quota rule into the store.
+// If a rule with the same id already exists it is replaced.
+pub f=set_rule(store:db.$store;rule:$quota_rule):bool{
+  let tokens_s=str.from_int(rule.limit_tokens);
+  let cost_s=str.from_float(rule.limit_cost_usd);
+  db.exec_params(
+    store.conn;
+    "INSERT INTO quota_rules (id,scope,limit_tokens,limit_cost_usd,period)
+     VALUES (?,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET
+       scope=excluded.scope,
+       limit_tokens=excluded.limit_tokens,
+       limit_cost_usd=excluded.limit_cost_usd,
+       period=excluded.period";
+    @(rule.id;rule.scope;tokens_s;cost_s;rule.period)
+  )|{
+    $ok:_ {
+      log.info(str.concat("quota rule saved: ";rule.id);"quota";"system");
+      <true
+    };
+    $err:e {
+      log.warn(str.concat("failed to save quota rule: ";rule.id);"quota";"system");
+      <false
+    }
+  }
+}
+
+// Returns all quota rules in the store ordered by scope.
+pub f=list_rules(store:db.$store):@($quota_rule){
+  db.query_params(
+    store.conn;
+    "SELECT id,scope,limit_tokens,limit_cost_usd,period FROM quota_rules ORDER BY scope";
+    @()
+  )|{
+    $ok:rows {
+      <rows.map|row{
+        $quota_rule{
+          id:json.get_str(row;"id");
+          scope:json.get_str(row;"scope");
+          limit_tokens:json.get_int(row;"limit_tokens");
+          limit_cost_usd:json.get_float(row;"limit_cost_usd");
+          period:json.get_str(row;"period")
+        }
+      }
+    };
+    $err:e {
+      log.warn("failed to list quota rules";"quota";"system");
+      <@()
+    }
+  }
+}

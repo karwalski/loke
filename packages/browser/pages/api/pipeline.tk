@@ -1,0 +1,199 @@
+// POST /api/pipeline — main privacy pipeline endpoint.
+// Receives user text, runs the full PII detection and anonymisation pipeline,
+// routes to the appropriate LLM, and returns the result with pipeline metadata.
+
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+i=core:browser.extensions.core;
+i=pipeline:core.privacy.pipeline;
+i=router:core.router.router;
+i=t:shared.types;
+i=gt:core.governance.types;
+i=gw:core.governance.gateway;
+i=pt:core.providers.types;
+i=disp:core.providers.dispatcher;
+
+// Derive a $latency_tolerance from the request "tolerance" string field
+f=parse_tolerance(raw:str):$latency_tolerance{
+  if str.eq(raw;"patient"){
+    <$patient
+  }else{
+    if str.eq(raw;"background"){
+      <$background
+    }else{
+      // Default to instant for "instant" or any unknown value
+      <$instant
+    }
+  }
+}
+
+// Render the sensitivity level as a human-readable string for the JSON response
+f=sensitivity_label(level:$sensitivity_level):str{
+  if level==$restricted{
+    <"RESTRICTED"
+  }else{
+    if level==$confidential{
+      <"CONFIDENTIAL"
+    }else{
+      if level==$internal{
+        <"INTERNAL"
+      }else{
+        <"PUBLIC"
+      }
+    }
+  }
+}
+
+pub f=post(req:$http.req):$http.res{
+  let cid=log.new_correlation_id();
+  log.info("pipeline request received";"api/pipeline";cid);
+
+  // Extract request fields from JSON body
+  let body=req.body;
+  let text=json.get_str(body;"text")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let system_prompt=json.get_str(body;"system_prompt")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let tolerance_raw=json.get_str(body;"tolerance")|{
+    $ok:v v;
+    $err:_ "instant"
+  };
+  let mode=json.get_str(body;"mode")|{
+    $ok:v v;
+    $err:_ "chat"
+  };
+  let api_key_anthropic=json.get_str(body;"api_key_anthropic")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let api_key_openai=json.get_str(body;"api_key_openai")|{
+    $ok:v v;
+    $err:_ ""
+  };
+
+  // If API keys provided in request, update the dispatcher
+  if str.eq(api_key_anthropic;""){
+    ()
+  }else{
+    core.set_api_key("anthropic";api_key_anthropic)
+  };
+  if str.eq(api_key_openai;""){
+    ()
+  }else{
+    core.set_api_key("openai";api_key_openai)
+  };
+
+  // Validate that text is non-empty
+  if str.eq(text;""){
+    log.warn("pipeline request missing text field";"api/pipeline";cid);
+    <http.res.err(400;"missing required field: text")
+  }else{
+    let tolerance_val=parse_tolerance(tolerance_raw);
+
+    // Governance gateway check
+    let gw_req=gt.gateway_request{
+      request_id:cid;
+      use_case_id:"chat-completion";
+      text:text;
+      model_id:"pending";
+      provider:t.provider.$ollama;
+      sensitivity:t.sensitivity_level.$public;
+      estimated_cost:0.0;
+      correlation_id:cid
+    };
+    let gw_decision=gw.submit(core.get_gateway();gw_req)|{
+      $ok:v v;
+      $err:e{
+        log.error("governance gateway error";"api/pipeline";cid);
+        <http.res.err(403;"governance gateway error")
+      }
+    };
+    if gw_decision.blocked{
+      log.warn("governance gateway blocked request";"api/pipeline";cid);
+      <http.res.err(403;gw_decision.reason)
+    }else{
+
+      // Run the privacy pipeline (detect PII, anonymise, inject guardian prompt)
+      let run=pipeline.run(text;system_prompt;core.get_pipeline_config());
+
+      // Route to the appropriate model based on sensitivity and entity count
+      let routing=router.route(
+        core.get_router();
+        run.result.anonymised;
+        run.result.sensitivity;
+        run.total_entities;
+        tolerance_val;
+        cid
+      )|{
+        $ok:v v;
+        $err:e{
+          log.error("router failed";"api/pipeline";cid);
+          <http.res.err(500;"router error")
+        }
+      };
+
+      // Build the LLM completion request
+      let completion_req=pt.completion_request{
+        model_id:routing.model.id;
+        messages:@(pt.user_msg(run.result.anonymised));
+        system_prompt:run.final_system_prompt;
+        max_tokens:4096;
+        temperature:0.7;
+        stream:false
+      };
+
+      // Dispatch to provider
+      let response=disp.dispatch(core.get_dispatcher();completion_req;routing.model.provider)|{
+        $ok:v v;
+        $err:e{
+          log.error("dispatch failed";"api/pipeline";cid);
+          <http.res.err(500;"dispatch error")
+        }
+      };
+
+      let sensitivity_str=sensitivity_label(run.result.sensitivity);
+      let entity_count_str=str.from_u32(run.total_entities);
+      let model_id=routing.model.id;
+      let provider_str=json.enc(routing.model.provider);
+      let tokens_in_str=str.from_u32(response.tokens_in);
+      let tokens_out_str=str.from_u32(response.tokens_out);
+      let cost_str=str.from_f64(response.cost_usd);
+
+      // Build response JSON
+      let resp_body=str.concat("{";
+        str.concat("\"ok\":true,";
+        str.concat("\"response\":";
+        str.concat(json.enc_str(response.content);
+        str.concat(",\"anonymised\":";
+        str.concat(json.enc_str(run.result.anonymised);
+        str.concat(",\"original\":";
+        str.concat(json.enc_str(run.result.original);
+        str.concat(",\"sensitivity\":";
+        str.concat(json.enc_str(sensitivity_str);
+        str.concat(",\"model_id\":";
+        str.concat(json.enc_str(model_id);
+        str.concat(",\"provider\":";
+        str.concat(provider_str;
+        str.concat(",\"entities_found\":";
+        str.concat(entity_count_str;
+        str.concat(",\"request_id\":";
+        str.concat(json.enc_str(run.request_id);
+        str.concat(",\"tokens_in\":";
+        str.concat(tokens_in_str;
+        str.concat(",\"tokens_out\":";
+        str.concat(tokens_out_str;
+        str.concat(",\"cost_usd\":";
+        str.concat(cost_str;
+        "}"))))))))))))))))))));
+
+      log.info("pipeline request complete";"api/pipeline";cid);
+      <http.res.json(200;resp_body)
+    }
+  }
+}

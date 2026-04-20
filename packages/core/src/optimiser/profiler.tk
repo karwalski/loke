@@ -1,0 +1,459 @@
+// F4.2 — Data profiler for schema extraction
+// Takes tabular data (JSON arrays) and produces a compact TOON-format schema
+// profile to send to LLMs instead of raw data.
+
+i=t:shared.types;
+i=toon:core.optimiser.toon;
+i=str:std.str;
+i=json:std.json;
+
+// --- Types ---
+
+pub m.$col_type{
+  $int_col;
+  $float_col;
+  $str_col;
+  $bool_col;
+  $date_col;
+  $unknown_col
+}
+
+pub m.$col_profile{
+  name:str;
+  col_type:$col_type;
+  null_count:u32;
+  null_pct:f64;
+  unique_count:u32;
+  min_val:str;
+  max_val:str;
+  sample_vals:@(str);
+  is_pii_candidate:bool
+}
+
+pub m.$dataset_profile{
+  name:str;
+  row_count:u32;
+  col_count:u32;
+  columns:@($col_profile);
+  sensitivity_hint:str
+}
+
+// --- PII heuristic ---
+
+// Returns true if the column name suggests it may contain PII.
+f=is_pii_name(col_name:str):bool{
+  let lower=str.to_lower(col_name);
+  let markers=@("email";"phone";"name";"address";"ssn";"dob";"birth";"credit";"account";"password";"key";"token");
+  let found=false;
+  markers|{
+    m;
+      if found{
+      }else{
+        if str.contains(lower;m){
+          found=true
+        }
+      }
+  };
+  <found
+}
+
+// --- Type inference ---
+
+// Infers a column type from a list of sample string values.
+// All values must satisfy the type for it to apply.
+pub f=infer_col_type(samples:@(str)):$col_type{
+  if samples.len==0{
+    <$col_type.$unknown_col
+  }else{
+    // Check bool
+    let all_bool=true;
+    samples|{
+      s;
+        let lower=str.to_lower(s);
+        let is_bool_val=str.eq(lower;"true");
+        let is_bool_n=str.eq(lower;"false");
+        let is_bool_y=str.eq(lower;"y");
+        let is_bool_no=str.eq(lower;"n");
+        if is_bool_val{
+        }else{
+          if is_bool_n{
+          }else{
+            if is_bool_y{
+            }else{
+              if is_bool_no{
+              }else{
+                all_bool=false
+              }
+            }
+          }
+        }
+    };
+    if all_bool{
+      <$col_type.$bool_col
+    }else{
+      // Check date: matches YYYY-MM-DD pattern (10 chars, digit-digit-digit-digit-dash-digit-digit-dash-digit-digit)
+      let all_date=true;
+      samples|{
+        s;
+          // A date string must be exactly 10 chars and contain "-" at positions 4 and 7
+          if str.len(s)==10{
+            let c4=str.slice(s;4;5);
+            let c7=str.slice(s;7;8);
+            if str.eq(c4;"-"){
+              if str.eq(c7;"-"){
+                // Looks like a date
+              }else{
+                all_date=false
+              }
+            }else{
+              all_date=false
+            }
+          }else{
+            all_date=false
+          }
+      };
+      if all_date{
+        <$col_type.$date_col
+      }else{
+        // Check int
+        let all_int=true;
+        samples|{
+          s;
+            str.parse_int(s)|{
+              $ok:_ {};
+              $err:_ all_int=false
+            }
+        };
+        if all_int{
+          <$col_type.$int_col
+        }else{
+          // Check float
+          let all_float=true;
+          samples|{
+            s;
+              str.parse_float(s)|{
+                $ok:_ {};
+                $err:_ all_float=false
+              }
+          };
+          if all_float{
+            <$col_type.$float_col
+          }else{
+            <$col_type.$str_col
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- Profile a single column ---
+
+// Extracts all string values for a given key from an array of JSON objects.
+// Returns a tuple-like structure via a helper type.
+f=extract_col_values(rows:@(any);col_name:str):@(str){
+  let vals=@();
+  rows|{
+    row;
+      // We attempt to get each type; use the string representation
+      let s_val=json.try_str_key(row;col_name);
+      s_val|{
+        $ok:s {
+          if str.eq(s;""){
+            // treat empty string as present but empty
+            vals=@(vals;s)
+          }else{
+            vals=@(vals;s)
+          }
+        };
+        $err:_ {
+          // Try int
+          let i_val=json.try_int_key(row;col_name);
+          i_val|{
+            $ok:n vals=@(vals;str.from_int(n));
+            $err:_ {
+              let f_val=json.try_float_key(row;col_name);
+              f_val|{
+                $ok:f vals=@(vals;str.from_float(f));
+                $err:_ {
+                  let b_val=json.try_bool_key(row;col_name);
+                  b_val|{
+                    $ok:b {
+                      if b{vals=@(vals;"true")}else{vals=@(vals;"false")}
+                    };
+                    $err:_ {
+                      // Key missing or null — skip (counted as null)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+  };
+  <vals
+}
+
+// Count how many rows are missing (null) for a given key.
+f=count_nulls(rows:@(any);col_name:str):u32{
+  let count=0;
+  rows|{
+    row;
+      let is_null=json.is_null_key(row;col_name);
+      if is_null{
+        count=count+1
+      }else{
+        let missing=json.has_key(row;col_name);
+        if missing{
+        }else{
+          count=count+1
+        }
+      }
+  };
+  <count
+}
+
+// Count unique values in a string array.
+f=count_unique(vals:@(str)):u32{
+  let seen=@();
+  vals|{
+    v;
+      let already=false;
+      seen|{
+        s;
+          if already{
+          }else{
+            if str.eq(s;v){
+              already=true
+            }
+          }
+      };
+      if already{
+      }else{
+        seen=@(seen;v)
+      }
+  };
+  <seen.len
+}
+
+// Find min value (lexicographic for strings, numeric comparison for numbers).
+f=find_min(vals:@(str)):str{
+  if vals.len==0{
+    <""
+  }else{
+    let m=vals[0];
+    vals|{
+      v;
+        // Lexicographic comparison: str.lt not available, use str.sort heuristic
+        // We compare by checking if v is less than current min using str.compare
+        let cmp=str.compare(v;m);
+        if cmp<0{
+          m=v
+        }
+    };
+    <m
+  }
+}
+
+// Find max value (lexicographic).
+f=find_max(vals:@(str)):str{
+  if vals.len==0{
+    <""
+  }else{
+    let m=vals[0];
+    vals|{
+      v;
+        let cmp=str.compare(v;m);
+        if cmp>0{
+          m=v
+        }
+    };
+    <m
+  }
+}
+
+// Take up to n samples from the front of an array.
+f=take_samples(vals:@(str);n:u32):@(str){
+  if vals.len<=n{
+    <vals
+  }else{
+    <vals.slice(0;n)
+  }
+}
+
+// Build a $col_profile for a single column from all rows.
+f=profile_col(rows:@(any);col_name:str;total_rows:u32):$col_profile{
+  let null_count=count_nulls(rows;col_name);
+  let null_pct=if total_rows==0{0.0}else{(null_count as f64/(total_rows as f64))*100.0};
+  let vals=extract_col_values(rows;col_name);
+  let unique_count=count_unique(vals);
+  let min_val=find_min(vals);
+  let max_val=find_max(vals);
+  let samples=take_samples(vals;3);
+  let col_type=infer_col_type(vals);
+  let is_pii=is_pii_name(col_name);
+  <$col_profile{
+    name:col_name;
+    col_type:col_type;
+    null_count:null_count;
+    null_pct:null_pct;
+    unique_count:unique_count;
+    min_val:min_val;
+    max_val:max_val;
+    sample_vals:samples;
+    is_pii_candidate:is_pii
+  }
+}
+
+// --- Public profiling function ---
+
+// Profiles a JSON array of objects. For each column: detect type, count nulls,
+// count unique values, find min/max, take up to 3 sample values.
+// Flags is_pii_candidate for columns whose name contains sensitive keywords.
+pub f=profile_json_array(data:str;name:str):$dataset_profile|$loke_err{
+  json.dec(data)|{
+    $ok:parsed {
+      let rows=json.try_arr(parsed);
+      rows|{
+        $ok:row_arr {
+          let row_count=row_arr.len;
+          if row_count==0{
+            let profile=$dataset_profile{
+              name:name;
+              row_count:0;
+              col_count:0;
+              columns:@();
+              sensitivity_hint:"no data"
+            };
+            <$ok(profile)
+          }else{
+            // Extract column names from the first row
+            let col_names=json.keys(row_arr[0]);
+            let col_count=col_names.len;
+            let columns=col_names.map|col_name{
+              profile_col(row_arr;col_name;row_count)
+            };
+            // Determine sensitivity hint
+            let has_pii=false;
+            columns|{
+              cp;
+                if cp.is_pii_candidate{
+                  has_pii=true
+                }
+            };
+            let sensitivity_hint=if has_pii{"contains PII candidates"}else{"no obvious PII"};
+            let profile=$dataset_profile{
+              name:name;
+              row_count:row_count;
+              col_count:col_count;
+              columns:columns;
+              sensitivity_hint:sensitivity_hint
+            };
+            <$ok(profile)
+          }
+        };
+        $err:_ {
+          <$err($loke_err.$unknown_err("profile_json_array: input is not a JSON array"))
+        }
+      }
+    };
+    $err:_ {
+      <$err($loke_err.$unknown_err(str.concat("profile_json_array: JSON parse failed for dataset: ";name)))
+    }
+  }
+}
+
+// --- Type string conversion ---
+
+// Converts a $col_type to its short string representation.
+pub f=col_type_to_str(t:$col_type):str{
+  t|{
+    $int_col   "int";
+    $float_col "float";
+    $str_col   "str";
+    $bool_col  "bool";
+    $date_col  "date";
+    $unknown_col "?"
+  }
+}
+
+// --- TOON schema string output ---
+
+// Formats a null percentage as a compact string (e.g. "0%", "2.3%").
+f=fmt_pct(pct:f64):str{
+  if pct==0.0{
+    <"0%"
+  }else{
+    // Round to one decimal place
+    let rounded=str.from_float(pct);
+    <str.concat(rounded;"%")
+  }
+}
+
+// Converts a $dataset_profile to a compact TOON schema string.
+pub f=to_toon_schema(profile:$dataset_profile):str{
+  let row_count_s=str.from_int(profile.row_count);
+  let col_count_s=str.from_int(profile.col_count);
+  let header=str.concat(
+    "SCHEMA:";
+    str.concat(
+      profile.name;
+      str.concat(
+        " rows:";
+        str.concat(
+          row_count_s;
+          str.concat(" cols:";col_count_s)
+        )
+      )
+    )
+  );
+  let col_lines=profile.columns.map|cp{
+    let type_s=col_type_to_str(cp.col_type);
+    // Sample values in brackets
+    let sample_part=if cp.sample_vals.len==0{
+      ""
+    }else{
+      let inner=str.join(cp.sample_vals;",");
+      str.concat("[";str.concat(inner;"]"))
+    };
+    let nulls_s=fmt_pct(cp.null_pct);
+    let uniq_s=str.from_int(cp.unique_count);
+    let pii_part=if cp.is_pii_candidate{" [PII]"}else{""};
+    // Check if date type: add [date?] hint
+    let date_hint=cp.col_type|{
+      $date_col " [date?]";
+      $int_col "";
+      $float_col "";
+      $str_col "";
+      $bool_col "";
+      $unknown_col ""
+    };
+    // But if already flagged PII, PII takes precedence
+    let suffix=if cp.is_pii_candidate{pii_part}else{date_hint};
+    str.concat(
+      cp.name;
+      str.concat(
+        ":";
+        str.concat(
+          type_s;
+          str.concat(
+            sample_part;
+            str.concat(
+              " nulls:";
+              str.concat(
+                nulls_s;
+                str.concat(
+                  " uniq:";
+                  str.concat(uniq_s;suffix)
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  };
+  let col_block=str.join(col_lines;"\n");
+  <str.concat(header;str.concat("\n";col_block))
+}

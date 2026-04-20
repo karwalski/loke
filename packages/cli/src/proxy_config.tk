@@ -1,0 +1,103 @@
+// A6.5 — Per-user proxy configuration.
+// Sets environment variables so coding tools (claude-code, cursor, etc.)
+// automatically route their LLM traffic through loke's proxy.
+
+i=t:shared.types;
+i=log:shared.log;
+i=out:cli.output;
+i=file:std.file;
+i=str:std.str;
+
+pub m.$proxy_env{
+  var_name:str;
+  value:str;
+  tool:str
+}
+
+// Returns the list of environment variable entries required to route the named
+// tool through loke's proxy.  Pass "all" to get entries for every supported tool.
+pub f=env_vars_for_tool(tool:str;proxy_port:i32):@($proxy_env){
+  let port_s=str.from_int(proxy_port);
+  let base=str.concat("http://localhost:";port_s);
+  let claude_var=$proxy_env{
+    var_name:"ANTHROPIC_BASE_URL";
+    value:base;
+    tool:"claude-code"
+  };
+  let openai_var=$proxy_env{
+    var_name:"OPENAI_BASE_URL";
+    value:base;
+    tool:"openai"
+  };
+  let cursor_var=$proxy_env{
+    var_name:"OPENAI_API_BASE";
+    value:base;
+    tool:"cursor"
+  };
+  if str.eq(tool;"claude-code"){
+    <@(claude_var)
+  };
+  if str.eq(tool;"openai"){
+    <@(openai_var)
+  };
+  if str.eq(tool;"cursor"){
+    <@(cursor_var)
+  };
+  // "all" or unrecognised tool — return everything
+  <@(claude_var;openai_var;cursor_var)
+}
+
+// Reads the shell profile at profile_path, appends any missing export lines,
+// and writes the file back.  Returns true on success, false on any error.
+pub f=inject_to_profile(vars:@($proxy_env);profile_path:str):bool{
+  let existing=file.read(profile_path)|{
+    $ok:v v;
+    $err:_ ""
+  };
+  let updated=existing;
+  vars.each|v{
+    let export_line=str.concat(
+      str.concat("export ";v.var_name);
+      str.concat("=";v.value)
+    );
+    if str.contains(existing;v.var_name){
+      // Variable already exported — skip to avoid duplicates
+      ()
+    }else{
+      let updated=str.concat(updated;str.concat("\n";export_line))
+    }
+  };
+  file.write(profile_path;updated)|{
+    $ok:_ <true;
+    $err:e {
+      log.warn(
+        str.concat("failed to write profile: ";profile_path);
+        "proxy_config";
+        "system"
+      );
+      <false
+    }
+  }
+}
+
+// Builds proxy env vars for tool, injects them into profile_path, prints a
+// summary, and returns 0 on success.
+pub f=run(tool:str;proxy_port:i32;profile_path:str):i32{
+  let vars=env_vars_for_tool(tool;proxy_port);
+  let ok=inject_to_profile(vars;profile_path);
+  if ok{
+    vars.each|v{
+      out.print_line(str.concat(
+        str.concat("  set ";v.var_name);
+        str.concat("=";v.value)
+      ))
+    };
+    out.print_line(str.concat(
+      "Restart your terminal or run: source ";
+      profile_path
+    ))
+  }else{
+    out.print_error(str.concat("could not write to profile: ";profile_path))
+  };
+  <0
+}

@@ -1,0 +1,261 @@
+// F3.7 — Prompt template engine
+// Versioned templates with safe parameter injection.
+// No raw string concatenation of user data into prompts — all values go
+// through the {{param_name}} substitution mechanism.
+
+i=t:shared.types;
+i=str:std.str;
+i=json:std.json;
+i=log:shared.log;
+
+pub m.$template_param{
+  name:str;
+  required:bool;
+  description:str;
+  default_val:str
+}
+
+pub m.$prompt_template{
+  id:str;
+  version:str;
+  name:str;
+  description:str;
+  system_prompt:str;
+  user_template:str;
+  params:@($template_param)
+}
+
+pub m.$render_result{
+  system_prompt:str;
+  user_prompt:str;
+  params_used:@(str);
+  missing_params:@(str)
+}
+
+// Returns the full set of built-in prompt templates.
+pub f=built_in_templates():@($prompt_template){
+  <@(
+    $prompt_template{
+      id:"data-analysis";
+      version:"1.0.0";
+      name:"Data Analysis";
+      description:"Analyse a dataset schema and answer questions without touching raw data.";
+      system_prompt:"You are a data analyst. Analyse the provided data schema and answer questions accurately. Never request raw data — work only with the schema and statistics provided.";
+      user_template:"Dataset: {{dataset_schema}}\n\nQuestion: {{question}}";
+      params:@(
+        $template_param{name:"dataset_schema";required:true;description:"JSON or textual schema of the dataset";default_val:""};
+        $template_param{name:"question";required:true;description:"Question to answer about the dataset";default_val:""}
+      )
+    };
+    $prompt_template{
+      id:"code-review";
+      version:"1.0.0";
+      name:"Code Review";
+      description:"Review code for quality, security, and correctness.";
+      system_prompt:"You are an expert code reviewer. Review code for quality, security, and correctness. Be specific and actionable.";
+      user_template:"Review this code:\n\n{{code}}\n\nFocus on: {{focus_areas}}";
+      params:@(
+        $template_param{name:"code";required:true;description:"Source code to review";default_val:""};
+        $template_param{name:"focus_areas";required:false;description:"Aspects to focus on during review";default_val:"quality and security"}
+      )
+    };
+    $prompt_template{
+      id:"summarise";
+      version:"1.0.0";
+      name:"Summarise";
+      description:"Create clear, accurate summaries of provided content.";
+      system_prompt:"You are a precise summariser. Create clear, accurate summaries.";
+      user_template:"Summarise the following:\n\n{{content}}\n\nFormat: {{format}}";
+      params:@(
+        $template_param{name:"content";required:true;description:"Content to summarise";default_val:""};
+        $template_param{name:"format";required:false;description:"Desired output format";default_val:"bullet points"}
+      )
+    };
+    $prompt_template{
+      id:"classify";
+      version:"1.0.0";
+      name:"Classify";
+      description:"Classify text into one of the provided categories.";
+      system_prompt:"You are a classification engine. Classify inputs into the provided categories. Reply with only the category name.";
+      user_template:"Categories: {{categories}}\n\nText to classify: {{text}}";
+      params:@(
+        $template_param{name:"categories";required:true;description:"Comma-separated list of valid categories";default_val:""};
+        $template_param{name:"text";required:true;description:"Text to classify";default_val:""}
+      )
+    };
+    $prompt_template{
+      id:"agent-task";
+      version:"1.0.0";
+      name:"Agent Task";
+      description:"Autonomous agent task with precise instructions and constraint tracking.";
+      system_prompt:"You are an autonomous agent completing a specific task. Follow instructions precisely. Report what you did and any issues encountered.";
+      user_template:"Task: {{task_description}}\n\nContext: {{context}}\n\nConstraints: {{constraints}}";
+      params:@(
+        $template_param{name:"task_description";required:true;description:"Description of the task to complete";default_val:""};
+        $template_param{name:"context";required:false;description:"Background context for the task";default_val:"none provided"};
+        $template_param{name:"constraints";required:false;description:"Constraints or guardrails for the agent";default_val:"none"}
+      )
+    }
+  )
+}
+
+// Finds a template by id from a list. Returns $loke_err if not found.
+pub f=find(templates:@($prompt_template);id:str):$prompt_template|$loke_err{
+  let count=templates.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let tmpl=str.array_get(templates;i);
+      if str.eq(tmpl.id;id){
+        <$ok(tmpl)
+      }else{
+        i=i+1
+      }
+    }
+  };
+  <$err($validation_err(str.concat("template not found: ";id)))
+}
+
+// Renders a raw template string by replacing {{key}} tokens with values
+// looked up in a JSON object string. Keys not present in params_json are
+// left as-is (the caller decides whether missing keys are errors).
+pub f=render_user(template_str:str;params_json:str):str{
+  let result=template_str;
+  let parsed=json.dec(params_json)|{
+    $ok:obj obj;
+    $err:_ <result
+  };
+  let keys=json.keys(parsed);
+  let count=keys.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let key=str.array_get(keys;i);
+      let val=json.get_str(parsed;key);
+      let token_open=str.concat("{{";key);
+      let token=str.concat(token_open;"}}");
+      result=str.replace(result;token;val);
+      i=i+1
+    }
+  };
+  <result
+}
+
+// Renders a $prompt_template with the supplied params JSON.
+// Required params missing from the JSON are recorded in missing_params.
+// Optional params fall back to their default_val when absent.
+pub f=render(template:$prompt_template;params_json:str):$render_result|$loke_err{
+  let parsed=json.dec(params_json)|{
+    $ok:obj obj;
+    $err:_ <$err($validation_err("render: params_json is not valid JSON"))
+  };
+
+  let params_used=@();
+  let missing_params=@();
+
+  // Build a resolved params JSON by walking template.params
+  // and applying defaults / recording missing required params.
+  let resolved_system=template.system_prompt;
+  let resolved_user=template.user_template;
+
+  let count=template.params.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let param=str.array_get(template.params;i);
+      let token_open=str.concat("{{";param.name);
+      let token=str.concat(token_open;"}}");
+
+      // Check whether the key exists in the parsed object
+      let val=json.get_str(parsed;param.name);
+      let key_present=str.len(val)>0;
+
+      if key_present{
+        resolved_system=str.replace(resolved_system;token;val);
+        resolved_user=str.replace(resolved_user;token;val);
+        params_used=@(params_used;param.name)
+      }else{
+        if param.required{
+          // Required and missing — record it but leave token unreplaced so the
+          // caller can detect that the output is incomplete.
+          missing_params=@(missing_params;param.name)
+        }else{
+          // Optional: substitute default value
+          resolved_system=str.replace(resolved_system;token;param.default_val);
+          resolved_user=str.replace(resolved_user;token;param.default_val);
+          params_used=@(params_used;param.name)
+        }
+      };
+      i=i+1
+    }
+  };
+
+  log.debug(str.concat("rendered template: ";template.id);"template";"engine");
+
+  <$ok($render_result{
+    system_prompt:resolved_system;
+    user_prompt:resolved_user;
+    params_used:params_used;
+    missing_params:missing_params
+  })
+}
+
+// Validates a template and returns a list of error strings.
+// An empty list means the template is valid.
+pub f=validate(template:$prompt_template):@(str){
+  let errors=@();
+
+  if str.len(template.id)==0{
+    errors=@(errors;"id must not be empty")
+  }else{};
+
+  if str.len(template.user_template)==0{
+    errors=@(errors;"user_template must not be empty")
+  }else{};
+
+  // Check that all params have non-empty names
+  let count=template.params.len;
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let param=str.array_get(template.params;i);
+      if str.len(param.name)==0{
+        errors=@(errors;"param at index has empty name")
+      }else{};
+      i=i+1
+    }
+  };
+
+  // Detect unclosed {{ in system_prompt and user_template
+  if str.contains(template.system_prompt;"{{"){
+    // Walk forward — every {{ should have a matching }}
+    // Simplified check: count {{ vs }} occurrences and flag mismatch
+    let open_parts=str.split(template.system_prompt;"{{");
+    let close_parts=str.split(template.system_prompt;"}}");
+    let open_count=open_parts.len;
+    let close_count=close_parts.len;
+    if open_count>close_count{
+      errors=@(errors;"system_prompt contains unclosed {{ placeholder")
+    }else{}
+  }else{};
+
+  if str.contains(template.user_template;"{{"){
+    let open_parts=str.split(template.user_template;"{{");
+    let close_parts=str.split(template.user_template;"}}");
+    let open_count=open_parts.len;
+    let close_count=close_parts.len;
+    if open_count>close_count{
+      errors=@(errors;"user_template contains unclosed {{ placeholder")
+    }else{}
+  }else{};
+
+  <errors
+}

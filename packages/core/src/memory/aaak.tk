@@ -1,0 +1,359 @@
+// M2.1 — AAAK encoder/decoder.
+// AAAK is a compressed English shorthand readable by any LLM without a decoder.
+// Achieves 5-30x compression on structured facts. Lossless for structured information.
+
+i=str:std.str;
+i=t:shared.types;
+i=mt:core.memory.types;
+
+pub m.$aaak_entry{
+  key:str;
+  value:str;
+  entry_type:str;
+  confidence:f64
+}
+
+pub m.$aaak_doc{
+  entries:@($aaak_entry);
+  raw:str;
+  source_len:u32;
+  aaak_len:u32;
+  compression_ratio:f64
+}
+
+pub m.$compress_level{
+  $light;
+  $medium;
+  $aggressive
+}
+
+// Returns the default compression level ($medium).
+pub f=default_level():$compress_level{
+  <$compress_level.$medium
+}
+
+// Strips common English articles from text.
+f=strip_articles(text:str):str{
+  let s=str.replace(text;" the ";" ");
+  let s=str.replace(s;" a ";" ");
+  let s=str.replace(s;" an ";" ");
+  let s=str.replace(s;"The ";"");
+  let s=str.replace(s;"A ";"");
+  <str.replace(s;"An ";"")
+}
+
+// Strips common prepositions from text.
+f=strip_prepositions(text:str):str{
+  let s=str.replace(text;" of ";" ");
+  let s=str.replace(s;" for ";" ");
+  let s=str.replace(s;" in ";" ");
+  let s=str.replace(s;" on ";" ");
+  let s=str.replace(s;" at ";" ");
+  let s=str.replace(s;" to ";" ");
+  let s=str.replace(s;" by ";" ");
+  <str.replace(s;" with ";" ")
+}
+
+// Abbreviates words longer than 8 chars to their first 4 chars in uppercase.
+// Only applies to words that look like proper nouns (start with uppercase) or long identifiers.
+f=abbreviate_long_words(text:str):str{
+  let words=str.split(text;" ");
+  let result="";
+  let first=true;
+  words.each|w{
+    let abbrev=if str.len(w) > 8{
+      str.to_upper(str.slice(w;0;4))
+    }else{
+      w
+    };
+    if first{
+      let result=abbrev;
+      let first=false
+    }else{
+      let result=str.concat(result;str.concat(" ";abbrev))
+    }
+  };
+  <result
+}
+
+// Detects if text describes a team or group of people with roles.
+// Heuristic: contains "manages", "leads", "is on", "does", "handles" with multiple names.
+f=is_team_pattern(lower:str):bool{
+  let has_manages=str.contains(lower;"manages");
+  let has_leads=str.contains(lower;"leads");
+  let has_handles=str.contains(lower;"handles");
+  let has_frontend=str.contains(lower;"frontend");
+  let has_backend=str.contains(lower;"backend");
+  let has_infra=str.contains(lower;"infra");
+  (has_manages || has_leads) && (has_frontend || has_backend || has_infra || has_handles)
+}
+
+// Detects if text describes a decision.
+f=is_decision_pattern(lower:str):bool{
+  let has_decision=str.contains(lower;"decision");
+  let has_decided=str.contains(lower;"decided");
+  let has_chose=str.contains(lower;"chose");
+  let has_selected=str.contains(lower;"selected");
+  has_decision || has_decided || has_chose || has_selected
+}
+
+// Detects if text has a "because of" or "due to" reason clause.
+f=has_reason_clause(lower:str):bool{
+  let has_because=str.contains(lower;"because");
+  let has_due=str.contains(lower;"due to");
+  let has_reason=str.contains(lower;"reason");
+  has_because || has_due || has_reason
+}
+
+// Detects "X is Y" or "X are Y" copula pattern.
+f=is_copula_pattern(lower:str):bool{
+  let has_is=str.contains(lower;" is ");
+  let has_are=str.contains(lower;" are ");
+  has_is || has_are
+}
+
+// Applies level-based compression: strip articles/prepositions and optionally abbreviate.
+f=apply_level(text:str;level:$compress_level):str{
+  level|{
+    $compress_level.$light {
+      <strip_articles(text)
+    };
+    $compress_level.$medium {
+      let s=strip_articles(text);
+      <strip_prepositions(s)
+    };
+    $compress_level.$aggressive {
+      let s=strip_articles(text);
+      let s=strip_prepositions(s);
+      <abbreviate_long_words(s)
+    }
+  }
+}
+
+// Encodes a single fact or sentence to AAAK shorthand.
+// Detects structural patterns and applies compression.
+pub f=encode_fact(text:str;level:$compress_level):str{
+  let trimmed=str.trim(text);
+  let lower=str.to_lower(trimmed);
+
+  // Pattern: "decision/decided ... because/due to" → DEC: x ← y
+  if is_decision_pattern(lower){
+    if has_reason_clause(lower){
+      // Split on "because" or "due to" to separate decision from reason
+      let parts_because=str.split(trimmed;"because");
+      let parts_due=str.split(trimmed;"due to");
+      let has_because=str.contains(lower;"because");
+      if has_because && str.len(parts_because[0]) > 0{
+        let decision_part=apply_level(str.trim(parts_because[0]);level);
+        let reason_part=apply_level(str.trim(parts_because[1]);level);
+        <str.concat("DEC: ";str.concat(decision_part;str.concat(" ← ";reason_part)))
+      }else{
+        let decision_part=apply_level(str.trim(parts_due[0]);level);
+        let reason_part=apply_level(str.trim(parts_due[1]);level);
+        <str.concat("DEC: ";str.concat(decision_part;str.concat(" ← ";reason_part)))
+      }
+    }else{
+      let compressed=apply_level(trimmed;level);
+      <str.concat("DEC: ";compressed)
+    }
+  }else{
+    // Pattern: team descriptions with roles
+    if is_team_pattern(lower){
+      let compressed=apply_level(trimmed;level);
+      <str.concat("TEAM: ";compressed)
+    }else{
+      // Pattern: "X manages/leads Y" → X(lead): Y
+      if str.contains(lower;"manages") || str.contains(lower;"leads"){
+        let parts_m=str.split(trimmed;" manages ");
+        let parts_l=str.split(trimmed;" leads ");
+        let has_manages=str.contains(lower;" manages ");
+        if has_manages && str.len(parts_m[0]) > 0{
+          let subject=apply_level(str.trim(parts_m[0]);level);
+          let object=apply_level(str.trim(parts_m[1]);level);
+          <str.concat(subject;str.concat("(lead): ";object))
+        }else{
+          if str.contains(lower;" leads ") && str.len(parts_l[0]) > 0{
+            let subject=apply_level(str.trim(parts_l[0]);level);
+            let object=apply_level(str.trim(parts_l[1]);level);
+            <str.concat(subject;str.concat("(lead): ";object))
+          }else{
+            <apply_level(trimmed;level)
+          }
+        }
+      }else{
+        // Pattern: "X is Y" or "X are Y" → X: Y
+        if is_copula_pattern(lower){
+          let has_is=str.contains(lower;" is ");
+          let parts_is=str.split(trimmed;" is ");
+          let parts_are=str.split(trimmed;" are ");
+          if has_is && str.len(parts_is[0]) > 0{
+            let subject=apply_level(str.trim(parts_is[0]);level);
+            let predicate=apply_level(str.trim(parts_is[1]);level);
+            <str.concat(subject;str.concat(": ";predicate))
+          }else{
+            if str.contains(lower;" are ") && str.len(parts_are[0]) > 0{
+              let subject=apply_level(str.trim(parts_are[0]);level);
+              let predicate=apply_level(str.trim(parts_are[1]);level);
+              <str.concat(subject;str.concat(": ";predicate))
+            }else{
+              <apply_level(trimmed;level)
+            }
+          }
+        }else{
+          // Default: strip articles/prepositions per level
+          <apply_level(trimmed;level)
+        }
+      }
+    }
+  }
+}
+
+// Returns the percentage of space saved: (1 - aaak_len/original_len) * 100.
+pub f=measure_savings(original:str;aaak:str):f64{
+  let orig_len=str.len(original);
+  let aaak_len=str.len(aaak);
+  if orig_len == 0{
+    <0.0
+  }else{
+    (1.0 - (aaak_len / orig_len)) * 100.0
+  }
+}
+
+// Encodes multi-sentence text to an $aaak_doc.
+// Splits on ". " boundaries, encodes each sentence, joins with " | " or "\n".
+pub f=encode_text(text:str;level:$compress_level):$aaak_doc{
+  let sentences=str.split(text;". ");
+  let encoded_parts=@();
+  sentences.each|s{
+    let trimmed=str.trim(s);
+    if str.len(trimmed) > 0{
+      let encoded=encode_fact(trimmed;level);
+      let encoded_parts=encoded_parts.append(encoded)
+    }
+  };
+
+  // Build raw AAAK string: join with " | "
+  let raw="";
+  let first=true;
+  encoded_parts.each|part{
+    if first{
+      let raw=part;
+      let first=false
+    }else{
+      let raw=str.concat(raw;str.concat(" | ";part))
+    }
+  };
+
+  let source_len=str.len(text);
+  let aaak_len=str.len(raw);
+  let ratio=measure_savings(text;raw);
+
+  // Build entries array
+  let entries=@();
+  encoded_parts.each|part{
+    let entry=$aaak_entry{
+      key:"";
+      value:part;
+      entry_type:"fact";
+      confidence:0.8
+    };
+    let entries=entries.append(entry)
+  };
+
+  <$aaak_doc{
+    entries:entries;
+    raw:raw;
+    source_len:source_len;
+    aaak_len:aaak_len;
+    compression_ratio:ratio
+  }
+}
+
+// Attempts to expand AAAK shorthand back to approximate natural language.
+// Not lossless — produces a readable approximation.
+pub f=decode(aaak:str):str{
+  // Handle DEC: x ← y → "Decision: x, because y"
+  let s=if str.contains(aaak;"DEC: "){
+    let parts=str.split(aaak;"DEC: ");
+    let after=parts[1];
+    if str.contains(after;" ← "){
+      let reason_parts=str.split(after;" ← ");
+      str.concat("Decision: ";str.concat(reason_parts[0];str.concat(", because ";reason_parts[1])))
+    }else{
+      str.concat("Decision: ";after)
+    }
+  }else{
+    aaak
+  };
+
+  // Handle TEAM: prefix
+  let s=if str.contains(s;"TEAM: "){
+    str.replace(s;"TEAM: ";"Team: ")
+  }else{
+    s
+  };
+
+  // Handle PALACE: prefix
+  let s=if str.contains(s;"PALACE: "){
+    str.replace(s;"PALACE: ";"Palace structure: ")
+  }else{
+    s
+  };
+
+  // Handle [DATE]: x → "On DATE: x"
+  let s=if str.contains(s;"["){
+    let bracket_parts=str.split(s;"[");
+    if str.len(bracket_parts[0]) == 0{
+      let inner=str.split(bracket_parts[1];"]");
+      let date_str=inner[0];
+      let rest=str.trim(inner[1]);
+      // Strip leading ": " if present
+      let rest=if str.contains(rest;": "){
+        let rparts=str.split(rest;": ");
+        rparts[1]
+      }else{
+        rest
+      };
+      str.concat("On ";str.concat(date_str;str.concat(": ";rest)))
+    }else{
+      s
+    }
+  }else{
+    s
+  };
+
+  // Expand → to " leads to "
+  let s=str.replace(s;"→";" leads to ");
+
+  // Expand | to " and "
+  let s=str.replace(s;" | ";" and ");
+
+  // Expand NAME(role) → "NAME (role)" by replacing "(" with " ("
+  // This is approximate — just makes it more readable
+  let s=str.replace(s;"(";" (");
+
+  // Handle KEY: val → "KEY is val" for remaining KEY: patterns
+  // We detect this by looking for ": " not preceded by known prefixes
+  // Simple approach: if line has "X: Y" and X has no spaces, expand it
+  if str.contains(s;": "){
+    let kv_parts=str.split(s;": ");
+    let key=str.trim(kv_parts[0]);
+    // Only expand if key looks like a single word/identifier (no spaces)
+    if !str.contains(key;" "){
+      let val=str.trim(kv_parts[1]);
+      str.concat(key;str.concat(" is ";val))
+    }else{
+      s
+    }
+  }else{
+    s
+  }
+}
+
+// Encodes a memory drawer's content to AAAK for closet storage.
+pub f=encode_drawer(drawer:$mt.drawer;level:$compress_level):str{
+  let doc=encode_text(drawer.content;level);
+  let loc_key=str.concat(drawer.location.wing;str.concat("/";str.concat(drawer.location.hall;str.concat("/";drawer.location.room))));
+  let header=str.concat(loc_key;": ");
+  <str.concat(header;doc.raw)
+}

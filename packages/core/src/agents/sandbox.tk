@@ -1,0 +1,211 @@
+// AG1.3 — Agent execution sandbox.
+// Enforces permissions, tracks cost, and executes agent tasks within declared limits.
+
+i=t:shared.types;
+i=at:core.agents.types;
+i=str:std.str;
+i=log:shared.log;
+i=http:std.http;
+i=file:std.file;
+
+pub m.$sandbox_result{
+  ok:bool;
+  output:str;
+  tokens_used:u32;
+  cost_usd:f64;
+  duration_ms:u32;
+  violations:@(str)
+}
+
+pub m.$sandbox{
+  agent:$at.agent_def;
+  violations:@(str);
+  tokens_used:u32;
+  cost_usd:f64
+}
+
+// Creates a new sandbox context for the given agent.
+pub f=new_sandbox(agent:$at.agent_def):$sandbox{
+  <$sandbox{
+    agent:agent;
+    violations:@();
+    tokens_used:0;
+    cost_usd:0.0
+  }
+}
+
+// Checks whether the agent's permissions list includes the requested permission.
+// Matches by permission type and path/name value.
+pub f=check_permission(sandbox:$sandbox;permission:$at.agent_permission):bool{
+  let perms=sandbox.agent.permissions;
+  let count=perms.len;
+  let i=0;
+  let granted=false;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let p=str.array_get(perms;i);
+      permission|{
+        $at.agent_permission.$read_file req_path;
+          p|{
+            $at.agent_permission.$read_file allowed_path;
+              if str.eq(allowed_path;req_path){
+                granted=true;
+                i=count
+              }else{
+                // check prefix: if allowed_path is a prefix of req_path, grant
+                if str.contains(req_path;allowed_path){
+                  granted=true;
+                  i=count
+                }else{
+                  i=i+1
+                }
+              };
+            $at.agent_permission.$write_file _; i=i+1;
+            $at.agent_permission.$mcp_tool _;   i=i+1;
+            $at.agent_permission.$http_get _;   i=i+1;
+            $at.agent_permission.$model _;      i=i+1
+          };
+        $at.agent_permission.$write_file req_path;
+          p|{
+            $at.agent_permission.$write_file allowed_path;
+              if str.eq(allowed_path;req_path){
+                granted=true;
+                i=count
+              }else{
+                if str.contains(req_path;allowed_path){
+                  granted=true;
+                  i=count
+                }else{
+                  i=i+1
+                }
+              };
+            $at.agent_permission.$read_file _;  i=i+1;
+            $at.agent_permission.$mcp_tool _;   i=i+1;
+            $at.agent_permission.$http_get _;   i=i+1;
+            $at.agent_permission.$model _;      i=i+1
+          };
+        $at.agent_permission.$mcp_tool req_name;
+          p|{
+            $at.agent_permission.$mcp_tool allowed_name;
+              if str.eq(allowed_name;req_name){
+                granted=true;
+                i=count
+              }else{
+                i=i+1
+              };
+            $at.agent_permission.$read_file _;  i=i+1;
+            $at.agent_permission.$write_file _; i=i+1;
+            $at.agent_permission.$http_get _;   i=i+1;
+            $at.agent_permission.$model _;      i=i+1
+          };
+        $at.agent_permission.$http_get req_url;
+          p|{
+            $at.agent_permission.$http_get allowed_url;
+              if str.eq(allowed_url;req_url){
+                granted=true;
+                i=count
+              }else{
+                if str.contains(req_url;allowed_url){
+                  granted=true;
+                  i=count
+                }else{
+                  i=i+1
+                }
+              };
+            $at.agent_permission.$read_file _;  i=i+1;
+            $at.agent_permission.$write_file _; i=i+1;
+            $at.agent_permission.$mcp_tool _;   i=i+1;
+            $at.agent_permission.$model _;      i=i+1
+          };
+        $at.agent_permission.$model req_model;
+          p|{
+            $at.agent_permission.$model allowed_model;
+              if str.eq(allowed_model;req_model){
+                granted=true;
+                i=count
+              }else{
+                i=i+1
+              };
+            $at.agent_permission.$read_file _;  i=i+1;
+            $at.agent_permission.$write_file _; i=i+1;
+            $at.agent_permission.$mcp_tool _;   i=i+1;
+            $at.agent_permission.$http_get _;   i=i+1
+          }
+      }
+    }
+  };
+  <granted
+}
+
+// Reads a file if the agent has read_file permission for the path.
+// Records a violation and returns an error if permission is denied.
+pub f=read_file(sandbox:mut $sandbox;path:str):str|$t.loke_err{
+  let perm=$at.agent_permission.$read_file(path);
+  let allowed=check_permission(sandbox;perm);
+  if allowed{
+    let result=file.read(path);
+    result|{
+      $file_err e;
+        <$t.loke_err.$config_err(str.concat("file read error: ";path))
+      content;
+        <content
+    }
+  }else{
+    let msg=str.concat("permission denied: read_file ";path);
+    sandbox.violations=@(sandbox.violations;msg);
+    log.warn(str.concat("sandbox violation: ";msg);"sandbox";sandbox.agent.id);
+    <$t.loke_err.$config_err(msg)
+  }
+}
+
+// Makes an HTTP GET request if the agent has http_get permission for the URL.
+// Records a violation and returns an error if permission is denied.
+pub f=http_get(sandbox:mut $sandbox;url:str):str|$t.loke_err{
+  let perm=$at.agent_permission.$http_get(url);
+  let allowed=check_permission(sandbox;perm);
+  if allowed{
+    let result=http.get(url);
+    result|{
+      $err e;
+        <$t.loke_err.$network_err(str.concat("http get failed: ";url))
+      body;
+        <body
+    }
+  }else{
+    let msg=str.concat("permission denied: http_get ";url);
+    sandbox.violations=@(sandbox.violations;msg);
+    log.warn(str.concat("sandbox violation: ";msg);"sandbox";sandbox.agent.id);
+    <$t.loke_err.$config_err(msg)
+  }
+}
+
+// Returns true if adding additional_cost would stay within the agent's cost limit.
+pub f=check_cost_limit(sandbox:$sandbox;additional_cost:f64):bool{
+  let total=sandbox.cost_usd+additional_cost;
+  <total<=sandbox.agent.max_cost_per_run
+}
+
+// Accumulates tokens and cost in the sandbox.
+pub f=record_cost(sandbox:mut $sandbox;tokens:u32;cost:f64):void{
+  sandbox.tokens_used=sandbox.tokens_used+tokens;
+  sandbox.cost_usd=sandbox.cost_usd+cost
+}
+
+// Returns true if the sandbox has recorded any permission violations.
+pub f=has_violations(sandbox:$sandbox):bool{
+  <sandbox.violations.len>0
+}
+
+// Builds the final sandbox result from the current sandbox state.
+pub f=to_result(sandbox:$sandbox;output:str;ok:bool):$sandbox_result{
+  <$sandbox_result{
+    ok:ok;
+    output:output;
+    tokens_used:sandbox.tokens_used;
+    cost_usd:sandbox.cost_usd;
+    duration_ms:0;
+    violations:sandbox.violations
+  }
+}

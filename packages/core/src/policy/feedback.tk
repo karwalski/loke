@@ -1,0 +1,121 @@
+m=core.policy.feedback;
+
+i=db:storage.db;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$compliance_event{
+  request_id:str;
+  policy_id:str;
+  regulation:str;
+  violated:bool;
+  user_override:bool;
+  timestamp:i64
+}
+
+pub m.$compliance_summary{
+  period_start:i64;
+  period_end:i64;
+  total_requests:i32;
+  violations:i32;
+  user_overrides:i32;
+  violation_rate:f32;
+  top_regulations:@(str)
+}
+
+pub f=record(event:$compliance_event):bool{
+  result=db.exec(
+    "INSERT INTO compliance_events (request_id, policy_id, regulation, violated, user_override, timestamp) VALUES (?, ?, ?, ?, ?, ?)";
+    @(event.request_id; event.policy_id; event.regulation; db.bool_val(event.violated); db.bool_val(event.user_override); db.i64_val(event.timestamp))
+  );
+  |result{
+    $ok:_
+      <true;
+    $err:e
+      log.warn(str.concat("compliance: failed to record event: "; e));
+      <false
+  }
+}
+
+pub f=summarise(from_ts:i64; to_ts:i64):$compliance_summary{
+  total_result=db.query_one(
+    "SELECT COUNT(*) FROM compliance_events WHERE timestamp >= ? AND timestamp <= ?";
+    @(db.i64_val(from_ts); db.i64_val(to_ts))
+  );
+  total=db.row_i32(total_result; 0);
+
+  violations_result=db.query_one(
+    "SELECT COUNT(*) FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND violated = 1";
+    @(db.i64_val(from_ts); db.i64_val(to_ts))
+  );
+  violations=db.row_i32(violations_result; 0);
+
+  overrides_result=db.query_one(
+    "SELECT COUNT(*) FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND user_override = 1";
+    @(db.i64_val(from_ts); db.i64_val(to_ts))
+  );
+  overrides=db.row_i32(overrides_result; 0);
+
+  rate=?(total > 0){
+    <f32.from_i32(violations) / f32.from_i32(total)
+  }:{
+    <0.0
+  };
+
+  top_result=db.query(
+    "SELECT regulation FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND violated = 1 GROUP BY regulation ORDER BY COUNT(*) DESC LIMIT 5";
+    @(db.i64_val(from_ts); db.i64_val(to_ts))
+  );
+  top_regs=@();
+  ri=0;
+  loop ri < db.rows_len(top_result){
+    top_regs=arr.push(top_regs; db.row_str(top_result; ri; 0));
+    ri=ri+1
+  };
+
+  <$compliance_summary{
+    period_start:from_ts;
+    period_end:to_ts;
+    total_requests:total;
+    violations:violations;
+    user_overrides:overrides;
+    violation_rate:rate;
+    top_regulations:top_regs
+  }
+}
+
+pub f=export_events(from_ts:i64; to_ts:i64):@($compliance_event){
+  rows=db.query(
+    "SELECT request_id, policy_id, regulation, violated, user_override, timestamp FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC";
+    @(db.i64_val(from_ts); db.i64_val(to_ts))
+  );
+  events=@();
+  i=0;
+  loop i < db.rows_len(rows){
+    ev=$compliance_event{
+      request_id:db.row_str(rows; i; 0);
+      policy_id:db.row_str(rows; i; 1);
+      regulation:db.row_str(rows; i; 2);
+      violated:db.row_bool(rows; i; 3);
+      user_override:db.row_bool(rows; i; 4);
+      timestamp:db.row_i64(rows; i; 5)
+    };
+    events=arr.push(events; ev);
+    i=i+1
+  };
+  <events
+}
+
+pub f=top_violations(limit:i32):@(str){
+  rows=db.query(
+    "SELECT policy_id FROM compliance_events WHERE violated = 1 GROUP BY policy_id ORDER BY COUNT(*) DESC LIMIT ?";
+    @(db.i32_val(limit))
+  );
+  ids=@();
+  i=0;
+  loop i < db.rows_len(rows){
+    ids=arr.push(ids; db.row_str(rows; i; 0));
+    i=i+1
+  };
+  <ids
+}

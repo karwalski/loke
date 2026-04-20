@@ -1,0 +1,103 @@
+m=core.privacy.content;
+i=str:std.string;
+
+pub m.$page_content{
+  url:str;
+  title:str;
+  text:str;
+  link_count:i32;
+  form_count:i32;
+  has_login:bool;
+  has_payment:bool;
+}
+
+// extract — parse HTML and pull out the fields we care about for privacy analysis
+pub f=extract(html:str;url:str):$page_content{
+  // ── title ────────────────────────────────────────────────────────────────
+  let title_raw=str.between(html;"<title>";"</title>");
+  let title=??(str.len(title_raw)>0){ str.strip(title_raw) }{ "" };
+
+  // ── strip script / style blocks before counting visible text ─────────────
+  let no_script=str.replace_re(html;"<script[^>]*>[\\s\\S]*?</script>";"";"gi");
+  let no_style=str.replace_re(no_script;"<style[^>]*>[\\s\\S]*?</style>";"";"gi");
+
+  // ── visible text — strip remaining tags ──────────────────────────────────
+  let no_tags=str.replace_re(no_style;"<[^>]+>";" ";"g");
+  let text=str.trim_ws(no_tags);
+
+  // ── link count ───────────────────────────────────────────────────────────
+  let link_count=str.count_re(html;"<a[\\s][^>]*href";"gi");
+
+  // ── form count ───────────────────────────────────────────────────────────
+  let form_count=str.count_re(html;"<form[\\s>]";"gi");
+
+  // ── login detection ───────────────────────────────────────────────────────
+  // password input OR common sign-in phrases in visible text / attributes
+  let has_pw=str.contains_re(html;"<input[^>]*type=[\"']?password[\"']?";"i");
+  let lower_text=str.lower(text);
+  let has_signin=str.contains(lower_text;"sign in");
+  let has_login_phrase=str.contains(lower_text;"log in");
+  let has_login=??(has_pw){ true }{ ??(has_signin){ true }{ has_login_phrase } };
+
+  // ── payment detection ────────────────────────────────────────────────────
+  let kw_card=str.contains(lower_text;"credit card");
+  let kw_payment=str.contains(lower_text;"payment");
+  let kw_checkout=str.contains(lower_text;"checkout");
+  let kw_billing=str.contains(lower_text;"billing");
+  let kw_cvv=str.contains(lower_text;"cvv");
+  let has_payment=??(kw_card){ true }{
+    ??(kw_payment){ true }{
+      ??(kw_checkout){ true }{
+        ??(kw_billing){ true }{ kw_cvv }
+      }
+    }
+  };
+
+  <$page_content{
+    url:url;
+    title:title;
+    text:text;
+    link_count:link_count;
+    form_count:form_count;
+    has_login:has_login;
+    has_payment:has_payment;
+  }
+}
+
+// privacy_score — 0-100 score derived from page content signals
+pub f=privacy_score(content:$page_content):i32{
+  let score=100;
+  let score=??(content.has_login){ score-20 }{ score };
+  let score=??(content.has_payment){ score-20 }{ score };
+  // -5 per 10 forms (integer division)
+  let form_penalty=(content.form_count/10)*5;
+  let score=score-form_penalty;
+  // clamp to 0-100
+  let score=??(score<0){ 0 }{ score };
+  let score=??(score>100){ 100 }{ score };
+  <score
+}
+
+// summary — one-line human-readable description of the extracted page
+pub f=summary(content:$page_content):str{
+  // derive hostname from url
+  let host=str.between(content.url;"://";"/"  );
+  let host=??(str.len(host)>0){ host }{ content.url };
+
+  // word count — split on whitespace
+  let words=str.split(content.text;" ");
+  let word_count=str.len(words);
+  let word_str=str.format_int(word_count);
+
+  // link count string
+  let link_str=str.format_int(content.link_count);
+
+  // base summary
+  let out=str.concat(@(host;" — ";word_str;" words, ";link_str;" links"));
+
+  // optional tags
+  let out=??(content.has_login){ str.concat(@(out;" [login]")) }{ out };
+  let out=??(content.has_payment){ str.concat(@(out;" [payment]")) }{ out };
+
+  <out
+}

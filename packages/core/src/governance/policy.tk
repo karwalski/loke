@@ -1,0 +1,86 @@
+// G1.3 — Risk classification and control gates.
+// Determines the effective risk tier and the policy decision for a given request.
+
+i=t:shared.types;
+i=gt:core.governance.types;
+i=str:std.str;
+i=log:shared.log;
+
+// Classifies the effective risk tier for a request.
+// Escalation rules (applied in order):
+//   1. RESTRICTED sensitivity → always $high
+//   2. CONFIDENTIAL + use_case $low → escalate to $medium
+//   3. cost > 1.0 USD → add one step (low→medium, medium→high)
+//   4. Otherwise return the use_case_risk as-is
+pub f=classify_risk(sensitivity:$sensitivity_level;use_case_risk:$gt.risk_tier;estimated_cost:f64):$gt.risk_tier{
+  if sensitivity==$sensitivity_level.$restricted{
+    <$gt.risk_tier.$high
+  }else{
+    let base_tier=use_case_risk;
+    if sensitivity==$sensitivity_level.$confidential{
+      base_tier|{
+        $gt.risk_tier.$low;    base_tier=$gt.risk_tier.$medium;
+        $gt.risk_tier.$medium; // already medium — no change
+        $gt.risk_tier.$high;   // already high — no change
+      }
+    }else{
+      // no sensitivity escalation needed
+    };
+    if estimated_cost>1.0{
+      base_tier|{
+        $gt.risk_tier.$low;    <$gt.risk_tier.$medium;
+        $gt.risk_tier.$medium; <$gt.risk_tier.$high;
+        $gt.risk_tier.$high;   <$gt.risk_tier.$high
+      }
+    }else{
+      <base_tier
+    }
+  }
+}
+
+// Evaluates the policy decision for a classified request.
+pub f=evaluate(risk:$gt.risk_tier;sensitivity:$sensitivity_level;model_id:str;use_case_id:str):$gt.policy_decision{
+  risk|{
+    $gt.risk_tier.$low;
+      if sensitivity==$sensitivity_level.$confidential{
+        <$gt.policy_decision.$allow_with_warning("Confidential data — anonymisation applied")
+      }else{
+        if sensitivity==$sensitivity_level.$restricted{
+          <$gt.policy_decision.$allow_with_warning("Confidential data — anonymisation applied")
+        }else{
+          <$gt.policy_decision.$allow
+        }
+      };
+    $gt.risk_tier.$medium;
+      <$gt.policy_decision.$allow_with_warning("Medium risk: audit trail enabled, human-visible preview recommended");
+    $gt.risk_tier.$high;
+      if sensitivity==$sensitivity_level.$restricted{
+        <$gt.policy_decision.$require_approval("High risk + restricted data: explicit approval required")
+      }else{
+        <$gt.policy_decision.$allow_with_warning("High risk: enhanced audit trail enabled")
+      }
+  }
+}
+
+// Returns the set of control labels applied for the given risk tier and sensitivity.
+// Always applied: anonymisation, audit-logging, guardian-prompt
+// $medium+: human-visible-preview, cost-confirmation
+// $high+: enhanced-audit, explainability-trace
+// RESTRICTED: local-only-routing
+pub f=controls_for_risk(risk:$gt.risk_tier;sensitivity:$sensitivity_level):@(str){
+  let controls=@("anonymisation";"audit-logging";"guardian-prompt");
+  risk|{
+    $gt.risk_tier.$low;
+      // no additional controls for low risk
+    $gt.risk_tier.$medium;
+      controls=@(controls;"human-visible-preview";"cost-confirmation");
+    $gt.risk_tier.$high;
+      controls=@(controls;"human-visible-preview";"cost-confirmation";"enhanced-audit";"explainability-trace")
+  };
+  if sensitivity==$sensitivity_level.$restricted{
+    controls=@(controls;"local-only-routing")
+  }else{
+    // no additional local-only routing required
+  };
+  <controls
+}

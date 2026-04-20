@@ -1,0 +1,246 @@
+// M1.2 — Conversation storage.
+// Store every conversation turn verbatim in drawers, auto-classified into palace locations.
+
+i=t:shared.types;
+i=mt:core.memory.types;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=json:std.json;
+
+// Inserts a drawer record into the database.
+pub f=store_drawer(palace:$mt.palace;drawer:$mt.drawer):void|$loke_err{
+  let tokens_s=str.from_int(drawer.tokens);
+  let sensitivity_s=drawer.sensitivity|{
+    $sensitivity_level.$public;       <"PUBLIC";
+    $sensitivity_level.$internal;     <"INTERNAL";
+    $sensitivity_level.$confidential; <"CONFIDENTIAL";
+    $sensitivity_level.$restricted;   <"RESTRICTED"
+  };
+  db.exec_params(
+    palace.conn;
+    "INSERT INTO memory_drawers (id,wing,hall,room,role,content,session_id,model_id,tokens,sensitivity,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,'now()')";
+    @(
+      drawer.id;
+      drawer.location.wing;
+      drawer.location.hall;
+      drawer.location.room;
+      drawer.role;
+      drawer.content;
+      drawer.session_id;
+      drawer.model_id;
+      tokens_s;
+      sensitivity_s
+    )
+  )|{
+    $ok:_ {
+      log.debug(str.concat("stored drawer: ";drawer.id);"storage";"system");
+      <$ok(void)
+    };
+    $err:e <$err($storage_err(str.concat("failed to store drawer: ";drawer.id)))
+  }
+}
+
+// Retrieves a single drawer by id.
+pub f=get_drawer(palace:$mt.palace;id:str):$mt.drawer|$loke_err{
+  db.query_params(palace.conn;"SELECT id,wing,hall,room,role,content,session_id,model_id,tokens,sensitivity,created_at FROM memory_drawers WHERE id=?";@(id))|{
+    $ok:rows {
+      if rows.len == 0{
+        <$err($storage_err(str.concat("drawer not found: ";id)))
+      }else{
+        let row=rows[0];
+        let sensitivity_str=json.get_str(row;"sensitivity");
+        let sensitivity=if str.eq(sensitivity_str;"RESTRICTED"){
+          $sensitivity_level.$restricted
+        }else{
+          if str.eq(sensitivity_str;"CONFIDENTIAL"){
+            $sensitivity_level.$confidential
+          }else{
+            if str.eq(sensitivity_str;"INTERNAL"){
+              $sensitivity_level.$internal
+            }else{
+              $sensitivity_level.$public
+            }
+          }
+        };
+        <$ok($mt.drawer{
+          id:json.get_str(row;"id");
+          location:$mt.palace_location{
+            wing:json.get_str(row;"wing");
+            hall:json.get_str(row;"hall");
+            room:json.get_str(row;"room")
+          };
+          role:json.get_str(row;"role");
+          content:json.get_str(row;"content");
+          session_id:json.get_str(row;"session_id");
+          model_id:json.get_str(row;"model_id");
+          tokens:json.get_int(row;"tokens");
+          sensitivity:sensitivity;
+          created_at:json.get_str(row;"created_at")
+        })
+      }
+    };
+    $err:e <$err($storage_err(str.concat("db error fetching drawer: ";id)))
+  }
+}
+
+// Lists drawers at a given palace location, newest first, up to limit.
+pub f=list_drawers(palace:$mt.palace;location:$mt.palace_location;limit:u32):@($mt.drawer)|$loke_err{
+  let limit_s=str.from_int(limit);
+  let sql=str.concat("SELECT id,wing,hall,room,role,content,session_id,model_id,tokens,sensitivity,created_at FROM memory_drawers WHERE wing=? AND hall=? AND room=? ORDER BY created_at DESC LIMIT ";limit_s);
+  db.query_params(palace.conn;sql;@(location.wing;location.hall;location.room))|{
+    $ok:rows {
+      let drawers=rows.map|row{
+        let sensitivity_str=json.get_str(row;"sensitivity");
+        let sensitivity=if str.eq(sensitivity_str;"RESTRICTED"){
+          $sensitivity_level.$restricted
+        }else{
+          if str.eq(sensitivity_str;"CONFIDENTIAL"){
+            $sensitivity_level.$confidential
+          }else{
+            if str.eq(sensitivity_str;"INTERNAL"){
+              $sensitivity_level.$internal
+            }else{
+              $sensitivity_level.$public
+            }
+          }
+        };
+        $mt.drawer{
+          id:json.get_str(row;"id");
+          location:$mt.palace_location{
+            wing:json.get_str(row;"wing");
+            hall:json.get_str(row;"hall");
+            room:json.get_str(row;"room")
+          };
+          role:json.get_str(row;"role");
+          content:json.get_str(row;"content");
+          session_id:json.get_str(row;"session_id");
+          model_id:json.get_str(row;"model_id");
+          tokens:json.get_int(row;"tokens");
+          sensitivity:sensitivity;
+          created_at:json.get_str(row;"created_at")
+        }
+      };
+      <$ok(drawers)
+    };
+    $err:e <$err($storage_err("failed to list drawers"))
+  }
+}
+
+// Heuristically classifies a piece of content and role into a palace location.
+// Rules (first match wins):
+//   code/function/bug/error/class/test → technical / Code / general
+//   meeting/standup/review             → work / Meetings / general
+//   project/task/sprint/milestone      → work / Projects / general
+//   research/paper/study               → technical / Research / general
+//   default                            → work / general / general
+pub f=classify_location(content:str;role:str):$mt.palace_location{
+  let lower=str.to_lower(content);
+  if str.contains(lower;"code"){
+    <$mt.palace_location{wing:"technical";hall:"Code";room:"general"}
+  }else{
+    if str.contains(lower;"function"){
+      <$mt.palace_location{wing:"technical";hall:"Code";room:"general"}
+    }else{
+      if str.contains(lower;"bug"){
+        <$mt.palace_location{wing:"technical";hall:"Code";room:"general"}
+      }else{
+        if str.contains(lower;"error"){
+          <$mt.palace_location{wing:"technical";hall:"Code";room:"general"}
+        }else{
+          if str.contains(lower;"class"){
+            <$mt.palace_location{wing:"technical";hall:"Code";room:"general"}
+          }else{
+            if str.contains(lower;"test"){
+              <$mt.palace_location{wing:"technical";hall:"Code";room:"general"}
+            }else{
+              if str.contains(lower;"meeting"){
+                <$mt.palace_location{wing:"work";hall:"Meetings";room:"general"}
+              }else{
+                if str.contains(lower;"standup"){
+                  <$mt.palace_location{wing:"work";hall:"Meetings";room:"general"}
+                }else{
+                  if str.contains(lower;"review"){
+                    <$mt.palace_location{wing:"work";hall:"Meetings";room:"general"}
+                  }else{
+                    if str.contains(lower;"project"){
+                      <$mt.palace_location{wing:"work";hall:"Projects";room:"general"}
+                    }else{
+                      if str.contains(lower;"task"){
+                        <$mt.palace_location{wing:"work";hall:"Projects";room:"general"}
+                      }else{
+                        if str.contains(lower;"sprint"){
+                          <$mt.palace_location{wing:"work";hall:"Projects";room:"general"}
+                        }else{
+                          if str.contains(lower;"milestone"){
+                            <$mt.palace_location{wing:"work";hall:"Projects";room:"general"}
+                          }else{
+                            if str.contains(lower;"research"){
+                              <$mt.palace_location{wing:"technical";hall:"Research";room:"general"}
+                            }else{
+                              if str.contains(lower;"paper"){
+                                <$mt.palace_location{wing:"technical";hall:"Research";room:"general"}
+                              }else{
+                                if str.contains(lower;"study"){
+                                  <$mt.palace_location{wing:"technical";hall:"Research";room:"general"}
+                                }else{
+                                  <$mt.palace_location{wing:"work";hall:"general";room:"general"}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Classifies a conversation turn, creates a drawer, and stores it.
+pub f=store_turn(palace:$mt.palace;role:str;content:str;session_id:str;model_id:str;tokens:u32;sensitivity:$sensitivity_level):void|$loke_err{
+  let location=classify_location(content;role);
+  let id=str.rand_hex(16);
+  let drawer=$mt.drawer{
+    id:id;
+    location:location;
+    role:role;
+    content:content;
+    session_id:session_id;
+    model_id:model_id;
+    tokens:tokens;
+    sensitivity:sensitivity;
+    created_at:""
+  };
+  store_drawer(palace;drawer)
+}
+
+// Inserts a closet record into the database.
+// drawer_ids are stored as a comma-separated string.
+pub f=store_closet(palace:$mt.palace;closet:$mt.closet):void|$loke_err{
+  let ids_joined=str.concat(""; closet.drawer_ids.join(","));
+  db.exec_params(
+    palace.conn;
+    "INSERT INTO memory_closets (id,wing,hall,room,aaak_summary,drawer_ids,created_at) VALUES (?,?,?,?,?,?,'now()')";
+    @(
+      closet.id;
+      closet.location.wing;
+      closet.location.hall;
+      closet.location.room;
+      closet.aaak_summary;
+      ids_joined
+    )
+  )|{
+    $ok:_ {
+      log.debug(str.concat("stored closet: ";closet.id);"storage";"system");
+      <$ok(void)
+    };
+    $err:e <$err($storage_err(str.concat("failed to store closet: ";closet.id)))
+  }
+}

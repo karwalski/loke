@@ -1,0 +1,215 @@
+m=moke.upload;
+i=str:std.string;
+i=compute:moke.compute;
+
+// MK5.1 + MK5.2 — CSV/TSV file upload and paste parsing
+
+pub m.$parse_opts{
+  delimiter:str;
+  has_header:bool;
+  max_rows:i32
+}
+
+pub m.$parse_result{
+  ok:bool;
+  dataset:compute.$dataset;
+  error:str;
+  row_count:i32;
+  col_count:i32;
+  preview_rows:@(@(str))
+}
+
+pub f=detect_delimiter(text:str):str{
+  first_line:str="";
+  nl_idx:i32=str.index_of(text;"\n");
+  ??(nl_idx>0){
+    first_line=str.slice(text;0;nl_idx)
+  }{
+    first_line=text
+  };
+  comma_count:i32=0;
+  tab_count:i32=0;
+  ci:i32=0;
+  ??(ci<str.len(first_line)){
+    ch:str=str.char_at(first_line;ci);
+    ??(str.eq(ch;",")){ comma_count=comma_count+1 }{};
+    ??(str.eq(ch;"\t")){ tab_count=tab_count+1 }{};
+    ci=ci+1
+  }{};
+  ??(tab_count>comma_count){
+    <"\t"
+  }{};
+  <","
+}
+
+f=split_csv_line(line:str;delimiter:str):@(str){
+  fields:@(str)=[];
+  current:str="";
+  in_quotes:bool=false;
+  i:i32=0;
+  line_len:i32=str.len(line);
+  ??(i<line_len){
+    ch:str=str.char_at(line;i);
+    ??(str.eq(ch;"\"")&&in_quotes==false){
+      in_quotes=true;
+      i=i+1
+    }{
+      ??(str.eq(ch;"\"")&&in_quotes){
+        // peek ahead for escaped quote ""
+        ??(i+1<line_len&&str.eq(str.char_at(line;i+1);"\"" )){
+          current=str.concat(current;"\"");
+          i=i+2
+        }{
+          in_quotes=false;
+          i=i+1
+        }
+      }{
+        ??(str.eq(ch;delimiter)&&in_quotes==false){
+          str.push(fields;str.trim(current));
+          current="";
+          i=i+1
+        }{
+          current=str.concat(current;ch);
+          i=i+1
+        }
+      }
+    }
+  }{};
+  str.push(fields;str.trim(current));
+  <fields
+}
+
+f=gen_col_headers(count:i32):@(str){
+  headers:@(str)=[];
+  i:i32=0;
+  ??(i<count){
+    h:str=str.concat("col_";str.from_i32(i));
+    str.push(headers;h);
+    i=i+1
+  }{};
+  <headers
+}
+
+pub f=parse_csv(text:str;opts:$parse_opts):$parse_result{
+  delim:str=opts.delimiter;
+  ??(str.len(delim)==0){
+    delim=detect_delimiter(text)
+  }{};
+  lines:@(str)=str.split(text;"\n");
+  total_lines:i32=str.len(lines);
+  ??(total_lines==0){
+    empty_ds:compute.$dataset=$compute.$dataset{
+      name="";
+      headers=[];
+      rows=[]
+    };
+    <$parse_result{
+      ok=false;
+      dataset=empty_ds;
+      error="no data";
+      row_count=0;
+      col_count=0;
+      preview_rows=[]
+    }
+  }{};
+  // strip trailing empty lines
+  last_idx:i32=total_lines-1;
+  ??(last_idx>=0&&str.len(str.trim(str.get(lines;last_idx)))==0){
+    total_lines=total_lines-1;
+    last_idx=last_idx-1
+  }{};
+  headers:@(str)=[];
+  start_row:i32=0;
+  ??(opts.has_header&&total_lines>0){
+    first_line:str=str.trim(str.get(lines;0));
+    headers=split_csv_line(first_line;delim);
+    start_row=1
+  }{
+    ??(total_lines>0){
+      first_data:str=str.trim(str.get(lines;0));
+      sample_fields:@(str)=split_csv_line(first_data;delim);
+      headers=gen_col_headers(str.len(sample_fields))
+    }{}
+  };
+  col_count:i32=str.len(headers);
+  rows:@(@(str))=[];
+  row_idx:i32=start_row;
+  ??(row_idx<total_lines&&str.len(rows)<opts.max_rows){
+    raw_line:str=str.trim(str.get(lines;row_idx));
+    ??(str.len(raw_line)>0){
+      fields:@(str)=split_csv_line(raw_line;delim);
+      // pad or trim to match header count
+      ??(str.len(fields)<col_count){
+        ??(str.len(fields)<col_count){
+          str.push(fields;"")
+        }{}
+      }{};
+      str.push(rows;fields)
+    }{};
+    row_idx=row_idx+1
+  }{};
+  row_count:i32=str.len(rows);
+  ds:compute.$dataset=$compute.$dataset{
+    name="";
+    headers=headers;
+    rows=rows
+  };
+  preview:@(@(str))=[];
+  pi:i32=0;
+  ??(pi<5&&pi<row_count){
+    str.push(preview;str.get(rows;pi));
+    pi=pi+1
+  }{};
+  <$parse_result{
+    ok=true;
+    dataset=ds;
+    error="";
+    row_count=row_count;
+    col_count=col_count;
+    preview_rows=preview
+  }
+}
+
+pub f=default_opts():$parse_opts{
+  <$parse_opts{
+    delimiter="";
+    has_header=true;
+    max_rows=10000
+  }
+}
+
+pub f=guess_name(filename:str):str{
+  // strip extension
+  dot_idx:i32=str.last_index_of(filename;".");
+  base:str=filename;
+  ??(dot_idx>0){
+    base=str.slice(filename;0;dot_idx)
+  }{};
+  // replace underscores and hyphens with spaces
+  base=str.replace_all(base;"_";" ");
+  base=str.replace_all(base;"-";" ");
+  // title-case: capitalise first char of each word
+  words:@(str)=str.split(base;" ");
+  result_words:@(str)=[];
+  wi:i32=0;
+  ??(wi<str.len(words)){
+    w:str=str.get(words;wi);
+    ??(str.len(w)>0){
+      first_ch:str=str.to_upper(str.char_at(w;0));
+      rest:str="";
+      ??(str.len(w)>1){
+        rest=str.slice(w;1;str.len(w))
+      }{};
+      str.push(result_words;str.concat(first_ch;rest))
+    }{};
+    wi=wi+1
+  }{};
+  <str.join(result_words;" ")
+}
+
+pub f=validate(result:$parse_result):bool{
+  ??(result.ok==false){ <false }{};
+  ??(result.col_count<=0){ <false }{};
+  ??(result.row_count<=0){ <false }{};
+  <true
+}

@@ -1,0 +1,411 @@
+m=moke.ml.engine;
+i=str:std.string;
+
+// MK2.1 — local ML engine, zero data egress
+// All computation operates on in-memory dataset only.
+
+pub m.$kmeans_opts{
+  k:i32;
+  max_iter:i32;
+  columns:@(str)
+}
+
+pub m.$kmeans_result{
+  k:i32;
+  assignments:@(i32);
+  centroids:@(@(f32));
+  inertia:f32;
+  iterations:i32
+}
+
+pub m.$anomaly_opts{
+  column:str;
+  threshold:f32;
+  method:str  // "zscore" or "iqr"
+}
+
+pub m.$anomaly{
+  row_index:i32;
+  column:str;
+  value:f32;
+  score:f32;
+  kind:str
+}
+
+pub m.$anomaly_result{
+  column:str;
+  method:str;
+  anomalies:@($anomaly);
+  threshold:f32
+}
+
+pub m.$correlation_result{
+  col_a:str;
+  col_b:str;
+  pearson_r:f32;
+  strength:str  // "strong" / "moderate" / "weak" / "negligible"
+}
+
+pub m.$ml_result{
+  kind:str;
+  kmeans:$kmeans_result;
+  anomalies:$anomaly_result;
+  correlations:@($correlation_result)
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+f=mean_f32(vals:@(f32)):f32{
+  let n=vals.len();
+  if n == 0{ <0.0 };
+  let total=0.0;
+  vals.each(v{ total=total + v });
+  <total / str.to_float(str.from_int(n))
+};
+
+f=stddev_f32(vals:@(f32)):f32{
+  let n=vals.len();
+  if n < 2{ <0.0 };
+  let m=mean_f32(vals);
+  let sum_sq=0.0;
+  vals.each(v{
+    let diff=v - m;
+    sum_sq=sum_sq + diff * diff;
+  });
+  <str.sqrt(sum_sq / str.to_float(str.from_int(n)))
+};
+
+f=pearson(xs:@(f32);ys:@(f32)):f32{
+  let n=xs.len();
+  if n < 2{ <0.0 };
+  let mx=mean_f32(xs);
+  let my=mean_f32(ys);
+  let cov=0.0;
+  let sx=0.0;
+  let sy=0.0;
+  let idx=0;
+  ??(idx < n){
+    let dx=xs[idx] - mx;
+    let dy=ys[idx] - my;
+    cov=cov + dx * dy;
+    sx=sx + dx * dx;
+    sy=sy + dy * dy;
+    idx=idx + 1
+  }{};
+  let denom=str.sqrt(sx) * str.sqrt(sy);
+  if denom == 0.0{ <0.0 };
+  <cov / denom
+};
+
+f=col_index(headers:@(str);name:str):i32{
+  let idx=0;
+  let found=-1;
+  ??(idx < headers.len()){
+    if str.eq(headers[idx]; name){ found=idx };
+    idx=idx + 1
+  }{};
+  <found
+};
+
+f=extract_numeric_col(headers:@(str);rows:@(@(str));col_name:str):@(f32){
+  let ci=col_index(headers; col_name);
+  let out=@();
+  if ci < 0{ <out };
+  rows.each(r{
+    let v=str.trim(r[ci]);
+    if str.is_float(v){ out.push(str.to_float(v)) } else { out.push(0.0) };
+  });
+  <out
+};
+
+f=euclidean_dist(a:@(f32);b:@(f32)):f32{
+  let d=0.0;
+  let i=0;
+  ??(i < a.len()){
+    let diff=a[i] - b[i];
+    d=d + diff * diff;
+    i=i + 1
+  }{};
+  <str.sqrt(d)
+};
+
+f=nearest_centroid(point:@(f32);centroids:@(@(f32))):i32{
+  let best_idx=0;
+  let best_dist=euclidean_dist(point; centroids[0]);
+  let i=1;
+  ??(i < centroids.len()){
+    let d=euclidean_dist(point; centroids[i]);
+    if d < best_dist{
+      best_dist=d;
+      best_idx=i;
+    };
+    i=i + 1
+  }{};
+  <best_idx
+};
+
+f=recompute_centroids(points:@(@(f32));assignments:@(i32);k:i32;dims:i32):@(@(f32)){
+  let new_cents=@();
+  let ci=0;
+  ??(ci < k){
+    let sum=@();
+    let di=0;
+    ??(di < dims){ sum.push(0.0); di=di + 1 }{};
+    let count=0;
+    let pi=0;
+    ??(pi < assignments.len()){
+      if assignments[pi] == ci{
+        let di2=0;
+        ??(di2 < dims){
+          sum[di2]=sum[di2] + points[pi][di2];
+          di2=di2 + 1
+        }{};
+        count=count + 1;
+      };
+      pi=pi + 1
+    }{};
+    if count > 0{
+      let di3=0;
+      ??(di3 < dims){
+        sum[di3]=sum[di3] / str.to_float(str.from_int(count));
+        di3=di3 + 1
+      }{}
+    };
+    new_cents.push(sum);
+    ci=ci + 1
+  }{};
+  <new_cents
+};
+
+// ── K-Means clustering ────────────────────────────────────────────────────────
+
+pub f=kmeans(headers:@(str);rows:@(@(str));opts:$kmeans_opts):$kmeans_result{
+  let k=opts.k;
+  let max_iter=opts.max_iter;
+  let col_names=opts.columns;
+  let n_rows=rows.len();
+  let dims=col_names.len();
+
+  // Extract numeric matrix for selected columns
+  let matrix=@();
+  rows.each(r{
+    let point=@();
+    col_names.each(cn{
+      let ci=col_index(headers; cn);
+      if ci >= 0{
+        let v=str.trim(r[ci]);
+        if str.is_float(v){ point.push(str.to_float(v)) } else { point.push(0.0) };
+      } else { point.push(0.0) };
+    });
+    matrix.push(point);
+  });
+
+  // Initialise centroids from first k rows
+  let centroids=@();
+  let init_i=0;
+  let init_lim=k;
+  if init_lim > n_rows{ init_lim=n_rows };
+  ??(init_i < init_lim){
+    centroids.push(matrix[init_i]);
+    init_i=init_i + 1
+  }{};
+  // Pad if dataset smaller than k
+  ??(centroids.len() < k){
+    let pad=@();
+    let di=0;
+    ??(di < dims){ pad.push(0.0); di=di + 1 }{};
+    centroids.push(pad);
+  }{};
+
+  let assignments=@();
+  let ri=0;
+  ??(ri < n_rows){ assignments.push(0); ri=ri + 1 }{};
+
+  let iter=0;
+  let converged=false;
+  ??(iter < max_iter && !converged){
+    let new_assign=@();
+    let pi=0;
+    ??(pi < n_rows){
+      new_assign.push(nearest_centroid(matrix[pi]; centroids));
+      pi=pi + 1
+    }{};
+
+    // Check convergence
+    let changed=false;
+    let ci2=0;
+    ??(ci2 < n_rows){
+      if new_assign[ci2] != assignments[ci2]{ changed=true };
+      ci2=ci2 + 1
+    }{};
+
+    // Update assignments
+    let ui=0;
+    ??(ui < n_rows){ assignments[ui]=new_assign[ui]; ui=ui + 1 }{};
+
+    if !changed{ converged=true };
+
+    centroids=recompute_centroids(matrix; assignments; k; dims);
+    iter=iter + 1
+  }{};
+
+  // Compute inertia (sum of squared distances to assigned centroid)
+  let inertia=0.0;
+  let ii=0;
+  ??(ii < n_rows){
+    let d=euclidean_dist(matrix[ii]; centroids[assignments[ii]]);
+    inertia=inertia + d * d;
+    ii=ii + 1
+  }{};
+
+  <$kmeans_result{
+    k=k;
+    assignments=assignments;
+    centroids=centroids;
+    inertia=inertia;
+    iterations=iter
+  }
+};
+
+// ── Z-Score anomaly detection ─────────────────────────────────────────────────
+
+pub f=zscore_anomalies(headers:@(str);rows:@(@(str));opts:$anomaly_opts):$anomaly_result{
+  let col_name=opts.column;
+  let threshold=opts.threshold;
+  let vals=extract_numeric_col(headers; rows; col_name);
+  let m=mean_f32(vals);
+  let sd=stddev_f32(vals);
+  let anomalies=@();
+  let ri=0;
+  ??(ri < vals.len()){
+    let z=0.0;
+    if sd > 0.0{ z=(vals[ri] - m) / sd };
+    let az=z;
+    if az < 0.0{ az=az * -1.0 };
+    if az > threshold{
+      anomalies.push($anomaly{
+        row_index=ri;
+        column=col_name;
+        value=vals[ri];
+        score=z;
+        kind="zscore"
+      });
+    };
+    ri=ri + 1
+  }{};
+  <$anomaly_result{
+    column=col_name;
+    method="zscore";
+    anomalies=anomalies;
+    threshold=threshold
+  }
+};
+
+// ── IQR anomaly detection ─────────────────────────────────────────────────────
+
+pub f=iqr_anomalies(headers:@(str);rows:@(@(str));opts:$anomaly_opts):$anomaly_result{
+  let col_name=opts.column;
+  let threshold=opts.threshold;
+  let vals=extract_numeric_col(headers; rows; col_name);
+  let n=vals.len();
+
+  // Sort a copy to compute quartiles
+  let sorted=vals.clone();
+  sorted.sort_f32_asc();
+
+  // Q1 = 25th pct, Q3 = 75th pct
+  let q1_idx=(n * 25) / 100;
+  let q3_idx=(n * 75) / 100;
+  if q1_idx >= n{ q1_idx=0 };
+  if q3_idx >= n{ q3_idx=n - 1 };
+  let q1=sorted[q1_idx];
+  let q3=sorted[q3_idx];
+  let iqr=q3 - q1;
+  let lower=q1 - 1.5 * iqr;
+  let upper=q3 + 1.5 * iqr;
+
+  let anomalies=@();
+  let ri=0;
+  ??(ri < n){
+    let v=vals[ri];
+    if v < lower || v > upper{
+      // Score = distance from nearest fence divided by IQR
+      let score=0.0;
+      if v < lower && iqr > 0.0{ score=(lower - v) / iqr };
+      if v > upper && iqr > 0.0{ score=(v - upper) / iqr };
+      anomalies.push($anomaly{
+        row_index=ri;
+        column=col_name;
+        value=v;
+        score=score;
+        kind="iqr"
+      });
+    };
+    ri=ri + 1
+  }{};
+  <$anomaly_result{
+    column=col_name;
+    method="iqr";
+    anomalies=anomalies;
+    threshold=1.5
+  }
+};
+
+// ── Pearson correlation matrix ─────────────────────────────────────────────────
+
+f=pearson_strength(r:f32):str{
+  let ar=r;
+  if ar < 0.0{ ar=ar * -1.0 };
+  if ar >= 0.7{ <"strong" };
+  if ar >= 0.4{ <"moderate" };
+  if ar >= 0.2{ <"weak" };
+  <"negligible"
+};
+
+f=is_numeric_col(headers:@(str);rows:@(@(str));col:str):bool{
+  let ci=col_index(headers; col);
+  if ci < 0{ <false };
+  let numeric_count=0;
+  let total=0;
+  let limit=50;
+  if limit > rows.len(){ limit=rows.len() };
+  let ri=0;
+  ??(ri < limit){
+    let v=str.trim(rows[ri][ci]);
+    if str.len(v) > 0{
+      if str.is_float(v){ numeric_count=numeric_count + 1 };
+      total=total + 1;
+    };
+    ri=ri + 1
+  }{};
+  if total == 0{ <false };
+  <(numeric_count * 100 / total) >= 80
+};
+
+pub f=correlation_matrix(headers:@(str);rows:@(@(str))):@($correlation_result){
+  // Collect numeric columns
+  let num_cols=@();
+  headers.each(h{
+    if is_numeric_col(headers; rows; h){ num_cols.push(h) };
+  });
+
+  let results=@();
+  let ai=0;
+  ??(ai < num_cols.len()){
+    let bi=ai + 1;
+    ??(bi < num_cols.len()){
+      let xs=extract_numeric_col(headers; rows; num_cols[ai]);
+      let ys=extract_numeric_col(headers; rows; num_cols[bi]);
+      let r=pearson(xs; ys);
+      results.push($correlation_result{
+        col_a=num_cols[ai];
+        col_b=num_cols[bi];
+        pearson_r=r;
+        strength=pearson_strength(r)
+      });
+      bi=bi + 1
+    }{};
+    ai=ai + 1
+  }{};
+  <results
+};

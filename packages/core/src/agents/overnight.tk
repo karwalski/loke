@@ -1,0 +1,178 @@
+// AG1.8 — Overnight batch processing pipeline.
+// Collects background-latency agents and runs them during the overnight window.
+
+i=t:shared.types;
+i=log:shared.log;
+i=reg:agents.registry;
+i=sched:agents.scheduler;
+i=lat:agents.latency;
+
+m.$overnight_window{
+  start_hour:i32;
+  end_hour:i32
+}
+
+m.$batch_job{
+  agent_name:str;
+  priority:i32;
+  estimated_minutes:i32
+}
+
+m.$batch_run{
+  window:$overnight_window;
+  jobs:@($batch_job);
+  completed:@(str);
+  failed:@(str);
+  started_at:i64;
+  finished_at:i64
+}
+
+// Default overnight window: 10pm–6am.
+pub let default_window=$overnight_window{
+  start_hour:22;
+  end_hour:6
+}
+
+// Returns true if the given hour falls within the overnight window.
+// Handles windows that wrap midnight (e.g. 22–6).
+pub f=is_overnight(hour:i32;window:$overnight_window):bool{
+  <hour>=window.start_hour||hour<window.end_hour
+}
+
+// Returns batch jobs for all enabled agents whose latency class is "background".
+// Assigns default priority=1 and estimated_minutes=30.
+pub f=collect_overnight_agents(reg:reg.$agent_registry;assignments:@(lat.$latency_assignment)):@($batch_job){
+  let enabled=reg.list_enabled(reg);
+  let count=enabled.len;
+  let jobs=@();
+  let i=0;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let agent=t.array_get(enabled;i);
+      let class=lat.class_for_agent(assignments;agent.name);
+      if str.eq(class.name;"background"){
+        let job=$batch_job{
+          agent_name:agent.name;
+          priority:1;
+          estimated_minutes:30
+        };
+        jobs=@(jobs;job)
+      }else{
+        // not a background agent — skip
+      };
+      i=i+1
+    }
+  };
+  <jobs
+}
+
+// Sorts jobs by priority (ascending) and executes each against the registry.
+// Records agent name in completed or failed based on stub outcome.
+// Returns a batch run summary with timestamps.
+pub f=run_batch(jobs:@($batch_job);reg:reg.$agent_registry):$batch_run{
+  let started=t.now_i64();
+
+  // Sort jobs by priority (insertion sort ascending)
+  let count=jobs.len;
+  let sorted=jobs;
+  let i=1;
+  loop{
+    if i>=count{
+      break
+    }else{
+      let j=i;
+      loop{
+        if j==0{
+          break
+        }else{
+          let a=t.array_get(sorted;j-1);
+          let b=t.array_get(sorted;j);
+          if a.priority>b.priority{
+            sorted=t.array_swap(sorted;j-1;j);
+            j=j-1
+          }else{
+            j=0
+          }
+        }
+      };
+      i=i+1
+    }
+  };
+
+  let completed=@();
+  let failed=@();
+  let k=0;
+  loop{
+    if k>=count{
+      break
+    }else{
+      let job=t.array_get(sorted;k);
+      log.info(
+        str.concat("overnight batch: running agent ";job.agent_name);
+        "overnight_batch";
+        job.agent_name
+      );
+      let find_result=reg.find(reg;job.agent_name);
+      find_result|{
+        $t.loke_err e;
+          log.error(
+            str.concat("overnight batch: agent not found: ";job.agent_name);
+            "overnight_batch";
+            job.agent_name
+          );
+          failed=@(failed;job.agent_name);
+          k=k+1;
+        agent;
+          // Stub: log execution and mark completed
+          log.info(
+            str.concat("overnight batch: completed agent ";job.agent_name);
+            "overnight_batch";
+            job.agent_name
+          );
+          completed=@(completed;job.agent_name);
+          k=k+1
+      }
+    }
+  };
+
+  let finished=t.now_i64();
+  <$batch_run{
+    window:default_window;
+    jobs:sorted;
+    completed:completed;
+    failed:failed;
+    started_at:started;
+    finished_at:finished
+  }
+}
+
+// Returns a human-readable summary of a batch run.
+pub f=format_batch_run(run:$batch_run):str{
+  let window_str=str.concat(
+    str.concat(
+      str.concat(
+        str.concat(str.from_i32(run.window.start_hour);"h–");
+        str.from_i32(run.window.end_hour));
+      "h")
+    ;""
+  );
+  let job_count=str.from_i32(run.jobs.len);
+  let ok_count=str.from_i32(run.completed.len);
+  let fail_count=str.from_i32(run.failed.len);
+  let elapsed=str.from_i64(run.finished_at-run.started_at);
+  <str.concat(
+    str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(
+              str.concat("overnight batch window:";window_str);
+              str.concat(" | jobs:";job_count));
+            str.concat(" | completed:";ok_count));
+          str.concat(" | failed:";fail_count));
+        " | elapsed:");
+      elapsed);
+    "s")
+}

@@ -1,0 +1,175 @@
+m=moke.ml.proposal;
+i=str:std.string;
+i=http:std.http;
+
+// MK2.2 — AI-assisted analysis proposal
+// Schema profile (TOON) is sent to the LLM — raw data never leaves the device.
+
+pub m.$ml_suggestion{
+  kind:str;         // "kmeans" | "zscore" | "iqr" | "correlation" | "groupby"
+  title:str;
+  description:str;
+  columns:@(str);
+  params:str;       // JSON string of method params
+  rationale:str
+}
+
+pub m.$proposal_result{
+  suggestions:@($ml_suggestion);
+  source:str  // "llm" or "heuristic"
+}
+
+// ── Heuristic fallback ────────────────────────────────────────────────────────
+
+f=heuristic_proposals(num_cols:@(str);cat_cols:@(str)):@($ml_suggestion){
+  let suggestions=@();
+  let n_num=num_cols.len();
+  let n_cat=cat_cols.len();
+
+  // K-means if 2+ numeric columns available
+  if n_num >= 2{
+    let km_cols=@();
+    let take=3;
+    if take > n_num{ take=n_num };
+    let ki=0;
+    ??(ki < take){ km_cols.push(num_cols[ki]); ki=ki + 1 }{};
+    suggestions.push($ml_suggestion{
+      kind="kmeans";
+      title="K-Means Clustering";
+      description="Group rows into natural clusters based on numeric patterns. Useful for segmenting customers, products, or events.";
+      columns=km_cols;
+      params="{\"k\":4,\"max_iter\":100}";
+      rationale="Dataset has " + str.from_int(n_num) + " numeric columns — clustering will reveal natural groupings."
+    });
+  };
+
+  // Z-score anomaly if any numeric column
+  if n_num >= 1{
+    let az_cols=@();
+    az_cols.push(num_cols[0]);
+    suggestions.push($ml_suggestion{
+      kind="zscore";
+      title="Z-Score Anomaly Detection";
+      description="Flag rows where a numeric value lies more than N standard deviations from the column mean.";
+      columns=az_cols;
+      params="{\"threshold\":3.0}";
+      rationale="Outliers in " + num_cols[0] + " may indicate data quality issues or exceptional events."
+    });
+  };
+
+  // Correlation matrix if 2+ numeric columns
+  if n_num >= 2{
+    suggestions.push($ml_suggestion{
+      kind="correlation";
+      title="Pearson Correlation Matrix";
+      description="Compute pairwise linear correlation between all numeric columns to surface relationships.";
+      columns=num_cols;
+      params="{}";
+      rationale="Correlation will reveal which numeric features move together and guide further modelling."
+    });
+  };
+
+  // Group-by pattern if categorical + numeric columns
+  if n_num >= 1 && n_cat >= 1{
+    let gb_cols=@();
+    gb_cols.push(cat_cols[0]);
+    gb_cols.push(num_cols[0]);
+    suggestions.push($ml_suggestion{
+      kind="groupby";
+      title="Group-By Analysis";
+      description="Compute mean and variance of " + num_cols[0] + " within each category of " + cat_cols[0] + ".";
+      columns=gb_cols;
+      params="{\"agg\":\"mean\"}";
+      rationale="Segment " + num_cols[0] + " by " + cat_cols[0] + " to compare performance across categories."
+    });
+  };
+
+  <suggestions
+};
+
+// ── LLM-assisted proposal ─────────────────────────────────────────────────────
+
+f=build_prompt(schema_toon:str;num_cols:@(str);cat_cols:@(str)):str{
+  let prompt="You are a data analyst. Given the dataset schema below, suggest 2-4 ML analyses.\n\n";
+  prompt=prompt + "SCHEMA PROFILE (no raw data):\n" + schema_toon + "\n\n";
+  prompt=prompt + "Numeric columns: " + str.join(num_cols; ", ") + "\n";
+  prompt=prompt + "Categorical columns: " + str.join(cat_cols; ", ") + "\n\n";
+  prompt=prompt + "Respond as a JSON array of objects, each with keys: kind, title, description, columns (array), params (JSON string), rationale.\n";
+  prompt=prompt + "Kinds available: kmeans, zscore, iqr, correlation, groupby.\n";
+  prompt=prompt + "Be concise and practical. Do not include any raw data or PII in your response.";
+  <prompt
+};
+
+f=parse_llm_suggestions(body:str):@($ml_suggestion){
+  // Attempt to parse JSON array from LLM response body.
+  // Expects response field to contain a JSON array.
+  let suggestions=@();
+  let arr=str.json_array(body; "response");
+  if !str.ok(arr){ <suggestions };
+  let i=0;
+  let items=str.json_parse_array(arr);
+  ??(i < items.len()){
+    let item=items[i];
+    let kind=str.json_string(item; "kind");
+    let title=str.json_string(item; "title");
+    let desc=str.json_string(item; "description");
+    let rationale=str.json_string(item; "rationale");
+    let params=str.json_string(item; "params");
+    let cols_raw=str.json_array(item; "columns");
+    let cols=str.json_parse_string_array(cols_raw);
+    if str.len(kind) > 0 && str.len(title) > 0{
+      suggestions.push($ml_suggestion{
+        kind=kind;
+        title=title;
+        description=desc;
+        columns=cols;
+        params=params;
+        rationale=rationale
+      });
+    };
+    i=i + 1
+  }{};
+  <suggestions
+};
+
+pub f=from_schema(schema_toon:str;num_cols:@(str);cat_cols:@(str)):$proposal_result{
+  let prompt=build_prompt(schema_toon; num_cols; cat_cols);
+  let body="{\"text\":" + str.json_encode(prompt) + ",\"system_prompt\":\"\",\"tolerance\":\"patient\",\"mode\":\"chat\"}";
+  let res=http.post("/api/moke/pipeline"; "application/json"; body);
+  if http.ok(res){
+    let suggestions=parse_llm_suggestions(http.body(res));
+    if suggestions.len() > 0{
+      <$proposal_result{
+        suggestions=suggestions;
+        source="llm"
+      }
+    };
+  };
+  // Fall through to heuristic on any failure
+  <$proposal_result{
+    suggestions=heuristic_proposals(num_cols; cat_cols);
+    source="heuristic"
+  }
+};
+
+// ── Formatting ────────────────────────────────────────────────────────────────
+
+pub f=format_suggestions(result:$proposal_result):str{
+  let lines=@();
+  lines.push("Analysis proposals (source: " + result.source + ")");
+  lines.push("---");
+  let i=0;
+  ??(i < result.suggestions.len()){
+    let s=result.suggestions[i];
+    lines.push(str.from_int(i + 1) + ". [" + str.upper(s.kind) + "] " + s.title);
+    lines.push("   " + s.description);
+    lines.push("   Columns: " + str.join(s.columns; ", "));
+    lines.push("   Why: " + s.rationale);
+    if str.len(s.params) > 2{
+      lines.push("   Params: " + s.params);
+    };
+    lines.push("");
+    i=i + 1
+  }{};
+  <str.join(lines; "\n")
+};

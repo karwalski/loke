@@ -1,0 +1,56 @@
+i=t:companion.types
+i=mdns:std.mdns
+i=log:shared.log
+i=db:storage.db
+
+pub f=advertise(port:i32;device_name:str):bool{
+  svc=mdns.$service_record{ name=device_name; type="_loke-companion._tcp"; port=port; txt=["version=1.0"] };
+  log.info "advertising as companion: {device_name}:{port}";
+  <mdns.advertise(svc)
+}
+
+pub f=browse(cb:f(t.$companion):void):bool{
+  inner_cb=f(d:mdns.$discovered):void{
+    now=db.now_ms();
+    companion=t.$companion{ id=d.name; name=d.name; host=d.host; port=d.port; cert_pem=""; paired=false; paired_at=0; last_seen=now };
+    cb(companion)
+  };
+  <mdns.browse("_loke-companion._tcp";inner_cb)
+}
+
+pub f=stop():bool{
+  a=mdns.stop_advertise("_loke-companion._tcp");
+  b=mdns.stop_browse("_loke-companion._tcp");
+  <a
+}
+
+pub f=generate_pairing_code(cert_pem:str):t.$pairing_code{
+  prefix=cert_pem[0..6];
+  n=0;
+  i=0;
+  |{ i<6: ch=prefix[i]; d=ch mod 10; n=n*10+d; i=i+1 };
+  code_num=n mod 1000000;
+  code="{code_num:06}";
+  expires_at=db.now_ms()+300000;
+  <t.$pairing_code{ code=code; expires_at=expires_at }
+}
+
+pub f=save_companion(store:db.$store;companion:t.$companion):bool{
+  db.exec(store;"CREATE TABLE IF NOT EXISTS companions (id TEXT PRIMARY KEY, name TEXT, host TEXT, port INT, cert_pem TEXT, paired INT, paired_at INT, last_seen INT)");
+  paired_int=0;
+  |{ companion.paired: paired_int=1 };
+  <db.exec(store;"INSERT OR REPLACE INTO companions (id, name, host, port, cert_pem, paired, paired_at, last_seen) VALUES (?,?,?,?,?,?,?,?)";[companion.id;companion.name;companion.host;"{companion.port}";companion.cert_pem;"{paired_int}";"{companion.paired_at}";"{companion.last_seen}"])
+}
+
+pub f=load_companions(store:db.$store):@(t.$companion){
+  rows=db.query(store;"SELECT id, name, host, port, cert_pem, paired, paired_at, last_seen FROM companions WHERE paired=1");
+  result=@(t.$companion)[];
+  |{ rows: row=rows.next(); |{ row.$some:r
+    id=r[0]; name=r[1]; host=r[2]; port=r[3] as i32; cert_pem=r[4];
+    paired_int=r[5] as i32; paired=paired_int!=0;
+    paired_at=r[6] as i64; last_seen=r[7] as i64;
+    c=t.$companion{ id=id; name=name; host=host; port=port; cert_pem=cert_pem; paired=paired; paired_at=paired_at; last_seen=last_seen };
+    result.push(c)
+  } };
+  <result
+}

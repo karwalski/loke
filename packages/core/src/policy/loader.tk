@@ -1,0 +1,177 @@
+i=t:policy.types
+i=file:std.file
+i=http:std.http
+i=json:std.json
+i=log:shared.log
+i=str:std.str
+
+m.$loader_config{ policy_dir:str; enterprise_url:str; hot_reload:bool; reload_interval_seconds:i32 }
+
+pub f=default_config(data_dir:str):$loader_config{
+  <$loader_config{
+    policy_dir:str.concat(data_dir;"/policies");
+    enterprise_url:"";
+    hot_reload:true;
+    reload_interval_seconds:60
+  }
+}
+
+pub f=load_file(path:str):t.$policy_set{
+  result=file.read(path);
+  |result{
+    $ok:contents
+      parsed=json.parse(contents);
+      |parsed{
+        $ok:data
+          <t.$policy_set{
+            name:json.get_str(data;"name");
+            source:path;
+            regulations:json.get_regulations(data;"regulations");
+            loaded_at:std.now_ms();
+            hash:str.rand_hex(8)
+          };
+        $err:e
+          log.warn(str.concat("policy: failed to parse file: ";path));
+          <t.$policy_set{
+            name:"";
+            source:path;
+            regulations:@();
+            loaded_at:std.now_ms();
+            hash:str.rand_hex(8)
+          }
+      };
+    $err:e
+      log.warn(str.concat("policy: failed to read file: ";path));
+      <t.$policy_set{
+        name:"";
+        source:path;
+        regulations:@();
+        loaded_at:std.now_ms();
+        hash:str.rand_hex(8)
+      }
+  }
+}
+
+pub f=load_url(url:str):t.$policy_set{
+  result=http.get(url);
+  |result{
+    $ok:resp
+      parsed=json.parse(resp.body);
+      |parsed{
+        $ok:data
+          <t.$policy_set{
+            name:json.get_str(data;"name");
+            source:url;
+            regulations:json.get_regulations(data;"regulations");
+            loaded_at:std.now_ms();
+            hash:str.rand_hex(8)
+          };
+        $err:e
+          log.warn(str.concat("policy: failed to parse url response: ";url));
+          <t.$policy_set{
+            name:"";
+            source:url;
+            regulations:@();
+            loaded_at:std.now_ms();
+            hash:""
+          }
+      };
+    $err:e
+      log.warn(str.concat("policy: failed to fetch url: ";url));
+      <t.$policy_set{
+        name:"";
+        source:url;
+        regulations:@();
+        loaded_at:std.now_ms();
+        hash:""
+      }
+  }
+}
+
+pub f=load_all(cfg:$loader_config):@(t.$policy_set){
+  sets=@();
+  files=file.list_glob(cfg.policy_dir;"*.json");
+  |files{
+    $ok:paths
+      i=0;
+      loop i < paths.len{
+        path=paths[i];
+        ps=load_file(path);
+        sets=sets.push(ps);
+        i=i+1
+      };
+    $err:e
+      log.warn(str.concat("policy: could not list policy dir: ";cfg.policy_dir))
+  };
+  cfg.enterprise_url != ""{
+    ps=load_url(cfg.enterprise_url);
+    sets=sets.push(ps)
+  };
+  <sets
+}
+
+pub f=check_reload_needed(cfg:$loader_config;last_loaded_at:i64):bool{
+  now=std.now_ms();
+  threshold=cfg.reload_interval_seconds * 1000;
+  <now - last_loaded_at > threshold
+}
+
+pub f=evaluate(sets:@(t.$policy_set);context:str;sensitivity:str):@(t.$policy_violation){
+  violations=@();
+  severity_rank=f(sev:str):i32{
+    sev == "critical"{ <4 };
+    sev == "high"{ <3 };
+    sev == "medium"{ <2 };
+    sev == "low"{ <1 };
+    <0
+  };
+  sens_rank=severity_rank(sensitivity);
+  si=0;
+  loop si < sets.len{
+    ps=sets[si];
+    ri=0;
+    loop ri < ps.regulations.len{
+      reg=ps.regulations[ri];
+      ki=0;
+      loop ki < reg.rules.len{
+        rule=reg.rules[ki];
+        keyword_match=str.contains(context;rule.id) || str.contains(context;rule.description);
+        severity_match=severity_rank(rule.severity) >= sens_rank;
+        keyword_match || severity_match{
+          v=t.$policy_violation{
+            rule_id:rule.id;
+            rule_desc:rule.description;
+            action:rule.action;
+            severity:rule.severity;
+            context:context
+          };
+          violations=violations.push(v)
+        };
+        ki=ki+1
+      };
+      ri=ri+1
+    };
+    si=si+1
+  };
+  <violations
+}
+
+pub f=format_violations(violations:@(t.$policy_violation)):str{
+  violations.len == 0{
+    <"No policy violations."
+  };
+  out="";
+  i=0;
+  loop i < violations.len{
+    v=violations[i];
+    line=str.concat("[";str.upper(v.severity);"] ";v.rule_id;": ";v.rule_desc;" → ";v.action);
+    out == ""{
+      out=line
+    };
+    out != ""{
+      out=str.concat(out;"\n";line)
+    };
+    i=i+1
+  };
+  <out
+}

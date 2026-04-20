@@ -1,0 +1,261 @@
+// M2.2 — Layered context loading.
+// Progressive loading of memory into LLM context budget across four layers:
+//   L0 (~20 tokens)  — compact identity string, always loaded
+//   L1 (~150 tokens) — AAAK palace map, always loaded
+//   L2 (~500 tokens) — AAAK active context for current task
+//   L3 (~2000 tokens) — deep semantic search results, loaded selectively
+
+i=t:shared.types;
+i=mt:core.memory.types;
+i=pal:core.memory.palace;
+i=aaak:core.memory.aaak;
+i=search:core.memory.search;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$context_layer{
+  $l0;
+  $l1;
+  $l2;
+  $l3
+}
+
+pub m.$loaded_context{
+  l0_identity:str;
+  l1_palace_map:str;
+  l2_active_context:str;
+  l3_deep_results:@($mt.search_result);
+  total_tokens_estimate:u32;
+  layers_loaded:@(str)
+}
+
+// Returns default token budgets for L0, L1, L2, L3.
+pub f=default_budgets():@(u32){
+  <@(20;150;500;2000)
+}
+
+// L0 identity (~20 tokens): compact identity string, always loaded.
+pub f=load_l0(user_name:str;version:str):str{
+  let v_part=str.concat("loke v";version);
+  let u_part=str.concat(" | user:";user_name);
+  let tail=" | priv-llm-proxy on ooke";
+  <str.concat(v_part;str.concat(u_part;tail))
+}
+
+// L1 palace map (~150 tokens): AAAK summary of the palace wing/hall structure.
+// Walks the palace and compresses the structure into AAAK shorthand.
+pub f=load_l1(palace:$mt.palace;level:$aaak.compress_level):str{
+  pal.walk(palace)|{
+    $ok:walk_str {
+      // Parse the walk output into a compact AAAK palace map.
+      // Format from walk: "Wing: work\n  Hall: Projects (12 drawers)\n ..."
+      // We compress this to: "PALACE: work(Projects,Tasks) | technical(Code,Research)"
+      let lines=str.split(walk_str;"\n");
+      let current_wing="";
+      let wing_halls=@();
+      let palace_parts=@();
+
+      lines.each|line{
+        let trimmed=str.trim(line);
+        if str.contains(trimmed;"Wing: "){
+          // Flush previous wing if any
+          if str.len(current_wing) > 0 && wing_halls.len > 0{
+            let halls_joined="";
+            let first=true;
+            wing_halls.each|h{
+              if first{
+                let halls_joined=h;
+                let first=false
+              }else{
+                let halls_joined=str.concat(halls_joined;str.concat(",";h))
+              }
+            };
+            let wing_entry=str.concat(current_wing;str.concat("(";str.concat(halls_joined;")")));
+            let palace_parts=palace_parts.append(wing_entry)
+          };
+          // Start new wing — extract name after "Wing: "
+          let wing_parts=str.split(trimmed;"Wing: ");
+          let current_wing=str.trim(wing_parts[1]);
+          let wing_halls=@()
+        }else{
+          if str.contains(trimmed;"Hall: "){
+            // Extract hall name — "Hall: Projects (12 drawers)" → "Projects"
+            let hall_parts=str.split(trimmed;"Hall: ");
+            let hall_full=str.trim(hall_parts[1]);
+            // Strip the " (N drawers)" suffix
+            let hall_name=if str.contains(hall_full;" ("){
+              let paren_parts=str.split(hall_full;" (");
+              str.trim(paren_parts[0])
+            }else{
+              hall_full
+            };
+            let wing_halls=wing_halls.append(hall_name)
+          }
+        }
+      };
+
+      // Flush last wing
+      if str.len(current_wing) > 0 && wing_halls.len > 0{
+        let halls_joined="";
+        let first=true;
+        wing_halls.each|h{
+          if first{
+            let halls_joined=h;
+            let first=false
+          }else{
+            let halls_joined=str.concat(halls_joined;str.concat(",";h))
+          }
+        };
+        let wing_entry=str.concat(current_wing;str.concat("(";str.concat(halls_joined;")")));
+        let palace_parts=palace_parts.append(wing_entry)
+      };
+
+      // Join all wings with " | "
+      let map_body="";
+      let first=true;
+      palace_parts.each|part{
+        if first{
+          let map_body=part;
+          let first=false
+        }else{
+          let map_body=str.concat(map_body;str.concat(" | ";part))
+        }
+      };
+
+      <str.concat("PALACE: ";map_body)
+    };
+    $err:_ {
+      <"PALACE: (unavailable)"
+    }
+  }
+}
+
+// L2 active context (~500 tokens): search for drawers relevant to task, encode top results in AAAK.
+pub f=load_l2(palace:$mt.palace;task_description:str;level:$aaak.compress_level):str{
+  search.search(palace;task_description;5)|{
+    $ok:results {
+      if results.len == 0{
+        <""
+      }else{
+        let parts=@();
+        results.each|r{
+          let encoded=aaak.encode_fact(r.content_excerpt;level);
+          let loc=str.concat(r.location.wing;str.concat("/";r.location.hall));
+          let tagged=str.concat("[";str.concat(loc;str.concat("] ";encoded)));
+          let parts=parts.append(tagged)
+        };
+        let joined="";
+        let first=true;
+        parts.each|p{
+          if first{
+            let joined=p;
+            let first=false
+          }else{
+            let joined=str.concat(joined;str.concat("\n";p))
+          }
+        };
+        <joined
+      }
+    };
+    $err:_ {
+      log.warn("L2 context load failed — search error";"context";"system");
+      <""
+    }
+  }
+}
+
+// L3 deep memory: full semantic search results returned as-is for selective inclusion.
+pub f=load_l3(palace:$mt.palace;query:str;limit:u32):@($mt.search_result){
+  search.search(palace;query;limit)|{
+    $ok:results { <results };
+    $err:_ {
+      log.warn("L3 deep search failed";"context";"system");
+      <@()
+    }
+  }
+}
+
+// Estimates token count from a string (1 token per 4 characters).
+f=estimate_tokens(s:str):u32{
+  str.len(s) / 4
+}
+
+// Loads context layers progressively up to token_budget.
+// L0 and L1 are always loaded. L2 and L3 are loaded if budget allows.
+pub f=load_context(palace:$mt.palace;task_desc:str;user_name:str;token_budget:u32):$loaded_context{
+  let level=aaak.default_level();
+
+  // L0 — always loaded
+  let l0=load_l0(user_name;"0.1.0");
+  let l0_tokens=estimate_tokens(l0);
+  let layers_loaded=@("L0");
+
+  // L1 — always loaded
+  let l1=load_l1(palace;level);
+  let l1_tokens=estimate_tokens(l1);
+  let layers_loaded=layers_loaded.append("L1");
+
+  let used_tokens=l0_tokens + l1_tokens;
+
+  // L2 — load if budget allows (500 token budget for L2)
+  let l2_budget=500;
+  let l2="";
+  if token_budget > used_tokens + l2_budget{
+    let l2=load_l2(palace;task_desc;level);
+    let l2_actual=estimate_tokens(l2);
+    let used_tokens=used_tokens + l2_actual;
+    let layers_loaded=layers_loaded.append("L2")
+  };
+
+  // L3 — load if budget still allows, up to remaining budget / 200 chars per result
+  let l3=@();
+  let remaining=if token_budget > used_tokens{
+    token_budget - used_tokens
+  }else{
+    0
+  };
+  if remaining > 200{
+    let l3_limit=remaining / 50;
+    let l3=load_l3(palace;task_desc;l3_limit);
+    let layers_loaded=layers_loaded.append("L3")
+  };
+
+  // Final token estimate
+  let l3_tokens=l3.len * 50;
+  let total=used_tokens + l3_tokens;
+
+  <$loaded_context{
+    l0_identity:l0;
+    l1_palace_map:l1;
+    l2_active_context:l2;
+    l3_deep_results:l3;
+    total_tokens_estimate:total;
+    layers_loaded:layers_loaded
+  }
+}
+
+// Combines all loaded context layers into a single string for prepending to LLM prompts.
+// Order: L0 → L1 → L2 → L3 summaries.
+pub f=to_context_string(ctx:$loaded_context):str{
+  let out=ctx.l0_identity;
+
+  if str.len(ctx.l1_palace_map) > 0{
+    let out=str.concat(out;str.concat("\n";ctx.l1_palace_map))
+  };
+
+  if str.len(ctx.l2_active_context) > 0{
+    let out=str.concat(out;str.concat("\n";ctx.l2_active_context))
+  };
+
+  if ctx.l3_deep_results.len > 0{
+    let l3_header="\n--- deep context ---";
+    let out=str.concat(out;l3_header);
+    ctx.l3_deep_results.each|r{
+      let loc=str.concat(r.location.wing;str.concat("/";str.concat(r.location.hall;str.concat("/";r.location.room))));
+      let line=str.concat("\n[";str.concat(loc;str.concat("] ";r.content_excerpt)));
+      let out=str.concat(out;line)
+    }
+  };
+
+  <out
+}

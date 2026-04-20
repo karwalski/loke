@@ -1,0 +1,215 @@
+m=core.policy.export;
+
+i=fb:core.policy.feedback;
+i=db:storage.db;
+i=file:std.file;
+i=str:std.str;
+i=log:shared.log;
+
+// $export_format constants: 0=CSV, 1=JSON, 2=JSONL
+pub FORMAT_CSV:i32=0;
+pub FORMAT_JSON:i32=1;
+pub FORMAT_JSONL:i32=2;
+
+pub m.$export_opts{
+  format:i32;
+  from_ts:i64;
+  to_ts:i64;
+  include_overrides:bool;
+  anonymise_ids:bool
+}
+
+pub m.$export_result{
+  path:str;
+  rows:i32;
+  format:i32;
+  size_bytes:i32
+}
+
+pub f=format_csv_row(fields:@(str)):str{
+  escaped=@();
+  i=0;
+  loop i < arr.len(fields){
+    raw=fields[i];
+    needs_quote=str.contains(raw; ",") || str.contains(raw; "\"") || str.contains(raw; "\n");
+    cell=?(needs_quote){
+      inner=str.replace_all(raw; "\""; "\"\"");
+      <str.concat("\""; inner; "\"")
+    }:{
+      <raw
+    };
+    escaped=arr.push(escaped; cell);
+    i=i+1
+  };
+  <str.join(escaped; ",")
+}
+
+pub f=format_jsonl_record(fields:@(str); keys:@(str)):str{
+  pairs=@();
+  i=0;
+  loop i < arr.len(keys){
+    k=keys[i];
+    v=?(i < arr.len(fields)){ <fields[i] }:{ <"" };
+    escaped_v=str.replace_all(v; "\""; "\\\"");
+    pair=str.concat("\""; k; "\":\""; escaped_v; "\"");
+    pairs=arr.push(pairs; pair);
+    i=i+1
+  };
+  <str.concat("{"; str.join(pairs; ","); "}")
+}
+
+pub f=export_audit(opts:$export_opts):$export_result{
+  ts=std.now_ms();
+  ext=?(opts.format == FORMAT_CSV){ <"csv" }:{
+    ?(opts.format == FORMAT_JSONL){ <"jsonl" }:{ <"json" }
+  };
+  path=str.concat(std.home_dir(); "/.loke/exports/audit_"; str.from_i64(ts); "."; ext);
+
+  rows=db.query(
+    "SELECT id, request_id, model_id, action, timestamp, regulation, severity FROM audit_entries WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC";
+    @(db.i64_val(opts.from_ts); db.i64_val(opts.to_ts))
+  );
+
+  row_count=db.rows_len(rows);
+  keys=@("id";"request_id";"model_id";"action";"timestamp";"regulation";"severity");
+  header=format_csv_row(keys);
+
+  content=?(opts.format == FORMAT_CSV){
+    lines=@(header);
+    i=0;
+    loop i < row_count{
+      id_raw=db.row_str(rows; i; 0);
+      rid_raw=db.row_str(rows; i; 1);
+      id_val=?(opts.anonymise_ids){ <str.sha256_prefix(id_raw; 8) }:{ <id_raw };
+      rid_val=?(opts.anonymise_ids){ <str.sha256_prefix(rid_raw; 8) }:{ <rid_raw };
+      fields=@(id_val; rid_val; db.row_str(rows; i; 2); db.row_str(rows; i; 3); str.from_i64(db.row_i64(rows; i; 4)); db.row_str(rows; i; 5); db.row_str(rows; i; 6));
+      lines=arr.push(lines; format_csv_row(fields));
+      i=i+1
+    };
+    <str.join(lines; "\n")
+  }:{
+    ?(opts.format == FORMAT_JSONL){
+      lines=@();
+      i=0;
+      loop i < row_count{
+        id_raw=db.row_str(rows; i; 0);
+        rid_raw=db.row_str(rows; i; 1);
+        id_val=?(opts.anonymise_ids){ <str.sha256_prefix(id_raw; 8) }:{ <id_raw };
+        rid_val=?(opts.anonymise_ids){ <str.sha256_prefix(rid_raw; 8) }:{ <rid_raw };
+        fields=@(id_val; rid_val; db.row_str(rows; i; 2); db.row_str(rows; i; 3); str.from_i64(db.row_i64(rows; i; 4)); db.row_str(rows; i; 5); db.row_str(rows; i; 6));
+        lines=arr.push(lines; format_jsonl_record(fields; keys));
+        i=i+1
+      };
+      <str.join(lines; "\n")
+    }:{
+      // JSON array
+      items=@();
+      i=0;
+      loop i < row_count{
+        id_raw=db.row_str(rows; i; 0);
+        rid_raw=db.row_str(rows; i; 1);
+        id_val=?(opts.anonymise_ids){ <str.sha256_prefix(id_raw; 8) }:{ <id_raw };
+        rid_val=?(opts.anonymise_ids){ <str.sha256_prefix(rid_raw; 8) }:{ <rid_raw };
+        fields=@(id_val; rid_val; db.row_str(rows; i; 2); db.row_str(rows; i; 3); str.from_i64(db.row_i64(rows; i; 4)); db.row_str(rows; i; 5); db.row_str(rows; i; 6));
+        items=arr.push(items; format_jsonl_record(fields; keys));
+        i=i+1
+      };
+      <str.concat("["; str.join(items; ","); "]")
+    }
+  };
+
+  file.ensure_dir(str.concat(std.home_dir(); "/.loke/exports"));
+  write_result=file.write(path; content);
+  |write_result{
+    $ok:_
+      <$export_result{
+        path:path;
+        rows:row_count;
+        format:opts.format;
+        size_bytes:str.byte_len(content)
+      };
+    $err:e
+      log.warn(str.concat("export: failed to write audit file: "; e));
+      <$export_result{ path:""; rows:0; format:opts.format; size_bytes:0 }
+  }
+}
+
+pub f=export_compliance(opts:$export_opts):$export_result{
+  ts=std.now_ms();
+  ext=?(opts.format == FORMAT_CSV){ <"csv" }:{
+    ?(opts.format == FORMAT_JSONL){ <"jsonl" }:{ <"json" }
+  };
+  path=str.concat(std.home_dir(); "/.loke/exports/audit_"; str.from_i64(ts); "."; ext);
+
+  events=fb.export_events(opts.from_ts; opts.to_ts);
+  keys=@("request_id";"policy_id";"regulation";"violated";"user_override";"timestamp");
+  header=format_csv_row(keys);
+
+  filtered=@();
+  i=0;
+  loop i < arr.len(events){
+    ev=events[i];
+    include=?(opts.include_overrides){ <true }:{ <!(ev.user_override) };
+    ?(include){
+      filtered=arr.push(filtered; ev)
+    };
+    i=i+1
+  };
+
+  row_count=arr.len(filtered);
+
+  content=?(opts.format == FORMAT_CSV){
+    lines=@(header);
+    i=0;
+    loop i < row_count{
+      ev=filtered[i];
+      rid_val=?(opts.anonymise_ids){ <str.sha256_prefix(ev.request_id; 8) }:{ <ev.request_id };
+      pid_val=?(opts.anonymise_ids){ <str.sha256_prefix(ev.policy_id; 8) }:{ <ev.policy_id };
+      fields=@(rid_val; pid_val; ev.regulation; str.from_bool(ev.violated); str.from_bool(ev.user_override); str.from_i64(ev.timestamp));
+      lines=arr.push(lines; format_csv_row(fields));
+      i=i+1
+    };
+    <str.join(lines; "\n")
+  }:{
+    ?(opts.format == FORMAT_JSONL){
+      lines=@();
+      i=0;
+      loop i < row_count{
+        ev=filtered[i];
+        rid_val=?(opts.anonymise_ids){ <str.sha256_prefix(ev.request_id; 8) }:{ <ev.request_id };
+        pid_val=?(opts.anonymise_ids){ <str.sha256_prefix(ev.policy_id; 8) }:{ <ev.policy_id };
+        fields=@(rid_val; pid_val; ev.regulation; str.from_bool(ev.violated); str.from_bool(ev.user_override); str.from_i64(ev.timestamp));
+        lines=arr.push(lines; format_jsonl_record(fields; keys));
+        i=i+1
+      };
+      <str.join(lines; "\n")
+    }:{
+      items=@();
+      i=0;
+      loop i < row_count{
+        ev=filtered[i];
+        rid_val=?(opts.anonymise_ids){ <str.sha256_prefix(ev.request_id; 8) }:{ <ev.request_id };
+        pid_val=?(opts.anonymise_ids){ <str.sha256_prefix(ev.policy_id; 8) }:{ <ev.policy_id };
+        fields=@(rid_val; pid_val; ev.regulation; str.from_bool(ev.violated); str.from_bool(ev.user_override); str.from_i64(ev.timestamp));
+        items=arr.push(items; format_jsonl_record(fields; keys));
+        i=i+1
+      };
+      <str.concat("["; str.join(items; ","); "]")
+    }
+  };
+
+  file.ensure_dir(str.concat(std.home_dir(); "/.loke/exports"));
+  write_result=file.write(path; content);
+  |write_result{
+    $ok:_
+      <$export_result{
+        path:path;
+        rows:row_count;
+        format:opts.format;
+        size_bytes:str.byte_len(content)
+      };
+    $err:e
+      log.warn(str.concat("export: failed to write compliance file: "; e));
+      <$export_result{ path:""; rows:0; format:opts.format; size_bytes:0 }
+  }
+}

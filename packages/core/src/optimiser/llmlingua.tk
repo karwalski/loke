@@ -1,0 +1,138 @@
+// F4.3 — LLMLingua prompt compression client
+// Wraps the LLMLingua Python sidecar (default http://localhost:8000).
+// Provides token-efficient prompt compression via /compress endpoint.
+
+i=t:shared.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+// --- Types ---
+
+pub m.$compress_result{
+  original:str;
+  compressed:str;
+  origin_tokens:u32;
+  compressed_tokens:u32;
+  actual_ratio:f64;
+  savings_pct:f64
+}
+
+pub m.$llmlingua_client{
+  base_url:str
+}
+
+// --- Constructor ---
+
+// Creates a new LLMLingua client pointing at base_url (e.g. "http://localhost:8000")
+pub f=new(base_url:str):$llmlingua_client{
+  <$llmlingua_client{base_url:base_url}
+}
+
+// --- Availability check ---
+
+// Returns true if the LLMLingua sidecar is reachable (GET /health returns 200, 2s timeout)
+pub f=is_available(client:$llmlingua_client):bool{
+  let url=str.concat(client.base_url;"/health");
+  let result=http.get_timeout(url;2000);
+  result|{
+    $http_err e;
+      <false;
+    body;
+      <true
+  }
+}
+
+// --- Internal: parse a /compress response body into a $compress_result ---
+
+f=parse_compress_response(original:str;raw:str):$compress_result|$loke_err{
+  let parsed=json.dec(raw);
+  parsed|{
+    $json_err e;
+      <$err($loke_err.$network_err("llmlingua compress: failed to parse JSON response"));
+    obj;
+      let compressed=json.get_str(obj;"compressed_prompt");
+      let origin_tokens_i64=json.get_int(obj;"origin_tokens");
+      let compressed_tokens_i64=json.get_int(obj;"compressed_tokens");
+      let origin_tokens=origin_tokens_i64 as u32;
+      let compressed_tokens=compressed_tokens_i64 as u32;
+      let savings_pct=if origin_tokens==0{
+        0.0
+      }else{
+        (1.0 - (compressed_tokens as f64 / origin_tokens as f64)) * 100.0
+      };
+      let actual_ratio=if origin_tokens==0{
+        0.0
+      }else{
+        compressed_tokens as f64 / origin_tokens as f64
+      };
+      let result=$compress_result{
+        original:original;
+        compressed:compressed;
+        origin_tokens:origin_tokens;
+        compressed_tokens:compressed_tokens;
+        actual_ratio:actual_ratio;
+        savings_pct:savings_pct
+      };
+      <$ok(result)
+  }
+}
+
+// --- Compress by ratio ---
+
+// Compresses prompt to approximately target_ratio of its original token count.
+// POST /compress with {"prompt":"...","ratio":target_ratio}
+pub f=compress(client:$llmlingua_client;prompt:str;target_ratio:f64):$compress_result|$loke_err{
+  let url=str.concat(client.base_url;"/compress");
+  let ratio_s=str.from_float(target_ratio);
+  let body_p1=str.concat("{\"prompt\":\"";prompt);
+  let body_p2=str.concat(body_p1;"\",\"ratio\":");
+  let body=str.concat(body_p2;str.concat(ratio_s;"}"));
+  let cid=log.new_correlation_id();
+  log.debug(str.concat("llmlingua compress: ratio=";ratio_s);"llmlingua";cid);
+  let result=http.post(url;body;"application/json");
+  result|{
+    $http_err e;
+      log.error("llmlingua compress: POST /compress failed";"llmlingua";cid);
+      <$err($loke_err.$network_err("llmlingua compress: failed to reach /compress"));
+    raw;
+      parse_compress_response(prompt;raw)
+  }
+}
+
+// --- Compress by token budget ---
+
+// Compresses prompt to fit within max_tokens.
+// POST /compress with {"prompt":"...","target_token":max_tokens}
+pub f=compress_auto(client:$llmlingua_client;prompt:str;max_tokens:u32):$compress_result|$loke_err{
+  let url=str.concat(client.base_url;"/compress");
+  let max_s=str.from_int(max_tokens as i64);
+  let body_p1=str.concat("{\"prompt\":\"";prompt);
+  let body_p2=str.concat(body_p1;"\",\"target_token\":");
+  let body=str.concat(body_p2;str.concat(max_s;"}"));
+  let cid=log.new_correlation_id();
+  log.debug(str.concat("llmlingua compress_auto: max_tokens=";max_s);"llmlingua";cid);
+  let result=http.post(url;body;"application/json");
+  result|{
+    $http_err e;
+      log.error("llmlingua compress_auto: POST /compress failed";"llmlingua";cid);
+      <$err($loke_err.$network_err("llmlingua compress_auto: failed to reach /compress"));
+    raw;
+      parse_compress_response(prompt;raw)
+  }
+}
+
+// --- Compression threshold check ---
+
+// Returns true if prompt_len exceeds threshold_chars.
+// Default threshold is 2000 chars (~500 tokens).
+// Callers may pass 0 to use the default (2000).
+pub f=should_compress(prompt_len:u32;threshold_chars:u32):bool{
+  let effective_threshold=if threshold_chars==0{
+    2000
+  }else{
+    threshold_chars
+  };
+  <prompt_len > effective_threshold
+}

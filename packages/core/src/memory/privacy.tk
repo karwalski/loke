@@ -1,0 +1,243 @@
+// M2.4 — Memory privacy controls.
+// Users control what loke remembers: opt-out topics, selective erasure,
+// PII removal, and hard retention limits. Privacy is the product — when in
+// doubt this module errs on the side of forgetting.
+
+i=mt:core.memory.types;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=json:std.json;
+
+pub m.$privacy_prefs{
+  opt_out_topics:@(str);
+  max_retention_days:i32;
+  auto_forget_pii:bool;
+  require_consent:bool
+}
+
+pub m.$forget_result{
+  deleted_count:i32;
+  topics_cleared:@(str)
+}
+
+// Loads privacy preferences from the settings table.
+// Returns safe defaults if the row is absent so the system always has a policy.
+pub f=load_prefs(palace:$mt.palace):$privacy_prefs{
+  db.query(palace.conn;"SELECT value FROM memory_settings WHERE key='privacy_prefs' LIMIT 1")|{
+    $ok:rows {
+      if rows.len > 0{
+        let raw=json.get_str(rows[0];"value");
+        json.parse(raw)|{
+          $ok:obj {
+            let topics=json.get_str_array(obj;"opt_out_topics");
+            let max_days=json.get_int(obj;"max_retention_days");
+            let forget_pii=json.get_bool(obj;"auto_forget_pii");
+            let consent=json.get_bool(obj;"require_consent");
+            <$privacy_prefs{
+              opt_out_topics:topics;
+              max_retention_days:max_days;
+              auto_forget_pii:forget_pii;
+              require_consent:consent
+            }
+          };
+          $err:_ {
+            log.warn("privacy_prefs row corrupt, using defaults";"privacy";"system");
+            <$privacy_prefs{
+              opt_out_topics:@();
+              max_retention_days:365;
+              auto_forget_pii:true;
+              require_consent:false
+            }
+          }
+        }
+      }else{
+        // No stored prefs — return safe defaults
+        <$privacy_prefs{
+          opt_out_topics:@();
+          max_retention_days:365;
+          auto_forget_pii:true;
+          require_consent:false
+        }
+      }
+    };
+    $err:_ {
+      log.warn("failed to load privacy prefs, using defaults";"privacy";"system");
+      <$privacy_prefs{
+        opt_out_topics:@();
+        max_retention_days:365;
+        auto_forget_pii:true;
+        require_consent:false
+      }
+    }
+  }
+}
+
+// Persists privacy preferences to the settings table (upsert).
+pub f=save_prefs(palace:$mt.palace;prefs:$privacy_prefs):bool{
+  // Serialise opt_out_topics array to a JSON string manually
+  let topics_joined=prefs.opt_out_topics.map|t{ str.concat("\"";str.concat(t;"\"")) };
+  let topics_arr=str.concat("[";str.concat(topics_joined.join(",");"]"));
+  let forget_pii_s=if prefs.auto_forget_pii{ "true" }else{ "false" };
+  let consent_s=if prefs.require_consent{ "true" }else{ "false" };
+  let max_s=str.from_int(prefs.max_retention_days);
+  let payload=str.concat(
+    "{\"opt_out_topics\":";str.concat(
+    topics_arr;str.concat(
+    ",\"max_retention_days\":";str.concat(
+    max_s;str.concat(
+    ",\"auto_forget_pii\":";str.concat(
+    forget_pii_s;str.concat(
+    ",\"require_consent\":";str.concat(
+    consent_s;"}"))))))))
+  );
+  db.exec_params(
+    palace.conn;
+    "INSERT OR REPLACE INTO memory_settings (key,value) VALUES ('privacy_prefs',?)";
+    @(payload)
+  )|{
+    $ok:_ {
+      log.info("privacy prefs saved";"privacy";"system");
+      <true
+    };
+    $err:_ {
+      log.warn("failed to save privacy prefs";"privacy";"system");
+      <false
+    }
+  }
+}
+
+// Deletes all memory drawers whose content or tags field contains topic as a
+// substring (case-insensitive). Returns a forget_result with the count and
+// the list of topics that were processed.
+pub f=forget_topic(palace:$mt.palace;topic:str):$forget_result{
+  let lower_topic=str.to_lower(topic);
+  let like_topic=str.concat("%";str.concat(lower_topic;"%"));
+  // Count first so we can report accurately
+  let deleted=0;
+  db.query_params(
+    palace.conn;
+    "SELECT id FROM memory_drawers WHERE LOWER(content) LIKE ? OR LOWER(id) IN (SELECT id FROM memory_scores WHERE LOWER(tags) LIKE ?)";
+    @(like_topic;like_topic)
+  )|{
+    $ok:rows {
+      rows.each|row{
+        let mid=json.get_str(row;"id");
+        // Remove from scores
+        db.exec_params(palace.conn;"DELETE FROM memory_scores WHERE id=?";@(mid))|{
+          $ok:_ {};$err:_ {}
+        };
+        // Remove from index
+        db.exec_params(palace.conn;"DELETE FROM memory_index WHERE drawer_id=?";@(mid))|{
+          $ok:_ {};$err:_ {}
+        };
+        // Remove drawer itself
+        db.exec_params(palace.conn;"DELETE FROM memory_drawers WHERE id=?";@(mid))|{
+          $ok:_ { let deleted=deleted + 1 };
+          $err:_ {
+            log.warn(str.concat("forget_topic: failed to delete drawer: ";mid);"privacy";"system")
+          }
+        }
+      };
+      log.info(
+        str.concat("forget_topic '";str.concat(topic;str.concat("': deleted ";str.from_int(deleted))));
+        "privacy";"system"
+      )
+    };
+    $err:_ {
+      log.warn(str.concat("forget_topic: query failed for topic: ";topic);"privacy";"system")
+    }
+  };
+  <$forget_result{deleted_count:deleted;topics_cleared:@(topic)}
+}
+
+// Deletes all memory drawers created before before_ts (Unix seconds).
+// Returns the number of records deleted.
+pub f=forget_before(palace:$mt.palace;before_ts:i64):i32{
+  let ts_s=str.from_int(before_ts);
+  // Gather ids first to clean up related tables
+  let deleted=0;
+  db.query_params(
+    palace.conn;
+    "SELECT id FROM memory_drawers WHERE created_at < ?";
+    @(ts_s)
+  )|{
+    $ok:rows {
+      rows.each|row{
+        let mid=json.get_str(row;"id");
+        db.exec_params(palace.conn;"DELETE FROM memory_scores WHERE id=?";@(mid))|{
+          $ok:_ {};$err:_ {}
+        };
+        db.exec_params(palace.conn;"DELETE FROM memory_index WHERE drawer_id=?";@(mid))|{
+          $ok:_ {};$err:_ {}
+        };
+        db.exec_params(palace.conn;"DELETE FROM memory_drawers WHERE id=?";@(mid))|{
+          $ok:_ { let deleted=deleted + 1 };
+          $err:_ {
+            log.warn(str.concat("forget_before: failed to delete drawer: ";mid);"privacy";"system")
+          }
+        }
+      };
+      log.info(
+        str.concat("forget_before ";str.concat(ts_s;str.concat(": deleted ";str.from_int(deleted))));
+        "privacy";"system"
+      )
+    };
+    $err:_ {
+      log.warn("forget_before: query failed";"privacy";"system")
+    }
+  };
+  <deleted
+}
+
+// Deletes all memory drawers that have been flagged as containing PII.
+// PII is flagged in memory_scores.pii_flagged = 1.
+// Returns the number of records deleted.
+pub f=forget_pii(palace:$mt.palace):i32{
+  let deleted=0;
+  db.query(
+    palace.conn;
+    "SELECT id FROM memory_scores WHERE pii_flagged=1"
+  )|{
+    $ok:rows {
+      rows.each|row{
+        let mid=json.get_str(row;"id");
+        db.exec_params(palace.conn;"DELETE FROM memory_scores WHERE id=?";@(mid))|{
+          $ok:_ {};$err:_ {}
+        };
+        db.exec_params(palace.conn;"DELETE FROM memory_index WHERE drawer_id=?";@(mid))|{
+          $ok:_ {};$err:_ {}
+        };
+        db.exec_params(palace.conn;"DELETE FROM memory_drawers WHERE id=?";@(mid))|{
+          $ok:_ { let deleted=deleted + 1 };
+          $err:_ {
+            log.warn(str.concat("forget_pii: failed to delete drawer: ";mid);"privacy";"system")
+          }
+        }
+      };
+      log.info(str.concat("forget_pii: deleted ";str.from_int(deleted));"privacy";"system")
+    };
+    $err:_ {
+      log.warn("forget_pii: query failed";"privacy";"system")
+    }
+  };
+  <deleted
+}
+
+// Returns true if content is safe to store given the user's privacy prefs.
+// Checks each opt_out_topic as a substring against the lowercased content.
+// A single match causes rejection — the user's opt-out list is authoritative.
+pub f=should_store(content:str;prefs:$privacy_prefs):bool{
+  let lower=str.to_lower(content);
+  let blocked=false;
+  prefs.opt_out_topics.each|topic{
+    if str.contains(lower;str.to_lower(topic)){
+      let blocked=true
+    }
+  };
+  if blocked{
+    <false
+  }else{
+    <true
+  }
+}

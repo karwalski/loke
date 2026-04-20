@@ -1,0 +1,115 @@
+// M1.5 — Memory decay.
+// Applies exponential temporal decay to memory scores and prunes entries that
+// fall below the configured threshold. Users can refresh individual memories
+// to reset their decay clock when they actively recall them.
+
+i=mt:core.memory.types;
+i=db:std.db;
+i=str:std.str;
+i=log:shared.log;
+i=json:std.json;
+
+pub m.$decay_config{
+  half_life_days:f32;
+  min_score:f32;
+  prune_below:f32;
+  sweep_interval_hours:i32
+}
+
+// Applies exponential decay: score * 2^(-(age_days / half_life_days)).
+// The result is clamped to min_score so memories never fully disappear
+// until the sweep prunes them below prune_below.
+pub f=apply(score:f32;created_at:i64;now:i64;cfg:$decay_config):f32{
+  let seconds_per_day=86400;
+  let age_secs=now - created_at;
+  let age_days=age_secs / seconds_per_day;
+  // Compute exponent = -(age_days / half_life_days)
+  let exponent=age_days / cfg.half_life_days;
+  let decay_factor=math.pow2_neg(exponent);
+  let raw=score * decay_factor;
+  // Clamp to min_score
+  if raw < cfg.min_score{
+    <cfg.min_score
+  }else{
+    <raw
+  }
+}
+
+// Fetches every memory record, recomputes its decayed score, and deletes those
+// that fall below prune_below. Returns the number of memories pruned.
+pub f=sweep(palace:$mt.palace;cfg:$decay_config;now:i64):i32{
+  let pruned=0;
+  db.query(palace.conn;"SELECT id,score,created_at FROM memory_scores")|{
+    $ok:rows {
+      rows.each|row{
+        let mid=json.get_str(row;"id");
+        let base_score=json.get_float(row;"score");
+        let created_at=json.get_int(row;"created_at");
+        let decayed=apply(base_score;created_at;now;cfg);
+        if decayed < cfg.prune_below{
+          // Delete from scores table and from main drawers
+          db.exec_params(
+            palace.conn;
+            "DELETE FROM memory_scores WHERE id=?";
+            @(mid)
+          )|{
+            $ok:_ {};
+            $err:_ {}
+          };
+          db.exec_params(
+            palace.conn;
+            "DELETE FROM memory_drawers WHERE id=?";
+            @(mid)
+          )|{
+            $ok:_ {
+              let pruned=pruned + 1
+            };
+            $err:_ {
+              log.warn(str.concat("sweep: failed to delete drawer: ";mid);"decay";"system")
+            }
+          }
+        }
+      };
+      log.info(str.concat("decay sweep complete, pruned: ";str.from_int(pruned));"decay";"system")
+    };
+    $err:_ {
+      log.warn("decay sweep: failed to query memory_scores";"decay";"system")
+    }
+  };
+  <pruned
+}
+
+// Resets decay for a memory by updating its accessed_at timestamp to now.
+// Call this when a user explicitly recalls or references a memory so it is
+// treated as recently reinforced.
+pub f=refresh(palace:$mt.palace;memory_id:str;now:i64):bool{
+  let ts_s=str.from_int(now);
+  db.exec_params(
+    palace.conn;
+    "UPDATE memory_scores SET accessed_at=? WHERE id=?";
+    @(ts_s;memory_id)
+  )|{
+    $ok:_ {
+      log.debug(str.concat("refreshed memory decay clock: ";memory_id);"decay";"system");
+      <true
+    };
+    $err:_ {
+      log.warn(str.concat("failed to refresh memory: ";memory_id);"decay";"system");
+      <false
+    }
+  }
+}
+
+// Returns sensible default decay parameters:
+//   half_life 30 days — a month-old memory retains 50% of its score
+//   min_score 0.1    — floor so memories survive gentle sweeps
+//   prune_below 0.05 — prune when score drops to 5% of original
+//   sweep every 24h  — one background pass per day
+pub f=default_config():$decay_config{
+  <$decay_config{
+    half_life_days:30.0;
+    min_score:0.1;
+    prune_below:0.05;
+    sweep_interval_hours:24
+  }
+}

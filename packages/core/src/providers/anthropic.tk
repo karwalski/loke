@@ -1,0 +1,101 @@
+// F5.4 — Anthropic Claude API client
+// Calls the Anthropic Messages API and maps responses to the provider abstraction types.
+
+i=t:shared.types;
+i=pt:core.providers.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$anthropic_client{
+  config:$pt.provider_config
+}
+
+// Creates an Anthropic client with default configuration.
+pub f=new(api_key:str):$anthropic_client{
+  let config=$pt.provider_config{
+    api_key:api_key;
+    base_url:"https://api.anthropic.com";
+    provider:$provider.$anthropic;
+    timeout_ms:30000
+  };
+  <$anthropic_client{config:config}
+}
+
+// Calculates USD cost for a given model and token counts.
+// claude-3-5-sonnet: $3.00/1M input, $15.00/1M output
+// claude-3-5-haiku:  $0.80/1M input,  $4.00/1M output
+// default:           $3.00/1M input, $15.00/1M output
+f=calc_cost(model_id:str;input_tokens:u32;output_tokens:u32):f64{
+  let cost_in=if str.contains(model_id;"claude-3-5-haiku"){0.0000008}else{0.000003};
+  let cost_out=if str.contains(model_id;"claude-3-5-haiku"){0.000004}else{0.000015};
+  let input_cost=input_tokens*cost_in;
+  let output_cost=output_tokens*cost_out;
+  <input_cost+output_cost
+}
+
+// Calls the Anthropic Messages API and returns a completion response.
+// Uses http.post_headers to pass x-api-key and anthropic-version headers.
+// Falls back to http.post with content-type only if post_headers is unavailable —
+//   in that case authentication must be handled at the network layer.
+pub f=complete(client:$anthropic_client;req:$pt.completion_request):$pt.completion_response|$loke_err{
+  let url="https://api.anthropic.com/v1/messages";
+  let body=json.enc({
+    model:req.model_id;
+    max_tokens:req.max_tokens;
+    system:req.system_prompt;
+    messages:req.messages
+  });
+  let headers=@(
+    $http_header{key:"x-api-key";value:client.config.api_key};
+    $http_header{key:"anthropic-version";value:"2023-06-01"};
+    $http_header{key:"content-type";value:"application/json"}
+  );
+  let result=http.post_headers(url;body;headers);
+  result|{
+    $http_err e;
+      let msg=str.concat("anthropic complete: HTTP error — ";json.enc(e));
+      log.error(msg;"anthropic";"");
+      <$loke_err.$network_err(msg)
+    raw;
+      let parsed=json.dec(raw);
+      parsed|{
+        $json_err e;
+          let msg="anthropic complete: failed to parse response JSON";
+          log.error(msg;"anthropic";"");
+          <$loke_err.$model_err(msg)
+        obj;
+          let content_arr=json.get_arr(obj;"content");
+          let first=content_arr[0];
+          let text=json.get_str(first;"text");
+          let usage=json.get_str(obj;"usage");
+          let usage_obj=json.dec(usage);
+          let input_tokens=usage_obj|{
+            $json_err e; 0;
+            u; json.get_int(u;"input_tokens")
+          };
+          let output_tokens=usage_obj|{
+            $json_err e; 0;
+            u; json.get_int(u;"output_tokens")
+          };
+          let model_out=json.get_str(obj;"model");
+          let cost=calc_cost(model_out;input_tokens;output_tokens);
+          let resp=$pt.completion_response{
+            content:text;
+            model_id:model_out;
+            input_tokens:input_tokens;
+            output_tokens:output_tokens;
+            finish_reason:"stop";
+            cost_usd:cost
+          };
+          log.info(str.concat("anthropic complete: ok model=";model_out);"anthropic";"");
+          <resp
+      }
+  }
+}
+
+// Returns true — Anthropic is a REST API with no persistent connection to check.
+pub f=is_available(client:$anthropic_client):bool{
+  <true
+}

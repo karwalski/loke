@@ -1,0 +1,193 @@
+// M2.4 — Memory mining from external sources.
+// Periodically extracts useful facts from external sources (browser history,
+// clipboard, file summaries) and stores them in the memory palace.
+
+i=t:shared.types;
+i=log:shared.log;
+i=stor:memory.storage;
+i=aaak:memory.aaak;
+i=pal:memory.palace;
+i=str:std.str;
+i=file:std.file;
+i=mt:core.memory.types;
+
+m.$mine_source{
+  name:str;
+  source_type:str;
+  path:str;
+  enabled:bool
+}
+
+m.$mine_result{
+  source:str;
+  facts_extracted:i32;
+  stored:i32;
+  skipped:i32;
+  err:str
+}
+
+pub let source_clipboard=$mine_source{
+  name:"clipboard";
+  source_type:"clipboard";
+  path:"";
+  enabled:true
+};
+
+pub let source_notes=$mine_source{
+  name:"notes";
+  source_type:"file";
+  path:"~/notes.txt";
+  enabled:false
+};
+
+// Mines facts from a text string, storing each sentence as an AAAK-encoded drawer.
+// Sentences shorter than 20 characters are skipped as noise.
+// Returns counts of facts extracted, stored, and skipped.
+pub f=mine_text(text:str;source_name:str;wing:str;palace:pal.$palace;store:stor.$palace_db):$mine_result{
+  let sentences=str.split(text;". ");
+  let extracted=0;
+  let stored_count=0;
+  let skipped=0;
+  sentences.each|sentence{
+    let trimmed=str.trim(sentence);
+    let length=str.len(trimmed);
+    if length > 20{
+      extracted=extracted+1;
+      let encoded=aaak.encode_fact(trimmed;aaak.default_level());
+      let id=str.rand_hex(16);
+      let location=mt.$palace_location{
+        wing:wing;
+        hall:"Mining";
+        room:"general"
+      };
+      let drawer=mt.$drawer{
+        id:id;
+        location:location;
+        role:"fact";
+        content:encoded;
+        session_id:source_name;
+        model_id:"";
+        tokens:length;
+        sensitivity:$sensitivity_level.$internal;
+        created_at:""
+      };
+      stor.store_drawer(palace;drawer)|{
+        $ok:_ { stored_count=stored_count+1 };
+        $err:e {
+          log.warn(
+            str.concat("mining: failed to store drawer from source: ";source_name);
+            "mining";
+            "system"
+          )
+        }
+      }
+    }else{
+      skipped=skipped+1
+    }
+  };
+  <$mine_result{
+    source:source_name;
+    facts_extracted:extracted;
+    stored:stored_count;
+    skipped:skipped;
+    err:""
+  }
+}
+
+// Reads a file and mines facts from its contents.
+// Returns a mine_result with err set on read failure.
+pub f=mine_file(path:str;wing:str;palace:pal.$palace;store:stor.$palace_db):$mine_result{
+  file.read(path)|{
+    $ok:text {
+      <mine_text(text;path;wing;palace;store)
+    };
+    $err:e {
+      log.warn(
+        str.concat("mining: failed to read file: ";path);
+        "mining";
+        "system"
+      );
+      <$mine_result{
+        source:path;
+        facts_extracted:0;
+        stored:0;
+        skipped:0;
+        err:str.concat("failed to read file: ";path)
+      }
+    }
+  }
+}
+
+// Mines all enabled sources and returns a result for each.
+pub f=mine_all(sources:@($mine_source);palace:pal.$palace;store:stor.$palace_db):@($mine_result){
+  let results=@();
+  sources.each|source{
+    if source.enabled{
+      let result=if str.eq(source.source_type;"file"){
+        mine_file(source.path;"mining";palace;store)
+      }else{
+        if str.eq(source.source_type;"clipboard"){
+          let text=std.clipboard.read();
+          mine_text(text;source.name;"mining";palace;store)
+        }else{
+          if str.eq(source.source_type;"text"){
+            mine_text(source.path;source.name;"mining";palace;store)
+          }else{
+            $mine_result{
+              source:source.name;
+              facts_extracted:0;
+              stored:0;
+              skipped:0;
+              err:str.concat("unknown source_type: ";source.source_type)
+            }
+          }
+        }
+      };
+      results=results.push(result)
+    }else{
+      // source disabled — skip
+    }
+  };
+  <results
+}
+
+// Pads a string with trailing spaces to at least width characters.
+f=pad_right(s:str;width:u32):str{
+  let len=str.len(s);
+  if len >= width{
+    <s
+  }else{
+    let diff=width-len;
+    let spaces="                              ";
+    let pad=str.slice(spaces;0;diff);
+    <str.concat(s;pad)
+  }
+}
+
+// Renders a formatted table of mining results: Source | Extracted | Stored | Skipped | Error.
+pub f=format_results(results:@($mine_result)):str{
+  let header="Source                | Extracted | Stored | Skipped | Error\n";
+  let divider="----------------------+-----------+--------+---------+------\n";
+  let body="";
+  results.each|r{
+    let src_col=pad_right(r.source;22);
+    let ext_col=pad_right(str.from_int(r.facts_extracted);11);
+    let sto_col=pad_right(str.from_int(r.stored);8);
+    let ski_col=pad_right(str.from_int(r.skipped);9);
+    let line=str.concat(
+      str.concat(
+        str.concat(
+          str.concat(
+            str.concat(src_col;"| ");
+            str.concat(ext_col;"| ")
+          );
+          str.concat(sto_col;"| ")
+        );
+        str.concat(ski_col;"| ")
+      );
+      str.concat(r.err;"\n")
+    );
+    body=str.concat(body;line)
+  };
+  <str.concat(str.concat(header;divider);body)
+}

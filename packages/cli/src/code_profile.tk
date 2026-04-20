@@ -1,0 +1,231 @@
+// A2.3 — loke code_profile — code preprocessing for coding LLM proxy
+
+m=cli.code_profile;
+
+i=str:std.str;
+i=arr:std.arr;
+
+// A detected secret within source code
+pub m.$code_finding{
+  kind:str;
+  line:i32;
+  redacted:str;
+  original_len:i32
+}
+
+// Result of profiling a source file for secrets
+pub m.$profile_result{
+  findings:@($code_finding);
+  redacted_source:str;
+  finding_count:i32;
+  has_secrets:bool
+}
+
+// Check whether a line contains a PEM private key block
+f=check_pem(line:str;line_no:i32;findings:@($code_finding)):@($code_finding){
+  // Detect -----BEGIN PRIVATE KEY-----, -----BEGIN RSA PRIVATE KEY-----, etc.
+  if str.contains(line;"PRIVATE KEY") || str.contains(line;"BEGIN RSA"){
+    let finding=$code_finding{
+      kind="pem_key";
+      line=line_no;
+      redacted="[REDACTED:pem_key]";
+      original_len=str.len(line)
+    };
+    <arr.push(findings;finding)
+  }else{
+    <findings
+  }
+}
+
+// Check whether a line contains a known API key prefix pattern
+f=check_api_key(line:str;line_no:i32;findings:@($code_finding)):@($code_finding){
+  // Detect sk-, ghp_, xoxb-, AKIA prefixes commonly used in API keys and tokens
+  if str.contains(line;"sk-") || str.contains(line;"ghp_") || str.contains(line;"xoxb-") || str.contains(line;"AKIA"){
+    let finding=$code_finding{
+      kind="api_key";
+      line=line_no;
+      redacted="[REDACTED:api_key]";
+      original_len=str.len(line)
+    };
+    <arr.push(findings;finding)
+  }else{
+    <findings
+  }
+}
+
+// Check whether a line looks like a .env KEY=<long-alphanumeric-secret> assignment
+f=check_env_secret(line:str;line_no:i32;findings:@($code_finding)):@($code_finding){
+  // Heuristic: line contains '=' and the value portion is long (>=16 chars) and alphanumeric-ish.
+  // Matches patterns like: SECRET_KEY=abc123XYZ... or API_TOKEN=ey...
+  // We look for an '=' sign, a key-like LHS (no spaces before '='), and a long value after '='.
+  if str.contains(line;"="){
+    let eq_pos=str.index_of(line;"=");
+    let lhs=str.slice(line;0;eq_pos);
+    let rhs=str.slice(line;eq_pos+1;str.len(line));
+    // LHS must look like an env var name (uppercase, underscores, no spaces)
+    // RHS must be long enough to be a secret (>=16 characters) and not empty
+    if str.len(lhs)>0 && str.len(rhs)>=16 && !str.contains(lhs;" ") && str.is_upper_snake(lhs){
+      let finding=$code_finding{
+        kind="env_secret";
+        line=line_no;
+        redacted="[REDACTED:env_secret]";
+        original_len=str.len(line)
+      };
+      <arr.push(findings;finding)
+    }else{
+      <findings
+    }
+  }else{
+    <findings
+  }
+}
+
+// Check whether a line contains a connection string with embedded credentials
+f=check_conn_string(line:str;line_no:i32;findings:@($code_finding)):@($code_finding){
+  // Detect patterns like: postgres://user:password@host or mongodb://user:pass@host
+  if str.contains(line;"://") && str.contains(line;"@"){
+    // Must have a colon between the scheme separator and the @ to indicate user:pass
+    let after_scheme=str.slice_after(line;"://");
+    if str.contains(after_scheme;"@") && str.contains(after_scheme;":"){
+      let at_pos=str.index_of(after_scheme;"@");
+      let credentials=str.slice(after_scheme;0;at_pos);
+      // credentials must contain ':' (user:password), and password part must be non-empty
+      if str.contains(credentials;":"){
+        let colon_pos=str.index_of(credentials;":");
+        let password=str.slice(credentials;colon_pos+1;str.len(credentials));
+        if str.len(password)>0{
+          let finding=$code_finding{
+            kind="conn_string";
+            line=line_no;
+            redacted="[REDACTED:conn_string]";
+            original_len=str.len(line)
+          };
+          <arr.push(findings;finding)
+        }else{
+          <findings
+        }
+      }else{
+        <findings
+      }
+    }else{
+      <findings
+    }
+  }else{
+    <findings
+  }
+}
+
+// Redact a single line based on any findings that match it, returning the (possibly redacted) line
+f=redact_line(line:str;line_no:i32;findings:@($code_finding)):str{
+  let i=0;
+  let len=arr.len(findings);
+  let result=line;
+  loop i<len{
+    let f=findings[i];
+    if f.line==line_no{
+      let result=f.redacted
+    };
+    let i=i+1
+  };
+  <result
+}
+
+// Scan source, detect secrets line by line, return profile result with redactions applied
+pub f=profile(source:str;filename:str):$profile_result{
+  let lines=str.split(source;"\n");
+  let line_count=arr.len(lines);
+  let findings=@($code_finding){};
+  let i=0;
+
+  // First pass: scan each line for secret patterns
+  loop i<line_count{
+    let line=lines[i];
+    let line_no=i+1;
+
+    // PEM private key blocks
+    let findings=check_pem(line;line_no;findings);
+
+    // API key prefixes: sk-, ghp_, xoxb-, AKIA
+    // Skip lines already flagged as pem_key to avoid double-reporting
+    let findings=check_api_key(line;line_no;findings);
+
+    // .env-style KEY=<long-secret> assignments
+    let findings=check_env_secret(line;line_no;findings);
+
+    // Connection strings with embedded credentials
+    let findings=check_conn_string(line;line_no;findings);
+
+    let i=i+1
+  };
+
+  // Second pass: rebuild source with redacted lines
+  let redacted_lines=@(str){};
+  let j=0;
+  loop j<line_count{
+    let line=lines[j];
+    let line_no=j+1;
+    let out_line=redact_line(line;line_no;findings);
+    let redacted_lines=arr.push(redacted_lines;out_line);
+    let j=j+1
+  };
+
+  let redacted_source=str.join(redacted_lines;"\n");
+  let finding_count=arr.len(findings);
+  let has_secrets=finding_count>0;
+
+  <$profile_result{
+    findings=findings;
+    redacted_source=redacted_source;
+    finding_count=finding_count;
+    has_secrets=has_secrets
+  }
+}
+
+// Collect distinct kind labels from findings for display in the summary
+f=collect_kinds(findings:@($code_finding)):str{
+  let i=0;
+  let len=arr.len(findings);
+  let kinds="";
+  loop i<len{
+    let f=findings[i];
+    // Append kind if not already present in the accumulated kinds string
+    if !str.contains(kinds;f.kind){
+      if str.len(kinds)>0{
+        let kinds=str.concat(kinds;str.concat(", ";f.kind))
+      }else{
+        let kinds=f.kind
+      }
+    };
+    let i=i+1
+  };
+  <kinds
+}
+
+// Return a human-readable one-liner summarising the profile result
+pub f=summarise(result:$profile_result):str{
+  if result.has_secrets{
+    let kinds=collect_kinds(result.findings);
+    let count_str=str.from_int(result.finding_count);
+    let label=if result.finding_count==1{"secret found"}else{"secrets found"};
+    <str.concat(
+      count_str;
+      str.concat(
+        " ";
+        str.concat(
+          label;
+          str.concat(
+            " (";
+            str.concat(kinds;")")
+          )
+        )
+      )
+    )
+  }else{
+    <"no secrets found"
+  }
+}
+
+// Returns true only when no secrets were detected in the source
+pub f=is_safe(result:$profile_result):bool{
+  <result.has_secrets==false
+}

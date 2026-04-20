@@ -1,0 +1,196 @@
+// F5.3 — Model selection engine
+// Selects the optimal model given sensitivity, task, latency tolerance, and registry.
+
+i=t:shared.types;
+i=reg:core.models.registry;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$selection_criteria{
+  task:$task_type;
+  sensitivity:$sensitivity_level;
+  tolerance:$latency_tolerance;
+  prefer_local:bool;
+  max_cost_per_1k:f64;
+  require_tools:bool
+}
+
+pub m.$selection_result{
+  model_id:str;
+  provider:str;
+  reason:str;
+  is_local:bool;
+  estimated_cost:f64;
+  tier:$model_tier
+}
+
+// Converts a $provider to its display string.
+pub f=provider_to_str(p:$provider):str{
+  p|{
+    $provider.$anthropic;  <"anthropic";
+    $provider.$openai;     <"openai";
+    $provider.$google;     <"google";
+    $provider.$mistral;    <"mistral";
+    $provider.$openrouter; <"openrouter";
+    $provider.$ollama;     <"ollama";
+    $provider.$local;      <"local"
+  }
+}
+
+// Converts "instant", "patient", "background" strings to $latency_tolerance.
+// Defaults to $instant for unrecognised values.
+pub f=tolerance_from_str(s:str):$latency_tolerance{
+  if str.eq(s;"patient"){
+    <$latency_tolerance.$patient
+  }else{
+    if str.eq(s;"background"){
+      <$latency_tolerance.$background
+    }else{
+      <$latency_tolerance.$instant
+    }
+  }
+}
+
+// Maps $latency_tolerance to the corresponding $model_tier for registry lookup.
+f=tier_from_tolerance(tolerance:$latency_tolerance):$model_tier{
+  tolerance|{
+    $latency_tolerance.$instant;    <$model_tier.$interactive;
+    $latency_tolerance.$patient;    <$model_tier.$considered;
+    $latency_tolerance.$background; <$model_tier.$background
+  }
+}
+
+// Converts $model_tier to a display string for logging.
+f=tier_to_str(tier:$model_tier):str{
+  tier|{
+    $model_tier.$interactive; <"interactive";
+    $model_tier.$considered;  <"considered";
+    $model_tier.$background;  <"background"
+  }
+}
+
+// Converts $sensitivity_level to a display string.
+f=sens_to_str(level:$sensitivity_level):str{
+  level|{
+    $sensitivity_level.$public;      <"PUBLIC";
+    $sensitivity_level.$internal;    <"INTERNAL";
+    $sensitivity_level.$confidential;<"CONFIDENTIAL";
+    $sensitivity_level.$restricted;  <"RESTRICTED"
+  }
+}
+
+// Builds a human-readable reason string for the selection log.
+f=build_reason(model_id:str;local_only:bool;sensitivity_str:str;tier_str:str):str{
+  let local_part=if local_only{"local-only (sensitivity: "}else{"cloud-eligible (sensitivity: "};
+  let sens_part=str.concat(local_part;sensitivity_str);
+  let close_part=str.concat(sens_part;", tier: ");
+  let tier_part=str.concat(close_part;tier_str);
+  let reason_mid=str.concat(tier_part;") => ");
+  let reason=str.concat(reason_mid;model_id);
+  <reason
+}
+
+// F5.3 — Selects the optimal model for the given criteria.
+// RESTRICTED sensitivity forces local_only=true regardless of prefer_local.
+// Falls back to cloud if local search fails and sensitivity permits it.
+pub f=select(criteria:$selection_criteria;registry:$reg.registry):$selection_result|$loke_err{
+  // Step 1: determine local_only flag
+  let is_restricted=criteria.sensitivity==$restricted;
+  let local_only=if is_restricted{true}else{criteria.prefer_local};
+
+  // Step 2: determine model tier from latency tolerance
+  let tier=tier_from_tolerance(criteria.tolerance);
+
+  // Step 3: call registry find_best
+  let found=reg.find_best(registry;criteria.task;local_only;tier);
+  found|{
+    $loke_err e;
+      // Step 4: if local search failed and we can fall back to cloud, retry
+      if local_only{
+        if is_restricted{
+          // RESTRICTED — cannot fall back to cloud, local model is mandatory
+          <$loke_err.$model_err("selector: no local model available for RESTRICTED sensitivity")
+        }else{
+          // CONFIDENTIAL or lower with prefer_local — retry without local constraint
+          let retry=reg.find_best(registry;criteria.task;false;tier);
+          retry|{
+            $loke_err e2;
+              <$loke_err.$model_err("selector: no model available after cloud fallback")
+            cap;
+              let provider_str=provider_to_str(cap.provider);
+              let sens_str=sens_to_str(criteria.sensitivity);
+              let tier_str=tier_to_str(tier);
+              let reason=build_reason(cap.model_id;false;sens_str;tier_str);
+              let cloud_reason=str.concat("cloud fallback: ";reason);
+              log.info(cloud_reason;"selector";"");
+              let result=$selection_result{
+                model_id:cap.model_id;
+                provider:provider_str;
+                reason:cloud_reason;
+                is_local:cap.local;
+                estimated_cost:0.0;
+                tier:tier
+              };
+              <result
+          }
+        }
+      }else{
+        <$loke_err.$model_err("selector: no model available for task")
+      }
+    cap;
+      // Step 5: build selection result
+      let provider_str=provider_to_str(cap.provider);
+      let sens_str=sens_to_str(criteria.sensitivity);
+      let tier_str=tier_to_str(tier);
+      let reason=build_reason(cap.model_id;local_only;sens_str;tier_str);
+      log.info(reason;"selector";"");
+      // estimated_cost set to 0.0 here; caller may use estimate_cost for precision
+      let result=$selection_result{
+        model_id:cap.model_id;
+        provider:provider_str;
+        reason:reason;
+        is_local:cap.local;
+        estimated_cost:0.0;
+        tier:tier
+      };
+      <result
+  }
+}
+
+// Estimates the cost of a call given token counts.
+// Returns 0.0 for local models (Ollama/local provider).
+// Cloud model costs are approximated from known pricing (USD per 1k tokens).
+pub f=estimate_cost(model_id:str;input_tokens:u32;output_tokens:u32;registry:$reg.registry):f64{
+  let found=reg.by_id(registry;model_id);
+  found|{
+    $loke_err e;
+      <0.0
+    cap;
+      if cap.local{
+        <0.0
+      }else{
+        // Pricing approximations (USD per 1k tokens)
+        // claude-3-5-sonnet: $0.003 in / $0.015 out
+        // claude-3-5-haiku:  $0.001 in / $0.005 out
+        // gpt-4o:            $0.005 in / $0.015 out
+        // gpt-4o-mini:       $0.00015 in / $0.0006 out
+        let cost_in=if str.contains(model_id;"claude-3-5-sonnet"){0.003}else{
+          if str.contains(model_id;"claude-3-5-haiku"){0.001}else{
+            if str.contains(model_id;"gpt-4o-mini"){0.00015}else{
+              if str.contains(model_id;"gpt-4o"){0.005}else{0.001}
+            }
+          }
+        };
+        let cost_out=if str.contains(model_id;"claude-3-5-sonnet"){0.015}else{
+          if str.contains(model_id;"claude-3-5-haiku"){0.005}else{
+            if str.contains(model_id;"gpt-4o-mini"){0.0006}else{
+              if str.contains(model_id;"gpt-4o"){0.015}else{0.003}
+            }
+          }
+        };
+        let input_cost=(input_tokens/1000)*cost_in;
+        let output_cost=(output_tokens/1000)*cost_out;
+        <input_cost+output_cost
+      }
+  }
+}

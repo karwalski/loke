@@ -1,0 +1,168 @@
+// A5.3 — Version check.
+// Queries the GitHub releases API to determine whether a newer version of loke
+// is available. Results are cached in settings for 24 hours to avoid spamming
+// the API on every startup.
+
+i=t:shared.types;
+i=http:std.http;
+i=json:std.json;
+i=log:shared.log;
+i=db:storage.db;
+
+pub m.$version_info{
+  current:str;
+  latest:str;
+  update_available:bool;
+  release_url:str;
+  release_notes:str;
+  checked_at:i64
+}
+
+pub let current_version = "0.1.0";
+pub let check_url = "https://api.github.com/repos/karwalski/loke/releases/latest";
+
+// Checks for a newer version of loke.
+// If the settings store contains a check performed within the last 24 hours the
+// cached result is returned immediately. Otherwise the GitHub releases API is
+// queried, the result is persisted and returned.
+pub f=check(store:db.$store):$version_info{
+  let now=t.now_ms();
+  let day_ms=86400000;
+  let cached_check=db.get_str(store;"update.last_check")|{
+    $ok:v v;
+    $err:_ ""
+  };
+  if str.len(cached_check) > 0{
+    let last_checked=str.to_int(cached_check);
+    if (now - last_checked) < day_ms{
+      let latest=db.get_str(store;"update.latest_version")|{
+        $ok:v v;
+        $err:_ current_version
+      };
+      let release_url=db.get_str(store;"update.release_url")|{
+        $ok:v v;
+        $err:_ ""
+      };
+      let release_notes=db.get_str(store;"update.release_notes")|{
+        $ok:v v;
+        $err:_ ""
+      };
+      <$version_info{
+        current:current_version;
+        latest:latest;
+        update_available:is_newer(current_version;latest);
+        release_url:release_url;
+        release_notes:release_notes;
+        checked_at:last_checked
+      }
+    }
+  };
+  let resp=http.get(check_url;@(
+    http.header("User-Agent";"loke/0.1.0");
+    http.header("Accept";"application/vnd.github+json")
+  ));
+  resp|{
+    $ok:r {
+      let parsed=json.parse(r.body);
+      let tag=json.get_str(parsed;"tag_name");
+      let latest=if str.starts_with(tag;"v"){
+        tag.slice(1;str.len(tag))
+      }else{
+        tag
+      };
+      let release_url=json.get_str(parsed;"html_url");
+      let full_notes=json.get_str(parsed;"body");
+      let release_notes=if str.len(full_notes) > 200{
+        full_notes.slice(0;200)
+      }else{
+        full_notes
+      };
+      let now_s=str.from_int(now);
+      db.set_str(store;"update.last_check";now_s;"update")|{
+        $ok:_ ();
+        $err:_ ()
+      };
+      db.set_str(store;"update.latest_version";latest;"update")|{
+        $ok:_ ();
+        $err:_ ()
+      };
+      db.set_str(store;"update.release_url";release_url;"update")|{
+        $ok:_ ();
+        $err:_ ()
+      };
+      db.set_str(store;"update.release_notes";release_notes;"update")|{
+        $ok:_ ();
+        $err:_ ()
+      };
+      log.info(
+        str.concat("update check complete — latest: ";latest);
+        "update.checker";
+        "system"
+      );
+      <$version_info{
+        current:current_version;
+        latest:latest;
+        update_available:is_newer(current_version;latest);
+        release_url:release_url;
+        release_notes:release_notes;
+        checked_at:now
+      }
+    };
+    $err:e {
+      log.warn(
+        str.concat("update check failed: ";e.message);
+        "update.checker";
+        "system"
+      );
+      <$version_info{
+        current:current_version;
+        latest:current_version;
+        update_available:false;
+        release_url:"";
+        release_notes:"";
+        checked_at:now
+      }
+    }
+  }
+}
+
+// Returns a human-readable notification string for the given version info.
+pub f=format_notification(info:$version_info):str{
+  if info.update_available{
+    <str.concat(
+      str.concat(
+        str.concat(
+          str.concat("Update available: ";info.current);
+          " → ");
+        info.latest);
+      str.concat(" (";str.concat(info.release_url;")")))
+  }else{
+    <str.concat("loke ";str.concat(info.current;" is up to date"))
+  }
+}
+
+// Returns true if version b is newer than version a.
+// Compares semver strings of the form "X.Y.Z" by integer comparison per part.
+pub f=is_newer(a:str;b:str):bool{
+  let a_parts=str.split(a;".");
+  let b_parts=str.split(b;".");
+  let a_major=str.to_int(a_parts[0]);
+  let b_major=str.to_int(b_parts[0]);
+  if b_major > a_major{
+    <true
+  };
+  if b_major < a_major{
+    <false
+  };
+  let a_minor=str.to_int(a_parts[1]);
+  let b_minor=str.to_int(b_parts[1]);
+  if b_minor > a_minor{
+    <true
+  };
+  if b_minor < a_minor{
+    <false
+  };
+  let a_patch=str.to_int(a_parts[2]);
+  let b_patch=str.to_int(b_parts[2]);
+  <b_patch > a_patch
+}

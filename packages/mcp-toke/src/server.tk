@@ -1,0 +1,119 @@
+// F7.2 — MCP server
+// Listens on a TCP port for JSON-RPC 2.0 requests and dispatches to tools.
+
+i=t:shared.types;
+i=proto:core.mcp.protocol;
+i=tools:mcp_toke.tools;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+i=net:std.net;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+pub m.$server_config{
+  host:str;
+  port:u16;
+  server_name:str;
+  version:str;
+  presidio_url:str;
+  ollama_url:str
+}
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+pub f=default_config():$server_config{
+  <$server_config{
+    host:"127.0.0.1";
+    port:11435;
+    server_name:"loke-mcp";
+    version:"0.1.0";
+    presidio_url:"http://localhost:5000";
+    ollama_url:"http://localhost:11434"
+  }
+}
+
+// ── Request dispatch ──────────────────────────────────────────────────────────
+
+// Parses a JSON-RPC request string and returns the appropriate JSON-RPC response.
+pub f=handle_request(raw:str;config:$server_config):str{
+  let cid=log.new_correlation_id();
+  let req=proto.parse_request(raw);
+  req|{
+    $loke_err e;
+      // Could not parse — return parse error (-32700)
+      <proto.error_response(0;-32700;"Parse error")
+    request;
+      log.debug(str.concat("mcp request: ";request.method);"mcp-server";cid);
+      if str.eq(request.method;"initialize"){
+        let result=proto.init_response(config.server_name;config.version);
+        <proto.ok_response(request.id;result)
+      }else{
+        if str.eq(request.method;"tools/list"){
+          let tool_defs=tools.all_tools();
+          let result=proto.tools_list_result(tool_defs);
+          <proto.ok_response(request.id;result)
+        }else{
+          if str.eq(request.method;"tools/call"){
+            // Extract tool name and arguments from params
+            let params_parsed=json.dec(request.params_raw);
+            params_parsed|{
+              $json_err e;
+                <proto.error_response(request.id;-32602;"Invalid params")
+              params_obj;
+                let tool_name=json.get_str(params_obj;"name");
+                let args_val=json.get_val(params_obj;"arguments");
+                let args_json=json.enc(args_val);
+                let tool_result=tools.handle_tool(tool_name;args_json;config.presidio_url;config.ollama_url);
+                <proto.ok_response(request.id;tool_result.text)
+            }
+          }else{
+            // Unknown method
+            log.warn(str.concat("mcp unknown method: ";request.method);"mcp-server";cid);
+            <proto.error_response(request.id;-32601;"Method not found")
+          }
+        }
+      }
+  }
+}
+
+// ── Server listen loop ────────────────────────────────────────────────────────
+
+// Starts the MCP TCP server and enters an accept/read/write loop.
+// Each connection is handled synchronously (one request per connection).
+pub f=start(config:$server_config):void{
+  let cid=log.new_correlation_id();
+  let port_str=str.from_int(config.port);
+  log.info(str.concat("loke MCP server starting on port ";port_str);"mcp-server";cid);
+  let listener=net.listen(config.host;config.port);
+  listener|{
+    $net_err e;
+      log.error(str.concat("mcp server: failed to listen on port ";port_str);"mcp-server";cid)
+    l;
+      loop{
+        let conn=net.accept(l);
+        conn|{
+          $net_err e;
+            log.warn("mcp server: accept error";"mcp-server";cid)
+          c;
+            let data=net.read(c);
+            data|{
+              $net_err e;
+                log.warn("mcp server: read error";"mcp-server";cid);
+                net.close(c)
+              raw;
+                let response=handle_request(raw;config);
+                let write_result=net.write(c;response);
+                write_result|{
+                  $net_err e;
+                    log.warn("mcp server: write error";"mcp-server";cid)
+                  _;
+                    // write ok
+                };
+                net.close(c)
+            }
+        }
+      }
+  }
+}

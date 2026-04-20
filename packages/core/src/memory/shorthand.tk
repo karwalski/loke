@@ -1,0 +1,243 @@
+// M2.3 — AAAK prompt shorthand.
+// Users can write shorthand in prompts that loke expands locally before sending to an LLM.
+// Shorthand is detected heuristically and users see a diff-like preview before sending.
+
+i=str:std.str;
+i=t:shared.types;
+i=log:shared.log;
+
+pub m.$shorthand_def{
+  abbrev:str;
+  expansion:str;
+  category:str
+}
+
+pub m.$expand_result{
+  original:str;
+  expanded:str;
+  expansions_applied:@(str)
+}
+
+// Returns the built-in shorthand definitions.
+pub f=built_in_shorthands():@($shorthand_def){
+  <@(
+    // Operators
+    $shorthand_def{ abbrev:"→";       expansion:" then ";          category:"operator" };
+    $shorthand_def{ abbrev:"←";       expansion:" because ";       category:"operator" };
+    // Word-boundary dot chaining — applied specially, not via simple str.replace
+    $shorthand_def{ abbrev:".";       expansion:" and ";            category:"operator" };
+    // Pipe as alternative — "fix|improve" → "fix or improve"
+    $shorthand_def{ abbrev:"|";       expansion:" or ";             category:"operator" };
+    // Technical abbreviations
+    $shorthand_def{ abbrev:"fn";      expansion:"function";         category:"technical" };
+    $shorthand_def{ abbrev:"impl";    expansion:"implement";        category:"technical" };
+    $shorthand_def{ abbrev:"refac";   expansion:"refactor";         category:"technical" };
+    $shorthand_def{ abbrev:"auth";    expansion:"authentication";   category:"technical" };
+    $shorthand_def{ abbrev:"db";      expansion:"database";         category:"technical" };
+    $shorthand_def{ abbrev:"cfg";     expansion:"configuration";    category:"technical" };
+    $shorthand_def{ abbrev:"msg";     expansion:"message";          category:"technical" };
+    $shorthand_def{ abbrev:"err";     expansion:"error";            category:"technical" };
+    $shorthand_def{ abbrev:"req";     expansion:"request";          category:"technical" };
+    $shorthand_def{ abbrev:"res";     expansion:"response";         category:"technical" };
+    $shorthand_def{ abbrev:"btn";     expansion:"button";           category:"ui" };
+    $shorthand_def{ abbrev:"comp";    expansion:"component";        category:"ui" };
+    $shorthand_def{ abbrev:"init";    expansion:"initialise";       category:"technical" };
+    $shorthand_def{ abbrev:"deps";    expansion:"dependencies";     category:"technical" }
+  )
+}
+
+// Returns true if the abbreviation is a word-level token (not an operator).
+f=is_word_abbrev(abbrev:str):bool{
+  let is_arrow=str.eq(abbrev;"→");
+  let is_back=str.eq(abbrev;"←");
+  let is_dot=str.eq(abbrev;".");
+  let is_pipe=str.eq(abbrev;"|");
+  !(is_arrow || is_back || is_dot || is_pipe)
+}
+
+// Expands word-level abbreviations by replacing " abbrev " (space-bounded) and start/end of string.
+// This prevents "auth" matching "author" and "db" matching "debug".
+f=expand_word(text:str;abbrev:str;expansion:str):str{
+  // Replace space-bounded occurrences: " abbrev " → " expansion "
+  let padded_abbrev=str.concat(" ";str.concat(abbrev;" "));
+  let padded_expansion=str.concat(" ";str.concat(expansion;" "));
+  let s=str.replace(text;padded_abbrev;padded_expansion);
+  // Replace at start of string: "abbrev " → "expansion "
+  let start_abbrev=str.concat(abbrev;" ");
+  let start_expansion=str.concat(expansion;" ");
+  // Only replace at the very start — check if text starts with abbrev
+  let s=if str.contains(s;start_abbrev){
+    let parts=str.split(s;start_abbrev);
+    // If parts[0] is empty, it was at the start
+    if str.len(parts[0]) == 0{
+      str.concat(start_expansion;parts[1])
+    }else{
+      s
+    }
+  }else{
+    s
+  };
+  <s
+}
+
+// Expands dot notation between word characters: word.word → word and word.
+// Avoids expanding file extensions (.tk, .json) and version numbers (v1.2.3).
+f=expand_dot_chains(text:str):str{
+  // Split on spaces to process word by word, then check each word for internal dots.
+  let words=str.split(text;" ");
+  let result_words=@();
+  words.each|w{
+    // A word with dots that isn't a file extension or URL:
+    // Heuristic: if word contains "." and no "/" and doesn't end with a known extension
+    let has_dot=str.contains(w;".");
+    let has_slash=str.contains(w;"/");
+    let has_colon=str.contains(w;":");
+    let looks_like_path=has_slash || has_colon;
+    // Skip file extensions: ends in .tk, .json, .ts, .js, .md, .toml, etc.
+    let lower_w=str.to_lower(w);
+    let is_ext=str.contains(lower_w;".tk") || str.contains(lower_w;".json") || str.contains(lower_w;".ts") || str.contains(lower_w;".js") || str.contains(lower_w;".md") || str.contains(lower_w;".toml") || str.contains(lower_w;".txt");
+    if has_dot && !looks_like_path && !is_ext{
+      let expanded_w=str.replace(w;".";" and ");
+      let result_words=result_words.append(expanded_w)
+    }else{
+      let result_words=result_words.append(w)
+    }
+  };
+  // Rejoin
+  let out="";
+  let first=true;
+  result_words.each|rw{
+    if first{
+      let out=rw;
+      let first=false
+    }else{
+      let out=str.concat(out;str.concat(" ";rw))
+    }
+  };
+  <out
+}
+
+// Expands pipe operator for alternatives, avoiding URLs (which contain "://").
+f=expand_pipe(text:str):str{
+  // Don't expand if this looks like a URL context
+  if str.contains(text;"://"){
+    <text
+  }else{
+    <str.replace(text;"|";" or ")
+  }
+}
+
+// Tracks whether a given expansion was actually applied.
+f=was_applied(before:str;after:str):bool{
+  !str.eq(before;after)
+}
+
+// Expands shorthand in text, applying built-in then custom shorthands.
+// Returns an $expand_result with the expanded text and a list of applied expansion names.
+pub f=expand(text:str;custom_shorthands:@($shorthand_def)):$expand_result{
+  let builtins=built_in_shorthands();
+  let s=text;
+  let applied=@();
+
+  // Apply operators in order: → and ← first (unambiguous unicode)
+  builtins.each|def{
+    let is_arrow=str.eq(def.abbrev;"→");
+    let is_back=str.eq(def.abbrev;"←");
+    if is_arrow || is_back{
+      let before=s;
+      let s=str.replace(s;def.abbrev;def.expansion);
+      if was_applied(before;s){
+        let applied=applied.append(def.abbrev)
+      }
+    }
+  };
+
+  // Expand dot chains (word.word → word and word)
+  let before_dot=s;
+  let s=expand_dot_chains(s);
+  if was_applied(before_dot;s){
+    let applied=applied.append(".")
+  };
+
+  // Expand pipe as alternative (not in URLs)
+  let before_pipe=s;
+  let s=expand_pipe(s);
+  if was_applied(before_pipe;s){
+    let applied=applied.append("|")
+  };
+
+  // Apply word-level abbreviations (space-bounded)
+  builtins.each|def{
+    if is_word_abbrev(def.abbrev){
+      let before=s;
+      let s=expand_word(s;def.abbrev;def.expansion);
+      if was_applied(before;s){
+        let applied=applied.append(def.abbrev)
+      }
+    }
+  };
+
+  // Apply custom shorthands
+  custom_shorthands.each|def{
+    let before=s;
+    if is_word_abbrev(def.abbrev){
+      let s=expand_word(s;def.abbrev;def.expansion)
+    }else{
+      let s=str.replace(s;def.abbrev;def.expansion)
+    };
+    if was_applied(before;s){
+      let applied=applied.append(def.abbrev)
+    }
+  };
+
+  <$expand_result{
+    original:text;
+    expanded:s;
+    expansions_applied:applied
+  }
+}
+
+// Heuristic: returns true if text likely contains AAAK shorthand.
+// Checks for dot-between-words, arrow operators, or known abbreviations.
+pub f=is_shorthand_text(text:str):bool{
+  // Arrow operators are unambiguous
+  let has_arrow=str.contains(text;"→");
+  let has_back=str.contains(text;"←");
+  if has_arrow || has_back{
+    <true
+  }else{
+    // Check for word.word dot chaining (not file extensions)
+    let lower=str.to_lower(text);
+    let has_dot=str.contains(text;".");
+    let has_slash=str.contains(text;"/");
+    let has_colon=str.contains(text;":");
+    let dot_chain_candidate=has_dot && !has_slash && !has_colon;
+
+    // Check for known word abbreviations
+    let has_fn=str.contains(lower;" fn ") || str.contains(lower;"fn ");
+    let has_impl=str.contains(lower;" impl ") || str.contains(lower;"impl ");
+    let has_refac=str.contains(lower;"refac");
+    let has_auth=str.contains(lower;" auth ") || str.contains(lower;"auth ");
+    let has_cfg=str.contains(lower;" cfg ") || str.contains(lower;"cfg ");
+    let has_deps=str.contains(lower;" deps") || str.contains(lower;"deps ");
+    let has_db=str.contains(lower;" db ") || str.contains(lower;"db ");
+    let has_init=str.contains(lower;" init ") || str.contains(lower;"init ");
+
+    let has_known_abbrev=has_fn || has_impl || has_refac || has_auth || has_cfg || has_deps || has_db || has_init;
+
+    dot_chain_candidate || has_known_abbrev
+  }
+}
+
+// Returns a diff-like preview string showing original and expanded forms.
+// Used in the pre-send confirmation UI.
+pub f=preview(text:str;custom:@($shorthand_def)):str{
+  let result=expand(text;custom);
+  if str.eq(result.original;result.expanded){
+    str.concat("No shorthand detected: ";text)
+  }else{
+    let orig_line=str.concat("Original: ";result.original);
+    let exp_line=str.concat("Expanded: ";result.expanded);
+    str.concat(orig_line;str.concat("\n";exp_line))
+  }
+}

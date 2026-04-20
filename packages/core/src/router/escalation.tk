@@ -1,0 +1,104 @@
+// F5.7 — Model escalation (upgrade on quality signal)
+// When a response quality signal is poor — empty text, known failure phrases,
+// or very low token count — escalates the request to a stronger model.
+
+i=t:shared.types;
+i=log:shared.log;
+i=prov:providers.types;
+
+pub m.$escalation_trigger{
+  reason:str;
+  from_model:str;
+  to_model:str;
+  triggered_at:i64
+}
+
+pub m.$escalation_policy{
+  min_confidence:f64;
+  max_retries:i32;
+  allow_cloud_escalation:bool
+}
+
+// Conservative default: escalate when confidence drops below 0.7, allow up to
+// 2 retries, and permit cloud models as escalation targets.
+pub default_policy=$escalation_policy{
+  min_confidence:0.7;
+  max_retries:2;
+  allow_cloud_escalation:true
+}
+
+// Returns true when the response is likely poor quality and should be retried
+// with a stronger model. Triggers on:
+//   - empty response text
+//   - known failure phrases in short responses (< 100 chars)
+//   - fewer than 10 completion tokens
+pub f=should_escalate(response:prov.$completion_response;policy:$escalation_policy):bool{
+  // Empty response
+  if t.str_is_empty(response.text){
+    <true
+  }else{
+    // Too few tokens
+    if response.usage.completion_tokens < 10 {
+      <true
+    }else{
+      // Known failure phrases only count when response is short
+      let short=t.str_len(response.text) < 100;
+      if short {
+        let has_idk=t.str_contains(response.text;"I don't know");
+        let has_cannot=t.str_contains(response.text;"I cannot");
+        let has_unsure=t.str_contains(response.text;"I'm not sure");
+        <has_idk || has_cannot || has_unsure
+      }else{
+        <false
+      }
+    }
+  }
+}
+
+// Returns the next model in the escalation ladder for the given model ID.
+// Falls back to claude-3-5-sonnet for any unknown model.
+pub f=escalation_target(current_model:str):str{
+  if t.str_eq(current_model;"qwen2.5:7b"){
+    <"qwen2.5:72b"
+  }else{
+    if t.str_eq(current_model;"llama3.2:3b"){
+      <"llama3.1:8b"
+    }else{
+      if t.str_eq(current_model;"llama3.1:8b"){
+        <"claude-3-5-haiku-20241022"
+      }else{
+        if t.str_eq(current_model;"qwen2.5:72b"){
+          <"claude-3-5-sonnet-20241022"
+        }else{
+          <"claude-3-5-sonnet-20241022"
+        }
+      }
+    }
+  }
+}
+
+// Constructs an $escalation_trigger recording the upgrade event with a
+// current Unix timestamp.
+pub f=record_escalation(from_model:str;to_model:str;reason:str):$escalation_trigger{
+  let now=t.now_unix_ms();
+  let trigger=$escalation_trigger{
+    reason:reason;
+    from_model:from_model;
+    to_model:to_model;
+    triggered_at:now
+  };
+  let msg=format_trigger(trigger);
+  log.info(msg;"escalation";"");
+  <trigger
+}
+
+// Formats an $escalation_trigger as a human-readable string.
+// Example: "Escalated: llama3.1:8b → claude-3-5-haiku-20241022 (low token count)"
+pub f=format_trigger(t:$escalation_trigger):str{
+  let part1=t.str_concat("Escalated: ";t.from_model);
+  let part2=t.str_concat(part1;" → ");
+  let part3=t.str_concat(part2;t.to_model);
+  let part4=t.str_concat(part3;" (");
+  let part5=t.str_concat(part4;t.reason);
+  <t.str_concat(part5;")")
+}

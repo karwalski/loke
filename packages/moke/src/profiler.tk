@@ -1,0 +1,150 @@
+m=moke.profiler;
+i=str:std.string;
+
+pub m.$col_stats{
+  name:str;
+  inferred_type:str;
+  null_pct:f32;
+  unique_count:i32;
+  cardinality:str;
+  sample:@(str);
+  min_str:str;
+  max_str:str;
+  mean_str:str;
+  is_pii_candidate:bool
+}
+
+pub m.$profile_result{
+  dataset_name:str;
+  row_count:i32;
+  col_count:i32;
+  stats:@($col_stats);
+  pii_col_count:i32;
+  suggested_sensitivity:str
+}
+
+f=is_pii_name(col:str):bool{
+  let lc=str.lower(col);
+  let hits=@(
+    "name";"email";"phone";"mobile";"id";"dob";"birth";"address";"street";"suburb";
+    "postcode";"ssn";"tfn";"abn";"medicare";"card";"passport";"licence";"license";
+    "gender";"sex";"age";"salary";"income";"account";"bsb";"iban";"ip";"device"
+  );
+  let found=false;
+  hits.each(h{
+    if str.contains(lc;h){ found=true };
+  });
+  <found
+};
+
+f=infer_type(values:@(str)):str{
+  let non_null=values.filter(v{ <str.len(v) > 0 });
+  if str.len(non_null) == 0{ <"categorical" };
+  let all_numeric=true;
+  let all_bool=true;
+  let all_date=true;
+  non_null.each(v{
+    if !str.is_float(v){ all_numeric=false };
+    let lv=str.lower(v);
+    if lv != "true" && lv != "false" && lv != "yes" && lv != "no" && lv != "1" && lv != "0"{
+      all_bool=false
+    };
+    if !str.matches(v;"^\\d{4}[-/]\\d{2}[-/]\\d{2}") && !str.matches(v;"^\\d{2}[-/]\\d{2}[-/]\\d{4}"){
+      all_date=false
+    };
+  });
+  if all_numeric{ <"numeric" };
+  if all_date{ <"datetime" };
+  if all_bool{ <"boolean" };
+  let unique_count=non_null.distinct().len();
+  if unique_count < 20{ <"categorical" };
+  let avg_len=non_null.map(v{ <str.len(v) }).sum() / non_null.len();
+  if avg_len > 40{ <"text" };
+  <"categorical"
+};
+
+f=numeric_stats(values:@(str)):@(str){
+  let nums=values.filter(v{ <str.is_float(v) }).map(v{ <str.to_float(v) });
+  if nums.len() == 0{ <@(""; ""; "") };
+  let mn=nums.min();
+  let mx=nums.max();
+  let mean=nums.sum() / nums.len();
+  <@(str.from_float(mn; 4); str.from_float(mx; 4); str.from_float(mean; 4))
+};
+
+pub f=profile(headers:@(str);rows:@(@(str));name:str):$profile_result{
+  let row_count=rows.len();
+  let col_count=headers.len();
+  let stats=@();
+  let pii_count=0;
+  headers.each_with_index(col; ci{
+    let col_vals=rows.map(r{ <r[ci] });
+    let null_count=col_vals.filter(v{ <str.len(str.trim(v)) == 0 }).len();
+    let null_pct=if row_count > 0{ <(null_count * 100 / row_count) } else { <0 };
+    let non_null=col_vals.filter(v{ <str.len(str.trim(v)) > 0 });
+    let distinct=non_null.distinct();
+    let unique_count=distinct.len();
+    let cardinality=if unique_count == 1{ <"constant"
+    } else if unique_count < 10{ <"low"
+    } else if unique_count < 100{ <"medium"
+    } else { <"high" };
+    let sample=distinct.take(3);
+    let itype=infer_type(non_null);
+    let min_str="";
+    let max_str="";
+    let mean_str="";
+    if itype == "numeric"{
+      let ns=numeric_stats(non_null);
+      min_str=ns[0];
+      max_str=ns[1];
+      mean_str=ns[2];
+    };
+    let is_pii=is_pii_name(col);
+    if is_pii{ pii_count=pii_count + 1 };
+    stats.push($col_stats{
+      name=col;
+      inferred_type=itype;
+      null_pct=str.to_float(str.from_int(null_pct));
+      unique_count=unique_count;
+      cardinality=cardinality;
+      sample=sample;
+      min_str=min_str;
+      max_str=max_str;
+      mean_str=mean_str;
+      is_pii_candidate=is_pii
+    });
+  });
+  let sensitivity="PUBLIC";
+  let has_pii=stats.any(s{ <s.is_pii_candidate });
+  let has_id=stats.any(s{ <str.contains(str.lower(s.name);"id") || str.contains(str.lower(s.name);"key") });
+  if has_pii{ sensitivity="CONFIDENTIAL" } else if has_id{ sensitivity="INTERNAL" };
+  <$profile_result{
+    dataset_name=name;
+    row_count=row_count;
+    col_count=col_count;
+    stats=stats;
+    pii_col_count=pii_count;
+    suggested_sensitivity=sensitivity
+  }
+};
+
+pub f=format_profile(result:$profile_result):str{
+  let lines=@();
+  lines.push("Dataset: " + result.dataset_name);
+  lines.push("Rows: " + str.from_int(result.row_count) + "  Columns: " + str.from_int(result.col_count));
+  lines.push("Suggested sensitivity: " + result.suggested_sensitivity);
+  lines.push("PII candidate columns: " + str.from_int(result.pii_col_count));
+  lines.push("---");
+  result.stats.each(s{
+    let pii_flag=if s.is_pii_candidate{ " [PII]" } else { "" };
+    lines.push(s.name + " (" + s.inferred_type + ")" + pii_flag);
+    lines.push("  nulls=" + str.from_float(s.null_pct; 1) + "%  unique=" + str.from_int(s.unique_count) + "  cardinality=" + s.cardinality);
+    if str.len(s.sample) > 0{
+      lines.push("  sample=[" + str.join(s.sample; ", ") + "]");
+    };
+    if str.len(s.min_str) > 0{
+      lines.push("  min=" + s.min_str + "  max=" + s.max_str + "  mean=" + s.mean_str);
+    };
+  });
+  <str.join(lines; "\n")
+};

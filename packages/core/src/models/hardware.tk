@@ -1,0 +1,127 @@
+// F2.8 partial — Hardware profiling types and detection entry point
+// Full benchmarking is F2.8; this file provides types and the profile struct.
+
+i=t:shared.types;
+i=str:std.str;
+
+pub m.$disk_type{
+  $nvme;
+  $sata;
+  $hdd;
+  $unknown
+}
+
+pub m.$hardware_profile{
+  ram_gb:f64;
+  gpu_vram_gb:f64;
+  unified_memory_gb:f64;
+  disk_type:$disk_type;
+  disk_read_mb_s:f64;
+  cpu_cores:u32;
+  platform:str
+}
+
+pub m.$tier_viability{
+  model_id:str;
+  interactive:bool;
+  considered:bool;
+  background:bool;
+  interactive_tok_s:f64;
+  considered_tok_s:f64;
+  background_tok_s:f64
+}
+
+pub f=empty_profile():$hardware_profile{
+  let p=$hardware_profile{
+    ram_gb:0.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:0.0;
+    disk_type:$disk_type.$unknown;
+    disk_read_mb_s:0.0;
+    cpu_cores:0;
+    platform:""
+  };
+  <p
+}
+
+pub f=estimate_tier_viability(profile:$hardware_profile;model_size_gb:f64):$tier_viability{
+  let required_fast=model_size_gb * 1.2;
+  let required_slow=model_size_gb * 0.8;
+
+  // Interactive: needs full model in unified memory or dedicated VRAM
+  let interactive=if profile.unified_memory_gb >= required_fast{
+    true
+  }else{
+    profile.gpu_vram_gb >= required_fast
+  };
+
+  // Considered: can layer RAM + VRAM together
+  let combined_mem=profile.ram_gb + profile.gpu_vram_gb;
+  let considered=combined_mem >= required_slow;
+
+  // Background: always viable on NVMe (can stream from disk), otherwise needs considered to pass
+  let background=profile.disk_type|{
+    $nvme;    true;
+    $sata;    considered;
+    $hdd;     considered;
+    $unknown; considered
+  };
+
+  // Estimate tok/s based on available memory bandwidth assumptions:
+  // Unified memory: ~60 GB/s effective → tok/s ~ bandwidth / (model_size_gb * 2) bytes per token
+  // GPU VRAM (discrete): ~400 GB/s → higher throughput
+  // RAM only (no GPU): ~40 GB/s effective
+  // Disk streaming (NVMe): ~3 GB/s read → very slow
+  let interactive_tok_s=if profile.unified_memory_gb >= required_fast{
+    if model_size_gb > 0.0{
+      60000.0 / (model_size_gb * 2000.0)
+    }else{
+      0.0
+    }
+  }else{
+    if profile.gpu_vram_gb >= required_fast{
+      if model_size_gb > 0.0{
+        400000.0 / (model_size_gb * 2000.0)
+      }else{
+        0.0
+      }
+    }else{
+      0.0
+    }
+  };
+
+  let considered_tok_s=if considered{
+    if model_size_gb > 0.0{
+      40000.0 / (model_size_gb * 2000.0)
+    }else{
+      0.0
+    }
+  }else{
+    0.0
+  };
+
+  let background_tok_s=if background{
+    if profile.disk_type|{$nvme; true; $sata; false; $hdd; false; $unknown; false}{
+      if model_size_gb > 0.0{
+        3000.0 / (model_size_gb * 2000.0)
+      }else{
+        0.0
+      }
+    }else{
+      considered_tok_s
+    }
+  }else{
+    0.0
+  };
+
+  let v=$tier_viability{
+    model_id:"";
+    interactive:interactive;
+    considered:considered;
+    background:background;
+    interactive_tok_s:interactive_tok_s;
+    considered_tok_s:considered_tok_s;
+    background_tok_s:background_tok_s
+  };
+  <v
+}

@@ -1,0 +1,143 @@
+// A1.4 — Dashboard widget preference persistence
+// Stores collapsed state, time range, sort order per widget as a single JSON blob.
+
+m=core.storage.dashboard;
+i=db:std.db;
+i=s:core.storage.db;
+i=str:std.str;
+i=json:std.json;
+
+// Key used to store the single dashboard prefs blob in the settings table
+let prefs_key="loke.dashboard.prefs";
+let prefs_ns="dashboard";
+
+pub m.$widget_state{
+  id:str;
+  collapsed:bool;
+  time_range:str;
+  sort_by:str;
+  updated_at:i64
+}
+
+pub m.$dashboard_prefs{
+  widgets:@($widget_state);
+  theme:str;
+  sidebar_open:bool
+}
+
+// Return sensible defaults — all widgets expanded, 7-day range, list sort
+pub f=default_prefs():$dashboard_prefs{
+  let widgets=@(
+    $widget_state{ id:"savings";      collapsed:false; time_range:"7d"; sort_by:"date";    updated_at:0 };
+    $widget_state{ id:"privacy";      collapsed:false; time_range:"7d"; sort_by:"count";   updated_at:0 };
+    $widget_state{ id:"models";       collapsed:false; time_range:"7d"; sort_by:"cost";    updated_at:0 };
+    $widget_state{ id:"pipeline";     collapsed:false; time_range:"7d"; sort_by:"default"; updated_at:0 };
+    $widget_state{ id:"governance";   collapsed:false; time_range:"7d"; sort_by:"default"; updated_at:0 };
+    $widget_state{ id:"audit";        collapsed:false; time_range:"7d"; sort_by:"date";    updated_at:0 };
+    $widget_state{ id:"token-budget"; collapsed:false; time_range:"30d"; sort_by:"default"; updated_at:0 }
+  );
+  <$dashboard_prefs{ widgets:widgets; theme:"dark"; sidebar_open:true }
+}
+
+// Load dashboard prefs from db. Returns default_prefs() if no row exists yet.
+pub f=load(store:db.$store):$dashboard_prefs{
+  db.query_params(store.conn;"SELECT value FROM settings WHERE key=? LIMIT 1";@(prefs_key))|{
+    $ok:rows {
+      ??(rows.len == 0){
+        <default_prefs()
+      }{
+        let blob=json.get_str(rows[0];"value");
+        let parsed=json.parse(blob)|{
+          $ok:v { v };
+          $err:_ { <default_prefs() }
+        };
+        let widgets=json.get_array(parsed;"widgets").map|w{
+          $widget_state{
+            id:           json.get_str(w;"id");
+            collapsed:    json.get_bool(w;"collapsed");
+            time_range:   json.get_str(w;"time_range");
+            sort_by:      json.get_str(w;"sort_by");
+            updated_at:   json.get_int(w;"updated_at")
+          }
+        };
+        <$dashboard_prefs{
+          widgets:     widgets;
+          theme:       json.get_str(parsed;"theme");
+          sidebar_open:json.get_bool(parsed;"sidebar_open")
+        }
+      }
+    };
+    $err:_ { <default_prefs() }
+  }
+}
+
+// Serialise prefs to JSON and upsert into the settings table.
+pub f=save(store:db.$store;prefs:$dashboard_prefs):bool{
+  let widgets_arr=prefs.widgets.map|w{
+    let collapsed_s=??(w.collapsed){"true"}{"false"};
+    let updated_s=str.from_int(w.updated_at);
+    str.concat(
+      "{\"id\":\"";w.id;
+      "\",\"collapsed\":";collapsed_s;
+      ",\"time_range\":\"";w.time_range;
+      "\",\"sort_by\":\"";w.sort_by;
+      "\",\"updated_at\":";updated_s;
+      "}"
+    )
+  };
+  let widgets_json=str.concat("[";str.join(widgets_arr;",");"]");
+  let sidebar_s=??(prefs.sidebar_open){"true"}{"false"};
+  let blob=str.concat(
+    "{\"widgets\":";widgets_json;
+    ",\"theme\":\"";prefs.theme;
+    "\",\"sidebar_open\":";sidebar_s;
+    "}"
+  );
+  let sql="INSERT INTO settings (key,value,value_type,namespace,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at";
+  db.exec_params(store.conn;sql;@(prefs_key;blob;"json";prefs_ns;"now()"))|{
+    $ok:_ { <true };
+    $err:_ { <false }
+  }
+}
+
+// Update a single widget's state without loading/re-saving the full prefs.
+// Reads current prefs, patches the matching widget (or appends if absent), then saves.
+pub f=set_widget(store:db.$store;id:str;collapsed:bool;time_range:str):bool{
+  let prefs=load(store);
+  let now_ts=0; // TODO: replace with std.time.now_unix() once available
+  let found=false;
+  let updated=prefs.widgets.map|w{
+    ??(str.eq(w.id;id)){
+      let found=true;
+      $widget_state{
+        id:          w.id;
+        collapsed:   collapsed;
+        time_range:  time_range;
+        sort_by:     w.sort_by;
+        updated_at:  now_ts
+      }
+    }{
+      w
+    }
+  };
+  let final_widgets=??(found){
+    updated
+  }{
+    // Widget not yet in prefs — append a new entry
+    let new_w=$widget_state{
+      id:         id;
+      collapsed:  collapsed;
+      time_range: time_range;
+      sort_by:    "default";
+      updated_at: now_ts
+    };
+    updated.push(new_w);
+    updated
+  };
+  let new_prefs=$dashboard_prefs{
+    widgets:      final_widgets;
+    theme:        prefs.theme;
+    sidebar_open: prefs.sidebar_open
+  };
+  <save(store;new_prefs)
+}
