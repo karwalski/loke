@@ -193,9 +193,9 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 | P2.3 | M | **Spec done** | Extensible configuration modules (applications extend base Zod schema with domain-specific sections, additional env variables, validated at startup alongside platform config) `[R1.2, Section 6]` |
 | P2.4 | M | **Spec done** | Anonymisation pattern registration (applications register entity types + detection regexes + confidence weights; merged into privacy pipeline at startup; hot-reload supported) `[R4.2, Section 6]` |
 | P2.5 | L | **Spec done** | Extension point documentation and contracts (versioned interfaces, semver compatibility guarantees, breaking change policy, migration guides for major versions) `[Section 6]` |
-| P2.6 | L | Privacy pipeline hook API (applications insert custom stages into the privacy pipeline without forking core; hook slots: `before_ner`, `after_anonymise`, `before_restore`, `after_restore`; each hook receives the current pipeline state and returns a modified state; hooks registered at startup via `pipeline.register_hook(slot; f)`; hook execution order: registration order; errors in hooks are logged and skipped — never crash the pipeline; hooks visible in pipeline console A4.2; used by moke for schema-first and local compute injection) |
-| P2.7 | M | Custom LLM provider registration (applications register new provider adapters without forking `providers/dispatcher.tk`; adapter interface: `connect():bool`, `generate(prompt;opts):str`, `embed(text):@(f32)`, `health():bool`; registered via `providers.register(id; adapter)`; auto-included in router model registry; appears in model selector UI; capability declarations: streaming, tool-calling, embedding; used by moke to route data-analysis requests to schema-aware custom handler) |
-| P2.8 | M | Governance rule hook (applications inject custom rule evaluation into the governance gateway; hook receives `$eval_context` before risk classification; returns `?(str)` — `none` to proceed, a string reason to block; registered via `gateway.register_rule_hook(id; f)`; hook outcome logged in audit trail with hook id; used by moke to enforce schema-first protocol — block requests where raw data detected in prompt) |
+| P2.6 | L | **Done** | Privacy pipeline hook API (applications insert custom stages into the privacy pipeline without forking core; hook slots: `before_ner`, `after_anonymise`, `before_restore`, `after_restore`; each hook receives the current pipeline state and returns a modified state; hooks registered at startup via `pipeline.register_hook(slot; f)`; hook execution order: registration order; errors in hooks are logged and skipped — never crash the pipeline; hooks visible in pipeline console A4.2; used by moke for schema-first and local compute injection) |
+| P2.7 | M | **Done** | Custom LLM provider registration (applications register new provider adapters without forking `providers/dispatcher.tk`; adapter interface: `connect():bool`, `generate(prompt;opts):str`, `embed(text):@(f32)`, `health():bool`; registered via `providers.register(id; adapter)`; auto-included in router model registry; appears in model selector UI; capability declarations: streaming, tool-calling, embedding; used by moke to route data-analysis requests to schema-aware custom handler) |
+| P2.8 | M | **Done** | Governance rule hook (applications inject custom rule evaluation into the governance gateway; hook receives `$eval_context` before risk classification; returns `?(str)` — `none` to proceed, a string reason to block; registered via `gateway.register_rule_hook(id; f)`; hook outcome logged in audit trail with hook id; used by moke to enforce schema-first protocol — block requests where raw data detected in prompt) |
 
 ## Epic P3: UI Platform
 
@@ -536,82 +536,82 @@ loke is local-first and single-user by design. The companion device support (F8)
 
 *The base moke experience: load a sensitive dataset, have loke anonymise it schema-first (no raw rows to the LLM), ask questions, see answers.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK1.1 | L | ooke package scaffold (`packages/moke/ooke.toml`, extension init hook, registers with loke gateway; `moke` command entry point; browser mode on port 11432 alongside loke on 11430) |
-| MK1.2 | M | Dataset loader (CSV, Excel .xlsx, paste CSV/TSV; PapaParse-equivalent in toke via `std.csv`; first-5-row preview before commit; drag-drop upload handler; stores in session — never persisted) |
-| MK1.3 | L | Schema-first data protocol hook (P2.6 hook registered `before_anonymise`; intercepts requests containing raw tabular data; extracts column names, types, stats (mean/min/max/nulls/sample 3 values); replaces raw data with TOON-compressed schema profile; raw rows stay local; hook enforced via P2.8 governance rule — blocks any prompt where raw row data detected) |
-| MK1.4 | L | Local compute engine (15 operations: count, sum, avg, min, max, group, timeseries, topN, distribution, correlate, percentile, countBy, latest, distinct, join; LLM requests computations via structured JSON query; moke executes locally against in-memory dataset; results fed back to LLM as next turn; no raw data ever sent) |
-| MK1.5 | M | Data profiler (auto-detect column types: numeric/categorical/datetime/boolean/text; compute per-column stats; identify cardinality; detect PII columns by name pattern; produce compact TOON profile; shown in dataset sidebar) |
-| MK1.6 | M | Sensitivity classification UI (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED selector on dataset load; classification propagates to loke governance gateway as `sensitivity` field in `$eval_context`; colour-coded badge on all dataset views; RESTRICTED forces local-only routing via P2.7 custom provider) |
-| MK1.7 | M | Pipeline console (real-time stage-by-stage log: schema extraction → profile → query dispatch → local compute → result injection → LLM call → response; colour-coded stages; expandable detail per stage; matches A4.2 panel style) |
-| MK1.8 | M | Confirmation modal (human-in-the-loop before every LLM call; shows: schema profile being sent vs original data stayed local; PII summary from loke pipeline; entity count; approve/edit/cancel; "don't ask again for this session") |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK1.1 | L | **Done** | ooke package scaffold (`packages/moke/ooke.toml`, extension init hook, registers with loke gateway; `moke` command entry point; browser mode on port 11432 alongside loke on 11430) |
+| MK1.2 | M | **Done** | Dataset loader (CSV, Excel .xlsx, paste CSV/TSV; PapaParse-equivalent in toke via `std.csv`; first-5-row preview before commit; drag-drop upload handler; stores in session — never persisted) |
+| MK1.3 | L | **Done** | Schema-first data protocol hook (P2.6 hook registered `before_anonymise`; intercepts requests containing raw tabular data; extracts column names, types, stats (mean/min/max/nulls/sample 3 values); replaces raw data with TOON-compressed schema profile; raw rows stay local; hook enforced via P2.8 governance rule — blocks any prompt where raw row data detected) |
+| MK1.4 | L | **Done** | Local compute engine (15 operations: count, sum, avg, min, max, group, timeseries, topN, distribution, correlate, percentile, countBy, latest, distinct, join; LLM requests computations via structured JSON query; moke executes locally against in-memory dataset; results fed back to LLM as next turn; no raw data ever sent) |
+| MK1.5 | M | **Done** | Data profiler (auto-detect column types: numeric/categorical/datetime/boolean/text; compute per-column stats; identify cardinality; detect PII columns by name pattern; produce compact TOON profile; shown in dataset sidebar) |
+| MK1.6 | M | **Done** | Sensitivity classification UI (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED selector on dataset load; classification propagates to loke governance gateway as `sensitivity` field in `$eval_context`; colour-coded badge on all dataset views; RESTRICTED forces local-only routing via P2.7 custom provider) |
+| MK1.7 | M | **Done** | Pipeline console (real-time stage-by-stage log: schema extraction → profile → query dispatch → local compute → result injection → LLM call → response; colour-coded stages; expandable detail per stage; matches A4.2 panel style) |
+| MK1.8 | M | **Done** | Confirmation modal (human-in-the-loop before every LLM call; shows: schema profile being sent vs original data stayed local; PII summary from loke pipeline; entity count; approve/edit/cancel; "don't ask again for this session") |
 
 ## Epic MK2: Insight Lab (Local ML Engine)
 
 *In-browser ML analysis with zero data egress — cluster, detect anomalies, correlate, all on the local dataset.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK2.1 | L | Insight Lab engine in toke (k-means clustering: configurable k, convergence detection, cluster assignment, centroid output; Z-score anomaly detection: per-column, configurable threshold, anomaly list with row index and score; IQR outlier detection: Q1/Q3/IQR per column, lower/upper fence, outlier classification; Pearson correlation matrix: all numeric column pairs, r value and p-value approximation; all operations on in-memory dataset — no network) |
-| MK2.2 | M | AI-assisted analysis proposal (LLM receives schema profile only; proposes 3-5 relevant ML analyses with column selection and params; e.g. "K-means on spend/frequency columns to segment customers"; fallback to heuristic proposals if LLM unavailable: numeric column count → suggest clustering, datetime + numeric → suggest timeseries; user selects which to run) |
-| MK2.3 | M | Animated ML processing screen (step-by-step progress: Loading data → Running algorithm → Computing results → Preparing visualisation; named stage display with elapsed time; real computation feedback — not fake delay; "complete" reveal with result summary card) |
-| MK2.4 | L | Insight Lab → Dashboard hand-off (ML results converted to Dashboard Definition Language (DDL); scatter chart with cluster colouring added for clustering results; anomaly table for anomaly detection; correlation heatmap for Pearson matrix; rendered in Dashboard view as a new dashboard card set) |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK2.1 | L | **Done** | Insight Lab engine in toke (k-means clustering: configurable k, convergence detection, cluster assignment, centroid output; Z-score anomaly detection: per-column, configurable threshold, anomaly list with row index and score; IQR outlier detection: Q1/Q3/IQR per column, lower/upper fence, outlier classification; Pearson correlation matrix: all numeric column pairs, r value and p-value approximation; all operations on in-memory dataset — no network) |
+| MK2.2 | M | **Done** | AI-assisted analysis proposal (LLM receives schema profile only; proposes 3-5 relevant ML analyses with column selection and params; e.g. "K-means on spend/frequency columns to segment customers"; fallback to heuristic proposals if LLM unavailable: numeric column count → suggest clustering, datetime + numeric → suggest timeseries; user selects which to run) |
+| MK2.3 | M | **Done** | Animated ML processing screen (step-by-step progress: Loading data → Running algorithm → Computing results → Preparing visualisation; named stage display with elapsed time; real computation feedback — not fake delay; "complete" reveal with result summary card) |
+| MK2.4 | L | **Done** | Insight Lab → Dashboard hand-off (ML results converted to Dashboard Definition Language (DDL); scatter chart with cluster colouring added for clustering results; anomaly table for anomaly detection; correlation heatmap for Pearson matrix; rendered in Dashboard view as a new dashboard card set) |
 
 ## Epic MK3: Dashboard Generation
 
 *LLM-driven dashboard layout: the LLM defines what to show (titles, metrics, charts, tables), moke's local compute engine fetches the numbers, client renders.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK3.1 | L | Dashboard Definition Language (DDL) (JSON schema for LLM to define dashboards: title, summary, and cards array; card types: `metric` (label, value, delta, trend), `chart` (type: line/bar/pie/area/scatter, title, x/y columns, filter), `table` (title, columns, sort, limit), `text` (markdown prose), `list` (title, items); DDL validated before rendering; stored per session for replay) |
-| MK3.2 | L | Multi-turn dashboard flow (Phase 1: LLM receives schema profile → returns DDL with compute queries; Phase 2: moke resolves each query via local compute engine; Phase 3: resolved DDL with actual values rendered as dashboard; follow-up prompts refine specific cards; "Refine this chart" → LLM receives current DDL + user instruction → updated DDL) |
-| MK3.3 | M | Dashboard renderer (renders DDL cards client-side; Chart.js for charts (line, bar, pie, area, scatter with cluster colouring); metric cards with delta arrows and trend sparklines; responsive 2/3/4 column grid; export dashboard as PNG or JSON DDL; "Copy DDL" for sharing the layout definition) |
-| MK3.4 | M | Dashboard persistence and templates (save current DDL as named template; re-run template against new dataset with matching schema; `loke memory store` integration — dashboard templates stored in memory palace as structured facts; list/load/delete templates) |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK3.1 | L | **Done** | Dashboard Definition Language (DDL) (JSON schema for LLM to define dashboards: title, summary, and cards array; card types: `metric` (label, value, delta, trend), `chart` (type: line/bar/pie/area/scatter, title, x/y columns, filter), `table` (title, columns, sort, limit), `text` (markdown prose), `list` (title, items); DDL validated before rendering; stored per session for replay) |
+| MK3.2 | L | **Done** | Multi-turn dashboard flow (Phase 1: LLM receives schema profile → returns DDL with compute queries; Phase 2: moke resolves each query via local compute engine; Phase 3: resolved DDL with actual values rendered as dashboard; follow-up prompts refine specific cards; "Refine this chart" → LLM receives current DDL + user instruction → updated DDL) |
+| MK3.3 | M | **Done** | Dashboard renderer (renders DDL cards client-side; Chart.js for charts (line, bar, pie, area, scatter with cluster colouring); metric cards with delta arrows and trend sparklines; responsive 2/3/4 column grid; export dashboard as PNG or JSON DDL; "Copy DDL" for sharing the layout definition) |
+| MK3.4 | M | **Done** | Dashboard persistence and templates (save current DDL as named template; re-run template against new dataset with matching schema; `loke memory store` integration — dashboard templates stored in memory palace as structured facts; list/load/delete templates) |
 
 ## Epic MK4: Demo Datasets
 
 *All original moke demo datasets ported to toke as data modules — Australian open data plus synthetic project datasets.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK4.1 | L | Australian open data datasets (6 datasets, ~1000 rows each: Medicare Benefits Schedule claims (26 cols, patient IDs, procedure codes, costs); NSW Public Schools (22 cols, school IDs, ATAR, enrolment, LBOTE%); Opal card tap data (24 cols, card tokens, journey times, fares); Sydney Water quality readings (23 cols, sensor IDs, turbidity, chlorine, pH); NSW Land Registry property transactions (25 cols, titles, addresses, prices); ABS employment by occupation (22 cols, ANZSCO codes, salaries, regions); all datasets have deliberate PII seeded in free-text fields for demo purposes) |
-| MK4.2 | M | IT Server Hardware project (4 linked datasets: server inventory (48 servers, specs, purchase date, warranty), performance metrics (CPU%, RAM%, disk I/O time series), network topology (switch/VLAN/port assignments), user-server assignments (user accounts, access levels); Banksia Digital SYD/MEL data centres; deliberate anomalies: 3 servers at >95% CPU, 2 servers with expired warranties, 1 misconfigured VLAN) |
-| MK4.3 | M | IT Web Platform project (6 linked datasets: user accounts (350 users), orders (1900 orders, statuses, values), web traffic (sessions, bounce rate, conversion), incidents (22 P1-P3 incidents), customer feedback (NPS scores, verbatim), shipping events (courier, SLA breach flags); Wattle & Co fictional e-commerce; deliberate anomalies: 22 high-value orders with mismatched shipping, 1 recurring P1 incident pattern) |
-| MK4.4 | M | Customer Intelligence dataset (392 synthetic customers, 4 natural clusters: budget shoppers / loyal mid-tier / occasional big spenders / inactive; 22 deliberate anomalies: 5 whale accounts, 7 suspected fraudsters, 4 ghost accounts, 6 luxury category buyers; 18 columns: customer_id, age, region, tenure_days, ltv, orders_ytd, avg_order_value, category_affinity, nps_score, churn_risk, last_purchase_days, support_tickets, email_domain, payment_method, referral_source, pii_name, pii_email, pii_phone) |
-| MK4.5 | S | Dataset selector UI (landing screen lists all built-in datasets with description, row count, column count, sensitivity level, and demo scenario; or upload own CSV/Excel/paste; grouped by type: Government Open Data / IT Operations / Customer Intelligence / Your Data) |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK4.1 | L | **Done** | Australian open data datasets (6 datasets, ~1000 rows each: Medicare Benefits Schedule claims (26 cols, patient IDs, procedure codes, costs); NSW Public Schools (22 cols, school IDs, ATAR, enrolment, LBOTE%); Opal card tap data (24 cols, card tokens, journey times, fares); Sydney Water quality readings (23 cols, sensor IDs, turbidity, chlorine, pH); NSW Land Registry property transactions (25 cols, titles, addresses, prices); ABS employment by occupation (22 cols, ANZSCO codes, salaries, regions); all datasets have deliberate PII seeded in free-text fields for demo purposes) |
+| MK4.2 | M | **Done** | IT Server Hardware project (4 linked datasets: server inventory (48 servers, specs, purchase date, warranty), performance metrics (CPU%, RAM%, disk I/O time series), network topology (switch/VLAN/port assignments), user-server assignments (user accounts, access levels); Banksia Digital SYD/MEL data centres; deliberate anomalies: 3 servers at >95% CPU, 2 servers with expired warranties, 1 misconfigured VLAN) |
+| MK4.3 | M | **Done** | IT Web Platform project (6 linked datasets: user accounts (350 users), orders (1900 orders, statuses, values), web traffic (sessions, bounce rate, conversion), incidents (22 P1-P3 incidents), customer feedback (NPS scores, verbatim), shipping events (courier, SLA breach flags); Wattle & Co fictional e-commerce; deliberate anomalies: 22 high-value orders with mismatched shipping, 1 recurring P1 incident pattern) |
+| MK4.4 | M | **Done** | Customer Intelligence dataset (392 synthetic customers, 4 natural clusters: budget shoppers / loyal mid-tier / occasional big spenders / inactive; 22 deliberate anomalies: 5 whale accounts, 7 suspected fraudsters, 4 ghost accounts, 6 luxury category buyers; 18 columns: customer_id, age, region, tenure_days, ltv, orders_ytd, avg_order_value, category_affinity, nps_score, churn_risk, last_purchase_days, support_tickets, email_domain, payment_method, referral_source, pii_name, pii_email, pii_phone) |
+| MK4.5 | S | **Done** | Dataset selector UI (landing screen lists all built-in datasets with description, row count, column count, sensitivity level, and demo scenario; or upload own CSV/Excel/paste; grouped by type: Government Open Data / IT Operations / Customer Intelligence / Your Data) |
 
 ## Epic MK5: Upload and Workspace
 
 *User-supplied data and multi-dataset project workspace.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK5.1 | M | CSV and Excel upload (drag-drop or file picker; `std.csv` parser for CSV/TSV; SheetJS-equivalent via `std.xlsx` for .xlsx/.xls; first 5 rows preview before commit; column count, row count, detected types shown; cancel upload before commit) |
-| MK5.2 | S | Paste data (textarea accepting CSV or TSV; toggle for "first row is header"; auto-detect delimiter; parse on submit) |
-| MK5.3 | M | Project workspace (group multiple datasets into a named project; tabbed navigation between datasets within project; cross-dataset queries: LLM can reference columns from multiple loaded datasets; combined schema profile sent to LLM includes all datasets; join operation in local compute engine links datasets by shared key) |
-| MK5.4 | S | Dataset pagination and search (50 rows per page, prev/next; column filter: select which columns to show; row search: filter rows containing substring in any column; export filtered view as CSV) |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK5.1 | M | **Done** | CSV and Excel upload (drag-drop or file picker; `std.csv` parser for CSV/TSV; SheetJS-equivalent via `std.xlsx` for .xlsx/.xls; first 5 rows preview before commit; column count, row count, detected types shown; cancel upload before commit) |
+| MK5.2 | S | **Done** | Paste data (textarea accepting CSV or TSV; toggle for "first row is header"; auto-detect delimiter; parse on submit) |
+| MK5.3 | M | **Done** | Project workspace (group multiple datasets into a named project; tabbed navigation between datasets within project; cross-dataset queries: LLM can reference columns from multiple loaded datasets; combined schema profile sent to LLM includes all datasets; join operation in local compute engine links datasets by shared key) |
+| MK5.4 | S | **Done** | Dataset pagination and search (50 rows per page, prev/next; column filter: select which columns to show; row search: filter rows containing substring in any column; export filtered view as CSV) |
 
 ## Epic MK6: moke UX and Infrastructure
 
 *App shell, navigation, settings, and serving infrastructure.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK6.1 | M | moke app shell and navigation (sidebar: Datasets / Dashboard / Insight Lab / Pipeline / Settings; dark theme matching loke base.tkt; moke-specific accent colour (teal, distinct from loke indigo); responsive layout; moke version badge in header) |
-| MK6.2 | M | Multi-provider LLM routing (Claude Sonnet/Haiku via loke's Anthropic provider; GPT-4o-mini via loke's OpenAI provider; model selector in chat panel; local Ollama models when available; API keys from loke keychain (F1.5) — no re-entry in moke settings) |
-| MK6.3 | S | moke settings page (session memory toggle — clear on close or persist; pipeline console verbosity; default sensitivity level; preferred model; about/version) |
-| MK6.4 | M | Presentation mode (full-screen dashboard view for demos; hide sidebar; auto-cycle through cards; keyboard arrows to navigate; ESC to exit; timer overlay showing time in presentation; `?` overlay for keyboard shortcuts; used in user research sessions) |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK6.1 | M | **Done** | moke app shell and navigation (sidebar: Datasets / Dashboard / Insight Lab / Pipeline / Settings; dark theme matching loke base.tkt; moke-specific accent colour (teal, distinct from loke indigo); responsive layout; moke version badge in header) |
+| MK6.2 | M | **Done** | Multi-provider LLM routing (Claude Sonnet/Haiku via loke's Anthropic provider; GPT-4o-mini via loke's OpenAI provider; model selector in chat panel; local Ollama models when available; API keys from loke keychain (F1.5) — no re-entry in moke settings) |
+| MK6.3 | S | **Done** | moke settings page (session memory toggle — clear on close or persist; pipeline console verbosity; default sensitivity level; preferred model; about/version) |
+| MK6.4 | M | **Done** | Presentation mode (full-screen dashboard view for demos; hide sidebar; auto-cycle through cards; keyboard arrows to navigate; ESC to exit; timer overlay showing time in presentation; `?` overlay for keyboard shortcuts; used in user research sessions) |
 
 ## Epic MK7: Demo Readiness
 
 *The three gaps between implemented code and a runnable demo: dataset serving API, unified registry, and static assets.*
 
-| Story | Size | Summary |
-|-------|------|---------|
-| MK7.1 | S | Unified dataset registry (`data/registry.tk`) — single `get_dataset(id):$dataset` and `list_all():@($dataset_info)` that delegates across all four data modules (au_datasets, it_hardware, it_platform, customer_intel); used by the API layer so it never needs to know which module owns which dataset |
-| MK7.2 | M | Dataset serving API (`pages/api/datasets.tk`) — `GET /api/moke/datasets` returns JSON list of all available datasets with metadata; `GET /api/moke/datasets/:id` returns full dataset as JSON `{ headers, rows, profile }` so the browser can load built-in demo data into memory; also serves IT project sub-datasets by qualified id (e.g. `it_hardware.inventory`) |
-| MK7.3 | S | Static assets and Chart.js wiring — update `templates/base.tkt` to load Chart.js from CDN; add `packages/moke/static/favicon.svg` (teal variant of loke favicon); verify all template `<script src="/static/...">` references resolve |
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK7.1 | S | **Done** | Unified dataset registry (`data/registry.tk`) — single `get_dataset(id):$dataset` and `list_all():@($dataset_info)` that delegates across all four data modules (au_datasets, it_hardware, it_platform, customer_intel); used by the API layer so it never needs to know which module owns which dataset |
+| MK7.2 | M | **Done** | Dataset serving API (`pages/api/datasets.tk`) — `GET /api/moke/datasets` returns JSON list of all available datasets with metadata; `GET /api/moke/datasets/:id` returns full dataset as JSON `{ headers, rows, profile }` so the browser can load built-in demo data into memory; also serves IT project sub-datasets by qualified id (e.g. `it_hardware.inventory`) |
+| MK7.3 | S | **Done** | Static assets and Chart.js wiring — update `templates/base.tkt` to load Chart.js from CDN; add `packages/moke/static/favicon.svg` (teal variant of loke favicon); verify all template `<script src="/static/...">` references resolve |
 
 ---
 
@@ -627,5 +627,5 @@ loke is local-first and single-user by design. The companion device support (F8)
 | Agentic AI (AG1) | 1 | 8 | 8 |
 | Memory Palace (M1–M2) | 2 | 11 | 7 |
 | Cross-cutting (X1–X5, W1) | 6 | 30 | 30 |
-| Demo — moke (MK1–MK6) | 6 | 30 | 0 |
-| **Total** | **40** | **211** | **150** |
+| Demo — moke (MK1–MK7) | 7 | 34 | 34 |
+| **Total** | **41** | **215** | **187** |
