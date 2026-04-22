@@ -1,0 +1,238 @@
+// A2.3 — Local compute preprocessing for code.
+// Profiles codebases, detects proprietary patterns, finds sensitive config
+// files, and scrubs secrets before any code leaves the machine.
+
+m=loke.cli.code_preprocess;
+i=str:std.string;
+i=log:std.log;
+
+pub m.$code_profile{
+  file_count:i32;
+  total_lines:i32;
+  languages:@(str);
+  proprietary_patterns:@(str);
+  config_files_found:@(str);
+  pii_in_code:@(str);
+  sensitive_strings:@(str)
+}
+
+pub m.$scrub_result{
+  original:str;
+  scrubbed:str;
+  replacements:i32;
+  patterns_found:@(str)
+}
+
+// detect_language — maps a filename extension to a language name.
+// Returns "unknown" for unrecognised extensions.
+pub f=detect_language(filename:str):str{
+  if str.ends_with(filename;".tk"){
+    <"toke"
+  }{
+    if str.ends_with(filename;".py"){
+      <"python"
+    }{
+      if str.ends_with(filename;".ts"){
+        <"typescript"
+      }{
+        if str.ends_with(filename;".js"){
+          <"javascript"
+        }{
+          if str.ends_with(filename;".go"){
+            <"go"
+          }{
+            if str.ends_with(filename;".rs"){
+              <"rust"
+            }{
+              if str.ends_with(filename;".java"){
+                <"java"
+              }{
+                if str.ends_with(filename;".rb"){
+                  <"ruby"
+                }{
+                  <"unknown"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// find_proprietary_patterns — scans source code for markers that suggest
+// the content should not leave the machine unredacted.
+// Looks for long opaque tokens, internal URLs, confidentiality markers,
+// and licence headers.
+pub f=find_proprietary_patterns(code:str):@(str){
+  let found:@(str)=@();
+  if str.contains(code;"PROPRIETARY"){
+    found.push("PROPRIETARY marker")
+  }{};
+  if str.contains(code;"CONFIDENTIAL"){
+    found.push("CONFIDENTIAL marker")
+  }{};
+  if str.contains(code;"INTERNAL"){
+    found.push("INTERNAL marker")
+  }{};
+  if str.contains(code;"internal."){
+    found.push("internal URL")
+  }{};
+  if str.contains(code;"corp."){
+    found.push("corp URL")
+  }{};
+  if str.contains(code;"private."){
+    found.push("private URL")
+  }{};
+  if str.contains(code;"staging."){
+    found.push("staging URL")
+  }{};
+  if str.contains(code;"All rights reserved"){
+    found.push("licence header")
+  }{};
+  if str.contains(code;"Copyright"){
+    found.push("copyright header")
+  }{};
+  // Heuristic: sequences of 32+ alphanumeric chars likely encode keys/tokens
+  if str.match(code;"[a-zA-Z0-9]{32,}"){
+    found.push("long opaque token (possible API key)")
+  }{};
+  <found
+}
+
+// find_config_files — filters a list of filenames to those that are likely
+// to contain secrets or environment-specific configuration.
+pub f=find_config_files(filenames:@(str)):@(str){
+  let found:@(str)=@();
+  filenames.each(f{
+    if str.starts_with(f;".env"){
+      found.push(f)
+    }{
+      if str.ends_with(f;".toml"){
+        found.push(f)
+      }{
+        if str.ends_with(f;".yaml"){
+          found.push(f)
+        }{
+          if str.ends_with(f;".yml"){
+            found.push(f)
+          }{
+            if str.ends_with(f;".json"){
+              found.push(f)
+            }{
+              if str.contains(f;".config."){
+                found.push(f)
+              }{
+                if str.starts_with(f;"credentials"){
+                  found.push(f)
+                }{
+                  if str.starts_with(f;"secrets"){
+                    found.push(f)
+                  }{}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+  <found
+}
+
+// scrub_secrets — replaces well-known secret patterns in source code with
+// safe placeholders. Returns the scrubbed text, replacement count, and a
+// list of pattern names that were matched.
+pub f=scrub_secrets(code:str):$scrub_result{
+  let scrubbed=code;
+  let replacements=0;
+  let patterns_found:@(str)=@();
+
+  // Base64-encoded secrets: 40+ base64 chars (optional padding)
+  let b64_count=str.replace_all_pattern(scrubbed;"[A-Za-z0-9+/]{40,}={0,2}";"[SECRET_REDACTED]");
+  if b64_count > 0{
+    replacements=replacements + b64_count;
+    patterns_found.push("base64 secret")
+  }{};
+  scrubbed=str.apply_replacements(scrubbed;"[A-Za-z0-9+/]{40,}={0,2}";"[SECRET_REDACTED]");
+
+  // OpenAI / Anthropic-style API keys: sk- prefix
+  let sk_count=str.replace_all_pattern(scrubbed;"sk-[a-zA-Z0-9]{40,}";"[API_KEY_REDACTED]");
+  if sk_count > 0{
+    replacements=replacements + sk_count;
+    patterns_found.push("sk- API key")
+  }{};
+  scrubbed=str.apply_replacements(scrubbed;"sk-[a-zA-Z0-9]{40,}";"[API_KEY_REDACTED]");
+
+  // Hex hashes / tokens: 32–40 lowercase hex chars
+  let hex_count=str.replace_all_pattern(scrubbed;"\\b[0-9a-f]{32,40}\\b";"[HASH_REDACTED]");
+  if hex_count > 0{
+    replacements=replacements + hex_count;
+    patterns_found.push("hex hash/token")
+  }{};
+  scrubbed=str.apply_replacements(scrubbed;"\\b[0-9a-f]{32,40}\\b";"[HASH_REDACTED]");
+
+  <$scrub_result{
+    original:code;
+    scrubbed:scrubbed;
+    replacements:replacements;
+    patterns_found:patterns_found
+  }
+}
+
+// profile_codebase — builds a profile from a list of filenames and their
+// corresponding line counts. Deduplicates language names.
+pub f=profile_codebase(filenames:@(str);lines_per_file:@(i32)):$code_profile{
+  let file_count=filenames.len();
+  let total_lines=0;
+  let i=0;
+  ??(i<lines_per_file.len()){
+    total_lines=total_lines + lines_per_file[i];
+    i=i+1
+  }{};
+
+  // Collect unique language names
+  let langs:@(str)=@();
+  filenames.each(fn{
+    let lang=detect_language(fn);
+    if lang == "unknown"{
+    }{
+      let already=false;
+      langs.each(l{
+        if l == lang{
+          already=true
+        }{}
+      });
+      if already{
+      }{
+        langs.push(lang)
+      }
+    }
+  });
+
+  let config_files=find_config_files(filenames);
+
+  <$code_profile{
+    file_count:file_count;
+    total_lines:total_lines;
+    languages:langs;
+    proprietary_patterns:@();
+    config_files_found:config_files;
+    pii_in_code:@();
+    sensitive_strings:@()
+  }
+}
+
+// profile_to_toon — serialises a code profile to a compact single-line
+// representation suitable for inclusion in an LLM context window.
+pub f=profile_to_toon(p:$code_profile):str{
+  let out="CODEBASE: " +
+    str.from_i32(p.file_count) + "files " +
+    str.from_i32(p.total_lines) + "lines LANGS:" +
+    str.join(p.languages;",");
+  if p.proprietary_patterns.len() > 0{
+    out=out + " PROP:" + str.from_i32(p.proprietary_patterns.len())
+  }{};
+  <out
+}

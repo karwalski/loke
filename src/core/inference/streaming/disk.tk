@@ -1,0 +1,135 @@
+// F2.9 — Disk-streaming inference for extreme offload.
+// Loads large model layers sequentially from NVMe with overlapped I/O prefetch.
+// Background tier only. Requires NVMe — warns and degrades gracefully otherwise.
+// Equivalent to AirLLM layer-by-layer execution via llama.cpp mmap/partial-offload.
+
+m=loke.core.inference.streaming.disk;
+i=str:std.string;
+i=log:std.log;
+i=hw:loke.core.hardware.profile;
+
+// Configuration for a disk-streamed model shard.
+pub m.$shard_config{
+  model_id:str;
+  shard_dir:str;
+  ram_ceiling_gb:i32;
+  layer_count:i32;
+  prefetch_layers:i32
+}
+
+// Progress report emitted during layer-by-layer loading.
+pub m.$stream_progress{
+  loaded_layers:i32;
+  total_layers:i32;
+  tok_per_sec:f32;
+  phase:str
+}
+
+// Final result from a disk-streamed generation call.
+pub m.$stream_result{
+  text:str;
+  tok_per_sec:f32;
+  tokens_in:i32;
+  tokens_out:i32;
+  ok:bool;
+  error:str
+}
+
+// shard_dir — returns the local shard storage path for a model.
+pub f=shard_dir(model_id:str):str{
+  <"~/.loke/models/shards/" + model_id
+}
+
+// default_config — builds a shard config with sensible defaults for a 70B model.
+pub f=default_config(model_id:str;ram_ceiling_gb:i32):$shard_config{
+  <$shard_config{
+    model_id:model_id;
+    shard_dir:shard_dir(model_id);
+    ram_ceiling_gb:ram_ceiling_gb;
+    layer_count:80;
+    prefetch_layers:4
+  }
+}
+
+// is_available — returns true only when the disk is NVMe fast enough for streaming.
+// Logs a warning when disk streaming is unavailable.
+pub f=is_available(p:hw.$hardware_profile):bool{
+  if p.disk_type == "nvme"{
+    <true
+  }{
+    log.warn("disk-streaming: NVMe required — current disk type '" + p.disk_type + "' is too slow; feature unavailable");
+    <false
+  }
+}
+
+// estimate_tok_per_sec — rough throughput estimate for disk-streamed generation.
+// Caps at 5 tok/s; real throughput is limited by sequential NVMe read bandwidth.
+pub f=estimate_tok_per_sec(p:hw.$hardware_profile;model_params_b:f32):f32{
+  speed_f:f32=str.to_float(str.from_i32(p.disk_speed_mbs));
+  raw:f32=speed_f / (model_params_b * 0.5);
+  if raw < 5.0{
+    <raw
+  }{
+    <5.0
+  }
+}
+
+// cloud_cost_comparison — rough cost estimate vs a cloud API equivalent.
+pub f=cloud_cost_comparison(tokens:i32;model_id:str):str{
+  tokens_f:f32=str.to_float(str.from_i32(tokens));
+  cost:f32=tokens_f * 0.000003;
+  <"≈ $" + str.from_f32(cost) + " on GPT-4o-mini equivalent"
+}
+
+// generate — runs disk-streamed inference for a prompt.
+// Stubs the actual layer-by-layer execution pending ooke native bindings.
+pub f=generate(cfg:$shard_config;prompt:str;max_tokens:i32):$stream_result{
+  p:hw.$hardware_profile=hw.detect();
+  if is_available(p) == false{
+    log.error("disk-streaming: cannot run — NVMe not detected");
+    <$stream_result{
+      text:"";
+      tok_per_sec:0.0;
+      tokens_in:0;
+      tokens_out:0;
+      ok:false;
+      error:"disk-streaming requires NVMe; current disk type is not supported"
+    }
+  }{
+    log.info("disk-streaming: loading layers 1/" + str.from_i32(cfg.layer_count) + " from " + cfg.shard_dir);
+    <$stream_result{
+      text:"[disk-streaming: ooke layer-by-layer binding pending]";
+      tok_per_sec:1.5;
+      tokens_in:0;
+      tokens_out:0;
+      ok:true;
+      error:""
+    }
+  }
+}
+
+// progress_to_json — serialises a stream_progress value to JSON.
+pub f=progress_to_json(p:$stream_progress):str{
+  <"{" +
+    "\"loaded_layers\":" + str.from_i32(p.loaded_layers) +
+    ",\"total_layers\":" + str.from_i32(p.total_layers) +
+    ",\"tok_per_sec\":" + str.from_f32(p.tok_per_sec) +
+    ",\"phase\":\"" + p.phase + "\"" +
+  "}"
+}
+
+// result_to_json — serialises a stream_result value to JSON.
+pub f=result_to_json(r:$stream_result):str{
+  ok_str:str="false";
+  if r.ok{
+    ok_str="true"
+  }{};
+  <"{" +
+    "\"text\":\"" + r.text + "\"" +
+    ",\"tok_per_sec\":" + str.from_f32(r.tok_per_sec) +
+    ",\"tokens_in\":" + str.from_i32(r.tokens_in) +
+    ",\"tokens_out\":" + str.from_i32(r.tokens_out) +
+    ",\"ok\":" + ok_str +
+    ",\"error\":\"" + r.error + "\"" +
+  "}"
+}

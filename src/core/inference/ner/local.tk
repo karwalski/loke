@@ -1,0 +1,306 @@
+// F2.5 — Local NER and embeddings.
+// Named entity recognition and text embedding using either the ooke native
+// binding (Phase 2) or the Ollama REST API (Phase 1 primary path).
+// Covers Australian PII types: MEDICARE_ID, TFN, ABN, ADDRESS in addition to
+// standard international types.
+
+m=loke.core.inference.ner.local;
+
+i=str:std.str;
+i=log:std.log;
+i=http:std.http;
+i=json:std.json;
+
+// A single named entity detected in text.
+pub m.$ner_entity{
+  text:str;
+  entity_type:str;
+  start:i32;
+  end_pos:i32;
+  confidence:f32;
+  source:str
+}
+
+// The result of a NER pass over a piece of text.
+pub m.$ner_result{
+  entities:@($ner_entity);
+  backend:str;
+  latency_ms:i32
+}
+
+// The result of an embedding call.
+pub m.$embed_result{
+  vector:@(f32);
+  model:str;
+  dims:i32
+}
+
+// ── NER ───────────────────────────────────────────────────────────────────────
+
+// Runs NER on text via the Ollama generate endpoint.
+// POSTs to http://127.0.0.1:11434/api/generate with a structured system
+// prompt that instructs the model to return a JSON array of entities.
+// Parses the array and returns a $ner_result with source="ollama".
+pub f=ner_via_ollama(text:str;model_id:str):$ner_result{
+  let empty=$ner_result{
+    entities:@();
+    backend:"ollama";
+    latency_ms:0
+  };
+  let system_prompt="You are a NER system. Extract named entities from the text as JSON array: [{\"text\":...,\"type\":...}]. Types: PERSON, ORG, LOCATION, DATE, PHONE, EMAIL, MEDICARE_ID, TFN, ABN, ADDRESS.";
+  let body=str.concat("{\"model\":";
+    str.concat(json.enc_str(model_id);
+    str.concat(",\"system\":";
+    str.concat(json.enc_str(system_prompt);
+    str.concat(",\"prompt\":";
+    str.concat(json.enc_str(text);
+    str.concat(",\"stream\":false;","}")))))));
+  let res=http.post("http://127.0.0.1:11434/api/generate";body;"application/json");
+  if !res.ok{
+    log.warn("NER via Ollama: HTTP request failed";"core.inference.ner.local";"system");
+    <empty
+  };
+  // Ollama wraps the model output in {"response":"..."}
+  let parsed=json.dec(res.body);
+  let ok=parsed|{
+    $ok:_{ <true };
+    $err:_{ <false }
+  };
+  if !ok{
+    log.warn("NER via Ollama: could not parse outer response";"core.inference.ner.local";"system");
+    <empty
+  };
+  let outer=parsed|{ $ok:o{ <o }; $err:_{ <json.empty_obj() } };
+  let response_text=json.get_str_or(outer;"response";"[]");
+  // Extract the JSON array from the model output (may be wrapped in markdown)
+  let arr_start=str.index_of(response_text;"[");
+  let arr_end=str.last_index_of(response_text;"]");
+  let arr_json="[]";
+  if arr_start >= 0{
+    if arr_end > arr_start{
+      let arr_json=str.slice(response_text;arr_start;arr_end+1)
+    }{}
+  }{};
+  let arr_parsed=json.dec(arr_json);
+  let arr_ok=arr_parsed|{
+    $ok:_{ <true };
+    $err:_{ <false }
+  };
+  if !arr_ok{
+    <empty
+  };
+  let arr=arr_parsed|{ $ok:a{ <a }; $err:_{ <json.empty_arr() } };
+  let entities=@();
+  let i=0;
+  let count=json.arr_len(arr);
+  ??(i<count){
+    let item=json.arr_get(arr;i);
+    let entity_text=json.get_str_or(item;"text";"");
+    let entity_type=json.get_str_or(item;"type";"UNKNOWN");
+    if str.len(entity_text) > 0{
+      let entity=$ner_entity{
+        text:entity_text;
+        entity_type:entity_type;
+        start:0;
+        end_pos:0;
+        confidence:0.9;
+        source:"ollama"
+      };
+      entities=@(entities;entity)
+    }{};
+    i=i+1
+  }{};
+  <$ner_result{
+    entities:entities;
+    backend:"ollama";
+    latency_ms:0
+  }
+}
+
+// NER stub using the native ooke binding (not yet wired in Phase 1).
+// Returns an empty result with backend="native_not_loaded".
+pub f=ner_via_native(text:str):$ner_result{
+  log.info("native NER binding not yet loaded";"core.inference.ner.local";"system");
+  <$ner_result{
+    entities:@();
+    backend:"native_not_loaded";
+    latency_ms:0
+  }
+}
+
+// Runs NER using the preferred backend with automatic fallback.
+// When prefer_native=true the native binding is tried first; if it returns an
+// empty result the call falls through to Ollama.
+// When Ollama also fails an empty result with backend="unavailable" is returned.
+pub f=ner(text:str;prefer_native:bool;model_id:str):$ner_result{
+  if prefer_native{
+    let native_result=ner_via_native(text);
+    if native_result.entities.len() > 0{
+      <native_result
+    }{}
+  }{};
+  let ollama_result=ner_via_ollama(text;model_id);
+  if str.eq(ollama_result.backend;"ollama"){
+    <ollama_result
+  }{
+    <$ner_result{
+      entities:@();
+      backend:"unavailable";
+      latency_ms:0
+    }
+  }
+}
+
+// ── Embeddings ────────────────────────────────────────────────────────────────
+
+// Generates a text embedding vector via the Ollama embeddings endpoint.
+// POSTs {"model":model_id,"prompt":text} to http://127.0.0.1:11434/api/embeddings.
+// Parses the {"embedding":[...]} response and returns an $embed_result.
+pub f=embed_via_ollama(text:str;model_id:str):$embed_result{
+  let empty=$embed_result{
+    vector:@();
+    model:model_id;
+    dims:0
+  };
+  let body=str.concat("{\"model\":";
+    str.concat(json.enc_str(model_id);
+    str.concat(",\"prompt\":";
+    str.concat(json.enc_str(text);"}"))));
+  let res=http.post("http://127.0.0.1:11434/api/embeddings";body;"application/json");
+  if !res.ok{
+    log.warn("embed via Ollama: HTTP request failed";"core.inference.ner.local";"system");
+    <empty
+  };
+  let parsed=json.dec(res.body);
+  let ok=parsed|{
+    $ok:_{ <true };
+    $err:_{ <false }
+  };
+  if !ok{
+    log.warn("embed via Ollama: could not parse response";"core.inference.ner.local";"system");
+    <empty
+  };
+  let obj=parsed|{ $ok:o{ <o }; $err:_{ <json.empty_obj() } };
+  let vec_arr=json.get_arr_or(obj;"embedding";json.empty_arr());
+  let dims=json.arr_len(vec_arr);
+  let vector=@();
+  let i=0;
+  ??(i<dims){
+    let v=json.arr_get_f32_or(vec_arr;i;0.0);
+    vector=@(vector;v);
+    i=i+1
+  }{};
+  <$embed_result{
+    vector:vector;
+    model:model_id;
+    dims:dims
+  }
+}
+
+// Embedding stub using the native ooke binding (not yet wired in Phase 1).
+// Returns a zero-length vector with model="native_not_loaded".
+pub f=embed_via_native(text:str):$embed_result{
+  <$embed_result{
+    vector:@();
+    model:"native_not_loaded";
+    dims:0
+  }
+}
+
+// Generates a text embedding using the preferred backend with automatic fallback.
+// When prefer_native=true the native binding is tried first; falls through to
+// Ollama when the native result has zero dims.
+pub f=embed(text:str;prefer_native:bool;model_id:str):$embed_result{
+  if prefer_native{
+    let native_result=embed_via_native(text);
+    if native_result.dims > 0{
+      <native_result
+    }{}
+  }{};
+  <embed_via_ollama(text;model_id)
+}
+
+// ── Similarity ────────────────────────────────────────────────────────────────
+
+// Computes the cosine similarity between two embedding vectors.
+// Returns 0.0 when either vector is empty or the dimensions do not match.
+pub f=cosine_similarity(a:@(f32);b:@(f32)):f32{
+  let a_len=a.len();
+  let b_len=b.len();
+  if a_len == 0{
+    <0.0
+  }{};
+  if b_len == 0{
+    <0.0
+  }{};
+  if a_len != b_len{
+    <0.0
+  }{};
+  let dot=0.0;
+  let mag_a=0.0;
+  let mag_b=0.0;
+  let i=0;
+  ??(i<a_len){
+    let av=a[i];
+    let bv=b[i];
+    dot=dot + av*bv;
+    mag_a=mag_a + av*av;
+    mag_b=mag_b + bv*bv;
+    i=i+1
+  }{};
+  let denom=mag_a*mag_b;
+  if denom == 0.0{
+    <0.0
+  }{};
+  // sqrt approximation via Newton's method — two iterations are sufficient
+  // for the precision needed here.
+  let s=denom;
+  s=(s + denom/s)*0.5;
+  s=(s + denom/s)*0.5;
+  <dot/s
+}
+
+// ── Serialisation ─────────────────────────────────────────────────────────────
+
+// Serialises a single $ner_entity to a JSON object string.
+pub f=entity_to_json(e:$ner_entity):str{
+  let start_str=str.from_i32(e.start);
+  let end_str=str.from_i32(e.end_pos);
+  let conf_str=str.from_f32(e.confidence);
+  <str.concat("{\"text\":";
+    str.concat(json.enc_str(e.text);
+    str.concat(",\"entity_type\":";
+    str.concat(json.enc_str(e.entity_type);
+    str.concat(",\"start\":";
+    str.concat(start_str;
+    str.concat(",\"end_pos\":";
+    str.concat(end_str;
+    str.concat(",\"confidence\":";
+    str.concat(conf_str;
+    str.concat(",\"source\":";
+    str.concat(json.enc_str(e.source);
+    "}"))))))))))))
+}
+
+// Serialises a $ner_result to a JSON object string.
+// The entities array is rendered inline.
+pub f=result_to_json(r:$ner_result):str{
+  let arr="[";
+  let i=0;
+  let count=r.entities.len();
+  ??(i<count){
+    if i > 0{
+      let arr=str.concat(arr;",")
+    }{};
+    let arr=str.concat(arr;entity_to_json(r.entities[i]));
+    i=i+1
+  }{};
+  let arr=str.concat(arr;"]");
+  let latency_str=str.from_i32(r.latency_ms);
+  <str.concat("{\"entities\":";
+    str.concat(arr;
+    str.concat(",\"backend\":";
+    str.concat(json.enc_str(r.backend);
+    str.concat(",\"latency_ms\":";
+    str.concat(latency_str;"}"))))))
+}

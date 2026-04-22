@@ -1,0 +1,184 @@
+// F6.3 — Vector store for semantic operations.
+// In-process vector store using cosine similarity search.
+// Replaces LanceDB Node.js library via ooke native bindings (Phase 2).
+
+m=loke.core.storage.vector;
+i=log:std.log;
+i=str:std.string;
+
+pub m.$vector_entry{
+  id:str;
+  namespace:str;
+  vector:@(f32);
+  metadata:str;
+  created_at:i64
+}
+
+pub m.$vector_store{
+  entries:@($vector_entry);
+  dims:i32
+}
+
+pub m.$search_result{
+  entry:$vector_entry;
+  score:f32
+}
+
+pub f=new_store(dims:i32):$vector_store{
+  <$vector_store{
+    entries:@();
+    dims:dims
+  }
+}
+
+// cosine_sim — dot product divided by product of magnitudes.
+// Returns 0.0 on dimension mismatch or empty vectors.
+pub f=cosine_sim(a:@(f32);b:@(f32)):f32{
+  if a.len() == 0{
+    <0.0
+  }{
+    if b.len() == 0{
+      <0.0
+    }{
+      if a.len() == b.len(){
+        let dot:f32=0.0;
+        let mag_a:f32=0.0;
+        let mag_b:f32=0.0;
+        let i:i32=0;
+        ??(i < a.len()){
+          let av:f32=a[i];
+          let bv:f32=b[i];
+          dot=dot + av * bv;
+          mag_a=mag_a + av * av;
+          mag_b=mag_b + bv * bv;
+          i=i + 1
+        }{};
+        let denom:f32=mag_a * mag_b;
+        if denom > 0.0{
+          <dot / denom
+        }{
+          <0.0
+        }
+      }{
+        <0.0
+      }
+    }
+  }
+}
+
+// insert — validates that the vector dimensionality matches the store, then appends.
+pub f=insert(store:$vector_store;id:str;namespace:str;vector:@(f32);metadata:str):$vector_store{
+  if vector.len() == store.dims{
+    let now:i64=0;
+    // ooke.time.now_unix() — binding stub
+    let entry=$vector_entry{
+      id:id;
+      namespace:namespace;
+      vector:vector;
+      metadata:metadata;
+      created_at:now
+    };
+    store.entries.push(entry);
+    log.debug("vector store: inserted " + id + " into namespace " + namespace);
+    <$vector_store{
+      entries:store.entries;
+      dims:store.dims
+    }
+  }{
+    log.warn("vector store: insert rejected — dimension mismatch for id " + id);
+    <store
+  }
+}
+
+// search — returns the top_k most similar entries in the given namespace.
+// An empty namespace string matches all namespaces.
+pub f=search(store:$vector_store;query:@(f32);namespace:str;top_k:i32):@($search_result){
+  let results:@($search_result)=@();
+  store.entries.each(e{
+    let ns_match=namespace == "";
+    if ns_match{}{
+      if e.namespace == namespace{
+        ns_match=true
+      }{}
+    };
+    if ns_match{
+      let score=cosine_sim(query; e.vector);
+      results.push($search_result{ entry:e; score:score })
+    }{}
+  });
+  // sort descending by score — insertion sort (top_k is typically small)
+  let sorted:@($search_result)=@();
+  results.each(r{
+    let inserted=false;
+    let out:@($search_result)=@();
+    sorted.each(s{
+      if inserted{
+        out.push(s)
+      }{
+        if r.score >= s.score{
+          out.push(r);
+          out.push(s);
+          inserted=true
+        }{
+          out.push(s)
+        }
+      }
+    });
+    if inserted{}{
+      out.push(r)
+    };
+    sorted=out
+  });
+  // take top_k
+  let top:@($search_result)=@();
+  let taken:i32=0;
+  sorted.each(r{
+    if taken < top_k{
+      top.push(r);
+      taken=taken + 1
+    }{}
+  });
+  log.debug("vector store: search found " + str.from_i32(top.len()) + " results");
+  <top
+}
+
+// delete — removes a single entry by id.
+pub f=delete(store:$vector_store;id:str):$vector_store{
+  let remaining:@($vector_entry)=@();
+  store.entries.each(e{
+    if e.id == id{}{
+      remaining.push(e)
+    }
+  });
+  <$vector_store{
+    entries:remaining;
+    dims:store.dims
+  }
+}
+
+// delete_namespace — removes all entries belonging to a namespace.
+pub f=delete_namespace(store:$vector_store;namespace:str):$vector_store{
+  let remaining:@($vector_entry)=@();
+  store.entries.each(e{
+    if e.namespace == namespace{}{
+      remaining.push(e)
+    }
+  });
+  <$vector_store{
+    entries:remaining;
+    dims:store.dims
+  }
+}
+
+pub f=count(store:$vector_store):i32{
+  <store.entries.len()
+}
+
+pub f=to_json_entry(e:$vector_entry):str{
+  <"{" +
+    "\"id\":\"" + e.id + "\"" +
+    ",\"namespace\":\"" + e.namespace + "\"" +
+    ",\"metadata\":" + str.json_encode(e.metadata) +
+    ",\"created_at\":" + str.from_i64(e.created_at) +
+  "}"
+}

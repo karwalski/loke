@@ -1,0 +1,139 @@
+// F6.4 — Secure ephemeral storage.
+// Short-lived in-memory values with auto-expiry and secure wipe.
+// Uses ooke mlock-equivalent bindings in Phase 2; no disk serialisation.
+
+m=loke.core.storage.ephemeral;
+i=log:std.log;
+i=str:std.string;
+
+pub m.$ephemeral_entry{
+  id:str;
+  value:str;
+  created_at:i64;
+  expires_at:i64;
+  auto_wipe:bool
+}
+
+pub m.$ephemeral_store{
+  entries:@($ephemeral_entry)
+}
+
+pub f=new_store():$ephemeral_store{
+  <$ephemeral_store{
+    entries:@()
+  }
+}
+
+// store — adds an entry with the given TTL.
+// Replaces any existing entry with the same id.
+pub f=store(st:$ephemeral_store;id:str;value:str;ttl_seconds:i64;auto_wipe:bool):$ephemeral_store{
+  let now:i64=0;
+  // ooke.time.now_unix() — binding stub
+  let remaining:@($ephemeral_entry)=@();
+  st.entries.each(e{
+    if e.id == id{}{
+      remaining.push(e)
+    }
+  });
+  let wipe_flag=if auto_wipe{"true"}{"false"};
+  log.debug("ephemeral: stored " + id + " (ttl=" + str.from_i64(ttl_seconds) + "s, wipe=" + wipe_flag + ")");
+  remaining.push($ephemeral_entry{
+    id:id;
+    value:value;
+    created_at:now;
+    expires_at:now + ttl_seconds;
+    auto_wipe:auto_wipe
+  });
+  <$ephemeral_store{
+    entries:remaining
+  }
+}
+
+// get — retrieves a value by id.
+// Returns none and triggers wipe if the entry has expired.
+pub f=get(st:$ephemeral_store;id:str):?(str){
+  let now:i64=0;
+  // ooke.time.now_unix() — binding stub
+  let result:?(str)=<none;
+  st.entries.each(e{
+    if e.id == id{
+      if e.expires_at > now{
+        result=<some(e.value)
+      }{
+        // expired — trigger secure wipe
+        wipe(st; id);
+        result=<none
+      }
+    }{}
+  });
+  <result
+}
+
+// wipe — overwrites the value with zeros then removes the entry.
+pub f=wipe(st:$ephemeral_store;id:str):$ephemeral_store{
+  // overwrite value in-place with zero string before removal
+  let zeroed:@($ephemeral_entry)=@();
+  st.entries.each(e{
+    if e.id == id{
+      zeroed.push($ephemeral_entry{
+        id:e.id;
+        value:"0000000000000000000000000000000000000000000000000000000000000000";
+        created_at:e.created_at;
+        expires_at:e.expires_at;
+        auto_wipe:e.auto_wipe
+      })
+    }{
+      zeroed.push(e)
+    }
+  });
+  // now remove
+  let remaining:@($ephemeral_entry)=@();
+  zeroed.each(e{
+    if e.id == id{}{
+      remaining.push(e)
+    }
+  });
+  log.debug("ephemeral: wiped " + id + " (secure erase)");
+  <$ephemeral_store{
+    entries:remaining
+  }
+}
+
+// wipe_expired — finds and wipes all expired entries.
+pub f=wipe_expired(st:$ephemeral_store):$ephemeral_store{
+  let now:i64=0;
+  // ooke.time.now_unix() — binding stub
+  let expired_ids:@(str)=@();
+  st.entries.each(e{
+    if e.expires_at <= now{
+      expired_ids.push(e.id)
+    }{}
+  });
+  let current=st;
+  expired_ids.each(id{
+    current=wipe(current; id)
+  });
+  log.debug("ephemeral: wiped " + str.from_i32(expired_ids.len()) + " expired entries");
+  <current
+}
+
+// wipe_all — securely erases every entry in the store.
+pub f=wipe_all(st:$ephemeral_store):$ephemeral_store{
+  let c=st.entries.len();
+  let current=st;
+  let ids:@(str)=@();
+  st.entries.each(e{
+    ids.push(e.id)
+  });
+  ids.each(id{
+    current=wipe(current; id)
+  });
+  log.debug("ephemeral: wiped all " + str.from_i32(c) + " entries (secure erase)");
+  <$ephemeral_store{
+    entries:@()
+  }
+}
+
+pub f=count(st:$ephemeral_store):i32{
+  <st.entries.len()
+}

@@ -1,0 +1,233 @@
+// G4.6 — Inference tier utilisation dashboard.
+// Tracks request counts, response times, quality ratings, tok/s, and cost
+// savings across the three inference tiers: interactive, considered, background.
+
+m=loke.governance.tier_dashboard;
+i=log:std.log;
+i=str:std.string;
+
+// $tier_stats — aggregated statistics for a single inference tier.
+pub m.$tier_stats{
+  tier:str;
+  request_count:i32;
+  request_pct:f32;
+  avg_response_ms:i32;
+  avg_quality_rating:f32;
+  models_used:@(str);
+  tok_per_sec_avg:f32;
+  cloud_cost_avoided_usd:f32;
+  gpu_pct:f32;
+  ram_pct:f32
+}
+
+// $tier_report — the full dashboard report covering all three tiers.
+pub m.$tier_report{
+  interactive:$tier_stats;
+  considered:$tier_stats;
+  background:$tier_stats;
+  period_days:i32;
+  total_requests:i32;
+  generated_at:i64
+}
+
+// empty_stats — returns a zeroed $tier_stats record for the named tier.
+pub f=empty_stats(tier:str):$tier_stats{
+  <$tier_stats{
+    tier:tier;
+    request_count:0;
+    request_pct:0.0;
+    avg_response_ms:0;
+    avg_quality_rating:0.0;
+    models_used:@();
+    tok_per_sec_avg:0.0;
+    cloud_cost_avoided_usd:0.0;
+    gpu_pct:0.0;
+    ram_pct:0.0
+  }
+}
+
+// new_report — returns a zeroed $tier_report for the given period length.
+pub f=new_report(period_days:i32):$tier_report{
+  let now:i64=0;
+  <$tier_report{
+    interactive:empty_stats("interactive");
+    considered:empty_stats("considered");
+    background:empty_stats("background");
+    period_days:period_days;
+    total_requests:0;
+    generated_at:now
+  }
+}
+
+// update_tier_stats — internal helper that updates a single $tier_stats with
+// one new data point, recalculating running averages.
+f=update_tier_stats(s:$tier_stats;response_ms:i32;quality:f32;model:str;tok_s:f32;cost_avoided:f32):$tier_stats{
+  let n=s.request_count + 1;
+  let n_f32=str.to_f32(str.from_i32(n));
+  let old_f=str.to_f32(str.from_i32(s.request_count));
+  // Running average: new_avg = (old_avg * old_n + new_val) / new_n
+  let new_avg_ms=str.to_i32(str.from_f32(
+    (str.to_f32(str.from_i32(s.avg_response_ms)) * old_f +
+     str.to_f32(str.from_i32(response_ms))) / n_f32
+  ));
+  let new_avg_q=(s.avg_quality_rating * old_f + quality) / n_f32;
+  let new_avg_tok=(s.tok_per_sec_avg * old_f + tok_s) / n_f32;
+  // Append model if not already present
+  let already=false;
+  s.models_used.each(m{
+    if str.eq(m;model){
+      already=true
+    }{}
+  });
+  if !already{
+    s.models_used.push(model)
+  }{};
+  <$tier_stats{
+    tier:s.tier;
+    request_count:n;
+    request_pct:s.request_pct;
+    avg_response_ms:new_avg_ms;
+    avg_quality_rating:new_avg_q;
+    models_used:s.models_used;
+    tok_per_sec_avg:new_avg_tok;
+    cloud_cost_avoided_usd:s.cloud_cost_avoided_usd + cost_avoided;
+    gpu_pct:s.gpu_pct;
+    ram_pct:s.ram_pct
+  }
+}
+
+// update_interactive — records one interactive-tier request in the report.
+pub f=update_interactive(r:$tier_report;response_ms:i32;quality:f32;model:str;tok_s:f32;cost_avoided:f32):$tier_report{
+  let new_interactive=update_tier_stats(r.interactive;response_ms;quality;model;tok_s;cost_avoided);
+  <$tier_report{
+    interactive:new_interactive;
+    considered:r.considered;
+    background:r.background;
+    period_days:r.period_days;
+    total_requests:r.total_requests + 1;
+    generated_at:r.generated_at
+  }
+}
+
+// update_considered — records one considered-tier request in the report.
+pub f=update_considered(r:$tier_report;response_ms:i32;quality:f32;model:str;tok_s:f32;cost_avoided:f32):$tier_report{
+  let new_considered=update_tier_stats(r.considered;response_ms;quality;model;tok_s;cost_avoided);
+  <$tier_report{
+    interactive:r.interactive;
+    considered:new_considered;
+    background:r.background;
+    period_days:r.period_days;
+    total_requests:r.total_requests + 1;
+    generated_at:r.generated_at
+  }
+}
+
+// update_background — records one background-tier request in the report.
+pub f=update_background(r:$tier_report;response_ms:i32;quality:f32;model:str;tok_s:f32;cost_avoided:f32):$tier_report{
+  let new_background=update_tier_stats(r.background;response_ms;quality;model;tok_s;cost_avoided);
+  <$tier_report{
+    interactive:r.interactive;
+    considered:r.considered;
+    background:new_background;
+    period_days:r.period_days;
+    total_requests:r.total_requests + 1;
+    generated_at:r.generated_at
+  }
+}
+
+// recalculate_pcts — recomputes request_pct for each tier from total_requests.
+pub f=recalculate_pcts(r:$tier_report):$tier_report{
+  let total=r.total_requests;
+  let total_f=str.to_f32(str.from_i32(total));
+  let i_pct=0.0;
+  let c_pct=0.0;
+  let b_pct=0.0;
+  if total > 0{
+    i_pct=str.to_f32(str.from_i32(r.interactive.request_count)) / total_f * 100.0;
+    c_pct=str.to_f32(str.from_i32(r.considered.request_count)) / total_f * 100.0;
+    b_pct=str.to_f32(str.from_i32(r.background.request_count)) / total_f * 100.0
+  }{};
+  let new_i=$tier_stats{
+    tier:r.interactive.tier;
+    request_count:r.interactive.request_count;
+    request_pct:i_pct;
+    avg_response_ms:r.interactive.avg_response_ms;
+    avg_quality_rating:r.interactive.avg_quality_rating;
+    models_used:r.interactive.models_used;
+    tok_per_sec_avg:r.interactive.tok_per_sec_avg;
+    cloud_cost_avoided_usd:r.interactive.cloud_cost_avoided_usd;
+    gpu_pct:r.interactive.gpu_pct;
+    ram_pct:r.interactive.ram_pct
+  };
+  let new_c=$tier_stats{
+    tier:r.considered.tier;
+    request_count:r.considered.request_count;
+    request_pct:c_pct;
+    avg_response_ms:r.considered.avg_response_ms;
+    avg_quality_rating:r.considered.avg_quality_rating;
+    models_used:r.considered.models_used;
+    tok_per_sec_avg:r.considered.tok_per_sec_avg;
+    cloud_cost_avoided_usd:r.considered.cloud_cost_avoided_usd;
+    gpu_pct:r.considered.gpu_pct;
+    ram_pct:r.considered.ram_pct
+  };
+  let new_b=$tier_stats{
+    tier:r.background.tier;
+    request_count:r.background.request_count;
+    request_pct:b_pct;
+    avg_response_ms:r.background.avg_response_ms;
+    avg_quality_rating:r.background.avg_quality_rating;
+    models_used:r.background.models_used;
+    tok_per_sec_avg:r.background.tok_per_sec_avg;
+    cloud_cost_avoided_usd:r.background.cloud_cost_avoided_usd;
+    gpu_pct:r.background.gpu_pct;
+    ram_pct:r.background.ram_pct
+  };
+  <$tier_report{
+    interactive:new_i;
+    considered:new_c;
+    background:new_b;
+    period_days:r.period_days;
+    total_requests:r.total_requests;
+    generated_at:r.generated_at
+  }
+}
+
+// tier_stats_to_json — serialises a $tier_stats record to a JSON object string.
+pub f=tier_stats_to_json(s:$tier_stats):str{
+  let models_arr="[";
+  let first=true;
+  s.models_used.each(m{
+    if first{
+      first=false
+    }{
+      models_arr=models_arr + ","
+    };
+    models_arr=models_arr + "\"" + m + "\""
+  });
+  models_arr=models_arr + "]";
+  <"{" +
+    "\"tier\":\"" + s.tier + "\"" +
+    ",\"request_count\":" + str.from_i32(s.request_count) +
+    ",\"request_pct\":" + str.from_f32(s.request_pct) +
+    ",\"avg_response_ms\":" + str.from_i32(s.avg_response_ms) +
+    ",\"avg_quality_rating\":" + str.from_f32(s.avg_quality_rating) +
+    ",\"models_used\":" + models_arr +
+    ",\"tok_per_sec_avg\":" + str.from_f32(s.tok_per_sec_avg) +
+    ",\"cloud_cost_avoided_usd\":" + str.from_f32(s.cloud_cost_avoided_usd) +
+    ",\"gpu_pct\":" + str.from_f32(s.gpu_pct) +
+    ",\"ram_pct\":" + str.from_f32(s.ram_pct) +
+  "}"
+}
+
+// report_to_json — serialises a $tier_report to a JSON object string.
+pub f=report_to_json(r:$tier_report):str{
+  <"{" +
+    "\"interactive\":" + tier_stats_to_json(r.interactive) +
+    ",\"considered\":" + tier_stats_to_json(r.considered) +
+    ",\"background\":" + tier_stats_to_json(r.background) +
+    ",\"period_days\":" + str.from_i32(r.period_days) +
+    ",\"total_requests\":" + str.from_i32(r.total_requests) +
+    ",\"generated_at\":" + str.from_i64(r.generated_at) +
+  "}"
+}

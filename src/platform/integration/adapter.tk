@@ -1,0 +1,122 @@
+// P5.1 — Integration adapter interface.
+// Standard contract for external service adapters: status tracking, retry,
+// timeout configuration, and circuit-breaking. Applications implement their
+// own domain methods on top of this foundation.
+
+m=loke.platform.integration.adapter;
+
+i=str:std.str;
+i=log:std.log;
+
+// Adapter status values — stored as strings for serialisability.
+// $connected: healthy and reachable.
+// $disconnected: not yet connected or cleanly disconnected.
+// $degraded: responding but with elevated latency or partial failures.
+// $error: circuit open — requests are being rejected without attempting delivery.
+pub m.$adapter_status{
+  connected:str;
+  disconnected:str;
+  degraded:str;
+  error:str
+}
+
+// Configuration for an integration adapter instance.
+pub m.$adapter_config{
+  id:str;
+  name:str;
+  timeout_ms:i32;
+  max_retries:i32;
+  circuit_break_after:i32
+}
+
+// Runtime state for an adapter instance.
+// status holds one of the $adapter_status label strings.
+pub m.$adapter_state{
+  config:$adapter_config;
+  status:str;
+  failure_count:i32;
+  last_error:str
+}
+
+// Creates a new adapter configuration with sensible production defaults.
+// timeout_ms: 5000 ms, max_retries: 3, circuit_break_after: 5 consecutive failures.
+pub f=new_adapter(id:str;name:str):$adapter_config{
+  <$adapter_config{
+    id:id;
+    name:name;
+    timeout_ms:5000;
+    max_retries:3;
+    circuit_break_after:5
+  }
+}
+
+// Creates initial adapter state for a given configuration.
+// Status starts as "disconnected".
+pub f=new_state(cfg:$adapter_config):$adapter_state{
+  <$adapter_state{
+    config:cfg;
+    status:"disconnected";
+    failure_count:0;
+    last_error:""
+  }
+}
+
+// Records a failed attempt. Increments failure_count and stores the error message.
+// If failure_count reaches circuit_break_after the status is set to "error"
+// (circuit open) and the adapter will reject further requests via is_open().
+pub f=record_failure(state:$adapter_state;err:str):$adapter_state{
+  let new_count=state.failure_count+1;
+  let new_status=state.status;
+  if new_count>=state.config.circuit_break_after{
+    new_status="error";
+    let msg=str.concat("loke.platform.integration.adapter: circuit open for ";state.config.id);
+    log.warn(msg)
+  }else{
+    new_status="degraded"
+  };
+  <$adapter_state{
+    config:state.config;
+    status:new_status;
+    failure_count:new_count;
+    last_error:err
+  }
+}
+
+// Records a successful call. Resets failure_count to 0 and restores status to
+// "connected", closing any open circuit.
+pub f=record_success(state:$adapter_state):$adapter_state{
+  <$adapter_state{
+    config:state.config;
+    status:"connected";
+    failure_count:0;
+    last_error:""
+  }
+}
+
+// Returns true when the circuit is open (status == "error").
+// Callers must check is_open() before attempting a request and short-circuit
+// if true, returning a cached or degraded response to the user.
+pub f=is_open(state:$adapter_state):bool{
+  <str.eq(state.status;"error")
+}
+
+// Returns a human-readable label for a given status string.
+pub f=status_label(status:str):str{
+  if str.eq(status;"connected"){
+    <"Connected"
+  }else{
+    if str.eq(status;"disconnected"){
+      <"Disconnected"
+    }else{
+      if str.eq(status;"degraded"){
+        <"Degraded"
+      }else{
+        if str.eq(status;"error"){
+          <"Circuit open"
+        }else{
+          <"Unknown"
+        }
+      }
+    }
+  }
+}

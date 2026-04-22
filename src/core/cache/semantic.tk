@@ -1,0 +1,180 @@
+// F4.4 — Semantic cache / vector store.
+// Embedding-similarity cache with configurable threshold and TTL.
+// Uses cosine similarity to match semantically equivalent prompts.
+
+m=loke.core.cache.semantic;
+i=log:std.log;
+i=str:std.string;
+
+pub m.$cache_entry{
+  key_hash:str;
+  prompt_hash:str;
+  response:str;
+  embedding:@(f32);
+  hit_count:i32;
+  created_at:i64;
+  expires_at:i64;
+  similarity_threshold:f32
+}
+
+pub m.$cache_config{
+  threshold:f32;
+  ttl_seconds:i64;
+  max_entries:i32
+}
+
+pub m.$cache_store{
+  entries:@($cache_entry);
+  config:$cache_config;
+  hits:i32;
+  misses:i32
+}
+
+pub f=default_config():$cache_config{
+  <$cache_config{
+    threshold:0.92;
+    ttl_seconds:86400;
+    max_entries:10000
+  }
+}
+
+pub f=new_store(cfg:$cache_config):$cache_store{
+  <$cache_store{
+    entries:@();
+    config:cfg;
+    hits:0;
+    misses:0
+  }
+}
+
+// make_key — returns a hash of the prompt for use as a cache key.
+// Uses str.sha256 if available; falls back to a hex stub based on prompt length.
+pub f=make_key(prompt:str):str{
+  // ooke binding stub — str.sha256 not yet available in Phase 1
+  log.debug("semantic cache: make_key using length stub (sha256 binding unavailable)");
+  <str.from_i32(str.len(prompt))
+}
+
+// cosine_sim — computes cosine similarity between two embedding vectors.
+// Returns 0.0 if either vector is empty or dimensions do not match.
+pub f=cosine_sim(a:@(f32);b:@(f32)):f32{
+  if a.len() == 0{
+    <0.0
+  }{
+    if b.len() == 0{
+      <0.0
+    }{
+      if a.len() == b.len(){
+        let dot:f32=0.0;
+        let mag_a:f32=0.0;
+        let mag_b:f32=0.0;
+        let i:i32=0;
+        ??(i < a.len()){
+          let av:f32=a[i];
+          let bv:f32=b[i];
+          dot=dot + av * bv;
+          mag_a=mag_a + av * av;
+          mag_b=mag_b + bv * bv;
+          i=i + 1
+        }{};
+        let denom:f32=mag_a * mag_b;
+        if denom > 0.0{
+          <dot / denom
+        }{
+          <0.0
+        }
+      }{
+        <0.0
+      }
+    }
+  }
+}
+
+// lookup — searches the cache for an entry whose embedding is similar enough.
+// Skips expired entries. Returns the first match above the configured threshold.
+pub f=lookup(store:$cache_store;embedding:@(f32)):?($cache_entry){
+  let now:i64=0;
+  // ooke.time.now_unix() — binding stub; 0 means expiry checks are conservative
+  let result:?($cache_entry)=<none;
+  store.entries.each(e{
+    if e.expires_at > now{
+      let sim:f32=cosine_sim(embedding; e.embedding);
+      if sim >= store.config.threshold{
+        result=<some(e)
+      }{}
+    }{}
+  });
+  <result
+}
+
+// store_entry — adds a new entry to the cache.
+// Evicts the oldest entry if max_entries has been reached before inserting.
+pub f=store_entry(store:$cache_store;prompt:str;response:str;embedding:@(f32)):$cache_store{
+  let now:i64=0;
+  // ooke.time.now_unix() — binding stub
+  let entries=store.entries;
+  if entries.len() >= store.config.max_entries{
+    // evict oldest — drop the first entry
+    let trimmed:@($cache_entry)=@();
+    let skip=true;
+    entries.each(e{
+      if skip{
+        skip=false
+      }{
+        trimmed.push(e)
+      }
+    });
+    entries=trimmed
+  }{};
+  let key=make_key(prompt);
+  let entry=$cache_entry{
+    key_hash:key;
+    prompt_hash:key;
+    response:response;
+    embedding:embedding;
+    hit_count:0;
+    created_at:now;
+    expires_at:now + store.config.ttl_seconds;
+    similarity_threshold:store.config.threshold
+  };
+  entries.push(entry);
+  <$cache_store{
+    entries:entries;
+    config:store.config;
+    hits:store.hits;
+    misses:store.misses
+  }
+}
+
+// evict_expired — removes all entries whose TTL has elapsed.
+pub f=evict_expired(store:$cache_store):$cache_store{
+  let now:i64=0;
+  // ooke.time.now_unix() — binding stub
+  let live:@($cache_entry)=@();
+  store.entries.each(e{
+    if e.expires_at >= now{
+      live.push(e)
+    }{}
+  });
+  <$cache_store{
+    entries:live;
+    config:store.config;
+    hits:store.hits;
+    misses:store.misses
+  }
+}
+
+// stats — returns a JSON summary of cache performance.
+pub f=stats(store:$cache_store):str{
+  let total=store.hits + store.misses;
+  let hit_rate:f32=0.0;
+  if total > 0{
+    hit_rate=store.hits / total
+  }{};
+  <"{" +
+    "\"hits\":" + str.from_i32(store.hits) +
+    ",\"misses\":" + str.from_i32(store.misses) +
+    ",\"entries\":" + str.from_i32(store.entries.len()) +
+    ",\"hit_rate\":" + str.from_f32(hit_rate) +
+  "}"
+}

@@ -1,0 +1,205 @@
+// F8.1 — Companion device discovery and pairing.
+// Discovers companion devices advertising _loke._tcp.local via mDNS, generates
+// confirmation codes for user-verified pairing, and tracks paired device state.
+// mDNS browsing is stubbed pending ooke.mdns.browse binding.
+
+m=loke.companion.discovery;
+
+i=str:std.str;
+i=log:std.log;
+i=json:std.json;
+
+// A companion device discovered on the local network.
+pub m.$companion_device{
+  id:str;
+  name:str;
+  host:str;
+  port:i32;
+  platform:str;
+  ram_gb:i32;
+  gpu_name:str;
+  status:str;
+  confirmation_code:str;
+  paired:bool;
+  paired_at:i64
+}
+
+// Mutable state for the discovery subsystem.
+pub m.$discovery_state{
+  devices:@($companion_device);
+  browsing:bool
+}
+
+// Returns a fresh, empty discovery state.
+pub f=new_state():$discovery_state{
+  <$discovery_state{
+    devices:@();
+    browsing:false
+  }
+}
+
+// Starts mDNS browsing for _loke._tcp.local service announcements.
+// Sets browsing=true and logs the intent; actual mDNS I/O is performed by the
+// ooke.mdns.browse binding (not yet wired in Phase 1 — stub).
+pub f=start_browse(state:$discovery_state):$discovery_state{
+  log.info("companion: browsing _loke._tcp.local via mDNS");
+  <$discovery_state{
+    devices:state.devices;
+    browsing:true
+  }
+}
+
+// Stops mDNS browsing and logs the outcome.
+pub f=stop_browse(state:$discovery_state):$discovery_state{
+  log.info("companion: browse stopped");
+  <$discovery_state{
+    devices:state.devices;
+    browsing:false
+  }
+}
+
+// Called when a device is announced on the network.
+// Generates a deterministic 6-digit confirmation code from the device id,
+// adds the device with status="discovered", and logs the find.
+// Stub: real implementation receives callbacks from the ooke.mdns.browse binding.
+pub f=on_found(state:$discovery_state;id:str;name:str;host:str;port:i32;platform:str):$discovery_state{
+  let code=str.from_i32(str.len(id) * 137 % 900000 + 100000);
+  let dev=$companion_device{
+    id:id;
+    name:name;
+    host:host;
+    port:port;
+    platform:platform;
+    ram_gb:0;
+    gpu_name:"";
+    status:"discovered";
+    confirmation_code:code;
+    paired:false;
+    paired_at:0
+  };
+  state.devices.push(dev);
+  log.info("companion: found " + name + " at " + host);
+  <$discovery_state{
+    devices:state.devices;
+    browsing:state.browsing
+  }
+}
+
+// Returns the confirmation code for a device by id, or none if not found.
+pub f=get_confirmation_code(state:$discovery_state;id:str):?(str){
+  let result:?(str)=none;
+  state.devices.each(d{
+    if d.id == id{
+      result=some(d.confirmation_code)
+    }{}
+  });
+  <result
+}
+
+// Confirms pairing when the user enters the correct confirmation code.
+// Sets paired=true, status="paired", paired_at=now.
+// No-ops silently if the id is not found or the code does not match.
+pub f=confirm_pairing(state:$discovery_state;id:str;entered_code:str):$discovery_state{
+  let updated:@($companion_device)=@();
+  state.devices.each(d{
+    if d.id == id{
+      if d.confirmation_code == entered_code{
+        updated.push($companion_device{
+          id:d.id;
+          name:d.name;
+          host:d.host;
+          port:d.port;
+          platform:d.platform;
+          ram_gb:d.ram_gb;
+          gpu_name:d.gpu_name;
+          status:"paired";
+          confirmation_code:d.confirmation_code;
+          paired:true;
+          paired_at:0
+        });
+        log.info("companion: paired " + id)
+      }{
+        updated.push(d)
+      }
+    }{
+      updated.push(d)
+    }
+  });
+  <$discovery_state{
+    devices:updated;
+    browsing:state.browsing
+  }
+}
+
+// Removes a device from the state (user rejected the pairing request).
+pub f=reject(state:$discovery_state;id:str):$discovery_state{
+  let kept:@($companion_device)=@();
+  state.devices.each(d{
+    if d.id == id{
+    }{
+      kept.push(d)
+    }
+  });
+  log.info("companion: rejected " + id);
+  <$discovery_state{
+    devices:kept;
+    browsing:state.browsing
+  }
+}
+
+// Returns the subset of devices that have been successfully paired.
+pub f=list_paired(state:$discovery_state):@($companion_device){
+  let result:@($companion_device)=@();
+  state.devices.each(d{
+    if d.paired{
+      result.push(d)
+    }{}
+  });
+  <result
+}
+
+// Returns the device with the given id, or none if not found.
+pub f=find(state:$discovery_state;id:str):?($companion_device){
+  let result:?($companion_device)=none;
+  state.devices.each(d{
+    if d.id == id{
+      result=some(d)
+    }{}
+  });
+  <result
+}
+
+// Serialises a $companion_device to a JSON string.
+pub f=to_json(d:$companion_device):str{
+  let paired_str=if d.paired{ "true" }{ "false" };
+  <"{" +
+    "\"id\":" + json.enc_str(d.id) +
+    ",\"name\":" + json.enc_str(d.name) +
+    ",\"host\":" + json.enc_str(d.host) +
+    ",\"port\":" + str.from_i32(d.port) +
+    ",\"platform\":" + json.enc_str(d.platform) +
+    ",\"ram_gb\":" + str.from_i32(d.ram_gb) +
+    ",\"gpu_name\":" + json.enc_str(d.gpu_name) +
+    ",\"status\":" + json.enc_str(d.status) +
+    ",\"paired\":" + paired_str +
+    ",\"paired_at\":" + str.from_i64(d.paired_at) +
+  "}"
+}
+
+// Runs basic security pre-checks before opening a channel to a companion device.
+// Stub: verifies host is non-empty and port is positive.
+// Full implementation: certificate pre-validation and network reachability probe.
+pub f=security_checks(d:$companion_device):bool{
+  if d.host == ""{
+    log.warn("companion: security check failed — empty host for " + d.name);
+    <false
+  }{
+    if d.port <= 0{
+      log.warn("companion: security check failed — invalid port for " + d.name);
+      <false
+    }{
+      log.info("companion: security checks passed for " + d.name);
+      <true
+    }
+  }
+}

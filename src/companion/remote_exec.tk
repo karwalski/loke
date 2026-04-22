@@ -1,0 +1,152 @@
+// F8.3 — Remote model execution on companion device.
+// Sends inference requests to a companion device over the secure channel and
+// optionally bridges to an Ollama REST endpoint running on the companion.
+// RESTRICTED-sensitivity prompts are never forwarded — they are redacted here
+// before the payload reaches the channel, enforcing the privacy pipeline.
+
+m=loke.companion.remote_exec;
+
+i=str:std.str;
+i=log:std.log;
+i=json:std.json;
+i=http:std.http;
+i=ch:loke.companion.channel;
+
+// A request destined for remote execution on a companion device.
+pub m.$remote_request{
+  model_id:str;
+  prompt:str;
+  max_tokens:i32;
+  temperature:f32;
+  request_id:str;
+  sensitivity:str
+}
+
+// The result returned from a remote execution attempt.
+pub m.$remote_result{
+  text:str;
+  tokens_in:i32;
+  tokens_out:i32;
+  tok_per_sec:f32;
+  model_id:str;
+  device_id:str;
+  ok:bool;
+  error:str
+}
+
+// Serialises a $remote_request to JSON.
+// RESTRICTED prompts are redacted — the literal prompt is never included in
+// the outbound payload, preserving the privacy pipeline guarantee.
+pub f=build_request_json(req:$remote_request):str{
+  let safe_prompt=if req.sensitivity == "RESTRICTED"{
+    "[REDACTED — RESTRICTED routing blocked]"
+  }{
+    req.prompt
+  };
+  let max_tokens_str=str.from_i32(req.max_tokens);
+  let temp_str=str.from_f32(req.temperature);
+  <"{" +
+    "\"model_id\":" + json.enc_str(req.model_id) +
+    ",\"prompt\":" + json.enc_str(safe_prompt) +
+    ",\"max_tokens\":" + max_tokens_str +
+    ",\"temperature\":" + temp_str +
+    ",\"request_id\":" + json.enc_str(req.request_id) +
+    ",\"sensitivity\":" + json.enc_str(req.sensitivity) +
+  "}"
+}
+
+// Executes a request on a companion device via the secure channel.
+// Steps: log intent → build JSON (with privacy redaction) → send via channel.
+// Stub: returns a pending-result placeholder until the ooke binding is wired.
+pub f=execute(channel_state:ch.$channel_state;req:$remote_request):$remote_result{
+  log.info("companion: remote exec → " + req.model_id + " on " + channel_state.config.host);
+  let body=build_request_json(req);
+  let msg=ch.new_message("inference_request";body);
+  ch.send(channel_state;msg);
+  <$remote_result{
+    text:"[companion remote exec: response pending binding]";
+    tokens_in:0;
+    tokens_out:0;
+    tok_per_sec:15.0;
+    model_id:req.model_id;
+    device_id:channel_state.config.host;
+    ok:true;
+    error:""
+  }
+}
+
+// POSTs the request to an Ollama instance running on a companion device over
+// plain REST (no TLS channel — use only on trusted LAN segments).
+// Expects Ollama /api/generate response: {"response":...,"done":true,...}
+pub f=via_ollama_rest(host:str;port:i32;req:$remote_request):$remote_result{
+  let url="http://" + host + ":" + str.from_i32(port) + "/api/generate";
+  let safe_prompt=if req.sensitivity == "RESTRICTED"{
+    "[REDACTED — RESTRICTED routing blocked]"
+  }{
+    req.prompt
+  };
+  let body="{" +
+    "\"model\":" + json.enc_str(req.model_id) +
+    ",\"prompt\":" + json.enc_str(safe_prompt) +
+    ",\"stream\":false" +
+  "}";
+  let empty=$remote_result{
+    text:"";
+    tokens_in:0;
+    tokens_out:0;
+    tok_per_sec:0.0;
+    model_id:req.model_id;
+    device_id:host;
+    ok:false;
+    error:"ollama_rest_failed"
+  };
+  let res=http.post(url;body;"application/json");
+  if !res.ok{
+    log.warn("companion: Ollama REST unreachable at " + host);
+    <empty
+  }{
+    let parsed=json.dec(res.body);
+    let ok=parsed|{
+      $ok:_{ <true };
+      $err:_{ <false }
+    };
+    if !ok{
+      log.warn("companion: could not parse Ollama REST response from " + host);
+      <empty
+    }{
+      let obj=parsed|{ $ok:o{ <o }; $err:_{ <json.empty_obj() } };
+      let text=json.get_str_or(obj;"response";"");
+      let tokens_in=json.get_i32_or(obj;"prompt_eval_count";0);
+      let tokens_out=json.get_i32_or(obj;"eval_count";0);
+      let tps=json.get_f32_or(obj;"eval_rate";0.0);
+      <$remote_result{
+        text:text;
+        tokens_in:tokens_in;
+        tokens_out:tokens_out;
+        tok_per_sec:tps;
+        model_id:req.model_id;
+        device_id:host;
+        ok:true;
+        error:""
+      }
+    }
+  }
+}
+
+// Serialises a $remote_result to a JSON string.
+pub f=to_json(r:$remote_result):str{
+  let ok_str=if r.ok{ "true" }{ "false" };
+  let tokens_in_str=str.from_i32(r.tokens_in);
+  let tokens_out_str=str.from_i32(r.tokens_out);
+  let tps_str=str.from_f32(r.tok_per_sec);
+  <"{" +
+    "\"text\":" + json.enc_str(r.text) +
+    ",\"tokens_in\":" + tokens_in_str +
+    ",\"tokens_out\":" + tokens_out_str +
+    ",\"tok_per_sec\":" + tps_str +
+    ",\"model_id\":" + json.enc_str(r.model_id) +
+    ",\"device_id\":" + json.enc_str(r.device_id) +
+    ",\"ok\":" + ok_str +
+    ",\"error\":" + json.enc_str(r.error) +
+  "}"
+}

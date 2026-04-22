@@ -1,0 +1,227 @@
+// A1.5 — Web privacy metadata detection.
+// Parses robots.txt AI directives and data-ai-sensitivity HTML attributes.
+
+m=loke.browser.workspace.privacy_metadata;
+i=str:std.string;
+i=log:std.log;
+
+pub m.$robots_directive{
+  user_agent:str;
+  disallow_ai:bool;
+  ai_training:str;
+  data_sensitivity:str
+}
+
+pub m.$page_metadata{
+  url:str;
+  robots_directives:@($robots_directive);
+  page_sensitivity:str;
+  data_ai_attrs:@(str);
+  disallow_ai_training:bool;
+  scraped_at:i64
+}
+
+// parse_robots_txt — scans robots.txt content line by line for AI-relevant directives.
+// Detects User-agent, Disallow containing "AI"/"GPTBot"/"ClaudeBot",
+// and X-AI-Training / X-Data-Sensitivity headers.
+pub f=parse_robots_txt(content:str;url:str):@($robots_directive){
+  let result:@($robots_directive)=@();
+  let current_agent="";
+  let current_disallow_ai=false;
+  let current_ai_training="";
+  let current_data_sensitivity="";
+  let line_start=0;
+  let i=0;
+  let len=str.len(content);
+  ??(i <= len){
+    let is_end=false;
+    if i == len{
+      is_end=true
+    }{
+      let ch=str.char_at(content;i);
+      if ch == "\n"{
+        is_end=true
+      }{}
+    };
+    if is_end{
+      let line_len=i - line_start;
+      let line=str.substr(content;line_start;line_len);
+      if str.starts_with(line;"User-agent:"){
+        if current_agent != ""{
+          result.push($robots_directive{
+            user_agent:current_agent;
+            disallow_ai:current_disallow_ai;
+            ai_training:current_ai_training;
+            data_sensitivity:current_data_sensitivity
+          })
+        }{};
+        current_agent=str.trim(str.substr(line;11;str.len(line) - 11));
+        current_disallow_ai=false;
+        current_ai_training="";
+        current_data_sensitivity=""
+      }{
+        if str.starts_with(line;"Disallow:"){
+          let val=str.trim(str.substr(line;9;str.len(line) - 9));
+          if str.contains(val;"AI"){
+            current_disallow_ai=true
+          }{};
+          if str.contains(val;"GPTBot"){
+            current_disallow_ai=true
+          }{};
+          if str.contains(val;"ClaudeBot"){
+            current_disallow_ai=true
+          }{}
+        }{
+          if str.starts_with(line;"X-AI-Training:"){
+            current_ai_training=str.trim(str.substr(line;14;str.len(line) - 14))
+          }{
+            if str.starts_with(line;"X-Data-Sensitivity:"){
+              current_data_sensitivity=str.trim(str.substr(line;19;str.len(line) - 19))
+            }{}
+          }
+        }
+      };
+      line_start=i + 1
+    }{};
+    i=i + 1
+  }{};
+  if current_agent != ""{
+    result.push($robots_directive{
+      user_agent:current_agent;
+      disallow_ai:current_disallow_ai;
+      ai_training:current_ai_training;
+      data_sensitivity:current_data_sensitivity
+    })
+  }{};
+  <result
+}
+
+// detect_data_ai_attrs — scans HTML for data-ai-sensitivity="VALUE" patterns.
+// Returns the list of found sensitivity values.
+pub f=detect_data_ai_attrs(html:str):@(str){
+  let result:@(str)=@();
+  let needle="data-ai-sensitivity=\"";
+  let needle_len=str.len(needle);
+  let i=0;
+  let html_len=str.len(html);
+  ??(i < html_len){
+    if str.starts_with(str.substr(html;i;html_len - i);needle){
+      let val_start=i + needle_len;
+      let j=val_start;
+      ??(j < html_len){
+        let ch=str.char_at(html;j);
+        if ch == "\""{
+          j=html_len
+        }{
+          j=j + 1
+        }
+      }{};
+      let val=str.substr(html;val_start;j - val_start);
+      if str.len(val) > 0{
+        result.push(val)
+      }{};
+      i=j
+    }{
+      i=i + 1
+    }
+  }{};
+  <result
+}
+
+// resolve_page_sensitivity — returns the highest sensitivity level from the attribute list.
+pub f=resolve_page_sensitivity(attrs:@(str)):str{
+  let has_restricted=false;
+  let has_confidential=false;
+  let has_internal=false;
+  attrs.each(a{
+    if a == "RESTRICTED"{
+      has_restricted=true
+    }{};
+    if a == "CONFIDENTIAL"{
+      has_confidential=true
+    }{};
+    if a == "INTERNAL"{
+      has_internal=true
+    }{}
+  });
+  if has_restricted{
+    <"RESTRICTED"
+  }{
+    if has_confidential{
+      <"CONFIDENTIAL"
+    }{
+      if has_internal{
+        <"INTERNAL"
+      }{
+        <"PUBLIC"
+      }
+    }
+  }
+}
+
+// check_ai_disallowed — returns true if any directive has disallow_ai set to true.
+pub f=check_ai_disallowed(directives:@($robots_directive)):bool{
+  let found=false;
+  directives.each(d{
+    if d.disallow_ai{
+      found=true
+    }{}
+  });
+  <found
+}
+
+// build_metadata — parses robots.txt and HTML attributes to construct page metadata.
+pub f=build_metadata(url:str;robots_content:str;html:str):$page_metadata{
+  let directives=parse_robots_txt(robots_content;url);
+  let attrs=detect_data_ai_attrs(html);
+  let sensitivity=resolve_page_sensitivity(attrs);
+  let disallow=check_ai_disallowed(directives);
+  let now:i64=0;
+  <$page_metadata{
+    url:url;
+    robots_directives:directives;
+    page_sensitivity:sensitivity;
+    data_ai_attrs:attrs;
+    disallow_ai_training:disallow;
+    scraped_at:now
+  }
+}
+
+// compliance_note — returns a user-facing compliance message for a page, or empty string.
+pub f=compliance_note(meta:$page_metadata):str{
+  if meta.disallow_ai_training{
+    <"⚠️ This page requests no AI training use. Data will not be stored for model training."
+  }{
+    if meta.page_sensitivity != "PUBLIC"{
+      <"🔒 Sensitivity: " + meta.page_sensitivity + ". Privacy controls applied."
+    }{
+      <""
+    }
+  }
+}
+
+// to_json — serialises a page_metadata record to a JSON object string.
+pub f=to_json(meta:$page_metadata):str{
+  let disallow_str="false";
+  if meta.disallow_ai_training{
+    disallow_str="true"
+  }{};
+  let attrs_out="[";
+  let first=true;
+  meta.data_ai_attrs.each(a{
+    if first{
+      first=false
+    }{
+      attrs_out=attrs_out + ","
+    };
+    attrs_out=attrs_out + "\"" + a + "\""
+  });
+  attrs_out=attrs_out + "]";
+  <"{" +
+    "\"url\":\"" + meta.url + "\"" +
+    ",\"page_sensitivity\":\"" + meta.page_sensitivity + "\"" +
+    ",\"disallow_ai_training\":" + disallow_str +
+    ",\"data_ai_attrs\":" + attrs_out +
+    ",\"scraped_at\":" + str.from_i64(meta.scraped_at) +
+  "}"
+}

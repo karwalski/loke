@@ -1,0 +1,154 @@
+// G2.2 — "Why this output?" explanation generator.
+// Produces plain-language explanations of what happened to an AI request,
+// generated locally from a decision trace — no cloud call required.
+// A richer explanation can optionally be generated via a local SLM.
+
+m=loke.governance.explainability;
+i=log:std.log;
+i=str:std.string;
+i=http:std.http;
+i=json:std.json;
+
+// $decision_trace — everything that happened to a single AI request.
+pub m.$decision_trace{
+  request_id:str;
+  pii_detected:@(str);
+  anonymisation_applied:bool;
+  compression_applied:bool;
+  risk_tier:str;
+  policy_decisions:@(str);
+  model_selected:str;
+  model_reason:str;
+  prompt_sent:str;
+  response_received:str;
+  entities_restored:i32
+}
+
+// $explanation — the plain-language explanation returned to the caller.
+pub m.$explanation{
+  request_id:str;
+  plain_language:str;
+  source_attribution:str;
+  confidence:str;
+  generated_locally:bool
+}
+
+// explain — generates a template-based explanation without any LLM call.
+// Always returns generated_locally=true.
+pub f=explain(trace:$decision_trace):$explanation{
+  let pii_count=trace.pii_detected.len();
+  let pii_str=str.from_i32(pii_count);
+  let compressed_str="not ";
+  if trace.compression_applied{
+    compressed_str=""
+  }{};
+  let restored_str=str.from_i32(trace.entities_restored);
+  let plain=
+    "Your request was processed as follows: " +
+    pii_str + " PII entities were detected and anonymised. " +
+    "The data was " + compressed_str + "compressed. " +
+    "Risk was classified as " + trace.risk_tier + ". " +
+    trace.model_selected + " was selected because " + trace.model_reason + ". " +
+    restored_str + " entity placeholders were restored in the response.";
+  <$explanation{
+    request_id:trace.request_id;
+    plain_language:plain;
+    source_attribution:"loke local trace";
+    confidence:"high";
+    generated_locally:true
+  }
+}
+
+// explain_via_llm — requests a richer explanation from a local SLM via Ollama.
+// Builds a concise summary of the trace and asks the model to explain it in
+// plain English. Falls back to the template explanation on any error.
+pub f=explain_via_llm(trace:$decision_trace;model_id:str):$explanation{
+  let pii_count=trace.pii_detected.len();
+  let summary=
+    "request_id=" + trace.request_id +
+    " pii_detected=" + str.from_i32(pii_count) +
+    " anonymised=" + str.from_bool(trace.anonymisation_applied) +
+    " compressed=" + str.from_bool(trace.compression_applied) +
+    " risk_tier=" + trace.risk_tier +
+    " model=" + trace.model_selected +
+    " model_reason=" + trace.model_reason +
+    " entities_restored=" + str.from_i32(trace.entities_restored);
+  let system_prompt="You are an AI transparency assistant. Explain in plain English what happened to this AI request, in 2-3 sentences.";
+  let body="{\"model\":" + json.enc_str(model_id) +
+    ",\"system\":" + json.enc_str(system_prompt) +
+    ",\"prompt\":" + json.enc_str(summary) +
+    ",\"stream\":false}";
+  let res=http.post("http://127.0.0.1:11434/api/generate";body;"application/json");
+  if !res.ok{
+    log.warn("explainability: Ollama request failed, using template fallback");
+    <explain(trace)
+  };
+  let parsed=json.dec(res.body);
+  let ok=parsed|{
+    $ok:_{ <true };
+    $err:_{ <false }
+  };
+  if !ok{
+    <explain(trace)
+  };
+  let obj=parsed|{ $ok:o{ <o }; $err:_{ <json.empty_obj() } };
+  let plain=json.get_str_or(obj;"response";"");
+  if str.len(plain) == 0{
+    <explain(trace)
+  };
+  <$explanation{
+    request_id:trace.request_id;
+    plain_language:plain;
+    source_attribution:"local SLM (" + model_id + ")";
+    confidence:"medium";
+    generated_locally:true
+  }
+}
+
+// trace_to_json — serialises a $decision_trace to a JSON object string.
+pub f=trace_to_json(t:$decision_trace):str{
+  let pii_arr="[";
+  let first_p=true;
+  t.pii_detected.each(p{
+    if first_p{
+      first_p=false
+    }{
+      pii_arr=pii_arr + ","
+    };
+    pii_arr=pii_arr + "\"" + p + "\""
+  });
+  pii_arr=pii_arr + "]";
+  let pd_arr="[";
+  let first_d=true;
+  t.policy_decisions.each(d{
+    if first_d{
+      first_d=false
+    }{
+      pd_arr=pd_arr + ","
+    };
+    pd_arr=pd_arr + "\"" + d + "\""
+  });
+  pd_arr=pd_arr + "]";
+  <"{" +
+    "\"request_id\":\"" + t.request_id + "\"" +
+    ",\"pii_detected\":" + pii_arr +
+    ",\"anonymisation_applied\":" + str.from_bool(t.anonymisation_applied) +
+    ",\"compression_applied\":" + str.from_bool(t.compression_applied) +
+    ",\"risk_tier\":\"" + t.risk_tier + "\"" +
+    ",\"policy_decisions\":" + pd_arr +
+    ",\"model_selected\":\"" + t.model_selected + "\"" +
+    ",\"model_reason\":\"" + t.model_reason + "\"" +
+    ",\"entities_restored\":" + str.from_i32(t.entities_restored) +
+  "}"
+}
+
+// to_json — serialises an $explanation to a JSON object string.
+pub f=to_json(e:$explanation):str{
+  <"{" +
+    "\"request_id\":\"" + e.request_id + "\"" +
+    ",\"plain_language\":\"" + e.plain_language + "\"" +
+    ",\"source_attribution\":\"" + e.source_attribution + "\"" +
+    ",\"confidence\":\"" + e.confidence + "\"" +
+    ",\"generated_locally\":" + str.from_bool(e.generated_locally) +
+  "}"
+}

@@ -1,0 +1,166 @@
+// M1.5 — Knowledge graph with temporal awareness.
+// Entity extraction, relationship mapping, temporal validity windows,
+// contradiction detection, and Graphviz DOT export for browser-mode visualisation.
+
+m=loke.memory.knowledge_graph;
+
+i=str:std.string;
+i=log:std.log;
+i=json:std.json;
+
+pub m.$entity_node{
+  id:str;
+  label:str;
+  entity_type:str;
+  properties:@(str)
+}
+
+pub m.$relation{
+  id:str;
+  from_id:str;
+  to_id:str;
+  relation_type:str;
+  valid_from:i64;
+  valid_to:i64;
+  source:str;
+  confidence:f32
+}
+
+pub m.$fact_query{
+  subject:str;
+  predicate:str;
+  as_of:i64
+}
+
+pub m.$knowledge_graph{
+  nodes:@($entity_node);
+  relations:@($relation)
+}
+
+// Creates an empty knowledge graph.
+pub f=new_graph():$knowledge_graph{
+  <$knowledge_graph{
+    nodes:@();
+    relations:@()
+  }
+}
+
+// Appends an entity node to the graph. Logs the addition.
+pub f=add_node(g:$knowledge_graph;id:str;label:str;entity_type:str):$knowledge_graph{
+  log.info(str.concat("kg: node + ";label));
+  let node=$entity_node{
+    id:id;
+    label:label;
+    entity_type:entity_type;
+    properties:@()
+  };
+  <$knowledge_graph{
+    nodes:g.nodes.push(node);
+    relations:g.relations
+  }
+}
+
+// Appends a temporal relation to the graph. Logs the edge.
+pub f=add_relation(g:$knowledge_graph;from_id:str;to_id:str;relation_type:str;valid_from:i64;valid_to:i64;source:str;confidence:f32):$knowledge_graph{
+  log.info(str.concat("kg: relation ";str.concat(from_id;str.concat(" -[";str.concat(relation_type;str.concat("]-> ";to_id))))));
+  let rel=$relation{
+    id:str.concat(from_id;str.concat("-";str.concat(relation_type;str.concat("-";to_id))));
+    from_id:from_id;
+    to_id:to_id;
+    relation_type:relation_type;
+    valid_from:valid_from;
+    valid_to:valid_to;
+    source:source;
+    confidence:confidence
+  };
+  <$knowledge_graph{
+    nodes:g.nodes;
+    relations:g.relations.push(rel)
+  }
+}
+
+// Returns relations matching the fact query.
+// Filters by: from_id matches subject, relation_type matches predicate,
+// and valid_from <= as_of <= valid_to (valid_to == 0 means open-ended).
+pub f=query_facts(g:$knowledge_graph;q:$fact_query):@($relation){
+  let results=@();
+  g.relations.each(r{
+    let subject_match=str.eq(r.from_id;q.subject);
+    let predicate_match=str.eq(r.relation_type;q.predicate);
+    let time_ok=r.valid_from <= q.as_of;
+    let end_ok=if r.valid_to == 0{
+      true
+    }{
+      q.as_of <= r.valid_to
+    };
+    if subject_match && predicate_match && time_ok && end_ok{
+      let results=results.push(r)
+    }
+  });
+  <results
+}
+
+// Detects contradictions: pairs of relations with same from_id and relation_type
+// but different to_id and overlapping validity windows.
+// Returns a list of human-readable contradiction strings.
+pub f=detect_contradictions(g:$knowledge_graph):@(str){
+  let contradictions=@();
+  let i=0;
+  ??(i < g.relations.len()){
+    let r_a=g.relations[i];
+    let j=i + 1;
+    ??(j < g.relations.len()){
+      let r_b=g.relations[j];
+      let same_from=str.eq(r_a.from_id;r_b.from_id);
+      let same_type=str.eq(r_a.relation_type;r_b.relation_type);
+      let diff_to=!str.eq(r_a.to_id;r_b.to_id);
+      // Check overlapping validity: intervals overlap if a.start < b.end and b.start < a.end
+      // valid_to == 0 means still open (use max i64 as sentinel)
+      let a_end=if r_a.valid_to == 0{ 9223372036854775807 }{ r_a.valid_to };
+      let b_end=if r_b.valid_to == 0{ 9223372036854775807 }{ r_b.valid_to };
+      let overlaps=r_a.valid_from < b_end && r_b.valid_from < a_end;
+      if same_from && same_type && diff_to && overlaps{
+        let msg=str.concat("Contradiction: [";str.concat(r_a.from_id;str.concat("] -[";str.concat(r_a.relation_type;str.concat("]-> ";str.concat(r_a.to_id;str.concat(" vs ";r_b.to_id)))))));
+        let contradictions=contradictions.push(msg)
+      };
+      let j=j + 1
+    }{};
+    let i=i + 1
+  }{};
+  log.info(str.concat("kg: contradictions found: ";str.from_i32(contradictions.len())));
+  <contradictions
+}
+
+// Returns a Graphviz DOT string for the knowledge graph (browser-mode graph view).
+pub f=visualise_dot(g:$knowledge_graph):str{
+  let out="digraph kg {\n";
+  g.nodes.each(n{
+    let line=str.concat("  \"";str.concat(n.id;str.concat("\" [label=\"";str.concat(n.label;str.concat("\" type=\"";str.concat(n.entity_type;"\"]\n"))))));
+    let out=str.concat(out;line)
+  });
+  g.relations.each(r{
+    let line=str.concat("  \"";str.concat(r.from_id;str.concat("\" -> \"";str.concat(r.to_id;str.concat("\" [label=\"";str.concat(r.relation_type;"\"]\n"))))));
+    let out=str.concat(out;line)
+  });
+  <str.concat(out;"}")
+}
+
+// Serialises an $entity_node to a JSON string.
+pub f=node_to_json(n:$entity_node):str{
+  let props_json="[";
+  let first=true;
+  n.properties.each(p{
+    if first{
+      let props_json=str.concat(props_json;str.concat("\"";str.concat(p;"\""))); let first=false
+    }{
+      let props_json=str.concat(props_json;str.concat(",\"";str.concat(p;"\"")))
+    }
+  });
+  let props_json=str.concat(props_json;"]");
+  <str.concat("{\"id\":\"";str.concat(n.id;str.concat("\",\"label\":\"";str.concat(n.label;str.concat("\",\"entity_type\":\"";str.concat(n.entity_type;str.concat("\",\"properties\":";str.concat(props_json;"}"))))))))
+}
+
+// Serialises a $relation to a JSON string.
+pub f=relation_to_json(r:$relation):str{
+  <str.concat("{\"id\":\"";str.concat(r.id;str.concat("\",\"from_id\":\"";str.concat(r.from_id;str.concat("\",\"to_id\":\"";str.concat(r.to_id;str.concat("\",\"relation_type\":\"";str.concat(r.relation_type;str.concat("\",\"valid_from\":";str.concat(str.from_i64(r.valid_from);str.concat(",\"valid_to\":";str.concat(str.from_i64(r.valid_to);str.concat(",\"source\":\"";str.concat(r.source;str.concat("\",\"confidence\":";str.concat(str.from_f32(r.confidence);"}"))))))))))))))))
+}
