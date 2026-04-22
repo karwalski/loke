@@ -1,0 +1,131 @@
+// T4.5 — Gateway unit tests.
+// Verifies new(), submit(), is_blocked(), activate_kill_switch(), and deactivate_kill_switch().
+
+m=tests.unit.governance.test_gateway;
+
+i=gw:core.governance.gateway;
+i=gt:core.governance.types;
+i=t:shared.types;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;v:bool):$result{
+  if v{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;v:bool):$result{
+  if !v{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results=@($result)[];
+
+  // T4.5-a: new() returns a gateway with kill_switch_active=false
+  let g=gw.new();
+  results=str.array_push(results;assert_false("new gateway kill_switch_active=false";g.kill_switch_active));
+
+  // T4.5-b: submit with kill switch inactive and known use case → not blocked
+  let req_clean=gt.$gateway_request{
+    request_id:"req-001";
+    use_case_id:"chat-completion";
+    text:"Hello";
+    model_id:"gpt-4o-mini";
+    provider:$provider.$openai;
+    sensitivity:$sensitivity_level.$public;
+    estimated_cost:0.001;
+    correlation_id:"corr-001"
+  };
+  let decision_clean=gw.submit(g;req_clean);
+  results=str.array_push(results;assert_false("clean request not blocked";gw.is_blocked(decision_clean)));
+
+  // T4.5-c: decision includes a non-empty explanation
+  results=str.array_push(results;assert_true("decision explanation non-empty";str.len(decision_clean.explanation)>0));
+
+  // T4.5-d: decision includes a non-empty timestamp
+  results=str.array_push(results;assert_true("decision timestamp non-empty";str.len(decision_clean.timestamp)>0));
+
+  // T4.5-e: activate kill switch → subsequent submit is blocked
+  let mut_g=gw.new();
+  gw.activate_kill_switch(mut_g;"emergency stop");
+  let req_blocked=gt.$gateway_request{
+    request_id:"req-002";
+    use_case_id:"chat-completion";
+    text:"Should be blocked";
+    model_id:"gpt-4o";
+    provider:$provider.$openai;
+    sensitivity:$sensitivity_level.$public;
+    estimated_cost:0.0;
+    correlation_id:"corr-002"
+  };
+  let decision_blocked=gw.submit(mut_g;req_blocked);
+  results=str.array_push(results;assert_true("kill switch active → request blocked";gw.is_blocked(decision_blocked)));
+
+  // T4.5-f: kill switch explanation contains the provided reason
+  results=str.array_push(results;assert_true("kill switch explanation contains reason";str.contains(decision_blocked.explanation;"emergency stop")));
+
+  // T4.5-g: kill switch decision has high risk tier
+  let tier_label=gt.risk_label(decision_blocked.risk_tier);
+  results=str.array_push(results;assert_eq("kill switch decision risk=HIGH";"HIGH";tier_label));
+
+  // T4.5-h: deactivate kill switch → request no longer blocked
+  gw.deactivate_kill_switch(mut_g);
+  let decision_restored=gw.submit(mut_g;req_clean);
+  results=str.array_push(results;assert_false("after deactivate → no longer blocked";gw.is_blocked(decision_restored)));
+
+  // T4.5-i: submit with unknown use case → blocked (deny)
+  let req_unknown_uc=gt.$gateway_request{
+    request_id:"req-003";
+    use_case_id:"nonexistent-use-case";
+    text:"test";
+    model_id:"gpt-4o";
+    provider:$provider.$openai;
+    sensitivity:$sensitivity_level.$internal;
+    estimated_cost:0.0;
+    correlation_id:"corr-003"
+  };
+  let g2=gw.new();
+  let decision_unknown=gw.submit(g2;req_unknown_uc);
+  results=str.array_push(results;assert_true("unknown use case → blocked";gw.is_blocked(decision_unknown)));
+
+  // T4.5-j: is_blocked returns false for $allow decision
+  let allow_decision=gt.$gateway_decision{
+    request_id:"req-004";
+    policy_decision:gt.$policy_decision.$allow;
+    risk_tier:gt.$risk_tier.$low;
+    routing:gw.default_routing();
+    controls_applied:@();
+    explanation:"approved";
+    timestamp:"2026-04-22T00:00:00Z"
+  };
+  results=str.array_push(results;assert_false("is_blocked false for allow decision";gw.is_blocked(allow_decision)));
+
+  let all=true;
+  let i=0;
+  let n=str.array_len(results);
+  loop{
+    if i>=n{ break }else{
+      let r=str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all=false }else{};
+      i=i+1
+    }
+  };
+  <all
+}

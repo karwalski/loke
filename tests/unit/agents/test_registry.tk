@@ -1,0 +1,163 @@
+// T12.3 — Agent registry unit tests
+// Verifies new_registry, register, find, list, list_enabled, enable, disable,
+// record_run, and get_runs behaviour.
+
+m=tests.unit.agents.test_registry;
+
+i=areg:core.agents.registry;
+i=at:core.agents.types;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(n:str):$result{ <$result{name:n;passed:true;message:"ok"} }
+f=fail(n:str;msg:str):$result{ <$result{name:n;passed:false;message:msg} }
+
+f=assert_eq(n:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(n) }else{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(n:str;v:bool):$result{
+  if v{ <pass(n) }else{ <fail(n;"expected true") }
+}
+
+f=assert_false(n:str;v:bool):$result{
+  if !v{ <pass(n) }else{ <fail(n;"expected false") }
+}
+
+f=assert_int_eq(n:str;got:i32;want:i32):$result{
+  if got == want{ <pass(n) }else{
+    <fail(n;str.concat("want=";str.concat(str.from_int(want);str.concat(" got=";str.from_int(got)))))
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results = @($result)[];
+
+  // T12.3-a: fresh registry has zero agents
+  let reg = areg.new_registry();
+  let initial_list = areg.list(reg);
+  results = str.array_push(results;assert_int_eq("fresh registry has zero agents";initial_list.len;0));
+
+  // T12.3-b: after register, list count increases by 1
+  let agent_a = at.new_agent("agent-alpha";"Alpha Agent";"Summarises daily reports";"Summarise the following: {{input}}");
+  areg.register(reg;agent_a)|{
+    $ok:_ {};
+    $err:e { log.warn(str.concat("register failed: ";e.message);"test";"") }
+  };
+  let after_one = areg.list(reg);
+  results = str.array_push(results;assert_int_eq("after register count is 1";after_one.len;1));
+
+  // T12.3-c: register second agent, count becomes 2
+  let agent_b = at.new_agent("agent-beta";"Beta Agent";"Classifies tickets";"Classify this ticket: {{input}}");
+  areg.register(reg;agent_b)|{
+    $ok:_ {};
+    $err:e { log.warn(str.concat("register failed: ";e.message);"test";"") }
+  };
+  let after_two = areg.list(reg);
+  results = str.array_push(results;assert_int_eq("after second register count is 2";after_two.len;2));
+
+  // T12.3-d: find("agent-alpha") returns correct agent
+  let found_a = areg.find(reg;"agent-alpha")|{
+    $ok:a { <a };
+    $err:e { <at.new_agent("";"";"";"") }
+  };
+  results = str.array_push(results;assert_eq("find returns correct name";found_a.name;"Alpha Agent"));
+  results = str.array_push(results;assert_eq("find returns correct id";found_a.id;"agent-alpha"));
+
+  // T12.3-e: agent struct has name field
+  results = str.array_push(results;assert_true("agent has non-empty name";str.len(found_a.name) > 0));
+
+  // T12.3-f: agent struct has description field
+  results = str.array_push(results;assert_eq("agent has description field";found_a.description;"Summarises daily reports"));
+
+  // T12.3-g: find("unknown_xyz") returns error
+  let not_found = areg.find(reg;"unknown_xyz")|{
+    $ok:a { <false };
+    $err:e { <true }
+  };
+  results = str.array_push(results;assert_true("find unknown returns error";not_found));
+
+  // T12.3-h: duplicate name registration — register agent-alpha again
+  //   The registry appends; both entries coexist (no overwrite guard in register).
+  //   Verify count increases to 3 (documents actual behaviour: append, not replace).
+  let agent_a_dup = at.new_agent("agent-alpha";"Alpha Agent v2";"Duplicate registration test";"Prompt: {{input}}");
+  let dup_result = areg.register(reg;agent_a_dup)|{
+    $ok:_ { <"ok" };
+    $err:e { <str.concat("err:";e.message) }
+  };
+  let after_dup = areg.list(reg);
+  // register does not block duplicates — it appends; count becomes 3
+  results = str.array_push(results;assert_int_eq("duplicate name appended, count is 3";after_dup.len;3));
+
+  // T12.3-i: register agent with empty name returns error
+  let agent_no_name = at.new_agent("";"";"";"some prompt");
+  let bad_reg = areg.register(reg;agent_no_name)|{
+    $ok:_ { <"ok" };
+    $err:e { <"err" }
+  };
+  results = str.array_push(results;assert_eq("empty name register returns error";bad_reg;"err"));
+
+  // T12.3-j: register agent with empty prompt_template returns error
+  let agent_no_prompt = at.new_agent("agent-noprompt";"No Prompt Agent";"desc";"");
+  let bad_prompt = areg.register(reg;agent_no_prompt)|{
+    $ok:_ { <"ok" };
+    $err:e { <"err" }
+  };
+  results = str.array_push(results;assert_eq("empty prompt_template register returns error";bad_prompt;"err"));
+
+  // T12.3-k: new_agent defaults — enabled=false, requires_approval=true
+  let agent_defaults = at.new_agent("agent-defaults";"Defaults Agent";"Check defaults";"Do: {{input}}");
+  results = str.array_push(results;assert_false("new_agent enabled defaults to false";agent_defaults.enabled));
+  results = str.array_push(results;assert_true("new_agent requires_approval defaults to true";agent_defaults.requires_approval));
+
+  // T12.3-l: enable then list_enabled shows agent
+  let reg2 = areg.new_registry();
+  let agent_c = at.new_agent("agent-gamma";"Gamma Agent";"Enabled test";"Process: {{input}}");
+  areg.register(reg2;agent_c)|{
+    $ok:_ {};
+    $err:e {}
+  };
+  areg.enable(reg2;"agent-gamma")|{
+    $ok:_ {};
+    $err:e { log.warn("enable failed";"test";"") }
+  };
+  let enabled_list = areg.list_enabled(reg2);
+  results = str.array_push(results;assert_int_eq("list_enabled shows 1 after enable";enabled_list.len;1));
+
+  // T12.3-m: disable removes agent from list_enabled
+  areg.disable(reg2;"agent-gamma")|{
+    $ok:_ {};
+    $err:e { log.warn("disable failed";"test";"") }
+  };
+  let disabled_list = areg.list_enabled(reg2);
+  results = str.array_push(results;assert_int_eq("list_enabled shows 0 after disable";disabled_list.len;0));
+
+  // T12.3-n: record_run and get_runs
+  let run1 = at.new_run("agent-gamma";"manual");
+  areg.record_run(reg2;run1);
+  let runs = areg.get_runs(reg2;"agent-gamma");
+  results = str.array_push(results;assert_int_eq("get_runs returns 1 run";runs.len;1));
+
+  let all = true;
+  let i = 0;
+  let n = str.array_len(results);
+  loop{
+    if i >= n{ break }else{
+      let r = str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all = false }else{};
+      i = i+1
+    }
+  };
+  <all
+}

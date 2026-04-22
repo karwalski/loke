@@ -616,6 +616,147 @@ loke is local-first and single-user by design. The companion device support (F8)
 
 ---
 
+# Epic T: Test Suite
+
+*Comprehensive behavioural test coverage for every module. Tests verify runtime correctness — not just that files compile, but that functions return expected values for known inputs. Each story produces one or more `.tk` test files under `tests/unit/`, `tests/integration/`, or `tests/e2e/`. Every test file exposes a `run_all():bool` entry point that logs `PASS`/`FAIL` per assertion and returns `true` only if every assertion passes.*
+
+## T1 — Privacy Core
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T1.1 | M | Done | `tests/unit/privacy/test_regex.tk` — PII detection: email (`john@example.com`), AU phone (`0412 345 678`), US phone (`(555) 123-4567`), credit card (`4111 1111 1111 1111`), AU TFN (`123 456 789`), AU ABN (`51 824 753 556`), API key (`sk-ant-...`), IPv4 (`192.168.1.1`); verify entity_type, sensitivity level, and placeholder format `[TYPE_N]`; verify clean text returns zero entities and `PUBLIC` sensitivity |
+| T1.2 | S | Done | `tests/unit/privacy/test_placeholder.tk` — `make_placeholder("email", 1)` → `"[EMAIL_1]"`; `make_placeholder("phone_au", 3)` → `"[PHONE_AU_3]"`; `new_map()` returns empty entries; `add_entry` + `restore` round-trips original value; multiple entries restored independently; restore on text with no placeholder returns text unchanged |
+| T1.3 | S | | `tests/unit/privacy/test_placeholder_store.tk` — add entry and retrieve by placeholder; retrieve unknown placeholder returns none; duplicate placeholder overwrites; `restore_all` replaces every placeholder in a string; store with zero entries returns text unchanged |
+| T1.4 | S | Done | `tests/unit/privacy/test_patterns.tk` — all `pat_*` constants are non-empty strings; `pat_email` contains `@`; `pat_credit_card` contains a digit character class; `pat_au_tfn` and `pat_au_abn` are distinct; none of the patterns is identical to another |
+| T1.5 | M | Done | `tests/unit/privacy/test_pipeline.tk` — full pipeline run: input with email → anonymised output does not contain original email → restore returns original; pipeline with no PII leaves text unchanged; pipeline preserves non-PII context around replaced value; chained pipeline (two PII types) restores both; sensitivity escalates correctly from PUBLIC → CONFIDENTIAL on email detection |
+| T1.6 | S | Done | `tests/unit/privacy/test_guardian.tk` — `build_system_prompt("")` returns non-empty string; `is_guardian_present` returns true on the built system prompt; `is_guardian_present` returns false on empty string; guardian text contains "GUARDIAN" keyword; custom system prompt is included in built prompt |
+| T1.7 | S | | `tests/unit/privacy/test_content.tk` — content type detected correctly for CSV, JSON, markdown, plaintext; content with `<html>` tag detected as HTML; empty string returns a valid (not-crash) result; very long string (1000+ chars) handled without truncation |
+| T1.8 | S | | `tests/unit/privacy/test_template.tk` — template with no substitutions returns base string; template with one `{{field}}` substituted; template with multiple fields substituted in order; missing field key leaves placeholder intact; `to_json` on a built template produces valid JSON shape |
+
+## T2 — Router
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T2.1 | M | Done | `tests/unit/router/test_sensitivity.tk` — `score_from_pii($public, 0)` → PUBLIC; `score_from_pii($confidential, 1)` → CONFIDENTIAL; `score_from_pii($confidential, 3)` → RESTRICTED (escalation); `score_from_pii($restricted, 1)` → RESTRICTED; `score_from_content("password reset")` → RESTRICTED; `score_from_content("bank account details")` → RESTRICTED; `score_from_content("patient diagnosis")` → CONFIDENTIAL; `score_from_content("the weather today")` → PUBLIC; `combine($confidential, $restricted)` → RESTRICTED; `combine($public, $internal)` → INTERNAL; `can_use_cloud($restricted)` → false; `can_use_cloud($public)` → true; `level_to_str($confidential)` → "CONFIDENTIAL" |
+| T2.2 | M | Done | `tests/unit/router/test_selector.tk` — selection with `prefer_local=true` and RESTRICTED sensitivity picks local/Ollama model; selection with PUBLIC sensitivity and cloud allowed returns a model with cost > 0 or local fallback; selection criteria with `max_cost_per_1k=0.001` excludes expensive models; empty registry returns error variant; `$instant` tolerance prefers interactive tier; `$background` tolerance accepts background tier |
+| T2.3 | M | Done | `tests/unit/router/test_router.tk` — `new_config("http://127.0.0.1:11434")` sets `prefer_local=true`; `provider_from_str("anthropic")` → `$anthropic`; `provider_from_str("unknown")` → `$local`; `ctx_from_model("claude-3-5-sonnet-20241022")` → 200000; `ctx_from_model("gpt-4o-mini")` → 128000; `cost_in_from_model("gpt-4o-mini")` → 0.00015; `estimate_latency` for `$interactive` tier → 500 ms |
+| T2.4 | S | Done | `tests/unit/router/test_escalation.tk` — escalation path selected when sensitivity is RESTRICTED; non-escalation path selected for PUBLIC; escalation message contains model name; escalation result includes reason field |
+| T2.5 | S | Done | `tests/unit/router/test_intent.tk` — intent classify on code-like text returns `$code_generation` or `$code_review` task; classify on "summarise this document" returns `$summarisation`; confidence is between 0.0 and 1.0 inclusive; result includes task and confidence fields |
+
+## T3 — Optimiser
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T3.1 | M | Done | `tests/unit/optimiser/test_cache.tk` — `default_config("/tmp")` sets threshold 0.92 and TTL 86400; stats start at zeros; hit rate = hits/(hits+misses); eviction increments evictions counter; cache result with score above threshold is a hit; result with score below threshold is a miss |
+| T3.2 | M | Done | `tests/unit/optimiser/test_budget.tk` — budget with 1000 token limit and 900 token prompt returns 100 remaining; budget at exactly limit returns 0 remaining; budget exceeded returns error/negative; token count estimate for known short string is non-zero; token count for empty string is 0 |
+| T3.3 | M | Done | `tests/unit/optimiser/test_toon.tk` — TOON profile for dataset with 3 columns contains all 3 column names; profile marks PII columns as SUPPRESSED; profile preserves non-PII column stats; `to_json` output contains "toon_profile" key; empty dataset produces valid (empty) profile |
+
+## T4 — Governance Core
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T4.1 | M | Done | `tests/unit/governance/test_kill_switch.tk` — `is_engaged` returns false on fresh state; after `engage`, `is_engaged` returns true; `release` sets `is_engaged` to false; `format_widget` on engaged state contains "ENGAGED"; `format_widget` on disengaged state contains "DISENGAGED"; `engage` with auto_release_minutes=0 sets `auto_release_at=0`; `check_auto_release` on non-auto state returns false |
+| T4.2 | M | Done | `tests/unit/governance/test_quota.tk` — quota not exceeded when usage below limit; quota exceeded when usage equals limit; quota exceeded when usage above limit; `remaining` returns correct value; `reset` zeros the counter; quota for a non-existent namespace returns the full limit |
+| T4.3 | M | Done | `tests/unit/governance/test_policy.tk` — policy loaded from valid JSON is valid; `evaluate` on matching rule returns action; `evaluate` on non-matching rule returns default; empty rule set returns allow; conflicting rules respect priority order; policy with missing required field returns error |
+| T4.4 | M | Done | `tests/unit/governance/test_rules_engine.tk` — rule with `all` conditions passes only when all conditions met; rule with `any` condition passes when at least one condition met; rule with no conditions always passes; rule with contradictory conditions never passes; `evaluate_all` returns first matching rule action |
+| T4.5 | S | Done | `tests/unit/governance/test_gateway.tk` — gateway allows PUBLIC request through; gateway blocks RESTRICTED request when kill switch engaged; gateway blocks request exceeding quota; gateway logs decision reason; blocked request returns `$loke_err` variant |
+| T4.6 | S | Done | `tests/unit/governance/test_compliance.tk` — AU default regulations loaded correctly; GDPR defaults loaded correctly; `is_compliant` returns true for clean data; `is_compliant` returns false for data with RESTRICTED PII and no justification; compliance report includes regulation name |
+
+## T5 — Storage
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T5.1 | M | Done | `tests/unit/storage/test_settings.tk` — `set_str`/`get_str` round-trip; `set_bool`/`get_bool` round-trip; `get_str` on missing key returns error; `set_int`/`get_int` round-trip; overwrite of existing key returns updated value; `get_bool` on non-bool value returns error |
+| T5.2 | M | Done | `tests/unit/storage/test_audit.tk` — append entry increments count; filter by type returns only matching entries; filter by date range returns only in-range entries; `to_json` on entry includes type, timestamp, actor fields; audit trail is append-only (no delete function); CSV export contains header row |
+| T5.3 | S | Done | `tests/unit/storage/test_ephemeral.tk` — `store` then `retrieve` returns value before TTL; `retrieve` after TTL expiry returns none; `wipe` removes entry; `wipe_expired` removes only expired entries; `wipe_all` leaves store empty; store with empty key returns error |
+| T5.4 | S | Done | `tests/unit/storage/test_keychain.tk` — `store` and `retrieve` round-trip API key; `retrieve` unknown service returns none; `delete` makes subsequent `retrieve` return none; service name is preserved exactly |
+
+## T6 — Memory
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T6.1 | M | **Done** | `tests/unit/memory/test_palace.tk` — new palace has zero wings; add wing increases count; retrieve wing by name returns correct wing; retrieve unknown wing returns none; wing has correct type and name; palace `to_json` contains wings array |
+| T6.2 | M | **Done** | `tests/unit/memory/test_graph.tk` — `add_node` increases node count; `add_relation` creates edge between existing nodes; `query_facts` with subject filter returns only matching facts; `query_facts` with predicate filter returns only matching relations; `detect_contradictions` returns empty for non-contradicting relations; `detect_contradictions` returns entry when same relation has conflicting valid_to for same from+relation; `visualise_dot` output starts with "digraph" |
+| T6.3 | M | **Done** | `tests/unit/memory/test_decay.tk` — access count increases relevance score; old last-accessed time decreases score; score is between 0.0 and 1.0 inclusive; `should_evict` returns true when score below threshold; `should_evict` returns false when score above threshold; `apply_decay` reduces score over time |
+| T6.4 | S | **Done** | `tests/unit/memory/test_aaak.tk` — AAAK context built from non-empty diary has non-empty output; AAAK context for empty diary is empty string or minimal header; `to_aaak` on single entry includes entry content; format includes "Agents", "Actions", "Artefacts", "Knowledge" sections |
+
+## T7 — Models & Inference
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T7.1 | M | Done | `tests/unit/models/test_registry.tk` — new registry has default models; lookup by ID returns correct model; lookup by unknown ID returns none/error; add model increases count; models can be filtered by provider; models can be filtered by tier; `list_all` returns all registered models |
+| T7.2 | M | Done | `tests/unit/models/test_tiers.tk` — model with latency ≤ 500 ms classified as `$interactive`; model with latency ≤ 5000 ms classified as `$considered`; model above 5000 ms classified as `$background`; tier label for `$interactive` is "interactive"; Q4 memory estimate for 7B model is < 8 GB; FP16 estimate for 7B model is > Q4 estimate |
+| T7.3 | S | Done | `tests/unit/models/test_hardware.tk` — `detect()` returns non-empty profile; `total_memory_gb` uses unified_memory when set; `total_memory_gb` sums ram+vram when unified=0; `summary()` is a non-empty human-readable string; `to_json` contains all expected keys |
+
+## T8 — Platform HTTP, Plugin, i18n, Integration, Error
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T8.1 | M | Done | `tests/unit/platform/test_http_response.tk` — `success(200, "{}")` envelope has `ok=true`; `error_resp(404, "not found")` has `ok=false` and correct code; `paginated` result includes `total`, `page`, `per_page` fields; error response does not include internal stack trace; `to_json` for success envelope is valid JSON shape |
+| T8.2 | M | Done | `tests/unit/platform/test_http_router.tk` — register route and find exact match returns it; find unknown path returns none; prefix match returns correct route when exact not found; multiple routes registered — each findable independently; `list_routes` count matches registered count |
+| T8.3 | S | Done | `tests/unit/platform/test_http_security.tk` — `security_headers()` contains CSP header; output contains X-Frame-Options; output contains X-Content-Type-Options; `default_config()` has HSTS enabled; CSP includes "default-src 'self'" |
+| T8.4 | M | Done | `tests/unit/platform/test_plugin_registry.tk` — register plugin increases count; `get` by name returns correct plugin; `get` unknown name returns none; `all_routes` aggregates routes from all plugins; `all_nav_items` aggregates nav items; `all_health_checks` aggregates health checks; duplicate plugin name is handled without crash |
+| T8.5 | M | Done | `tests/unit/platform/test_plugin_anonymisation.tk` — AU TFN pattern registered by default; AU ABN pattern registered by default; AU Medicare pattern registered by default; `find_by_type("au_tfn")` returns correct pattern; pattern confidence for Medicare is 0.90; `list_patterns` count ≥ 3 |
+| T8.6 | S | Done | `tests/unit/platform/test_plugin_contracts.tk` — `current_version()` returns `{0,1,0}`; `is_compatible({0,1,0}, {0,0,1})` → true (same major, higher minor); `is_compatible({1,0,0}, {0,9,0})` → false (different major); `version_string({1,2,3})` → "1.2.3"; `list_breaking_changes()` returns empty array for 0.1.0 |
+| T8.7 | M | Done | `tests/unit/platform/test_i18n_translator.tk` — `t("loke.privacy.on")` returns non-empty string after loading en-AU; `t("nonexistent.key")` returns the key itself as fallback; `t_n("loke.entities", 1)` uses singular form; `t_n("loke.entities", 3)` uses plural form; `t_params("loke.greeting", ["Alice"])` substitutes `{{0}}` with "Alice"; `set_locale`/`get_locale` round-trip; `format_number(1234.5)` returns "1234.50" |
+| T8.8 | M | Done | `tests/unit/platform/test_sanitise.tk` — `strip_html("<b>hello</b>")` → "&lt;b&gt;hello&lt;/b&gt;" (entities); `strip_tags("<b>hello</b>")` → "hello"; `sql_escape("O'Brien")` → "O''Brien"; `prevent_log_injection("line1\nline2")` → "line1 line2"; `clamp_length("hello", 3)` → "hel…"; `clamp_length("hi", 10)` → "hi" unchanged |
+| T8.9 | M | Done | `tests/unit/platform/test_adapter.tk` — new adapter starts in "disconnected" state; `record_failure` increments failure count; after threshold failures circuit opens; `record_success` resets to "connected"; `is_open` returns true when open, false when closed; `status_label` matches state |
+| T8.10 | M | Done | `tests/unit/platform/test_error_server.tk` — `new_error` creates error with code and message; `to_json` does not contain internal field; `to_json` contains code and message; `log_error` does not crash; error with same code+message is equal |
+
+## T9 — CLI & Browser Workspace
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T9.1 | M | Done | `tests/unit/cli/test_sessions.tk` — `new_store()` has zero sessions; `create` adds session; `activate` sets that session as active; `deactivate` clears active; `get_active` returns none when no active session; `list` returns all sessions; `find` by id returns correct session; `find` unknown id returns none; `format_list` for empty store returns a non-empty header string |
+| T9.2 | M | Done | `tests/unit/cli/test_code_preprocess.tk` — `detect_language(".py")` → "python"; `detect_language(".ts")` → "typescript"; `detect_language(".unknown")` → "unknown"; `find_proprietary_patterns` on text with `INTERNAL_ONLY` marker returns ≥ 1 match; `scrub_secrets` on text with `sk-` key removes it; `scrub_secrets` on clean text returns text unchanged; profile result has language field set |
+| T9.3 | M | Done | `tests/unit/browser/test_tabs.tk` — `new_store()` has zero tabs; `open` adds tab; `close` removes tab; `activate` sets active_id; `pin` toggles pinned state; close active tab activates next available; `list_tabs` count matches open count; `add_bookmark` and `remove_bookmark` update bookmarks list |
+| T9.4 | M | Done | `tests/unit/browser/test_extractor.tk` — `strip_html_tags("<p>hello</p>")` → "hello"; `detect_pii` on text with email address returns true; `detect_pii` on clean text returns false; `detect_pii` on text with digit run > 8 returns true; extraction result includes content and kind fields |
+| T9.5 | M | Done | `tests/unit/browser/test_privacy_metadata.tk` — `resolve_page_sensitivity` with RESTRICTED attr → RESTRICTED; CONFIDENTIAL + PUBLIC → CONFIDENTIAL (takes highest); no attrs → PUBLIC; `parse_robots_txt` with GPTBot Disallow sets `disallow_ai=true`; `parse_robots_txt` with empty content sets `disallow_ai=false`; compliance note is non-empty string |
+
+## T10 — Governance src/
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T10.1 | M | Done | `tests/unit/governance_src/test_kill_switch.tk` — `enable_global` blocks all; `disable_global` unblocks; `enable_provider("anthropic")` blocks that provider; `is_blocked("anthropic", "any")` → true after enable; `is_blocked("ollama", "any")` → false when only anthropic blocked; `list_active` returns all active entries; `fallback_message` returns non-empty string |
+| T10.2 | M | Done | `tests/unit/governance_src/test_incidents.tk` — `create` returns incident with id and open status; `append` makes incident retrievable; `resolve` sets resolved=true; `list_open` excludes resolved; `list_all` includes both; `get` unknown id returns none; `post_incident_template` is a non-empty string |
+| T10.3 | M | Done | `tests/unit/governance_src/test_justification.tk` — `submit` creates justification; `get` returns submitted justification; `approve` sets approved=true; `suggest_simpler` returns ≥ 1 built-in simpler paths; simpler path for rule-based use case suggests rule engine; `to_json` contains use_case_id and rationale |
+| T10.4 | M | Done | `tests/unit/governance_src/test_ownership.tk` — `assign` stores owner; `get` returns assigned owner; `has_all_owners` returns false when role missing; `has_all_owners` returns true when all required roles assigned; `missing_roles` returns only unassigned roles; `list` count matches assigned count |
+| T10.5 | M | Done | `tests/unit/governance_src/test_tier_dashboard.tk` — `new_report` has all-zero stats; `update_interactive` increments interactive count; percentages recalculate correctly after update (sum = 100%); `report_to_json` contains all three tier keys; running averages update after second call; zero total does not divide by zero |
+
+## T11 — MCP Broker & src/memory
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T11.1 | M | Done | `tests/unit/mcp_broker/test_config.tk` — `new_server` with allowlist blocks unlisted tool; `new_server` with empty allowlist allows any tool; `is_tool_allowed` with denylist blocks denied tool; `is_tool_allowed` with both allow and deny — deny wins; `to_json` contains name, transport, enabled fields |
+| T11.2 | M | Done | `tests/unit/mcp_broker/test_registry.tk` — register server increases count; `get_server` by name returns correct entry; `get_server` unknown returns none; `set_status` updates status; `set_tools` stores tool list; `list_tools` returns prefixed tool names (`server_name.tool_name`); `list_servers` count matches registered |
+| T11.3 | M | Done | `tests/unit/memory_src/test_knowledge_graph.tk` — `new_graph` has zero nodes; `add_node` increases count; `add_relation` creates edge; `query_facts` with subject filter returns only matching; temporal query with `as_of` excludes future relations; `detect_contradictions` empty for no overlap; contradictions detected when two relations have conflicting valid_to; `visualise_dot` starts with "digraph" |
+| T11.4 | M | Done | `tests/unit/memory_src/test_agent_diary.tk` — `get_or_create_diary` for new agent has zero entries; `append_entry` adds entry; `get_entries` returns most-recent-first; `get_recent(1)` returns only the latest; `build_startup_context` for non-empty diary returns non-empty string; `record_feedback` on matching entry updates feedback field; `to_aaak` on single entry is non-empty |
+
+## T12 — Feedback, Agents, Providers
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T12.1 | M | Done | `tests/unit/feedback/test_store.tk` — `append` adds feedback entry; `list` returns all entries; filter by feature_area returns only matching; filter by thumbs_down returns only negative; entry has no prompt content (privacy invariant); `count` matches appended entries; `clear` empties store |
+| T12.2 | M | Done | `tests/unit/feedback/test_learning.tk` — thumbs-down on model decrements its score; false-positive PII reduces confidence for that pattern; high thumbs-down on warning type triggers sensitivity review flag; `list_adaptations` contains description of each change; `revert` removes adaptation |
+| T12.3 | M | Done | `tests/unit/agents/test_registry.tk` — register agent increases count; `get` by name returns correct agent; `get` unknown returns none; duplicate name registration returns error; `list` returns all agents; agent has name, description, and capability fields |
+| T12.4 | M | Done | `tests/unit/providers/test_dispatcher.tk` — dispatch to "ollama" calls Ollama provider path; dispatch to unknown provider returns error; dispatch with kill switch engaged returns blocked error; response includes model and provider fields; `to_json` on response is valid shape |
+
+## T13 — a11y Testing
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T13.1 | M | Done | `tests/unit/a11y/test_scanner.tk` — HTML with `<img>` missing `alt` produces VIOLATION; HTML with all images having `alt` produces no violations; `<button>` without label produces VIOLATION; well-formed semantic HTML produces zero violations; `assert_no_violations` returns true for clean HTML; `result_to_json` contains violations array; violation includes element and message fields |
+
+## T14 — Integration & E2E
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| T14.1 | L | Done | `tests/integration/test_health_api.tk` — `GET /api/health` returns `{ok: true}` shape; response includes version field; Ollama status field is present (may be "offline" in test); response time < 100 ms; endpoint accessible without authentication |
+| T14.2 | L | Done | `tests/integration/test_pipeline_api.tk` — POST to `/api/pipeline` with clean text returns response with no PII; POST with email in body returns anonymised prompt; POST with RESTRICTED content is blocked or requires approval; response includes session_id; response includes sensitivity classification |
+| T14.3 | L | Done | `tests/e2e/test_moke_flow.tk` — dataset load stores headers and rows in session; privacy pipeline run on dataset with PII returns anonymised schema; confirm page receives local_view and llm_view; restore after LLM response returns original values; sensitivity classification flows through all stages correctly |
+
+---
+
 # SUMMARY
 
 | Layer | Epics | Stories | Done/Spec done |
@@ -629,4 +770,5 @@ loke is local-first and single-user by design. The companion device support (F8)
 | Memory Palace (M1–M2) | 2 | 11 | 7 |
 | Cross-cutting (X1–X5, W1) | 6 | 30 | 30 |
 | Demo — moke (MK1–MK7) | 7 | 34 | 34 |
-| **Total** | **41** | **215** | **193** |
+| Test Suite (T1–T14) | 14 | 53 | 0 |
+| **Total** | **55** | **268** | **193** |

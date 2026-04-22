@@ -1,0 +1,180 @@
+// T4.4 — Rules engine unit tests.
+// Verifies evaluate(), evaluate_all(), and default_rules() behaviour.
+
+m=tests.unit.governance.test_rules_engine;
+
+i=re:core.governance.rules_engine;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;v:bool):$result{
+  if v{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;v:bool):$result{
+  if !v{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results=@($result)[];
+
+  // Shared eval context: sensitivity=3, cloud-premium, count=50, hour=14, scope="internal"
+  let ctx_high=re.$eval_context{
+    sensitivity:3;
+    model_tier:"cloud-premium";
+    request_count:50;
+    hour_of_day:14;
+    scope:"internal"
+  };
+
+  // T4.4-a: $and rule — all conditions met → matched=true
+  let and_rule=re.$compound_rule{
+    id:"test-and-match";
+    name:"Test AND match";
+    logic:re.$rule_op.$and;
+    conditions:@(
+      re.$condition{field:"sensitivity";op:"eq";value:"3"};
+      re.$condition{field:"model_tier";op:"contains";value:"cloud"}
+    );
+    action:"warn";
+    severity:"high"
+  };
+  let and_result=re.evaluate(and_rule;ctx_high);
+  results=str.array_push(results;assert_true("AND rule all-match → matched";and_result.matched));
+  results=str.array_push(results;assert_eq("AND rule action is warn";"warn";and_result.action));
+
+  // T4.4-b: $and rule — one condition fails → matched=false
+  let ctx_low=re.$eval_context{
+    sensitivity:0;
+    model_tier:"local";
+    request_count:5;
+    hour_of_day:10;
+    scope:"internal"
+  };
+  let and_miss_result=re.evaluate(and_rule;ctx_low);
+  results=str.array_push(results;assert_false("AND rule partial-miss → not matched";and_miss_result.matched));
+  results=str.array_push(results;assert_eq("AND miss action defaults to allow";"allow";and_miss_result.action));
+
+  // T4.4-c: $or rule — only one condition met → matched=true
+  let or_rule=re.$compound_rule{
+    id:"test-or-match";
+    name:"Test OR match";
+    logic:re.$rule_op.$or;
+    conditions:@(
+      re.$condition{field:"sensitivity";op:"eq";value:"3"};
+      re.$condition{field:"model_tier";op:"eq";value:"cloud-economy"}
+    );
+    action:"throttle";
+    severity:"medium"
+  };
+  // ctx_high has sensitivity=3 (matches first) but model_tier="cloud-premium" (misses second)
+  let or_result=re.evaluate(or_rule;ctx_high);
+  results=str.array_push(results;assert_true("OR rule one-match → matched";or_result.matched));
+  results=str.array_push(results;assert_eq("OR rule action is throttle";"throttle";or_result.action));
+
+  // T4.4-d: $or rule — no conditions met → matched=false
+  let or_miss_result=re.evaluate(or_rule;ctx_low);
+  results=str.array_push(results;assert_false("OR rule no-match → not matched";or_miss_result.matched));
+
+  // T4.4-e: $not rule — condition is false → not(false)=true → matched
+  let not_rule=re.$compound_rule{
+    id:"test-not-match";
+    name:"Test NOT match";
+    logic:re.$rule_op.$not;
+    conditions:@(
+      re.$condition{field:"sensitivity";op:"eq";value:"99"}
+    );
+    action:"deny";
+    severity:"high"
+  };
+  // sensitivity=3, checking eq "99" → false → NOT false = true
+  let not_result=re.evaluate(not_rule;ctx_high);
+  results=str.array_push(results;assert_true("NOT rule condition-false → matched";not_result.matched));
+
+  // T4.4-f: $not rule — condition is true → not(true)=false → not matched
+  let not_hit_rule=re.$compound_rule{
+    id:"test-not-hit";
+    name:"Test NOT miss";
+    logic:re.$rule_op.$not;
+    conditions:@(
+      re.$condition{field:"sensitivity";op:"eq";value:"3"}
+    );
+    action:"deny";
+    severity:"high"
+  };
+  let not_hit_result=re.evaluate(not_hit_rule;ctx_high);
+  results=str.array_push(results;assert_false("NOT rule condition-true → not matched";not_hit_result.matched));
+
+  // T4.4-g: $and rule with empty conditions → all_pass stays true → matched
+  let empty_and_rule=re.$compound_rule{
+    id:"test-empty-and";
+    name:"Empty AND";
+    logic:re.$rule_op.$and;
+    conditions:@();
+    action:"allow";
+    severity:"low"
+  };
+  let empty_and_result=re.evaluate(empty_and_rule;ctx_high);
+  results=str.array_push(results;assert_true("empty AND conditions → matched (vacuously true)";empty_and_result.matched));
+
+  // T4.4-h: evaluate_all returns only matched rules
+  let rules=@(and_rule;or_rule;not_rule);
+  let matched_results=re.evaluate_all(rules;ctx_high);
+  // and_rule, or_rule, and not_rule should all match against ctx_high
+  results=str.array_push(results;assert_true("evaluate_all returns matched results";str.array_len(matched_results)>=1));
+
+  // T4.4-i: default_rules() returns non-empty list
+  let defaults=re.default_rules();
+  results=str.array_push(results;assert_true("default_rules non-empty";str.array_len(defaults)>0));
+
+  // T4.4-j: confidential-external default rule matches external scope + confidential
+  let ctx_ext=re.$eval_context{
+    sensitivity:2;
+    model_tier:"cloud-standard";
+    request_count:10;
+    hour_of_day:11;
+    scope:"external-partner"
+  };
+  let ext_matches=re.evaluate_all(defaults;ctx_ext);
+  let has_deny=false;
+  let di=0;
+  let dn=str.array_len(ext_matches);
+  loop{
+    if di>=dn{ break }else{
+      let er=str.array_get(ext_matches;di);
+      if str.eq(er.action;"deny"){ let has_deny=true }else{};
+      di=di+1
+    }
+  };
+  results=str.array_push(results;assert_true("external+confidential scope triggers deny rule";has_deny));
+
+  let all=true;
+  let i=0;
+  let n=str.array_len(results);
+  loop{
+    if i>=n{ break }else{
+      let r=str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all=false }else{};
+      i=i+1
+    }
+  };
+  <all
+}

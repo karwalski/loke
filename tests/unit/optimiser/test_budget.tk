@@ -1,0 +1,136 @@
+// T3.2 — Token budget manager unit tests
+// Tests budget construction, default limits, check logic (allowed/denied),
+// remaining token calculation, record accumulation, period reset, and format_usage.
+
+m=tests.unit.optimiser.test_budget;
+
+i=budget:optimiser.budget;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;v:bool):$result{
+  if v{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;v:bool):$result{
+  if !v{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=assert_int_eq(name:str;got:i32;want:i32):$result{
+  if got == want{ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(str.from_int(want);str.concat(" got=";str.from_int(got)))))
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results = @($result)[];
+
+  // T3.2-a: default limits contains at least one entry
+  let defaults=budget.default_limits();
+  results=str.array_push(results;assert_true("default limits non-empty";str.array_len(defaults) > 0));
+
+  // T3.2-b: first default limit has max_tokens = 100000 (daily)
+  let first_lim=str.array_get(defaults;0);
+  results=str.array_push(results;assert_true("daily max_tokens 100000";first_lim.max_tokens == 100000));
+
+  // T3.2-c: first default limit has max_cost_usd = 5.0
+  results=str.array_push(results;assert_true("daily max_cost_usd 5.0";first_lim.max_cost_usd == 5.0));
+
+  // T3.2-d: first default limit has warn_at_pct = 80.0
+  results=str.array_push(results;assert_true("daily warn_at_pct 80.0";first_lim.warn_at_pct == 80.0));
+
+  // T3.2-e: new manager with default limits creates matching usage entries
+  let mgr=budget.new(defaults);
+  results=str.array_push(results;assert_true("manager usage count matches limits";str.array_len(mgr.usage) == str.array_len(mgr.limits)));
+
+  // T3.2-f: fresh manager usage tokens_used starts at zero
+  let first_usg=str.array_get(mgr.usage;0);
+  results=str.array_push(results;assert_true("initial tokens_used is 0";first_usg.tokens_used == 0));
+
+  // T3.2-g: fresh manager usage cost_usd starts at zero
+  results=str.array_push(results;assert_true("initial cost_usd is 0.0";first_usg.cost_usd == 0.0));
+
+  // T3.2-h: fresh manager usage request_count starts at zero
+  results=str.array_push(results;assert_true("initial request_count is 0";first_usg.request_count == 0));
+
+  // T3.2-i: check with 0 tokens on fresh manager is allowed
+  let chk_zero=budget.check(mgr;0;0.0);
+  results=str.array_push(results;assert_true("zero tokens allowed";chk_zero.allowed));
+
+  // T3.2-j: check with tokens well under limit is allowed
+  let chk_small=budget.check(mgr;1000;0.05);
+  results=str.array_push(results;assert_true("small request allowed";chk_small.allowed));
+
+  // T3.2-k: tokens_remaining reflects space within the tightest limit
+  // Daily limit is 100000; requesting 1000 means 99000 remaining
+  results=str.array_push(results;assert_true("tokens remaining 99000";chk_small.tokens_remaining == 99000));
+
+  // T3.2-l: check that exceeds token limit returns allowed=false
+  // Build a tight manager: single daily limit of 1000 tokens / $1.00
+  let tight_limit=budget.$budget_limit{
+    period:budget.$budget_period.$daily;
+    max_tokens:1000;
+    max_cost_usd:1.0;
+    warn_at_pct:80.0
+  };
+  let tight_mgr=budget.new(@(tight_limit));
+  let chk_exceed=budget.check(tight_mgr;1001;0.01);
+  results=str.array_push(results;assert_false("exceeding token limit not allowed";chk_exceed.allowed));
+
+  // T3.2-m: tokens_remaining is 0 when limit exceeded
+  results=str.array_push(results;assert_true("tokens_remaining 0 when exceeded";chk_exceed.tokens_remaining == 0));
+
+  // T3.2-n: reason string is non-empty when limit exceeded
+  results=str.array_push(results;assert_true("reason non-empty on exceed";str.len(chk_exceed.reason) > 0));
+
+  // T3.2-o: reason contains "token" when token limit exceeded
+  results=str.array_push(results;assert_true("reason mentions token";str.contains(chk_exceed.reason;"token")));
+
+  // T3.2-p: check that exceeds cost limit returns allowed=false
+  let chk_cost=budget.check(tight_mgr;500;1.01);
+  results=str.array_push(results;assert_false("exceeding cost limit not allowed";chk_cost.allowed));
+
+  // T3.2-q: check within limits returns reason "within budget"
+  let chk_ok=budget.check(tight_mgr;500;0.40);
+  results=str.array_push(results;assert_true("within budget reason";str.eq(chk_ok.reason;"within budget")));
+
+  // T3.2-r: format_usage output is a non-empty string
+  let fmt=budget.format_usage(mgr);
+  results=str.array_push(results;assert_true("format_usage non-empty";str.len(fmt) > 0));
+
+  // T3.2-s: format_usage contains "daily"
+  results=str.array_push(results;assert_true("format_usage contains daily";str.contains(fmt;"daily")));
+
+  // T3.2-t: format_usage contains "tokens"
+  results=str.array_push(results;assert_true("format_usage contains tokens";str.contains(fmt;"tokens")));
+
+  let all = true;
+  let i = 0;
+  let n = str.array_len(results);
+  loop{
+    if i >= n{ break }else{
+      let r = str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all = false }else{};
+      i = i+1
+    }
+  };
+  <all
+}

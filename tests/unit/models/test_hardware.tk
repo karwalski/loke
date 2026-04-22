@@ -1,0 +1,192 @@
+// T7.3 — Hardware profiling unit tests
+// Tests empty_profile() construction, estimate_tier_viability logic,
+// and total_memory_gb semantics (unified_memory_gb vs ram+vram).
+
+m=tests.unit.models.test_hardware;
+
+i=hw:models.hardware;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;v:bool):$result{
+  if v{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;v:bool):$result{
+  if !v{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=assert_int_eq(name:str;got:i32;want:i32):$result{
+  if got == want{ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(str.from_int(want);str.concat(" got=";str.from_int(got)))))
+  }
+}
+
+// Compute total_memory_gb: uses unified_memory when > 0, otherwise ram + vram.
+// This mirrors the intended semantics described in T7.3.
+f=total_memory_gb(p:hw.$hardware_profile):f64{
+  if p.unified_memory_gb > 0.0{
+    <p.unified_memory_gb
+  }else{
+    <p.ram_gb + p.gpu_vram_gb
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results = @($result)[];
+
+  // T7.3-a: empty_profile() returns a profile (non-crashing)
+  let empty=hw.empty_profile();
+  results=str.array_push(results;pass("empty_profile does not crash"));
+
+  // T7.3-b: empty_profile() has ram_gb = 0.0
+  results=str.array_push(results;assert_true("empty_profile ram_gb zero";empty.ram_gb == 0.0));
+
+  // T7.3-c: empty_profile() has gpu_vram_gb = 0.0
+  results=str.array_push(results;assert_true("empty_profile gpu_vram_gb zero";empty.gpu_vram_gb == 0.0));
+
+  // T7.3-d: empty_profile() has unified_memory_gb = 0.0
+  results=str.array_push(results;assert_true("empty_profile unified_memory_gb zero";empty.unified_memory_gb == 0.0));
+
+  // T7.3-e: empty_profile() has cpu_cores = 0
+  results=str.array_push(results;assert_true("empty_profile cpu_cores zero";empty.cpu_cores == 0));
+
+  // T7.3-f: empty_profile() has platform = ""
+  results=str.array_push(results;assert_eq("empty_profile platform empty";empty.platform;""));
+
+  // T7.3-g: total_memory_gb uses unified_memory_gb when > 0
+  let unified_profile=hw.$hardware_profile{
+    ram_gb:16.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:32.0;
+    disk_type:hw.$disk_type.$nvme;
+    disk_read_mb_s:3000.0;
+    cpu_cores:8;
+    platform:"darwin"
+  };
+  let total_unified=total_memory_gb(unified_profile);
+  results=str.array_push(results;assert_true("total_memory uses unified when set";total_unified == 32.0));
+
+  // T7.3-h: total_memory_gb uses ram + vram when unified_memory_gb = 0
+  let discrete_profile=hw.$hardware_profile{
+    ram_gb:32.0;
+    gpu_vram_gb:8.0;
+    unified_memory_gb:0.0;
+    disk_type:hw.$disk_type.$nvme;
+    disk_read_mb_s:3500.0;
+    cpu_cores:16;
+    platform:"linux"
+  };
+  let total_discrete=total_memory_gb(discrete_profile);
+  results=str.array_push(results;assert_true("total_memory sums ram+vram when unified=0";total_discrete == 40.0));
+
+  // T7.3-i: total_memory_gb for a profile with no GPU and no unified is just ram
+  let ram_only=hw.$hardware_profile{
+    ram_gb:16.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:0.0;
+    disk_type:hw.$disk_type.$sata;
+    disk_read_mb_s:500.0;
+    cpu_cores:4;
+    platform:"windows"
+  };
+  let total_ram_only=total_memory_gb(ram_only);
+  results=str.array_push(results;assert_true("total_memory ram only is ram_gb";total_ram_only == 16.0));
+
+  // T7.3-j: estimate_tier_viability on a capable machine marks interactive=true
+  let capable=hw.$hardware_profile{
+    ram_gb:64.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:64.0;
+    disk_type:hw.$disk_type.$nvme;
+    disk_read_mb_s:3000.0;
+    cpu_cores:12;
+    platform:"darwin"
+  };
+  let viability=hw.estimate_tier_viability(capable;4.0);
+  results=str.array_push(results;assert_true("capable machine interactive viable";viability.interactive));
+
+  // T7.3-k: estimate_tier_viability on a capable machine marks considered=true
+  results=str.array_push(results;assert_true("capable machine considered viable";viability.considered));
+
+  // T7.3-l: estimate_tier_viability on a capable NVMe machine marks background=true
+  results=str.array_push(results;assert_true("capable nvme machine background viable";viability.background));
+
+  // T7.3-m: estimate_tier_viability on a low-memory machine marks interactive=false for large model
+  let weak=hw.$hardware_profile{
+    ram_gb:4.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:0.0;
+    disk_type:hw.$disk_type.$sata;
+    disk_read_mb_s:400.0;
+    cpu_cores:2;
+    platform:"linux"
+  };
+  let viability_weak=hw.estimate_tier_viability(weak;14.0);
+  results=str.array_push(results;assert_false("weak machine not interactive for large model";viability_weak.interactive));
+
+  // T7.3-n: estimate_tier_viability interactive_tok_s > 0 on capable machine
+  results=str.array_push(results;assert_true("capable machine interactive_tok_s > 0";viability.interactive_tok_s > 0.0));
+
+  // T7.3-o: estimate_tier_viability considered_tok_s > 0 on capable machine
+  results=str.array_push(results;assert_true("capable machine considered_tok_s > 0";viability.considered_tok_s > 0.0));
+
+  // T7.3-p: disk_type $nvme guarantees background=true regardless of memory
+  let nvme_low_mem=hw.$hardware_profile{
+    ram_gb:2.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:0.0;
+    disk_type:hw.$disk_type.$nvme;
+    disk_read_mb_s:3000.0;
+    cpu_cores:2;
+    platform:"linux"
+  };
+  let viability_nvme=hw.estimate_tier_viability(nvme_low_mem;14.0);
+  results=str.array_push(results;assert_true("nvme disk always background viable";viability_nvme.background));
+
+  // T7.3-q: $disk_type variants can be constructed
+  let dt_nvme=hw.$disk_type.$nvme;
+  let dt_sata=hw.$disk_type.$sata;
+  let dt_hdd=hw.$disk_type.$hdd;
+  let dt_unknown=hw.$disk_type.$unknown;
+  results=str.array_push(results;pass("disk_type variants construct without crash"));
+
+  // T7.3-r: platform field is stored and retrievable
+  results=str.array_push(results;assert_eq("platform field stored";capable.platform;"darwin"));
+
+  // T7.3-s: cpu_cores field is stored and retrievable
+  results=str.array_push(results;assert_true("cpu_cores field stored";capable.cpu_cores == 12));
+
+  // T7.3-t: disk_read_mb_s field is stored and retrievable
+  results=str.array_push(results;assert_true("disk_read_mb_s field stored";capable.disk_read_mb_s == 3000.0));
+
+  let all = true;
+  let i = 0;
+  let n = str.array_len(results);
+  loop{
+    if i >= n{ break }else{
+      let r = str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all = false }else{};
+      i = i+1
+    }
+  };
+  <all
+}

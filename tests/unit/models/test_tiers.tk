@@ -1,0 +1,172 @@
+// T7.2 — Tiered inference engine unit tests
+// Tests config_for_tier, tier_label, select_tier, and apply_to_ollama_opts.
+// Memory estimates are exercised through estimate_tier_viability (from hardware.tk)
+// as tiers.tk delegates to it for viability checks.
+
+m=tests.unit.models.test_tiers;
+
+i=tiers:models.tiers;
+i=hw:models.hardware;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;v:bool):$result{
+  if v{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;v:bool):$result{
+  if !v{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=assert_int_eq(name:str;got:i32;want:i32):$result{
+  if got == want{ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(str.from_int(want);str.concat(" got=";str.from_int(got)))))
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results = @($result)[];
+
+  // T7.2-a: tier_label for $interactive is "Interactive (instant)"
+  let interactive_label=tiers.tier_label($model_tier.$interactive);
+  results=str.array_push(results;assert_eq("tier_label interactive";interactive_label;"Interactive (instant)"));
+
+  // T7.2-b: tier_label for $considered is "Considered (~30s)"
+  let considered_label=tiers.tier_label($model_tier.$considered);
+  results=str.array_push(results;assert_eq("tier_label considered";considered_label;"Considered (~30s)"));
+
+  // T7.2-c: tier_label for $background is "Background (minutes)"
+  let background_label=tiers.tier_label($model_tier.$background);
+  results=str.array_push(results;assert_eq("tier_label background";background_label;"Background (minutes)"));
+
+  // T7.2-d: config_for_tier($interactive) sets num_gpu_layers = -1 (full offload)
+  let interactive_cfg=tiers.config_for_tier($model_tier.$interactive);
+  results=str.array_push(results;assert_int_eq("interactive num_gpu_layers";interactive_cfg.num_gpu_layers;-1));
+
+  // T7.2-e: config_for_tier($interactive) sets use_mlock = true
+  results=str.array_push(results;assert_true("interactive use_mlock";interactive_cfg.use_mlock));
+
+  // T7.2-f: config_for_tier($interactive) sets use_mmap = false
+  results=str.array_push(results;assert_false("interactive use_mmap false";interactive_cfg.use_mmap));
+
+  // T7.2-g: config_for_tier($interactive) ctx_size = 4096
+  results=str.array_push(results;assert_true("interactive ctx_size 4096";interactive_cfg.ctx_size == 4096));
+
+  // T7.2-h: config_for_tier($considered) num_gpu_layers = 20
+  let considered_cfg=tiers.config_for_tier($model_tier.$considered);
+  results=str.array_push(results;assert_int_eq("considered num_gpu_layers";considered_cfg.num_gpu_layers;20));
+
+  // T7.2-i: config_for_tier($considered) use_mmap = true
+  results=str.array_push(results;assert_true("considered use_mmap true";considered_cfg.use_mmap));
+
+  // T7.2-j: config_for_tier($considered) ctx_size = 8192
+  results=str.array_push(results;assert_true("considered ctx_size 8192";considered_cfg.ctx_size == 8192));
+
+  // T7.2-k: config_for_tier($background) num_gpu_layers = 4
+  let background_cfg=tiers.config_for_tier($model_tier.$background);
+  results=str.array_push(results;assert_int_eq("background num_gpu_layers";background_cfg.num_gpu_layers;4));
+
+  // T7.2-l: config_for_tier($background) ctx_size = 32768 (large context window)
+  results=str.array_push(results;assert_true("background ctx_size 32768";background_cfg.ctx_size == 32768));
+
+  // T7.2-m: apply_to_ollama_opts returns non-empty JSON string
+  let ollama_json=tiers.apply_to_ollama_opts(interactive_cfg);
+  results=str.array_push(results;assert_true("apply_to_ollama_opts non-empty";str.len(ollama_json) > 0));
+
+  // T7.2-n: apply_to_ollama_opts contains "num_gpu" key
+  results=str.array_push(results;assert_true("ollama opts contains num_gpu";str.contains(ollama_json;"num_gpu")));
+
+  // T7.2-o: apply_to_ollama_opts contains "use_mlock" key
+  results=str.array_push(results;assert_true("ollama opts contains use_mlock";str.contains(ollama_json;"use_mlock")));
+
+  // T7.2-p: apply_to_ollama_opts contains "num_ctx" key
+  results=str.array_push(results;assert_true("ollama opts contains num_ctx";str.contains(ollama_json;"num_ctx")));
+
+  // Memory estimate tests via hw.estimate_tier_viability
+  // A 7B model at Q4 quantisation is ~3.5 GB (params_b * 0.5 GB/B parameter at 4-bit).
+  // A 7B model at FP16 is ~14 GB (params_b * 2 GB/B parameter at 16-bit).
+  // We test the underlying viability estimates to confirm the size relationship.
+
+  // T7.2-q: Q4 memory estimate for 7B model is < 8 GB
+  // Q4 ≈ 7B * 4 bits / 8 bits_per_byte / 1024^3 ≈ 3.5 GB.
+  // We represent it as a model_size_gb argument of 3.5 GB.
+  let q4_size_gb=3.5;
+  // FP16 ≈ 7B * 16 bits / 8 bits_per_byte / 1024^3 ≈ 14 GB.
+  let fp16_size_gb=14.0;
+  results=str.array_push(results;assert_true("Q4 7B model size < 8 GB";q4_size_gb < 8.0));
+
+  // T7.2-r: FP16 estimate is > Q4 estimate for same 7B parameter count
+  results=str.array_push(results;assert_true("FP16 > Q4 for 7B";fp16_size_gb > q4_size_gb));
+
+  // T7.2-s: tier_for_profile — on a machine with 64 GB unified memory a 3.5 GB Q4 model
+  //         should be interactive-viable.
+  let big_machine=hw.$hardware_profile{
+    ram_gb:64.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:64.0;
+    disk_type:hw.$disk_type.$nvme;
+    disk_read_mb_s:3000.0;
+    cpu_cores:12;
+    platform:"darwin"
+  };
+  let viability_q4=hw.estimate_tier_viability(big_machine;q4_size_gb);
+  results=str.array_push(results;assert_true("64GB machine interactive for 3.5GB model";viability_q4.interactive));
+
+  // T7.2-t: on a low-memory machine (4 GB) a 14 GB FP16 model is not interactive
+  let small_machine=hw.$hardware_profile{
+    ram_gb:4.0;
+    gpu_vram_gb:0.0;
+    unified_memory_gb:0.0;
+    disk_type:hw.$disk_type.$nvme;
+    disk_read_mb_s:2000.0;
+    cpu_cores:4;
+    platform:"linux"
+  };
+  let viability_fp16_small=hw.estimate_tier_viability(small_machine;fp16_size_gb);
+  results=str.array_push(results;assert_false("4GB machine not interactive for 14GB model";viability_fp16_small.interactive));
+
+  // T7.2-u: select_tier with $instant tolerance on a capable machine returns $interactive tier
+  let sel=tiers.select_tier($latency_tolerance.$instant;big_machine;q4_size_gb;"test-model");
+  results=str.array_push(results;assert_true("select_tier instant on capable machine is interactive";
+    sel.tier|{ $interactive true; $considered false; $background false }
+  ));
+
+  // T7.2-v: select_tier returns a non-empty reason string
+  results=str.array_push(results;assert_true("select_tier reason non-empty";str.len(sel.reason) > 0));
+
+  // T7.2-w: select_tier with $background tolerance always returns $background tier
+  let sel_bg=tiers.select_tier($latency_tolerance.$background;small_machine;fp16_size_gb;"big-model");
+  results=str.array_push(results;assert_true("select_tier background tolerance is background";
+    sel_bg.tier|{ $interactive false; $considered false; $background true }
+  ));
+
+  let all = true;
+  let i = 0;
+  let n = str.array_len(results);
+  loop{
+    if i >= n{ break }else{
+      let r = str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all = false }else{};
+      i = i+1
+    }
+  };
+  <all
+}

@@ -1,0 +1,149 @@
+// T12.2 — Feedback learning unit tests
+// Verifies compute_signals, derive_adjustments, apply_learning, and
+// format_learning_state behaviour using in-memory signal and state fixtures.
+
+m=tests.unit.feedback.test_learning;
+
+i=learning:core.feedback.learning;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(n:str):$result{ <$result{name:n;passed:true;message:"ok"} }
+f=fail(n:str;msg:str):$result{ <$result{name:n;passed:false;message:msg} }
+
+f=assert_eq(n:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(n) }else{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(n:str;v:bool):$result{
+  if v{ <pass(n) }else{ <fail(n;"expected true") }
+}
+
+f=assert_false(n:str;v:bool):$result{
+  if !v{ <pass(n) }else{ <fail(n;"expected false") }
+}
+
+f=assert_int_eq(n:str;got:i32;want:i32):$result{
+  if got == want{ <pass(n) }else{
+    <fail(n;str.concat("want=";str.concat(str.from_int(want);str.concat(" got=";str.from_int(got)))))
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results = @($result)[];
+
+  // T12.2-a: derive_adjustments on empty signals returns empty list
+  let empty_sigs = @($learning.learning_signal)[];
+  let empty_adjs = learning.derive_adjustments(empty_sigs);
+  results = str.array_push(results;assert_int_eq("derive_adjustments empty input yields empty output";empty_adjs.len;0));
+
+  // T12.2-b: thumbs-down signal on routing area (rate < 0.5) produces negative adjustment
+  let low_routing_sig = $learning.$learning_signal{
+    feature_area:"routing_decision";
+    thumbs_up_rate:0.3;
+    sample_size:20;
+    confidence:"medium"
+  };
+  let adjs_low = learning.derive_adjustments(@(low_routing_sig));
+  results = str.array_push(results;assert_true("low routing thumbs_up_rate produces adjustment";adjs_low.len > 0));
+  if adjs_low.len > 0{
+    let adj = str.array_get(adjs_low;0);
+    results = str.array_push(results;assert_true("routing adjustment is negative";adj.adjustment < 0.0));
+    results = str.array_push(results;assert_true("routing adjustment reason non-empty";str.len(adj.reason) > 0));
+    results = str.array_push(results;assert_true("routing adjustment has description via reason field";str.contains(adj.reason;"low thumbs-up rate")))
+  }else{};
+
+  // T12.2-c: high thumbs-up signal (rate > 0.85, n > 10) produces positive adjustment
+  let high_sig = $learning.$learning_signal{
+    feature_area:"chat_response";
+    thumbs_up_rate:0.92;
+    sample_size:30;
+    confidence:"medium"
+  };
+  let adjs_high = learning.derive_adjustments(@(high_sig));
+  results = str.array_push(results;assert_true("high thumbs_up_rate produces adjustment";adjs_high.len > 0));
+  if adjs_high.len > 0{
+    let adj_high = str.array_get(adjs_high;0);
+    results = str.array_push(results;assert_true("high-confidence adjustment is positive";adj_high.adjustment > 0.0));
+    results = str.array_push(results;assert_true("positive adjustment has description";str.len(adj_high.reason) > 0))
+  }else{};
+
+  // T12.2-d: high thumbs-up signal with sample_size <= 10 produces NO adjustment
+  let high_small_sig = $learning.$learning_signal{
+    feature_area:"compression";
+    thumbs_up_rate:0.95;
+    sample_size:5;
+    confidence:"low"
+  };
+  let adjs_small = learning.derive_adjustments(@(high_small_sig));
+  results = str.array_push(results;assert_int_eq("high rate but small sample yields no adjustment";adjs_small.len;0));
+
+  // T12.2-e: list_adaptations — format_learning_state returns non-empty string
+  let state_with_adjs = $learning.$learning_state{
+    signals:@(low_routing_sig;high_sig);
+    adjustments:adjs_low;
+    computed_at:0
+  };
+  let formatted = learning.format_learning_state(state_with_adjs);
+  results = str.array_push(results;assert_true("format_learning_state non-empty";str.len(formatted) > 0));
+  results = str.array_push(results;assert_true("formatted state contains signals header";str.contains(formatted;"Learning Signals")));
+
+  // T12.2-f: state with no adjustments shows "(none)" in formatted output
+  let state_no_adjs = $learning.$learning_state{
+    signals:@(high_small_sig);
+    adjustments:@();
+    computed_at:0
+  };
+  let formatted_none = learning.format_learning_state(state_no_adjs);
+  results = str.array_push(results;assert_true("format_learning_state with no adjustments shows none";str.contains(formatted_none;"(none)")));
+
+  // T12.2-g: revert / undo — derive_adjustments with no signal matching rules
+  //   returns empty, effectively removing any prior adjustment for that area
+  let neutral_sig = $learning.$learning_signal{
+    feature_area:"dashboard";
+    thumbs_up_rate:0.6;
+    sample_size:15;
+    confidence:"medium"
+  };
+  let adjs_neutral = learning.derive_adjustments(@(neutral_sig));
+  results = str.array_push(results;assert_int_eq("neutral signal in non-routing area yields no adjustment";adjs_neutral.len;0));
+
+  // T12.2-h: learning_signal struct has confidence field (adaptation description)
+  let sig_check = $learning.$learning_signal{
+    feature_area:"governance_warning";
+    thumbs_up_rate:0.4;
+    sample_size:12;
+    confidence:"medium"
+  };
+  results = str.array_push(results;assert_eq("learning_signal has confidence field";sig_check.confidence;"medium"));
+  results = str.array_push(results;assert_true("learning_signal has thumbs_up_rate field";sig_check.thumbs_up_rate < 1.0));
+
+  // T12.2-i: routing_adjustment struct has reason field (acts as description)
+  if adjs_low.len > 0{
+    let ra = str.array_get(adjs_low;0);
+    results = str.array_push(results;assert_true("routing_adjustment reason/description non-empty";str.len(ra.reason) > 0))
+  }else{};
+
+  let all = true;
+  let i = 0;
+  let n = str.array_len(results);
+  loop{
+    if i >= n{ break }else{
+      let r = str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all = false }else{};
+      i = i+1
+    }
+  };
+  <all
+}

@@ -1,0 +1,165 @@
+// T2.2 — Model selector unit tests
+// Verifies selection_criteria construction, provider_to_str, tolerance_from_str,
+// and select behaviour with RESTRICTED sensitivity enforcing local-only routing.
+
+m=tests.unit.router.test_selector;
+
+i=sel:core.router.selector;
+i=reg:core.models.registry;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){
+    <pass(name)
+  }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;val:bool):$result{
+  if val{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;val:bool):$result{
+  if !val{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=log_result(r:$result){
+  if r.passed{
+    log.info(str.concat("PASS ";r.name))
+  }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results=@($result)[];
+
+  // T2.2-a: selection_criteria struct can be constructed with all fields
+  let criteria=$sel.selection_criteria{
+    task:$task_type.$chat;
+    sensitivity:$sensitivity_level.$public;
+    tolerance:$latency_tolerance.$instant;
+    prefer_local:false;
+    max_cost_per_1k:0.05;
+    require_tools:false
+  };
+  results=str.array_push(results;assert_true("selection_criteria task field";criteria.task==$task_type.$chat));
+  results=str.array_push(results;assert_true("selection_criteria sensitivity field";criteria.sensitivity==$sensitivity_level.$public));
+  results=str.array_push(results;assert_true("selection_criteria tolerance field";criteria.tolerance==$latency_tolerance.$instant));
+  results=str.array_push(results;assert_false("selection_criteria prefer_local false";criteria.prefer_local));
+  results=str.array_push(results;assert_false("selection_criteria require_tools false";criteria.require_tools));
+
+  // T2.2-b: provider_to_str conversions
+  results=str.array_push(results;assert_eq("provider_to_str anthropic";sel.provider_to_str($provider.$anthropic);"anthropic"));
+  results=str.array_push(results;assert_eq("provider_to_str openai";sel.provider_to_str($provider.$openai);"openai"));
+  results=str.array_push(results;assert_eq("provider_to_str ollama";sel.provider_to_str($provider.$ollama);"ollama"));
+  results=str.array_push(results;assert_eq("provider_to_str local";sel.provider_to_str($provider.$local);"local"));
+  results=str.array_push(results;assert_eq("provider_to_str google";sel.provider_to_str($provider.$google);"google"));
+  results=str.array_push(results;assert_eq("provider_to_str mistral";sel.provider_to_str($provider.$mistral);"mistral"));
+  results=str.array_push(results;assert_eq("provider_to_str openrouter";sel.provider_to_str($provider.$openrouter);"openrouter"));
+
+  // T2.2-c: tolerance_from_str round-trips
+  results=str.array_push(results;assert_true("tolerance_from_str patient";sel.tolerance_from_str("patient")==$latency_tolerance.$patient));
+  results=str.array_push(results;assert_true("tolerance_from_str background";sel.tolerance_from_str("background")==$latency_tolerance.$background));
+  results=str.array_push(results;assert_true("tolerance_from_str instant";sel.tolerance_from_str("instant")==$latency_tolerance.$instant));
+
+  // T2.2-d: select with RESTRICTED sensitivity returns a local model (is_local=true)
+  let registry=reg.new_registry();
+  let restricted_criteria=$sel.selection_criteria{
+    task:$task_type.$chat;
+    sensitivity:$sensitivity_level.$restricted;
+    tolerance:$latency_tolerance.$instant;
+    prefer_local:false;
+    max_cost_per_1k:1.0;
+    require_tools:false
+  };
+  let sel_result=sel.select(restricted_criteria;registry);
+  sel_result|{
+    $loke_err e;
+      results=str.array_push(results;assert_true("select restricted returns local model";false));
+    cap;
+      results=str.array_push(results;assert_true("select restricted returns local model";cap.is_local))
+  };
+
+  // T2.2-e: select with PUBLIC sensitivity and cloud allowed returns a result
+  let public_criteria=$sel.selection_criteria{
+    task:$task_type.$chat;
+    sensitivity:$sensitivity_level.$public;
+    tolerance:$latency_tolerance.$instant;
+    prefer_local:false;
+    max_cost_per_1k:1.0;
+    require_tools:false
+  };
+  let pub_result=sel.select(public_criteria;registry);
+  pub_result|{
+    $loke_err e;
+      results=str.array_push(results;assert_true("select public sensitivity returns a result";false));
+    cap;
+      results=str.array_push(results;assert_true("select public sensitivity model_id non-empty";!str.eq(cap.model_id;"")))
+  };
+
+  // T2.2-f: select with prefer_local=true and PUBLIC sensitivity returns a local model
+  let local_pref_criteria=$sel.selection_criteria{
+    task:$task_type.$chat;
+    sensitivity:$sensitivity_level.$public;
+    tolerance:$latency_tolerance.$instant;
+    prefer_local:true;
+    max_cost_per_1k:1.0;
+    require_tools:false
+  };
+  let local_result=sel.select(local_pref_criteria;registry);
+  local_result|{
+    $loke_err e;
+      results=str.array_push(results;assert_true("select prefer_local returns a result";false));
+    cap;
+      results=str.array_push(results;assert_true("select prefer_local returns local model";cap.is_local))
+  };
+
+  // T2.2-g: select with $background tolerance returns a result
+  let bg_criteria=$sel.selection_criteria{
+    task:$task_type.$summarisation;
+    sensitivity:$sensitivity_level.$public;
+    tolerance:$latency_tolerance.$background;
+    prefer_local:false;
+    max_cost_per_1k:1.0;
+    require_tools:false
+  };
+  let bg_result=sel.select(bg_criteria;registry);
+  bg_result|{
+    $loke_err e;
+      results=str.array_push(results;assert_true("select background tolerance returns a result";false));
+    cap;
+      results=str.array_push(results;assert_true("select background tolerance model_id non-empty";!str.eq(cap.model_id;"")))
+  };
+
+  // T2.2-h: select with RESTRICTED sensitivity and no local models returns error
+  // Use an empty registry to force error path
+  let empty_reg=$reg.registry{entries:@($reg.model_capability)[]};
+  let empty_result=sel.select(restricted_criteria;empty_reg);
+  empty_result|{
+    $loke_err e;
+      results=str.array_push(results;assert_true("empty registry restricted returns error";true));
+    cap;
+      results=str.array_push(results;assert_true("empty registry restricted should return error";false))
+  };
+
+  let all_passed=true;
+  let i=0;
+  let n=str.array_len(results);
+  loop{
+    if i>=n{ break }else{
+      let r=str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all_passed=false }else{};
+      i=i+1
+    }
+  };
+  <all_passed
+}

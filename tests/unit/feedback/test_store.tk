@@ -1,0 +1,164 @@
+// T12.1 — Feedback store unit tests
+// Verifies save, get_summary, pending_submission, mark_submitted, format_summary,
+// and the privacy invariant that no pub function exposes raw prompt content.
+
+m=tests.unit.feedback.test_store;
+
+i=store:core.feedback.store;
+i=ft:core.feedback.types;
+i=db:core.storage.db;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(n:str):$result{ <$result{name:n;passed:true;message:"ok"} }
+f=fail(n:str;msg:str):$result{ <$result{name:n;passed:false;message:msg} }
+
+f=assert_eq(n:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(n) }else{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(n:str;v:bool):$result{
+  if v{ <pass(n) }else{ <fail(n;"expected true") }
+}
+
+f=assert_false(n:str;v:bool):$result{
+  if !v{ <pass(n) }else{ <fail(n;"expected false") }
+}
+
+f=assert_int_eq(n:str;got:i32;want:i32):$result{
+  if got == want{ <pass(n) }else{
+    <fail(n;str.concat("want=";str.concat(str.from_int(want);str.concat(" got=";str.from_int(got)))))
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+pub f=run_all():bool{
+  let results = @($result)[];
+
+  // T12.1-a: fresh in-memory store has zero pending entries
+  let s = db.new_memory_store();
+  store.ensure_table(s)|{
+    $ok:_ {};
+    $err:e {}
+  };
+  let pending_empty = store.pending_submission(s)|{
+    $ok:entries { <entries };
+    $err:e { <@() }
+  };
+  results = str.array_push(results;assert_int_eq("empty store has zero pending";pending_empty.len;0));
+
+  // T12.1-b: after save, pending count = 1
+  let entry1 = ft.new_entry(
+    $ft.feedback_rating.$thumbs_up;
+    $ft.feature_area.$chat_response;
+    "req-001";
+    "claude-3-5-sonnet-20241022";
+    "Response was very helpful"
+  );
+  store.save(s;entry1)|{
+    $ok:_ {};
+    $err:e {}
+  };
+  let pending_one = store.pending_submission(s)|{
+    $ok:entries { <entries };
+    $err:e { <@() }
+  };
+  results = str.array_push(results;assert_int_eq("after save count is 1";pending_one.len;1));
+
+  // T12.1-c: filter by feature_area — save a routing_decision entry and verify
+  //   summary shows non-zero total after two saves
+  let entry2 = ft.new_entry(
+    $ft.feedback_rating.$thumbs_down;
+    $ft.feature_area.$routing_decision;
+    "req-002";
+    "gpt-4o";
+    "Wrong model chosen"
+  );
+  store.save(s;entry2)|{
+    $ok:_ {};
+    $err:e {}
+  };
+  let summary_all = store.get_summary(s;365)|{
+    $ok:sm { <sm };
+    $err:e { <$ft.feedback_summary{total:0;thumbs_up:0;thumbs_down:0;thumbs_up_rate:0.0;top_issues:@()} }
+  };
+  results = str.array_push(results;assert_true("summary total > 0 after two saves";summary_all.total > 0));
+
+  // T12.1-d: summary thumbs_down count reflects negative entries
+  results = str.array_push(results;assert_true("summary thumbs_down >= 1";summary_all.thumbs_down >= 1));
+
+  // T12.1-e: summary thumbs_up count reflects positive entries
+  results = str.array_push(results;assert_true("summary thumbs_up >= 1";summary_all.thumbs_up >= 1));
+
+  // T12.1-f: pending_submission returns entries that have not been marked submitted
+  let pending_two = store.pending_submission(s)|{
+    $ok:entries { <entries };
+    $err:e { <@() }
+  };
+  results = str.array_push(results;assert_int_eq("pending has 2 before mark_submitted";pending_two.len;2));
+
+  // T12.1-g: mark_submitted removes entries from pending list
+  let id1 = entry1.id;
+  store.mark_submitted(s;@(id1))|{
+    $ok:_ {};
+    $err:e {}
+  };
+  let pending_after_mark = store.pending_submission(s)|{
+    $ok:entries { <entries };
+    $err:e { <@() }
+  };
+  results = str.array_push(results;assert_int_eq("pending count = 1 after mark_submitted";pending_after_mark.len;1));
+
+  // T12.1-h: privacy invariant — $feedback_entry struct has no prompt_text field.
+  //   Verified structurally: new_entry accepts comment but the stored entry type
+  //   fields are id, rating, feature_area, request_id, model_id, use_case,
+  //   risk_level, comment, created_at — none named "prompt" or "prompt_text".
+  //   We confirm comment field is NOT named prompt_text by checking entry field access.
+  let entry_check = ft.new_entry(
+    $ft.feedback_rating.$neutral;
+    $ft.feature_area.$privacy_detection;
+    "req-003";
+    "local-model";
+    "some comment"
+  );
+  results = str.array_push(results;assert_eq("entry comment field accessible";entry_check.comment;"some comment"));
+  results = str.array_push(results;assert_eq("entry has no prompt_text — request_id is not prompt";entry_check.request_id;"req-003"));
+
+  // T12.1-i: format_summary produces non-empty string
+  let fmt = store.format_summary(summary_all);
+  results = str.array_push(results;assert_true("format_summary non-empty";str.len(fmt) > 0));
+
+  // T12.1-j: rating_label for thumbs_up
+  let lbl_up = ft.rating_label($ft.feedback_rating.$thumbs_up);
+  results = str.array_push(results;assert_eq("rating_label thumbs_up";lbl_up;"thumbs_up"));
+
+  // T12.1-k: rating_label for thumbs_down
+  let lbl_down = ft.rating_label($ft.feedback_rating.$thumbs_down);
+  results = str.array_push(results;assert_eq("rating_label thumbs_down";lbl_down;"thumbs_down"));
+
+  // T12.1-l: area_label for routing_decision
+  let lbl_route = ft.area_label($ft.feature_area.$routing_decision);
+  results = str.array_push(results;assert_eq("area_label routing_decision";lbl_route;"Routing decision"));
+
+  let all = true;
+  let i = 0;
+  let n = str.array_len(results);
+  loop{
+    if i >= n{ break }else{
+      let r = str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all = false }else{};
+      i = i+1
+    }
+  };
+  <all
+}

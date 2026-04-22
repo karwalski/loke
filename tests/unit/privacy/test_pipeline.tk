@@ -1,0 +1,104 @@
+// T1.4 — Privacy pipeline orchestrator unit tests (maps to T1.5 in epics-and-stories.md)
+// Verifies anonymisation, sensitivity escalation, entity count, and original field preservation.
+
+m=tests.unit.privacy.test_pipeline;
+
+i=pipeline:core.privacy.pipeline;
+i=regex:core.privacy.regex;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){
+    <pass(name)
+  }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_eq_u32(name:str;got:u32;want:u32):$result{
+  if got==want{
+    <pass(name)
+  }else{
+    <fail(name;str.concat("want=";str.concat(str.from_u32(want);str.concat(" got=";str.from_u32(got)))))
+  }
+}
+
+f=assert_true(name:str;val:bool):$result{
+  if val{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;val:bool):$result{
+  if !val{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=log_result(r:$result){
+  if r.passed{
+    log.info(str.concat("PASS ";r.name))
+  }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+// Build a minimal pipeline config with NER and Presidio disabled so tests run offline
+f=offline_config():$pipeline_config{
+  let cfg=pipeline.new_config("";"");
+  <$pipeline_config{
+    presidio_url:"";
+    ollama_url:"";
+    ner_model_id:"";
+    use_presidio:false;
+    use_ner:false;
+    dry_run:false
+  }
+}
+
+pub f=run_all():bool{
+  let results=@($result)[];
+  let cfg=offline_config();
+
+  // T1.4-a: Pipeline run on email text — anonymised output does NOT contain original email
+  let email_input="Contact alice@example.com for details";
+  let email_run=pipeline.run(email_input;"";cfg);
+  results=str.array_push(results;assert_false("email not in anonymised output";str.contains(email_run.result.anonymised;"alice@example.com")));
+
+  // T1.4-b: Pipeline run on email text — sensitivity is CONFIDENTIAL
+  results=str.array_push(results;assert_true("email pipeline sensitivity confidential";email_run.result.sensitivity==$confidential));
+
+  // T1.4-c: Pipeline run on clean text — output equals input (unchanged)
+  let clean_input="The weather is nice today";
+  let clean_run=pipeline.run(clean_input;"";cfg);
+  results=str.array_push(results;assert_eq("clean text output unchanged";clean_run.result.anonymised;clean_input));
+
+  // T1.4-d: Pipeline run on credit card text — sensitivity is RESTRICTED
+  let cc_input="Card number 4111111111111111 on file";
+  let cc_run=pipeline.run(cc_input;"";cfg);
+  results=str.array_push(results;assert_true("credit card pipeline sensitivity restricted";cc_run.result.sensitivity==$restricted));
+
+  // T1.4-e: entity_count in result matches detected entities
+  let count_input="Contact bob@example.com for info";
+  let count_run=pipeline.run(count_input;"";cfg);
+  let actual_entity_count=str.array_len(count_run.result.entities);
+  results=str.array_push(results;assert_eq_u32("entity_count matches entities array";count_run.total_entities;actual_entity_count));
+
+  // T1.4-f: original field in result equals input
+  results=str.array_push(results;assert_eq("original field equals input";count_run.result.original;count_input));
+
+  let all_passed=true;
+  let i=0;
+  let n=str.array_len(results);
+  loop{
+    if i>=n{ break }else{
+      let r=str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all_passed=false }else{};
+      i=i+1
+    }
+  };
+  <all_passed
+}

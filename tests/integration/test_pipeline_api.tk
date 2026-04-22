@@ -1,0 +1,129 @@
+// T14.2 — Privacy pipeline integration tests.
+// Exercises the privacy pipeline end-to-end using regex, placeholder, and guardian modules.
+// No HTTP calls — tests the pipeline logic directly.
+
+m=tests.integration.test_pipeline_api;
+
+i=pipeline:core.privacy.pipeline;
+i=regex:core.privacy.regex;
+i=guardian:core.privacy.guardian;
+i=ph:core.privacy.placeholder;
+i=str:std.str;
+i=log:shared.log;
+
+pub m.$result{ name:str; passed:bool; message:str }
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} }
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} }
+
+f=assert_eq(name:str;got:str;want:str):$result{
+  if str.eq(got;want){ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+}
+
+f=assert_true(name:str;v:bool):$result{
+  if v{ <pass(name) }else{ <fail(name;"expected true") }
+}
+
+f=assert_false(name:str;v:bool):$result{
+  if !v{ <pass(name) }else{ <fail(name;"expected false") }
+}
+
+f=assert_eq_u32(name:str;got:u32;want:u32):$result{
+  if got==want{ <pass(name) }else{
+    <fail(name;str.concat("want=";str.concat(str.from_u32(want);str.concat(" got=";str.from_u32(got)))))
+  }
+}
+
+f=log_result(r:$result){
+  if r.passed{ log.info(str.concat("PASS ";r.name)) }else{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+}
+
+// Build an offline pipeline config (NER and Presidio disabled so tests run without servers)
+f=offline_config():$pipeline_config{
+  <$pipeline_config{
+    presidio_url:"";
+    ollama_url:"";
+    ner_model_id:"";
+    use_presidio:false;
+    use_ner:false;
+    dry_run:false
+  }
+}
+
+pub f=run_all():bool{
+  let results=@($result)[];
+  let cfg=offline_config();
+
+  // T14.2-a: Clean text → anonymised equals input (no PII changed)
+  let clean_text="The weather is fine today";
+  let clean_run=pipeline.run(clean_text;"";cfg);
+  results=str.array_push(results;assert_eq("clean text anonymised equals input";clean_run.result.anonymised;clean_text));
+
+  // T14.2-b: Email text → anonymised does NOT contain the original email
+  let email_text="Contact john@example.com for info";
+  let email_run=pipeline.run(email_text;"";cfg);
+  results=str.array_push(results;assert_false("email text anonymised does not contain original";str.contains(email_run.result.anonymised;"john@example.com")));
+
+  // T14.2-c: Credit card text → sensitivity is RESTRICTED
+  let cc_text="Card: 4111 1111 1111 1111";
+  let cc_run=pipeline.run(cc_text;"";cfg);
+  results=str.array_push(results;assert_true("credit card sensitivity is RESTRICTED";cc_run.result.sensitivity==$restricted));
+
+  // T14.2-d: Email text → entity_count >= 1
+  results=str.array_push(results;assert_true("email text entity count >= 1";cc_run.total_entities>=1||email_run.total_entities>=1));
+  let email_entity_count=str.array_len(email_run.result.entities);
+  results=str.array_push(results;assert_true("email pipeline entity_count >= 1";email_entity_count>=1));
+
+  // T14.2-e: Clean text → entity_count == 0
+  let clean_entity_count=str.array_len(clean_run.result.entities);
+  results=str.array_push(results;assert_eq_u32("clean text entity_count is 0";clean_entity_count;0));
+
+  // T14.2-f: Full detect → anonymise → restore cycle restores original input
+  // Step 1: detect PII in input text
+  let restore_input="Email john@example.com about it";
+  let detect_result=regex.detect(restore_input);
+
+  // Step 2: anonymised text from detection
+  let anon_text=detect_result.anonymised;
+  results=str.array_push(results;assert_false("detection anonymised text is different from input";str.eq(anon_text;restore_input)));
+
+  // Step 3: build placeholder map from detection entities
+  let ph_map=ph.new_map();
+  let entity_count=str.array_len(detect_result.entities);
+  let ei=0;
+  loop{
+    if ei>=entity_count{ break }else{
+      let entity=str.array_get(detect_result.entities;ei);
+      ph.add_entry(ph_map;entity.value;entity.placeholder;entity.entity_type);
+      ei=ei+1
+    }
+  };
+
+  // Step 4: restore placeholders → should equal original input
+  let restored=ph.restore(anon_text;ph_map);
+  results=str.array_push(results;assert_eq("restore returns original input";restored;restore_input));
+
+  // T14.2-g: pipeline final_system_prompt contains guardian text
+  let guardian_run=pipeline.run("Hello";"You are an assistant.";cfg);
+  results=str.array_push(results;assert_true("pipeline final_system_prompt contains guardian";guardian.is_guardian_present(guardian_run.final_system_prompt)));
+
+  // T14.2-h: pipeline result original field matches input text
+  results=str.array_push(results;assert_eq("pipeline result original field matches input";clean_run.result.original;clean_text));
+
+  let all=true;
+  let i=0;
+  let n=str.array_len(results);
+  loop{
+    if i>=n{ break }else{
+      let r=str.array_get(results;i);
+      log_result(r);
+      if !r.passed{ let all=false }else{};
+      i=i+1
+    }
+  };
+  <all
+}
