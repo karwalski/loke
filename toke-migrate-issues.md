@@ -1,194 +1,428 @@
-# toke --migrate Issues — Top 20 Error Patterns
+# toke --migrate Issues — Current Status
 
-**Status:** 13/559 files compile clean after migration + manual fixes
-**Date:** 2026-05-03
-
-## Error Pattern Analysis
-
-Each entry shows: count, error message, actual code at error location, required fix.
+**Date:** 2026-05-04
+**toke version:** 75e906f (parser accepts @($type))
+**Compile status:** 86/559 files compile clean (15.4%)
+**Files with errors:** 547
 
 ---
 
-### #1 — 81 files: `expected ':' got '{'`
-```
-BEFORE: mt someexpr {Ok:v result){
-AFTER:  mt someexpr {Ok:v v;Err:e ""}
-```
-**Cause:** `--migrate` mangled `|{` → `mt` conversion, lost expression boundaries. Match arms incomplete.
-**Fix in --migrate:** Ensure both `Ok` and `Err` arms are emitted when converting `|{` match syntax.
+### #1 — 107 files: `missing semicolon`
 
-### #2 — 55 files: `expected '(' got 'str'`
+**Example 1:** `packages/mcp-broker/src/proxy.tk:16`
 ```
-BEFORE: if str.eq(got;want)
-AFTER:  if(str.eq(got;want))
+  }else{
 ```
-**Cause:** `--migrate` didn't wrap `if` conditions in parens. v3 requires `if(cond){`.
-**Fix in --migrate:** Detect `if <non-paren>` and wrap condition in `()`.
 
-### #3 — 21 files: `unexpected token` at module declaration
+**Example 2:** `packages/core/src/privacy/placeholder.tk:46`
 ```
-BEFORE: m=loke.platform.ui.tokens
-AFTER:  m=loke.platform.ui.tokens;
+  loop{
 ```
-**Cause:** Missing semicolon after module declaration, or module path too long for parser.
-**Fix in --migrate:** Ensure `m=` lines end with `;`.
 
-### #4 — 15 files: `unexpected token in type position` (http.$req)
+**Example 3:** `packages/core/src/privacy/regex.tk:38`
 ```
-BEFORE: f=get(req:http.$req):http.$res{
-AFTER:  f=get(req:i64):i64{
+  }else{
 ```
-**Cause:** Qualified cross-module types not valid in standalone compilation. Handler signatures need `i64`.
-**Fix in --migrate:** Convert `http.$req`, `http.$res`, `db.$store`, `db.$conn` to `i64` in function signatures.
 
-### #5 — 13 files: `expected ':' in map type, got ')'`
-```
-BEFORE: headers:@(str);
-AFTER:  headers:@str;
-```
-**Cause:** `@(str)` with parens is map type syntax (expects `@(key:val)`). Array type is `@str` without parens.
-**Fix in --migrate:** Convert `@(str)` → `@str`, `@($type)` → `@$type` in type positions.
-
-### #6 — 7 files: `expected ':' in map type, got ')'`
-```
-BEFORE: items:@(str)
-AFTER:  items:@str
-```
-Same as #5 but in different context (no semicolon). Same fix.
-
-### #7 — 5 files: `missing semicolon` after shared.log import
-```
-BEFORE: i=log:shared.log\n\n
-AFTER:  i=log:shared.log;\n
-```
-**Cause:** Import line missing trailing `;`, or blank line confuses parser.
-**Fix in --migrate:** Ensure all `i=` lines end with `;`.
-
-### #8 — 5 files: `missing semicolon` after cross-module return type
-```
-BEFORE: f=preset():$s.policy{
-AFTER:  f=preset():$s.policy{  (valid — the ; error is elsewhere)
-```
-**Cause:** Cross-module type `$s.policy` works but preceding declarations may be unterminated.
-**Fix:** Check preceding lines for missing `;`.
-
-### #9 — 5 files: `module 'ooke.template' not found`
-```
-BEFORE: i=tpl:ooke.template;
-AFTER:  (keep — resolves at link time during ooke compile)
-```
-**Not a migration issue** — this is a link-time dependency. Only fails in standalone `--emit-llvm` check.
-
-### #10 — 5 files: `unexpected token` in src/core/inference
-```
-BEFORE: m=loke.core.inference.ner.local
-AFTER:  m=loke.core.inference.ner.local;
-```
-Same as #3 — missing semicolon on module declaration.
-
-### #11 — 4 files: `expected ':' in map type, got ')'`
-```
-BEFORE: args:@(str)):i32{
-AFTER:  args:@str):i32{
-```
-Same as #5 — `@(str)` in function param type position.
-
-### #12 — 4 files: `expected ':' got '+'`
-```
-BEFORE: i=i+1        (inside a type block due to bad indentation)
-AFTER:  i=i+1;       (move outside type block, or fix indentation)
-```
-**Cause:** Code statement accidentally inside a `t=$type{...}` block. The `--migrate` tool or original code has structural issues.
-**Fix:** These files have structural problems — type blocks not properly closed.
-
-### #13 — 4 files: `expected ')' got '{'`
-```
-BEFORE: let results=@$str{
-AFTER:  let results=@($str);
-```
-**Cause:** `@$str{` parsed as array type followed by block. Should be `@($str)` array literal or `@str` type.
-**Fix in --migrate:** Distinguish array type annotations from array literal construction.
-
-### #14 — 4 files: `unexpected token ')' after }el{`
-```
-BEFORE: }el{()};
-AFTER:  }el{};
-```
-**Cause:** Empty parens `()` in else block — not valid v3 expression.
-**Fix in --migrate:** Strip `()` in empty else blocks.
-
-### #15 — 4 files: `expected binding name, got '$'`
-```
-BEFORE: Ok:$v v;
-AFTER:  Ok:v v;
-```
-**Cause:** `$` prefix on match binding variable. v3 bindings are bare identifiers.
-**Fix in --migrate:** Strip `$` from binding names in match arms.
-
-### #16 — 4 files: `unexpected token` in moke API pages
-```
-BEFORE: m=page.moke.api.datasets
-AFTER:  m=page.moke.api.datasets;
-```
-Same as #3 — missing semicolon.
-
-### #17 — 3 files: `expected ':' got 'e'`
-```
-BEFORE: perr e;
-AFTER:  Err:e "";
-```
-**Cause:** `--migrate` mangled `$err:e` into `perr e` (lost the `$` and `:`).
-**Fix in --migrate:** Ensure error match arms preserve `Err:binding` format.
-
-### #18 — 3 files: `unexpected token in type position` (db.$store)
-```
-BEFORE: store:db.$store
-AFTER:  store:i64
-```
-Same as #4 — qualified cross-module type needs `i64` replacement.
-
-### #19 — 3 files: `expected '(' after '@', got '$'`
-```
-BEFORE: let paths=mut.@$str;
-AFTER:  let paths=mut.@($str);
-```
-**Cause:** Mutable array literal needs `@()` parens, not bare `@$type`.
-**Fix in --migrate:** Use `@($type)` for array literals/constructors, `@$type` only for type annotations.
-
-### #20 — 3 files: `expected ')' got '.'`
-```
-BEFORE: (req:$http.req):$http.res{
-AFTER:  (req:i64):i64{
-```
-Same as #4 — qualified HTTP types.
+**Fix:** `--migrate` not adding `};` to close blocks, or `}else{` not converted to `}el{` (missing `;` before next statement).
 
 ---
 
-## Summary for --migrate tool
+### #2 — 71 files: `unexpected token`
 
-| Priority | Fix | Files affected |
-|----------|-----|----------------|
-| P0 | Fix `|{` → `mt` expression boundary detection | 81 |
-| P0 | Add `if()` parens around conditions | 55 |
-| P1 | Ensure `m=` and `i=` lines end with `;` | 26 |
-| P1 | Convert qualified types (http.$req, db.$store) to i64 | 18 |
-| P1 | Fix `@(type)` → `@type` in type positions | 25 |
-| P2 | Strip `$` from match binding names | 4 |
-| P2 | Fix mangled error arms (perr → Err:e) | 3 |
-| P2 | Distinguish `@$type` (type) vs `@($type)` (literal) | 7 |
-| — | Module not found (link-time, not migration) | 5 |
+**Example 1:** `packages/mcp-broker/src/server.tk:13`
+```
+let defaultport=11436;
+```
 
-## Files that compile clean (13)
+**Example 2:** `packages/core/src/privacy/guardian.tk:9`
 ```
-packages/core/src/pipeline/types.tk
-packages/core/src/policy/schema.tk
-packages/core/src/policy/conflict.tk
-packages/core/src/policy/merge.tk
-packages/browser/src/components/modal.tk
-src/platform/a11y/roving-tabindex.tk
-src/platform/a11y/aria-patterns.tk
-src/platform/a11y/announcements.tk
-src/platform/a11y/skip-link.tk
-src/platform/a11y/focus-trap.tk
-(+ 3 more)
+let guardianversion="1.0.0"
 ```
+
+**Example 3:** `packages/core/src/memory/mining.tk:30`
+```
+let sourceclipboard=$minesource{
+```
+
+**Fix:** Various — qualified types in params (`mod.$type`), top-level `let`, `mut` modifier, or structural issues from agent-generated code.
+
+---
+
+### #3 — 54 files: `expected '(' after '@', got '$'`
+
+**Example 1:** `packages/core/src/installer/uninstall.tk:25`
+```
+  let models=@$removablemodel@();
+```
+
+**Example 2:** `packages/browser/_handlers.tk:123`
+```
+  let paths=mut.@$str;
+```
+
+**Example 3:** `packages/browser/src/_handlers.tk:123`
+```
+  let paths=mut.@$str;
+```
+
+**Fix:** `--migrate` produces mangled `@$type@()` — double @ from array literal conversion. Should be `@($type)` or `@$type`.
+
+---
+
+### #4 — 31 files: `expected ':', got '}'`
+
+**Example 1:** `packages/core/src/privacy/pipeline.tk:31`
+```
+};
+```
+
+**Example 2:** `packages/core/src/memory/export.tk:17`
+```
+};
+```
+
+**Example 3:** `packages/core/src/memory/aaak.tk:29`
+```
+};
+```
+
+**Fix:** Match arm variant without `:binding` — `$variant expr` needs `$variant:v expr`.
+
+---
+
+### #5 — 22 files: `expected ')', got '.'`
+
+**Example 1:** `packages/core/src/metrics/collector.tk:39`
+```
+f=record(conn:i64;event:i64;extconfig:$external.$externalconfig|void):void|$lokeerr{
+```
+
+**Example 2:** `packages/core/src/memory/graph.tk:35`
+```
+f=upsertentity(palace:$memtypes.palace;e:$entity):bool{
+```
+
+**Example 3:** `packages/core/src/memory/privacy.tk:27`
+```
+f=loadprefs(palace:$memtypes.palace):$privacyprefs{
+```
+
+**Fix:** Qualified type `mod.$typename` in function signature — replace with `i64`.
+
+---
+
+### #6 — 19 files: `module 'ooke.template' not found; available: `
+
+**Example 1:** `packages/browser/pages/tabs.tk:3`
+```
+i=tpl:ooke.template;
+```
+
+**Example 2:** `packages/browser/pages/index.tk:3`
+```
+i=tpl:ooke.template;
+```
+
+**Example 3:** `packages/browser/pages/sysmon.tk:3`
+```
+i=tpl:ooke.template;
+```
+
+**Fix:** Link-time dependency — not a syntax error. Resolves during `ooke compile`.
+
+---
+
+### #7 — 17 files: `expected ')' to close array literal, got '@'`
+
+**Example 1:** `tests/unit/auth/test-oauth.tk:35`
+```
+  let results=mut.@($result@();
+```
+
+**Example 2:** `tests/unit/mcp/test_broker.tk:48`
+```
+  let results=mut.@($result@();
+```
+
+**Example 3:** `tests/unit/mcp/test_protocol.tk:41`
+```
+  let results=mut.@($result@();
+```
+
+**Fix:** `@(item1;item2;...` with struct literals inside — `--migrate` doesn't handle multi-line array literals with complex elements.
+
+---
+
+### #8 — 14 files: `unexpected token in expression, got '='`
+
+**Example 1:** `packages/core/src/auth/refresh.tk:22`
+```
+  <now>=threshold
+```
+
+**Example 2:** `packages/core/src/governance/scorecard.tk:63`
+```
+  if(len >= width){
+```
+
+**Example 3:** `packages/core/src/installer/models.tk:17`
+```
+  if(ramgb >= 64){
+```
+
+**Fix:** Struct field init using `=` instead of `:` — `field=value` should be `field:value`.
+
+---
+
+### #9 — 14 files: `expected ')', got '{'`
+
+**Example 1:** `packages/cli/src/policy.tk:10`
+```
+f=run(args:@$str{
+```
+
+**Example 2:** `packages/cli/src/feedback.tk:8`
+```
+f=run(args:@$str{
+```
+
+**Example 3:** `packages/cli/src/report.tk:9`
+```
+f=run(conn:i64;args:@$str{
+```
+
+**Fix:** Function parameter type `@$str{` — array type `@$str` followed by `{` block start, missing `)` to close params.
+
+---
+
+### #10 — 13 files: `expected field, got '$'`
+
+**Example 1:** `packages/mcp-broker/src/main.tk:7`
+```
+  let cfg=s.$brokerconfig{ port:s.defaultport; datadir:"./data" };
+```
+
+**Example 2:** `packages/core/src/models/streaming.tk:14`
+```
+  opts=inf.$streamopts{ ramceilinggb:cfg.ramceilinggb; prefetchlayers:cfg.prefetchlayers; requiresnvme:true };
+```
+
+**Example 3:** `packages/core/src/models/infer.tk:34`
+```
+  let opts=inf.$inferopts{ngpulayers:99;nthreads:4;seed:0};
+```
+
+**Fix:** `$variant` inside struct literal being parsed as field name — structural confusion from `--migrate` output.
+
+---
+
+### #11 — 11 files: `expected '}', got '.'`
+
+**Example 1:** `packages/core/src/pipeline/history.tk:6`
+```
+  runs:@$pt.pipelinerun);
+```
+
+**Example 2:** `packages/core/src/pipeline/emitter.tk:9`
+```
+  events:@$pt.stageevent);
+```
+
+**Example 3:** `packages/core/src/providers/anthropic.tk:13`
+```
+  config:$pt.providerconfig
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #12 — 9 files: `square brackets are not allowed in default mode; use @() for arrays/maps`
+
+**Example 1:** `packages/mcp-broker/src/registry.tk:25`
+```
+  <[toke;memory]
+```
+
+**Example 2:** `packages/core/src/auth/oauth.tk:105`
+```
+  let hdrs=@(@str).get(["Content-Type";"application/x-www-form-urlencoded"]);
+```
+
+**Example 3:** `packages/core/src/eval/bench.tk:37`
+```
+defaultcases:@$benchcase = [
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #13 — 9 files: `invalid escape sequence in string literal`
+
+**Example 1:** `packages/core/src/privacy/patterns.tk:5`
+```
+let patemail="[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}"
+```
+
+**Example 2:** `packages/core/src/privacy/content.tk:21`
+```
+  let noscript=str.replacere(html;"<script[^>]*>[\s\S]*?</script>";"";"gi");
+```
+
+**Example 3:** `packages/core/src/feedback/draft.tk:82`
+```
+\
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #14 — 9 files: `unexpected token in expression, got 'if'`
+
+**Example 1:** `packages/core/src/memory/shorthand.tk:70`
+```
+  let s=if str.contains(s;startabbrev){
+```
+
+**Example 2:** `packages/core/src/setup/wizard.tk:39`
+```
+  log.info(str.concat("RAM: ";str.concat(str.fromint(ram);str.concat("GB, cores: ";str.concat(str.fromint(cores);str.concat(", Apple Silicon: ";if(applesilicon){"yes"}el{"no"})))));"setup.wizard";"system");
+```
+
+**Example 3:** `packages/core/src/feedback/reporter.tk:64`
+```
+  let out=str.concat("{\"id\":\"";str.concat(report.id;str.concat("\",\"type\":\"";str.concat(report.reporttype;str.concat("\",\"title\":\"";str.concat(report.title;str.concat("\",\"description\":\"";str.concat(report.description;str.concat("\",\"privacy_scanned\":";str.concat(if(report.privacyscanned){"true"}el{"false"};"}"))))))))));
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #15 — 9 files: `unexpected token in expression, got '{'`
+
+**Example 1:** `packages/core/src/governance/report.tk:29`
+```
+    $ok:rows {
+```
+
+**Example 2:** `packages/core/src/companion/executor.tk:14`
+```
+  mt  { connopt.$none:
+```
+
+**Example 3:** `packages/cli/src/doctor.tk:20`
+```
+    $ok:resp{
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #16 — 8 files: `unexpected token at statement level, got '{'`
+
+**Example 1:** `packages/cli/src/portable.tk:99`
+```
+  }{
+```
+
+**Example 2:** `src/core/cache/semantic.tk:63`
+```
+  }{
+```
+
+**Example 3:** `src/core/storage/vector.tk:39`
+```
+  }{
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #17 — 7 files: `expected ')', got ':'`
+
+**Example 1:** `packages/mcp-broker/src/permissions.tk:25`
+```
+f=checktoolpermission(registry:i64:i64;toolname:$str):bool{
+```
+
+**Example 2:** `packages/core/src/governance/violation-types.tk:58`
+```
+f=highestseverity(violations:@$violation:$str{
+```
+
+**Example 3:** `packages/core/src/governance/response-scanner.tk:8`
+```
+f=scanresponse(rawresponse:$str;restoredresponse:$str;requestid:$str;blockedentities:@$str:$vt.scanresult{
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #18 — 7 files: `character outside allowed character set`
+
+**Example 1:** `packages/core/src/mcp/protocol.tk:89`
+```
+  let p1=str.concat("{\"content\":[{\"type\":\"text\",\"text\":\"";escaped);
+```
+
+**Example 2:** `packages/core/src/mcp/client.tk:143`
+```
+  let params=str.concat("{\"name\":\"";str.concat(nameescaped;str.concat("\",\"arguments\":";str.concat(argsjson;"}"))));
+```
+
+**Example 3:** `packages/core/src/optimiser/toon.tk:473`
+```
+      <str.concat("\"";str.concat(escaped;"\""))
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #19 — 6 files: `expected ':', got '{'`
+
+**Example 1:** `packages/core/src/models/tiers.tk:37`
+```
+    $interactive {
+```
+
+**Example 2:** `packages/core/src/models/mlx.tk:22`
+```
+f=generate(pool:$mlxpool;modelid:str;prompt:str;maxtokens:i32):(str){
+```
+
+**Example 3:** `packages/core/src/optimiser/cache.tk:65`
+```
+f=lookup(col:i64;prompt:str;pool:i64;cfg:$cacheconfig):($cachehit){
+```
+
+**Fix:** Needs investigation.
+
+---
+
+### #20 — 5 files: `expected ':', got 'e'`
+
+**Example 1:** `packages/core/src/privacy/presidio.tk:33`
+```
+    $httperr e;
+```
+
+**Example 2:** `packages/core/src/privacy/ner.tk:27`
+```
+    $httperr e;
+```
+
+**Example 3:** `packages/core/src/optimiser/llmlingua.tk:41`
+```
+    $httperr e;
+```
+
+**Fix:** Needs investigation.
+
+---
