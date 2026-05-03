@@ -1,0 +1,177 @@
+
+m=loke.core.inference.sidecar;
+
+i=str:std.str;
+i=log:std.log;
+i=http:std.http;
+i=process:std.process;
+
+t=$sidecar{
+  name:$str;
+  command:@$str;
+  healthurl:$str;
+  handle:i64;
+  running:bool;
+  restartcount:i32;
+  maxrestarts:i32
+};
+
+f=new(name:$str;command:@$str;healthurl:$str):$sidecar{
+  <$sidecar{
+    name:name;
+    command:command;
+    healthurl:healthurl;
+    handle:none;
+    running:false;
+    restartcount:0;
+    maxrestarts:5
+  };
+};
+
+f=newpresidio():$sidecar{
+  <new("presidio";@("presidio-analyzer";"--port";"5000");"http://127.0.0.1:5000/health")
+};
+
+f=newllmlingua():$sidecar{
+  <new("llmlingua";@("llmlingua-server";"--port";"5001");"http://127.0.0.1:5001/health")
+};
+
+f=spawn(sc:$sidecar):$sidecar{
+  log.info("sidecar: spawning " + sc.name);
+  let result=mt process.spawn(sc.command);
+  result {
+    $ok:h{
+      log.info("sidecar: " + sc.name + " started");
+      <$sidecar{
+        name:sc.name;
+        command:sc.command;
+        healthurl:sc.healthurl;
+        handle:some(h);
+        running:true;
+        restartcount:sc.restartcount;
+        maxrestarts:sc.maxrestarts
+      };
+    };
+    $err:e{
+      mt e {
+        $notfound:{
+          log.error("sidecar: " + sc.name + " command not found")
+        };
+        $permission:{
+          log.error("sidecar: " + sc.name + " permission denied")
+        };
+        $io:{
+          log.error("sidecar: " + sc.name + " IO error during spawn")
+        };
+      };
+      <$sidecar{
+        name:sc.name;
+        command:sc.command;
+        healthurl:sc.healthurl;
+        handle:none;
+        running:false;
+        restartcount:sc.restartcount;
+        maxrestarts:sc.maxrestarts
+      };
+    };
+  };
+};
+
+f=stop(sc:$sidecar):$sidecar{
+  mt sc.handle {
+    $some:h{
+      process.kill(h);
+      log.info("sidecar: " + sc.name + " stopped")
+    };
+    $none:{
+      log.info("sidecar: " + sc.name + " not running")
+    };
+  };
+  <$sidecar{
+    name:sc.name;
+    command:sc.command;
+    healthurl:sc.healthurl;
+    handle:none;
+    running:false;
+    restartcount:sc.restartcount;
+    maxrestarts:sc.maxrestarts
+  };
+};
+
+f=ishealthy(sc:$sidecar):bool{
+  if(!sc.running){
+    <false
+  }el{
+    let res=http.get(sc.healthurl);
+    <res.ok
+  };
+};
+
+f=wait(sc:$sidecar):i32{
+  mt sc.handle {
+    $some:h{
+      let result=mt process.wait(h);
+      result {
+        $ok:code{ <code };
+        $err:{ <-1 };
+      };
+    };
+    $none:{
+      <-1
+    };
+  };
+};
+
+f=readstdout(sc:$sidecar):$str{
+  mt sc.handle {
+    $some:h{
+      let result=mt process.stdout(h);
+      result {
+        $ok:out{ <out };
+        $err:{ <"" };
+      };
+    };
+    $none:{
+      <""
+    };
+  };
+};
+
+f=readstderr(sc:$sidecar):$str{
+  mt sc.handle {
+    $some:h{
+      let result=mt process.stderr(h);
+      result {
+        $ok:out{ <out };
+        $err:{ <"" };
+      };
+    };
+    $none:{
+      <""
+    };
+  };
+};
+
+f=ensurehealthy(sc:$sidecar):$sidecar{
+  if(ishealthy(sc)){
+    <sc
+  }el{
+    if(sc.restartcount >= sc.maxrestarts){
+      log.error("sidecar: " + sc.name + " exceeded max restarts (" + str.fromi32(sc.maxrestarts) + ")");
+      <stop(sc)
+    }el{
+      log.warn("sidecar: " + sc.name + " unhealthy  restarting (attempt " + str.fromi32(sc.restartcount + 1) + ")");
+      let stopped=stop(sc);
+      let restarted=spawn(stopped);
+      <$sidecar{
+        name:restarted.name;
+        command:restarted.command;
+        healthurl:restarted.healthurl;
+        handle:restarted.handle;
+        running:restarted.running;
+        restartcount:sc.restartcount + 1;
+        maxrestarts:sc.maxrestarts
+      };
+    };
+  };
+};

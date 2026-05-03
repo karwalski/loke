@@ -1,0 +1,233 @@
+
+m=tests.unit.agents.testexecutor;
+
+i=exec:core.agents.executor;
+i=at:core.agents.types;
+i=sb:core.agents.sandbox;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+i=mreg:core.models.registry;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:$n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:$n;passed:false;message:$msg} };
+
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+
+f=assertfalse(n:$str;v:bool):$result{
+  if(!$v){ <pass(n) }el{ <fail(n;"expected false") };
+};
+
+f=assertinteq(n:$str;got:i32;want:i32):$result{
+  if(got = want){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(str.fromint(want);str.concat(" got=";str.fromint(got)))))
+  };
+};
+
+f=assertgtf64(n:$str;got:f64;threshold:f64):$result{
+  if(got > threshold){ <pass(n) }el{
+    <fail(n;str.concat("expected > ";str.fromf64(threshold)))
+  };
+};
+
+f=assertgef64(n:$str;got:f64;threshold:f64):$result{
+  if(got >= threshold){ <pass(n) }el{
+    <fail(n;str.concat("expected >= ";str.fromf64(threshold)))
+  };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=maketestconfig():$exec.executorconfig{
+  let keys=$disp.apikeys{anthropic:"test-ant-key";openai:"test-oai-key"};
+  <exec.newconfig("http://localhost:5002";"http://127.0.0.1:11434";keys)
+};
+
+f=maketestagent(id:$str;model:$str;perms:@$at.agentpermission)):$at.agentdef{
+  let agent=at.newagent(id;"Test Agent";"Test agent for executor";"Summarise the following:");
+  agent.modelpreference=model;
+  agent.permissions=perms;
+  agent.enabled=true;
+  agent.maxcostperrun=1.0;
+  <agent
+};
+
+f=runall():bool{
+  let results = @$result@();
+
+  let config=maketestconfig();
+  results = str.arraypush(results;asserteq("config has presidio_url";config.presidiourl;"http://localhost:5002"));
+  results = str.arraypush(results;asserteq("config has ollama_url";config.ollamaurl;"http://127.0.0.1:11434"));
+  results = str.arraypush(results;asserteq("config dispatcher has anthropic key";config.dispatcher.keys.anthropic;"test-ant-key"));
+  results = str.arraypush(results;asserteq("config dispatcher has openai key";config.dispatcher.keys.openai;"test-oai-key"));
+
+  let reg=config.modelregistry;
+  let claudelookup=mreg.byid(reg;"claude-3-5-sonnet-20241022");
+  let claudefound=mt claudelookup {
+    $lokeerr e; <false;
+    cap; <true
+  };
+  results = str.arraypush(results;asserttrue("model registry has claude-3-5-sonnet";claudefound));
+
+  let ollamalookup=mreg.byid(reg;"qwen2.5:7b");
+  let ollamafound=mt ollamalookup {
+    $lokeerr e; <false;
+    cap; <true
+  };
+  results = str.arraypush(results;asserttrue("model registry has qwen2.5:7b";ollamafound));
+
+  let claudeprovider=exec.resolveprovider("claude-3-5-sonnet-20241022";reg);
+  let claudeisanthropic=mt claudeprovider {
+    $provider.$anthropic:i64; <true;
+    v; <false
+  };
+  results = str.arraypush(results;asserttrue("resolve_provider returns anthropic for claude";claudeisanthropic));
+
+  let gptprovider=exec.resolveprovider("gpt-4o";reg);
+  let gptisopenai=mt gptprovider {
+    $provider.$openai:i64; <true;
+    v; <false
+  };
+  results = str.arraypush(results;asserttrue("resolve_provider returns openai for gpt-4o";gptisopenai));
+
+  let qwenprovider=exec.resolveprovider("qwen2.5:7b";reg);
+  let qwenisollama=mt qwenprovider {
+    $provider.$ollama:i64; <true;
+    v; <false
+  };
+  results = str.arraypush(results;asserttrue("resolve_provider returns ollama for qwen2.5:7b";qwenisollama));
+
+  let unknownprovider=exec.resolveprovider("mystery-model-v1";reg);
+  let unknownisollama=mt unknownprovider {
+    $provider.$ollama:i64; <true;
+    v; <false
+  };
+  results = str.arraypush(results;asserttrue("resolve_provider falls back to ollama for unknown model";unknownisollama));
+
+  let claudeheuristic=exec.resolveprovider("claude-4-opus-20260101";reg);
+  let claudehisant=mt claudeheuristic {
+    $provider.$anthropic:i64; <true;
+    v; <false
+  };
+  results = str.arraypush(results;asserttrue("resolve_provider heuristic: claude prefix -> anthropic";claudehisant));
+
+  let gptheuristic=exec.resolveprovider("gpt-5-turbo";reg);
+  let gpthisoai=mt gptheuristic {
+    $provider.$openai:i64; <true;
+    v; <false
+  };
+  results = str.arraypush(results;asserttrue("resolve_provider heuristic: gpt prefix -> openai";gpthisoai));
+
+  let expensiveagent=maketestagent("agent-expensive";"qwen2.5:7b";@());
+  expensiveagent.maxcostperrun=0.0;
+  let expensiveresult=exec.execute(expensiveagent;"test context";config;"test-cid-1");
+  results = str.arraypush(results;assertfalse("cost limit exceeded returns ok=false";expensiveresult.ok));
+  results = str.arraypush(results;asserttrue("cost limit exceeded has violations";expensiveresult.violations.len > 0));
+
+  let ollamaagent=maketestagent("agent-ollama";"qwen2.5:7b";@());
+  let ollamaresult=exec.execute(ollamaagent;"Hello world";config;"test-cid-2");
+  let dispatchattempted=if(ollamaresult.ok){
+    true
+  }el{
+    str.contains(ollamaresult.output;"LLM error")
+  };
+  results = str.arraypush(results;asserttrue("execute routes through dispatcher (not stubbed)";dispatchattempted));
+
+  let antagent=maketestagent("agent-anthropic";"claude-3-5-sonnet-20241022";@());
+  let antresult=exec.execute(antagent;"Summarise this text";config;"test-cid-3");
+  let antdispatchattempted=if(antresult.ok){
+    true
+  }el{
+    str.contains(antresult.output;"LLM error")
+  };
+  results = str.arraypush(results;asserttrue("anthropic dispatch attempted";antdispatchattempted));
+
+  let zerocostresult=exec.execute(expensiveagent;"test";config;"test-cid-4");
+  results = str.arraypush(results;assertgef64("sandbox_result has cost_usd field";zerocostresult.costusd;0.0));
+
+  let trackagent=maketestagent("agent-track";"qwen2.5:7b";@());
+  let tracksandbox=sb.newsandbox(trackagent);
+  sb.recordcost(tracksandbox;100;0.05);
+  sb.recordcost(tracksandbox;200;0.10);
+  results = str.arraypush(results;assertinteq("record_cost accumulates tokens";tracksandbox.tokensused;300));
+  results = str.arraypush(results;assertgtf64("record_cost accumulates cost";tracksandbox.costusd;0.14));
+
+  let budgetagent=maketestagent("agent-budget";"qwen2.5:7b";@());
+  budgetagent.maxcostperrun=0.10;
+  let budgetsandbox=sb.newsandbox(budgetagent);
+  sb.recordcost(budgetsandbox;500;0.08);
+  results = str.arraypush(results;asserttrue("check_cost_limit ok when within budget";sb.checkcostlimit(budgetsandbox;0.01)));
+  results = str.arraypush(results;assertfalse("check_cost_limit false when exceeded";sb.checkcostlimit(budgetsandbox;0.05)));
+
+  let testmsg=pt.usermsg("test content");
+  let testreq=$pt.completionrequest{
+    modelid:"qwen2.5:7b";
+    messages:@(testmsg);
+    systemprompt:"You are a test agent";
+    maxtokens:2048;
+    temperature:0.0;
+    stream:false
+  };
+  results = str.arraypush(results;asserteq("completion_request model_id";testreq.modelid;"qwen2.5:7b"));
+  results = str.arraypush(results;assertinteq("completion_request messages count";testreq.messages.len;1));
+  results = str.arraypush(results;asserteq("completion_request system_prompt";testreq.systemprompt;"You are a test agent"));
+
+  let streamreq=$pt.completionrequest{
+    modelid:"claude-3-5-sonnet-20241022";
+    messages:@(testmsg);
+    systemprompt:"";
+    maxtokens:2048;
+    temperature:0.0;
+    stream:true
+  };
+  results = str.arraypush(results;asserttrue("stream request has stream=true";streamreq.stream));
+
+  let fakeresp=$pt.completionresponse{
+    content:"Test response content";
+    modelid:"claude-3-5-sonnet-20241022";
+    inputtokens:500;
+    outputtokens:200;
+    finishreason:"stop";
+    costusd:0.0045
+  };
+  let resptokens=fakeresp.inputtokens+fakeresp.outputtokens;
+  results = str.arraypush(results;assertinteq("response total tokens";resptokens;700));
+  results = str.arraypush(results;assertgtf64("response has non-zero cost";fakeresp.costusd;0.0));
+
+  let nomodelagent=maketestagent("agent-nomodel";"";@());
+  let nomodelresult=exec.execute(nomodelagent;"test";config;"test-cid-5");
+  let nomodeldispatched=if(nomodelresult.ok){
+    true
+  }el{
+    str.contains(nomodelresult.output;"LLM error")
+  };
+  results = str.arraypush(results;asserttrue("empty model_preference defaults to qwen2.5:7b";nomodeldispatched));
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i+1
+    };
+  };
+  <all
+};

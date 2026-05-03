@@ -1,0 +1,208 @@
+m=core.monitoring.sysmon;
+
+i=process:std.process;
+i=str:std.str;
+i=log:shared.log;
+
+t=$processstats{
+  pid:i64;
+  name:$str;
+  cpupercent:f64;
+  rammb:f64;
+  rampercent:f64;
+  threads:i64
+};
+t=$systemstats{
+  totalrammb:i64;
+  usedrammb:i64;
+  freerammb:i64;
+  rampercent:f64;
+  cpucount:i64;
+  cpupercent:f64;
+  ollamastats:i64;
+  lokestats:i64;
+  slmactive:bool;
+  slmmodel:$str
+};
+t=$cpuinfo{count:i64;percent:f64};
+
+f=getramstats():$raminfo{
+  let total=mut.0;
+  let used=mut.0;
+  let h=process.spawn(@("sysctl";"-n";mt "hw.memsize")) {
+    $ok:handle {
+      mt process.wait(handle) {$$ok:v {};$$err:e {}};
+      let out=mt process.stdout(handle) {$ok:s s;$$err:e ""};
+      let bytes=mt str.parseint(str.trim(out)) {$ok:n n;$$err:e 0};
+      total=bytes/1048576;
+      total
+    };
+
+f=snapshot():$systemstats{
+  let ram=getramstats();
+  let cpu=getcpustats();
+  let ollama=getprocessstats("ollama");
+  let lokeproc=getprocessstats("ooke-toke");
+  let slmactive=ollama.cpupercent>5.0;
+  let slmmodel=if(slmactive){getactivemodel()}el{""};
+  <$systemstats{
+    totalrammb:$ram.total;
+    usedrammb:$ram.used;
+    freerammb:$ram.free;
+    rampercent:$ram.percent;
+    cpucount:$cpu.count;
+    cpupercent:$cpu.percent;
+    ollamastats:$ollama;
+    lokestats:$lokeproc;
+    slmactive:$slmactive;
+    slmmodel:$slmmodel
+  };
+};
+    $$err:e 0
+  };
+  let h2=mt process.spawn(@("vm_stat")) {
+    $ok:handle {
+      mt process.wait(handle) {$$ok:v {};$$err:e {}};
+      let out=mt process.stdout(handle) {$ok:s s;$$err:e ""};
+      let active=parsevmstatfield(out;"Pages active:");
+      let wired=parsevmstatfield(out;"Pages wired down:");
+      let compressed=parsevmstatfield(out;"Pages occupied by compressor:");
+      let pagesize=16384;
+      used=((active+wired+compressed)*pagesize)/1048576;
+      used
+    };
+    $$err:e 0
+  };
+  let free=total-used;
+  let percent=mut.if(total>0){(used as f64)/(total as f64)*100.0}el{0.0};
+  <$raminfo{total:$total;used:$used;free:$free;percent:$percent};
+};
+f=parsevmstatfield(output:$str;fieldname:$str):i64{
+  let lines=str.split(output;"
+");
+  let result=mut.0;
+  lines.each|line{
+    if(str.contains(line;fieldname)){
+      let parts=str.split(line;":");
+      if(parts.len>=2){
+        let valstr=str.trim(parts.get(1));
+        let valstr=if(str.endswith(valstr;".")){str.slice(valstr;0;str.len(valstr)-1)}el{valstr};
+        let valstr=str.trim(valstr);
+        result=mt str.parseint(valstr) {$ok:n n;$$err:e 0};
+      }el{};
+    }el{};
+  };
+  <result
+};
+f=getcpustats():$cpuinfo{
+  let count=mut.0;
+  let h=process.spawn(@("sysctl";"-n";mt "hw.ncpu")) {
+    $ok:handle {
+      mt process.wait(handle) {$$ok:v {};$$err:e {}};
+      let out=mt process.stdout(handle) {$ok:s s;$$err:e ""};
+      count=mt str.parseint(str.trim(out)) {$ok:n n;$$err:e 0};
+      count
+    };
+    $$err:e 0
+  };
+  let percent=0.0;
+  let h2=process.spawn(@("top";"-l";"1";"-n";"0";"-s";mt "0")) {
+    $ok:handle {
+      mt process.wait(handle) {$$ok:v {};$$err:e {}};
+      let out=mt process.stdout(handle) {$ok:s s;$$err:e ""};
+      let lines=str.split(out;"
+");
+      lines.each|line{
+        if(str.contains(line;"CPU usage")){
+          let idlepart=str.split(line;"idle");
+          if(idlepart.len>=1){
+            let beforeidle=idlepart.get(0);
+            let parts=str.split(beforeidle;",");
+            if(parts.len>=3){
+              let idlestr=str.trim(parts.get(2));
+              let idlestr=str.replace(idlestr;"%";"");
+              let idlestr=str.trim(idlestr);
+              let idleval=mt str.parsefloat(idlestr) {$ok:f f;$$err:e 0.0};
+              percent=100.0-idleval
+            }el{};
+          }el{};
+        }el{};
+      };
+      percent
+    };
+    $$err:e 0.0
+  };
+  <$cpuinfo{count:$count;percent:$percent};
+};
+f=getprocessstats(name:$str):$processstats{
+  let h=process.spawn(@("ps";"-eo";mt "pid,pcpu,rss,nlwp,comm")) {
+    $ok:handle {
+      mt process.wait(handle) {$$ok:v {};$$err:e {}};
+      let out=mt process.stdout(handle) {$ok:s s;$$err:e ""};
+      let lines=str.split(out;"
+");
+      let best=$processstats{pid:0;name:$name;cpupercent:0.0;rammb:0.0;rampercent:0.0;threads:0};
+      lines.each|line{
+        if(str.contains(line;name)){
+          let parts=str.split(str.trim(line);" ");
+          let cleaned=@str;
+          parts.each|p{
+            if(str.len(str.trim(p))>0){
+              cleaned:@.push(cleaned;str.trim(p))
+            }el{};
+          };
+          if(cleaned.len>=4){
+            let pid=mt str.parseint(cleaned.get(0)) {$ok:n n;$$err:e 0};
+            let cpu=mt str.parsefloat(cleaned.get(1)) {$ok:f f;$$err:e 0.0};
+            let rsskb=mt str.parseint(cleaned.get(2)) {$ok:n n;$$err:e 0};
+            let rammb=(rsskb as f64)/1024.0;
+            if(cpu>best.cpupercent){
+              best:$processstats{pid:$pid;name:$name;cpupercent:$cpu;rammb:$rammb;rampercent:0.0;threads:0};
+            }el{};
+          }el{};
+        }el{};
+      };
+      <best
+    };
+    $$err:e <$processstats{pid:0;name:$name;cpupercent:0.0;rammb:0.0;rampercent:0.0;threads:0};
+  };
+};
+f=getactivemodel():$str{
+  let h=process.spawn(@("curl";"-s";mt "http://localhost:11434/api/ps")) {
+    $ok:handle {
+      mt process.wait(handle) {$$ok:v {};$$err:e {}};
+      let out=mt process.stdout(handle) {$ok:s s;$$err:e ""};
+      if(str.contains(out;"name")){
+        let parts=str.split(out;"\"name\":\"");
+        if(parts.len>=2){
+          let modelpart=parts.get(1);
+          let end=str.indexof(modelpart;"\"");
+          if(end>0){
+            <str.slice(modelpart;0;end)
+          }el{<"unknown"};
+        }el{<""};
+      }el{<""};
+    };
+    $$err:e <""
+  };
+};
+f=tojson(stats:$systemstats):$str{
+  let slmstr=if(stats.slmactive){str.concat("\"";str.concat(stats.slmmodel;"\""))}el{"null"};
+  <str.concat("{\"total_ram_mb\":";str.concat(str.fromint(stats.totalrammb);
+    str.concat(",\"used_ram_mb\":";str.concat(str.fromint(stats.usedrammb);
+    str.concat(",\"free_ram_mb\":";str.concat(str.fromint(stats.freerammb);
+    str.concat(",\"ram_percent\":";str.concat(str.fromfloat(stats.rampercent);
+    str.concat(",\"cpu_count\":";str.concat(str.fromint(stats.cpucount);
+    str.concat(",\"cpu_percent\":";str.concat(str.fromfloat(stats.cpupercent);
+    str.concat(",\"ollama\":{\"pid\":";str.concat(str.fromint(stats.ollamastats.pid);
+    str.concat(",\"cpu\":";str.concat(str.fromfloat(stats.ollamastats.cpupercent);
+    str.concat(",\"ram_mb\":";str.concat(str.fromfloat(stats.ollamastats.rammb);
+    str.concat("}";
+    str.concat(",\"loke\":{\"pid\":";str.concat(str.fromint(stats.lokestats.pid);
+    str.concat(",\"cpu\":";str.concat(str.fromfloat(stats.lokestats.cpupercent);
+    str.concat(",\"ram_mb\":";str.concat(str.fromfloat(stats.lokestats.rammb);
+    str.concat("}";
+    str.concat(",\"slm_active\":";str.concat(if(stats.slmactive){"true"}el{"false"};
+    str.concat(",\"slm_model\":";str.concat(slmstr;
+    "}"))))))))))))))))))))))))
+};

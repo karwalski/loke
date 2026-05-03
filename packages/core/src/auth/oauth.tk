@@ -1,0 +1,182 @@
+
+m=loke.core.auth.oauth;
+
+i=str:std.str;
+i=log:std.log;
+i=http:std.http;
+i=auth:std.auth;
+i=crypto:std.crypto;
+i=encoding:std.encoding;
+i=pkce:loke.core.auth.pkce;
+i=store:loke.core.auth.tokenstore;
+i=refresh:loke.core.auth.refresh;
+
+t=$oauthconfig{
+  adapterid:$str;
+  clientid:$str;
+  authoriseurl:$str;
+  tokenurl:$str;
+  scopes:$str;
+  revokeurl:$str;
+  callbackport:i32
+};
+
+t=$tokenset{
+  accesstoken:$str;
+  refreshtoken:$str;
+  expiresat:i64;
+  scopes:$str
+};
+
+t=$oautherr{
+  adapterid:$str;
+  errorcode:$str;
+  errordesc:$str
+};
+
+t=$authstate{
+  stateparam:$str;
+  codeverifier:$str;
+  redirecturi:$str
+};
+
+f=newconfig(adapterid:$str;clientid:$str;authoriseurl:$str;tokenurl:$str;scopes:$str):$oauthconfig{
+  <$oauthconfig{
+    adapterid:adapterid;
+    clientid:clientid;
+    authoriseurl:authoriseurl;
+    tokenurl:tokenurl;
+    scopes:scopes;
+    revokeurl:"";
+    callbackport:0
+  };
+};
+
+f=withrevokeurl(cfg:i64;url:$str):$oauthconfig{
+  <$oauthconfig{
+    adapterid:cfg.adapterid;
+    clientid:cfg.clientid;
+    authoriseurl:cfg.authoriseurl;
+    tokenurl:cfg.tokenurl;
+    scopes:cfg.scopes;
+    revokeurl:url;
+    callbackport:cfg.callbackport
+  };
+};
+
+f=withcallbackport(cfg:i64;port:i32):$oauthconfig{
+  <$oauthconfig{
+    adapterid:cfg.adapterid;
+    clientid:cfg.clientid;
+    authoriseurl:cfg.authoriseurl;
+    tokenurl:cfg.tokenurl;
+    scopes:cfg.scopes;
+    revokeurl:cfg.revokeurl;
+    callbackport:port
+  };
+};
+
+f=buildauthoriseurl(cfg:i64;stateparam:$str;codechallenge:$str;redirecturi:$str):$str{
+  let url=str.concat(cfg.authoriseurl;"?response_type=code");
+  let url=str.concat(url;str.concat("&client_id=";cfg.clientid));
+  let url=str.concat(url;str.concat("&redirect_uri=";redirecturi));
+  let url=str.concat(url;str.concat("&scope=";cfg.scopes));
+  let url=str.concat(url;str.concat("&state=";stateparam));
+  let url=str.concat(url;str.concat("&code_challenge=";codechallenge));
+  let url=str.concat(url;"&code_challenge_method=S256");
+  <url
+};
+
+f=redirecturi(port:i32):$str{
+  <str.concat("http://localhost:";str.concat(str.fromint(port);"/callback"))
+};
+
+f=generatestate():$str{
+  <crypto.randomhex(32)
+};
+
+f=exchangecode(cfg:i64;code:$str;codeverifier:$str;redir:$str):$tokenset!$oautherr{
+  let client=http.client(cfg.tokenurl);
+  let body=str.concat("grant_type=authorization_code";
+    str.concat("&code=";str.concat(code;
+    str.concat("&redirect_uri=";str.concat(redir;
+    str.concat("&client_id=";str.concat(cfg.clientid;
+    str.concat("&code_verifier=";codeverifier))))))));
+  let hdrs=@(@(str)).get(["Content-Type";"application/x-www-form-urlencoded"]);
+  let resp=http.post(client;"";str.tobytes(body);"application/x-www-form-urlencoded")!{
+    <$oautherr{adapterid:cfg.adapterid;errorcode:"network_error";errordesc:"token request failed"}
+  };
+  if(resp.status>=400){
+    let msg=str.concat("token endpoint returned ";str.fromint(resp.status));
+    log.warn(str.concat("loke.core.auth.oauth: ";msg));
+    <$oautherr{adapterid:cfg.adapterid;errorcode:"token_exchange_failed";errordesc:msg}
+  }el{};
+  let bodystr=str.frombytes(resp.body);
+  let access=encoding.jsonfield(bodystr;"access_token");
+  let refreshtok=encoding.jsonfield(bodystr;"refresh_token");
+  let expiresin=encoding.jsonfieldint(bodystr;"expires_in");
+  let now=std.time.nowunix();
+  let tokens=$tokenset{
+    accesstoken:access;
+    refreshtoken:refreshtok;
+    expiresat:now+expiresin;
+    scopes:cfg.scopes
+  };
+  log.info(str.concat("loke.core.auth.oauth: tokens acquired for ";cfg.adapterid));
+  <tokens
+};
+
+f=validatestate(expected:$str;actual:$str):bool{
+  <str.eq(expected;actual)
+};
+
+f=beginauthorise(cfg:$oauthconfig):$authstate{
+  let verifier=pkce.generateverifier();
+  let challenge=pkce.generatechallenge(verifier);
+  let stateparam=generatestate();
+  let port=cfg.callbackport;
+  if(port=0){ let port=8739 }el{};
+  let redir=redirecturi(port);
+  let url=buildauthoriseurl(cfg;stateparam;challenge;redir);
+  log.info(str.concat("loke.core.auth.oauth: authorise URL built for ";cfg.adapterid));
+  <$authstate{
+    stateparam:stateparam;
+    codeverifier:verifier;
+    redirecturi:redir
+  };
+};
+
+f=completeauthorise(cfg:i64;auth:i64;callbackstate:$str;code:$str):$tokenset!$oautherr{
+  if(!validatestate(auth.stateparam;callbackstate)){
+    log.warn(str.concat("loke.core.auth.oauth: state mismatch for ";cfg.adapterid));
+    <$oautherr{adapterid:cfg.adapterid;errorcode:"state_mismatch";errordesc:"CSRF validation failed  state parameter does not match"}
+  }el{};
+  let tokens=exchangecode(cfg;code;auth.codeverifier;auth.redirecturi)!{
+    <$oautherr{adapterid:cfg.adapterid;errorcode:"exchange_failed";errordesc:"code exchange failed"}
+  };
+  store.savetokens(cfg.adapterid;tokens);
+  log.info(str.concat("loke.core.auth.oauth: authorisation complete for ";cfg.adapterid));
+  <tokens
+};
+
+f=getaccesstoken(cfg:$oauthconfig):$str{
+  <refresh.getvalidtoken(cfg)
+};
+
+f=isauthorised(adapterid:$str):bool{
+  <store.hastokens(adapterid)
+};
+
+f=revoke(cfg:$oauthconfig){
+  let access=store.loadaccesstoken(cfg.adapterid);
+  if(str.len(access)>0){
+    if(str.len(cfg.revokeurl)>0){
+      let client=http.client(cfg.revokeurl);
+      let body=str.concat("token=";access);
+      http.post(client;"";str.tobytes(body);"application/x-www-form-urlencoded")!{};
+      log.info(str.concat("loke.core.auth.oauth: revocation request sent for ";cfg.adapterid))
+    }el{}
+  }el{};
+  store.cleartokens(cfg.adapterid);
+  log.info(str.concat("loke.core.auth.oauth: tokens cleared for ";cfg.adapterid))
+};

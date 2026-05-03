@@ -28,9 +28,9 @@ See [docs/design-principles.md](docs/design-principles.md) for the full design p
 
 ## Operating Modes
 
-### Browser Mode (Chromium Workspace)
+### Browser Mode (Desktop Workspace)
 
-A Chromium-based desktop application where users can browse, interact with web apps, process data, and prompt LLMs from a single location. Web page content is sandboxed — data read from within a webpage never goes directly to an LLM. All data passes through the local intelligence layer first, where sensitive information is identified, anonymised, or blocked before any external transmission.
+An ooke native binary with web view where users can browse, interact with web apps, process data, and prompt LLMs from a single location. Web page content is sandboxed — data read from within a webpage never goes directly to an LLM. All data passes through the local intelligence layer first, where sensitive information is identified, anonymised, or blocked before any external transmission.
 
 ### Terminal Mode (CLI / Coding Interface)
 
@@ -51,21 +51,82 @@ $ loke claude-code "refactor this module"
     └── 7. Result displayed with full audit log
 ```
 
-## Key Components
+## What's Built
 
-| Component | Purpose |
-|-----------|---------|
-| **Local Intelligence Layer** | On-device SLM for summarisation, NER, intent classification, and simple tasks |
-| **Privacy & Anonymisation** | Multi-layer PII detection (regex, NLP, SLM NER, Presidio) with reversible anonymisation |
-| **Token Optimisation Pipeline** | TOON format + LLMLingua compression + semantic caching + toke encoding |
-| **LLM Router** | Routes requests by sensitivity, complexity, cost, speed, and user preference |
-| **AI Governance Gateway** | Single mandatory entry point for all AI interactions — risk classification, policy enforcement, accountability, and kill switches |
-| **Agent Framework** | Lightweight scheduled/triggered agents with declared permissions, sandbox execution, and full governance coverage |
-| **Memory Palace** | Persistent cross-session memory in a structured palace (wings, halls, rooms); semantic search; AAAK-compressed context loading |
-| **MCP Integration** | First-class MCP host and client — includes toke MCP server, memory MCP server, and MCP broker for tool use across local, companion, and cloud boundaries |
-| **Policy & Compliance Engine** | Enterprise policy enforcement, audit trails, regulatory compliance reporting, and governance dashboards |
-| **Companion Device Support** | Offload heavy inference to nearby high-power devices over encrypted connections |
-| **Feedback System** | Thumbs up/down on every interaction; feedback-driven learning loops; routes directly into the development pipeline |
+The core engine, platform layer, and application modes are implemented. The table below shows what exists today.
+
+### Foundation (Core Engine)
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Privacy & Anonymisation Pipeline** | Done | Multi-layer PII detection (regex, NLP, SLM NER, Presidio), reversible placeholder mapping with SQLCipher, guardian system prompt injection, privacy pipeline orchestrator with dry-run and visual diff |
+| **Token Optimisation** | Done | TOON serialiser/deserialiser (30-60% savings), LLMLingua compression (5-20x), semantic caching (73% on cache hits), token budget manager with daily/weekly/monthly limits |
+| **LLM Router** | Done | Semantic intent classifier (<10ms), sensitivity scorer, model selection engine (cheapest-adequate/fastest/best-quality/local-first), RouteLLM integration, latency tolerance routing, model size escalation with user consent |
+| **Tiered Inference Engine** | Done | Three tiers: Interactive (25-55 tok/s), Considered (5-15 tok/s), Background (0.5-5 tok/s); hardware-aware model recommendations; disk-streaming inference for extreme offload; overnight batch processing |
+| **Local Model Integration** | Done | Ollama service manager, MLX backend for Apple Silicon, native inference via ooke bindings, model capability registry, background inference queue |
+| **Storage & Audit** | Done | SQLite + SQLCipher with WAL mode, append-only audit trail with hash chain, vector store, secure ephemeral storage, backup/restore, sync queue, namespaced settings |
+| **MCP Framework** | Done | MCP client and server in toke, MCP broker for intermediary routing with per-server permissions, toke MCP server (compress/decompress/template/analyse), local MCP server discovery via mDNS |
+| **Companion Device Support** | Done | mDNS discovery and pairing, TLS 1.3 mutual auth secure channels, remote model execution, Exo distributed inference (GPL boundary maintained) |
+| **Model Evaluation** | Done | Local benchmarking suite, A/B comparison testing, "Could this run locally?" advisor, workload-specific scoring |
+
+### Accountable AI Systems
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **AI Governance Gateway** | Done | Single mandatory entry point for all AI interactions; risk classification (Low/Medium/High); policy enforcement; kill switches (global/per-provider/per-use-case/per-agent); accountability and ownership registry |
+| **Transparency & Explainability** | Done | Decision trace system capturing full pipeline state; "Why this output?" local explanation generator; AI content disclosure markers |
+| **Operational Monitoring** | Done | Output quality monitoring with hallucination/coherence/relevance scoring; incident management workflow with severity levels and post-incident review |
+| **Metrics & Dashboards** | Done | Governance health dashboard, value realisation dashboard, provider performance scorecard, regulatory compliance reporting, cost forecasting, inference tier utilisation dashboard |
+
+### Agents & Memory
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Agent Framework** | Done | YAML/TOML agent definitions; cron/file/webhook/MCP triggers; sandbox execution with permission enforcement; agent-to-agent communication; overnight batch processing |
+| **Memory Palace** | Done | Wing/Hall/Room/Closet/Drawer hierarchy; verbatim conversation storage; semantic search (<500ms for 100K drawers); automatic context enrichment; knowledge graph with temporal awareness; agent diaries. Adapted from the [MemPalace](https://github.com/milla-jovovich/mempalace) architecture (MIT) for local-first use |
+| **AAAK Shorthand** | Done | 5-30x compression for memory/context; layered context loading (L0-L3); prompt shorthand expansion; memory mining from external sources; memory MCP server |
+| **Feedback System** | Done | Thumbs up/down on every interaction; feedback-driven learning loops |
+
+### Platform Layer
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **HTTP Server** | Done | Configurable host:port, versioned API routing, composable middleware pipeline, security hardening (CSP, HSTS, rate limiting) |
+| **Extensibility** | Done | Plugin registration system, lifecycle hooks, extensible config, anonymisation pattern registration, privacy pipeline hooks, custom provider registration, governance rule hooks |
+| **UI Platform** | Done | Design tokens, dark mode/theming, component primitives, application shell, client-side router, navigation, notifications, settings UI |
+| **Internationalisation** | Done | Translation function with interpolation/pluralisation, locale file structure, layout accommodation for text expansion |
+| **Integration Framework** | Done | Adapter interface with retry/circuit-breaking, OAuth 2.0 support, base HTTP client, input sanitisation |
+| **Error Handling** | Done | Server/client/API error handling with correlation IDs, structured error responses, no stack traces leaked |
+
+### Application Layer
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Browser Mode** | Done | Tab/navigation management, webpage content extraction with privacy filtering, chat/LLM interaction panel, dashboard persistence, web privacy metadata detection |
+| **Terminal Mode** | Done | Direct prompting (`loke ask`), coding LLM proxy mode, local compute preprocessing for code, multi-session management, environment integration (`loke init`, `loke doctor`) |
+| **Desktop Distribution** | Done | ooke packaging (DMG/NSIS), code signing and notarization, auto-update with stable/beta channels, portable CLI binary, per-user proxy configuration, port conflict detection |
+
+### Cross-Cutting
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Documentation** | Done | Project documentation site, contribution framework, security policy, architecture document, threat model, security audit checklist |
+| **Research** | Done | Peer-reviewed research proposal, TOON benchmark publication |
+
+## What's Next
+
+These features are specified but not yet implemented — the user-facing experience layer.
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Policy Loader & Regulatory Defaults** | Spec done | YAML/TOML policy format, enterprise URL fetch, regional defaults (GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA) |
+| **Compliance Feedback Loop** | Spec done | Response scanning for compliance violations, warning UI, require-confirmation mode |
+| **Audit Reporting & Export** | Spec done | PDF/CSV/JSON reports, time ranges, templates, scheduled generation |
+| **First-Run Setup Wizard** | Spec done | Hardware check, Ollama install, provider config, privacy presets, test interaction |
+| **Pipeline Visibility Panel** | Spec done | Real-time pipeline stage display, expandable details |
+| **Savings Dashboard** | Spec done | Tokens saved, cost saved, PII intercepted, local ratio, trends |
+| **Prompt Approval Workflow** | Spec done | Pre-send display, approve/edit/cancel for beta users |
+| **Issue Reporting Form** | Spec done | In-app structured issue reporting with privacy pipeline |
 
 ## Token Savings
 
@@ -89,8 +150,6 @@ loke layers multiple optimisation strategies for a combined target of **60-80% t
 - **Routing:** RouteLLM signal integration (REST), semantic intent classifier (local model)
 - **MCP:** toke implementation of MCP protocol (language-agnostic specification)
 
-> **Note:** Foundation layer development is on hold pending ooke Phase 1 completion. See `docs/epics-and-stories.md` for detail.
-
 ## Platform Support
 
 - **macOS** — primary platform (Apple Silicon optimised)
@@ -102,8 +161,9 @@ loke layers multiple optimisation strategies for a combined target of **60-80% t
 packages/
 ├── core/              # Shared core engine (privacy, router, optimizer, cache, storage, audit,
 │                      #   governance gateway, agent framework, memory palace)
-├── browser/           # Electron/Chromium workspace mode
+├── browser/           # ooke native binary with web view (browser mode)
 ├── cli/               # Terminal mode and coding LLM proxy
+├── moke/              # Conceptual demo of loke's privacy pipeline (ooke application)
 ├── mcp-toke/          # toke MCP server (compress, decompress, template, analyse)
 ├── mcp-broker/        # MCP broker for intermediary routing
 └── shared/            # Shared types, utilities, and configuration

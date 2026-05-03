@@ -1,0 +1,227 @@
+
+m=core.installer.detect;
+i=str:std.str;
+i=log:shared.log;
+i=sys:std.sys;
+i=process:std.process;
+i=http:std.http;
+
+t=$installstate{
+  ollamainstalled:bool;
+  ollamaversion:$str;
+  ollamarunning:bool;
+  modelpulled:bool;
+  modelid:$str;
+  diskfreegb:i64;
+  ramgb:i64;
+  isarm64:bool;
+  hasinternet:bool;
+  platform:$str
+};
+
+t=$detectresult{
+  ok:bool;
+  value:$str;
+  error:$str
+};
+
+let gollamaurl = "http://localhost:11434";
+
+f=detectollamainstalled():$detectresult{
+  log.info("probing ollama --version";"installer.detect";"system");
+  let handle = process.spawn(["ollama";"--version"]);
+  mt handle {
+    Ok:h {
+      let code = mt process.wait(h);
+      code {
+        Ok:c {
+          if(c = 0){
+            let out = mt process.stdout(h);
+            out {
+              Ok:v {
+                log.info(str.concat("ollama found: ";v);"installer.detect";"system");
+                <$detectresult{ok:true;value:v;error:""}
+              };
+              Err:e <$detectresult{ok:true;value:"unknown";error:""}
+            };
+          }el{
+            <$detectresult{ok:false;value:"";error:"ollama exited with non-zero code"}
+          };
+        };
+        Err:e <$detectresult{ok:false;value:"";error:"process wait failed"}
+      };
+    };
+    Err:e {
+      log.info("ollama not found on PATH";"installer.detect";"system");
+      <$detectresult{ok:false;value:"";error:"ollama not found"}
+    };
+  };
+};
+
+f=detectollamarunning():$detectresult{
+  log.info("checking if ollama is running";"installer.detect";"system");
+  let client = http.client(gollamaurl);
+  let resp = http.get(client;"/api/version");
+  mt resp {
+    Ok:r {
+      if(r.status = 200){
+        log.info("ollama server is running";"installer.detect";"system");
+        <$detectresult{ok:true;value:$str.frombytes(r.body);error:""}
+      }el{
+        <$detectresult{ok:false;value:"";error:$str.concat("unexpected status: ";str.fromint(r.status))}
+      };
+    };
+    Err:e {
+      log.info("ollama server not reachable";"installer.detect";"system");
+      <$detectresult{ok:false;value:"";error:e.msg}
+    };
+  };
+};
+
+f=detectmodelpulled(modelid:$str):$detectresult{
+  log.info(str.concat("checking for model: ";modelid);"installer.detect";"system");
+  let client = http.client(gollamaurl);
+  let resp = http.get(client;"/api/tags");
+  mt resp {
+    Ok:r {
+      if(r.status = 200){
+        let body = str.frombytes(r.body);
+        if(str.contains(body;modelid)){
+          log.info(str.concat("model found: ";modelid);"installer.detect";"system");
+          <$detectresult{ok:true;value:modelid;error:""}
+        }el{
+          log.info(str.concat("model not found: ";modelid);"installer.detect";"system");
+          <$detectresult{ok:false;value:"";error:"model not in tag list"}
+        };
+      }el{
+        <$detectresult{ok:false;value:"";error:$str.concat("unexpected status: ";str.fromint(r.status))}
+      };
+    };
+    Err:e {
+      <$detectresult{ok:false;value:"";error:e.msg}
+    };
+  };
+};
+
+f=detectdiskspace():$detectresult{
+  log.info("checking disk space";"installer.detect";"system");
+  let datadir = sys.datadir("loke");
+  let handle = process.spawn(["df";"-g";datadir]);
+  mt handle {
+    Ok:h {
+      let code = mt process.wait(h);
+      code {
+        Ok:c {
+          let out = mt process.stdout(h);
+          out {
+            Ok:v {
+              log.info(str.concat("disk info: ";v);"installer.detect";"system");
+              <$detectresult{ok:true;value:v;error:""}
+            };
+            Err:e <$detectresult{ok:false;value:"";error:"could not read df output"}
+          };
+        };
+        Err:e <$detectresult{ok:false;value:"";error:"df command failed"}
+      };
+    };
+    Err:e <$detectresult{ok:false;value:"0";error:"could not run df"}
+  };
+};
+
+f=detectram():i64{
+  let ram = sys.totalramgb();
+  log.info(str.concat("total RAM: ";str.concat(str.fromint(ram);" GB"));"installer.detect";"system");
+  <ram
+};
+
+f=detectarch():bool{
+  let arm = sys.isarm64();
+  log.info(str.concat("ARM64: ";if(arm){"yes"}el{"no"});"installer.detect";"system");
+  <arm
+};
+
+f=detectinternet():$detectresult{
+  log.info("checking internet connectivity";"installer.detect";"system");
+  let client = http.client("https://ollama.com");
+  let resp = http.get(client;"/");
+  mt resp {
+    Ok:r {
+      if(r.status >= 200){
+        if(r.status < 400){
+          log.info("internet connectivity confirmed";"installer.detect";"system");
+          <$detectresult{ok:true;value:"connected";error:""}
+        }el{
+          <$detectresult{ok:false;value:"";error:$str.concat("http status: ";str.fromint(r.status))}
+        };
+      }el{
+        <$detectresult{ok:false;value:"";error:"unexpected status"}
+      };
+    };
+    Err:e {
+      log.info("no internet connectivity";"installer.detect";"system");
+      <$detectresult{ok:false;value:"";error:e.msg}
+    };
+  };
+};
+
+f=fulldetect():$installstate{
+  log.info("running full detection";"installer.detect";"system");
+
+  let ollamacheck = detectollamainstalled();
+  let runningcheck = detectollamarunning();
+  let ram = detectram();
+  let arm = detectarch();
+  let internetcheck = detectinternet();
+  let diskcheck = detectdiskspace();
+
+  let defaultmodel = "qwen2.5:3b";
+  if(ram >= 64){ let defaultmodel = "qwen2.5:32b" }el{};
+  if(ram >= 32){ if(ram < 64){ let defaultmodel = "qwen2.5:14b" }el{} }el{};
+  if(ram >= 16){ if(ram < 32){ let defaultmodel = "qwen2.5:7b" }el{} }el{};
+  if(ram >= 8){ if(ram < 16){ let defaultmodel = "qwen2.5:3b" }el{} }el{};
+  if(ram < 8){ let defaultmodel = "qwen2.5:1.5b" }el{};
+
+  let modelcheck = if(runningcheck.ok){
+    detectmodelpulled(defaultmodel)
+  }el{
+    $detectresult{ok:false;value:"";error:"ollama not running"}
+  };
+
+  let platform = "unknown";
+  let plathandle = process.spawn(["uname";"-s"]);
+  mt plathandle {
+    Ok:h {
+      mt process.wait(h) {
+        Ok:c {
+          mt process.stdout(h) {
+            Ok:v {
+              if(str.contains(v;"Darwin")){ let platform = "macos" }el{};
+              if(str.contains(v;"Linux")){ let platform = "linux" }el{};
+              if(str.contains(v;"MINGW")){ let platform = "windows" }el{};
+              if(str.contains(v;"MSYS")){ let platform = "windows" }el{}
+            };
+            Err:e {}
+          };
+        };
+        Err:e {}
+      };
+    };
+    Err:e {}
+  };
+
+  let state = $installstate{
+    ollamainstalled:ollamacheck.ok;
+    ollamaversion:ollamacheck.value;
+    ollamarunning:runningcheck.ok;
+    modelpulled:modelcheck.ok;
+    modelid:defaultmodel;
+    diskfreegb:0;
+    ramgb:ram;
+    isarm64:arm;
+    hasinternet:internetcheck.ok;
+    platform:platform
+  };
+
+  log.info(str.concat("detection complete: ollama_installed=";str.concat(if(state.ollamainstalled){"true"}el{"false"};str.concat(" running=";str.concat(if(state.ollamarunning){"true"}el{"false"};str.concat(" model=";str.concat(if(state.modelpulled){"true"}el{"false"};str.concat(" internet=";if(state.hasinternet){"true"}el{"false"})))))));"installer.detect";"system");
+  <state
+};

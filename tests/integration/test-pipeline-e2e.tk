@@ -1,0 +1,139 @@
+
+m=tests.integration.testpipelinee2e;
+
+i=pipeline:core.privacy.pipeline;
+i=regex:core.privacy.regex;
+i=guardian:core.privacy.guardian;
+i=ph:core.privacy.placeholder;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:$n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:$n;passed:false;message:$msg} };
+
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+
+f=assertfalse(n:$str;v:bool):$result{
+  if(!$v){ <pass(n) }el{ <fail(n;"expected false") };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=offlineconfig():$pipelineconfig{
+  <$pipelineconfig{
+    presidiourl:"";
+    ollamaurl:"";
+    nermodelid:"";
+    usepresidio:false;
+    usener:false;
+    dryrun:false
+  };
+};
+
+f=runall():bool{
+  let results = @$result@();
+  let cfg = offlineconfig();
+
+  let input = "Hi, I'm Alice Smith. My email is alice@example.com and card 4111 1111 1111 1111.";
+  let systemprompt = "You are a helpful assistant.";
+
+  let piperesult = pipeline.run(input;systemprompt;cfg);
+
+  results = str.arraypush(results;assertfalse(
+    "e2e: anonymised does not contain email";
+    str.contains(piperesult.result.anonymised;"alice@example.com")
+  ));
+
+  results = str.arraypush(results;assertfalse(
+    "e2e: anonymised does not contain credit card";
+    str.contains(piperesult.result.anonymised;"4111 1111 1111 1111")
+  ));
+
+  let entitycount = str.arraylen(piperesult.result.entities);
+  results = str.arraypush(results;asserttrue("e2e: at least 2 entities detected";entitycount >= 2));
+
+  results = str.arraypush(results;asserttrue(
+    "e2e: sensitivity is RESTRICTED";
+    piperesult.result.sensitivity = $restricted
+  ));
+
+  results = str.arraypush(results;asserteq("e2e: original preserved";piperesult.result.original;input));
+
+  results = str.arraypush(results;asserttrue(
+    "e2e: guardian injected into system prompt";
+    guardian.isguardianpresent(piperesult.finalsystemprompt)
+  ));
+
+  results = str.arraypush(results;asserttrue(
+    "e2e: original system prompt preserved";
+    str.contains(piperesult.finalsystemprompt;"helpful assistant")
+  ));
+
+  let detectresult = regex.detect(input);
+  let anontext = detectresult.anonymised;
+
+  let phmap = ph.newmap();
+  let ei = 0;
+  let entcount = str.arraylen(detectresult.entities);
+  loop{
+    if(ei >= entcount){ break }el{
+      let entity = str.arrayget(detectresult.entities;ei);
+      ph.addentry(phmap;entity.value;entity.placeholder;entity.entitytype);
+      ei = ei + 1
+    };
+  };
+
+  let restored = ph.restore(anontext;phmap);
+  results = str.arraypush(results;asserteq("e2e: restore returns original";restored;input));
+
+  let clean = "The weather forecast looks good for Saturday.";
+  let cleanresult = pipeline.run(clean;"";cfg);
+
+  results = str.arraypush(results;asserteq("e2e: clean text unchanged";cleanresult.result.anonymised;clean));
+
+  let cleanentities = str.arraylen(cleanresult.result.entities);
+  results = str.arraypush(results;asserttrue("e2e: clean text zero entities";cleanentities = 0));
+
+  let multi = "Call +61 412 345 678 or email bob@test.org. TFN: 123 456 789.";
+  let multiresult = pipeline.run(multi;"";cfg);
+
+  results = str.arraypush(results;assertfalse(
+    "e2e: multi PII does not contain phone";
+    str.contains(multiresult.result.anonymised;"+61 412 345 678")
+  ));
+
+  let multientities = str.arraylen(multiresult.result.entities);
+  results = str.arraypush(results;asserttrue("e2e: multi PII has entities";multientities >= 1));
+
+  let emptyresult = pipeline.run("";"";cfg);
+  results = str.arraypush(results;asserteq("e2e: empty input returns empty";emptyresult.result.anonymised;""));
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i + 1
+    };
+  };
+  <all
+};

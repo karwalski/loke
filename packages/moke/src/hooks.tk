@@ -1,484 +1,493 @@
 m=moke.hooks;
 i=str:std.string;
 i=log:std.log;
-i=hooks:core.extensions.pipeline_hooks;
+i=hooks:core.extensions.pipelinehooks;
 
-pub m.$col_type{ $numeric; $categorical; $datetime; $boolean; $text; $unknown }
+t=$coltype{ $numeric; $categorical; $datetime; $boolean; $text; $unknown };
 
-pub m.$col_profile{
+t=$colprofile{
   name:str;
-  col_type:str;
-  null_count:i32;
-  unique_count:i32;
-  sample_values:@(str);
-  min_val:str;
-  max_val:str;
-  mean_val:str
-}
+  coltype:str;
+  nullcount:i32;
+  uniquecount:i32;
+  samplevalues:@(str);
+  minval:str;
+  maxval:str;
+  meanval:str
+};
 
-pub m.$schema_profile{
-  dataset_name:str;
-  row_count:i32;
-  col_count:i32;
-  columns:@($col_profile)
-}
+t=$schemaprofile{
+  datasetname:str;
+  rowcount:i32;
+  colcount:i32;
+  columns:@$colprofile
+};
 
-pub m.$hook_result{
+t=$hookresult{
   transformed:str;
-  profile:$schema_profile;
-  raw_data_detected:bool
-}
+  profile:$schemaprofile;
+  rawdatadetected:bool
+};
 
-// ── P2.6 — Privacy pipeline hook API ─────────────────────────────────────────
 
-// State threaded through the privacy pipeline for each request.
-pub m.$pipeline_state{
+
+
+t=$pipelinestate{
   original:str;
   anonymised:str;
-  schema_profile:str;
-  entity_count:i32;
+  schemaprofile:str;
+  entitycount:i32;
   sensitivity:str;
-  dataset_name:str;
-  is_schema_first:bool
-}
+  datasetname:str;
+  isschemafirst:bool
+};
 
-// Result returned by each hook function.
-pub m.$pipeline_hook_result{
-  state:$pipeline_state;
+
+t=$pipelinehookresult{
+  state:$pipelinestate;
   modified:bool
-}
+};
 
-// Internal hook entry: id paired with a string key used for dispatch.
-// toke 0.1 cannot store function pointers as struct fields, so the ooke
-// dispatch table resolves hook_key to the real function at call time.
-pub m.$pipeline_hook_entry{
+
+
+
+t=$pipelinehookentry{
   id:str;
-  hook_key:str;
+  hookkey:str;
   slot:str
-}
+};
 
-// Registry holding all registered pipeline hooks in insertion order.
-pub m.$pipeline_hook_registry{
-  entries:@($pipeline_hook_entry)
-}
 
-// Module-level registries — mutated during init, read-only at request time.
-let g_before_anon_registry=$pipeline_hook_registry{ entries=[] };
-let g_after_anon_registry=$pipeline_hook_registry{ entries=[] };
+t=$pipelinehookregistry{
+  entries:@$pipelinehookentry
+};
 
-// Register a hook for the before-anonymise slot.
-// hook_fn is the export name of the function within this module (or an
-// imported module) that ooke will resolve at dispatch time.
-pub f=register_before_anonymise(id:str; hook_key:str){
-  entry:$pipeline_hook_entry={
+
+let gbeforeanonregistry=$pipelinehookregistry{ entries=@() };
+let gafteranonregistry=$pipelinehookregistry{ entries=@() };
+
+
+
+
+f=registerbeforeanonymise(id:str; hookkey:str){
+  entry:$pipelinehookentry={
     id=id;
-    hook_key=hook_key;
+    hookkey=hookkey;
     slot="before_anonymise"
   };
-  updated:@($pipeline_hook_entry)=str.push_copy(g_before_anon_registry.entries;entry);
-  g_before_anon_registry=$pipeline_hook_registry{ entries=updated }
-}
+  updated:@$pipelinehookentry=str.pushcopy(gbeforeanonregistry.entries;entry);
+  gbeforeanonregistry=$pipelinehookregistry{ entries=updated };
+};
 
-// Register a hook for the after-anonymise slot.
-pub f=register_after_anonymise(id:str; hook_key:str){
-  entry:$pipeline_hook_entry={
+
+f=registerafteranonymise(id:str; hookkey:str){
+  entry:$pipelinehookentry={
     id=id;
-    hook_key=hook_key;
+    hookkey=hookkey;
     slot="after_anonymise"
   };
-  updated:@($pipeline_hook_entry)=str.push_copy(g_after_anon_registry.entries;entry);
-  g_after_anon_registry=$pipeline_hook_registry{ entries=updated }
-}
+  updated:@$pipelinehookentry=str.pushcopy(gafteranonregistry.entries;entry);
+  gafteranonregistry=$pipelinehookregistry{ entries=updated };
+};
 
-// Run all hooks registered for the given slot in insertion order.
-// If a hook returns modified=true its output state is fed to the next hook.
-// The ooke dispatch table is consulted for each hook_key — unknown keys are
-// logged and skipped (no-op pass-through).
-pub f=run_hooks(slot:str; state:$pipeline_state):$pipeline_state{
-  registry:$pipeline_hook_registry=g_before_anon_registry;
-  ??(str.eq(slot;"after_anonymise")){
-    registry=g_after_anon_registry
+
+
+
+
+f=runhooks(slot:str; state:$pipelinestate):$pipelinestate{
+  registry:$pipelinehookregistry=gbeforeanonregistry;
+  if(str.eq(slot;"after_anonymise")){
+    registry=gafteranonregistry
   }{};
-  current:$pipeline_state=state;
+  current:$pipelinestate=state;
   idx:i32=0;
-  ??(idx<str.len(registry.entries)){
-    entry:$pipeline_hook_entry=str.get(registry.entries;idx);
-    result:$pipeline_hook_result=hooks.dispatch(entry.hook_key;current);
-    ??(result.modified){
+  if(idx<str.len(registry.entries)){
+    entry:$pipelinehookentry=str.get(registry.entries;idx);
+    result:$pipelinehookresult=hooks.dispatch(entry.hookkey;current);
+    if(result.modified){
       current=result.state
     }{};
     idx=idx+1
   }{};
   <current
-}
+};
 
-// ── Schema-first hook (MK1.3) ─────────────────────────────────────────────────
-// Replaces raw tabular data in the prompt with a compact schema profile.
-// Raw row data never leaves the device.
-pub f=schema_first_hook(state:$pipeline_state):$pipeline_hook_result{
-  ??(str.len(state.schema_profile)==0){
-    <$pipeline_hook_result{
+
+
+
+f=schemafirsthook(state:$pipelinestate):$pipelinehookresult{
+  if(str.len(state.schemaprofile)==0){
+    <$pipelinehookresult{
       state=state;
       modified=false
-    }
+    };
   }{};
   prefix:str="Dataset: ";
-  prefix=str.concat(prefix;state.dataset_name);
+  prefix=str.concat(prefix;state.datasetname);
   prefix=str.concat(prefix;" Schema: ");
-  prefix=str.concat(prefix;state.schema_profile);
-  prefix=str.concat(prefix;"\n\n");
-  new_text:str=str.concat(prefix;state.original);
-  new_state:$pipeline_state={
-    original=new_text;
+  prefix=str.concat(prefix;state.schemaprofile);
+  prefix=str.concat(prefix;"
+
+");
+  newtext:str=str.concat(prefix;state.original);
+  newstate:$pipelinestate={
+    original=newtext;
     anonymised=state.anonymised;
-    schema_profile=state.schema_profile;
-    entity_count=state.entity_count;
+    schemaprofile=state.schemaprofile;
+    entitycount=state.entitycount;
     sensitivity=state.sensitivity;
-    dataset_name=state.dataset_name;
-    is_schema_first=true
+    datasetname=state.datasetname;
+    isschemafirst=true
   };
-  <$pipeline_hook_result{
-    state=new_state;
+  <$pipelinehookresult{
+    state=newstate;
     modified=true
-  }
-}
+  };
+};
 
-// ── P2.8 — Governance rule hook ───────────────────────────────────────────────
 
-// Context supplied to every governance rule hook evaluation.
-pub m.$eval_context{
-  request_id:str;
-  use_case_id:str;
+
+
+t=$evalcontext{
+  requestid:str;
+  usecaseid:str;
   text:str;
-  model_id:str;
+  modelid:str;
   sensitivity:str;
-  estimated_cost:f32
-}
+  estimatedcost:f32
+};
 
-// Result returned by a governance rule hook.
-pub m.$rule_hook_result{
+
+t=$rulehookresult{
   blocked:bool;
   reason:str;
-  hook_id:str
-}
+  hookid:str
+};
 
-// Internal rule hook entry. As with pipeline hooks, toke 0.1 stores a
-// string key resolved by the ooke dispatch table rather than a fn pointer.
-pub m.$rule_hook_entry{
+
+
+t=$rulehookentry{
   id:str;
-  hook_key:str
-}
+  hookkey:str
+};
 
-// Registry holding all registered rule hooks in insertion order.
-pub m.$rule_hook_registry{
-  entries:@($rule_hook_entry)
-}
 
-// Module-level rule hook registry.
-let g_rule_registry=$rule_hook_registry{ entries=[] };
+t=$rulehookregistry{
+  entries:@$rulehookentry
+};
 
-// Register a governance rule hook.
-pub f=register_rule_hook(id:str; hook_key:str){
-  entry:$rule_hook_entry={
+
+let gruleregistry=$rulehookregistry{ entries=@() };
+
+
+f=registerrulehook(id:str; hookkey:str){
+  entry:$rulehookentry={
     id=id;
-    hook_key=hook_key
+    hookkey=hookkey
   };
-  updated:@($rule_hook_entry)=str.push_copy(g_rule_registry.entries;entry);
-  g_rule_registry=$rule_hook_registry{ entries=updated }
-}
+  updated:@$rulehookentry=str.pushcopy(gruleregistry.entries;entry);
+  gruleregistry=$rulehookregistry{ entries=updated };
+};
 
-// Evaluate all registered rule hooks in insertion order.
-// First hook that returns blocked=true short-circuits and its result is
-// returned immediately. If no hook blocks, an allow result is returned.
-pub f=evaluate_rules(ctx:$eval_context):$rule_hook_result{
+
+
+
+f=evaluaterules(ctx:$evalcontext):$rulehookresult{
   idx:i32=0;
-  ??(idx<str.len(g_rule_registry.entries)){
-    entry:$rule_hook_entry=str.get(g_rule_registry.entries;idx);
-    result:$rule_hook_result=hooks.dispatch_rule(entry.hook_key;ctx);
-    ??(result.blocked){
+  if(idx<str.len(gruleregistry.entries)){
+    entry:$rulehookentry=str.get(gruleregistry.entries;idx);
+    result:$rulehookresult=hooks.dispatchrule(entry.hookkey;ctx);
+    if(result.blocked){
       <result
     }{};
     idx=idx+1
   }{};
-  <$rule_hook_result{
+  <$rulehookresult{
     blocked=false;
     reason="";
-    hook_id=""
-  }
-}
+    hookid=""
+  };
+};
 
-// ── Raw data guard (MK1.3 governance rule) ────────────────────────────────────
-// Blocks any request where raw tabular row data is detected in the prompt
-// text. Uses a simple heuristic: count lines that contain more than five
-// semicolons or more than five commas. If more than three such lines are
-// found the request is blocked.
-pub f=raw_data_guard_hook(ctx:$eval_context):$rule_hook_result{
-  lines:@(str)=str.split(ctx.text;"\n");
-  heavy_lines:i32=0;
+
+
+
+
+
+f=rawdataguardhook(ctx:$evalcontext):$rulehookresult{
+  lines:@(str)=str.split(ctx.text;"
+");
+  heavylines:i32=0;
   idx:i32=0;
-  ??(idx<str.len(lines)){
+  if(idx<str.len(lines)){
     line:str=str.get(lines;idx);
-    semi_count:i32=str.count(line;";");
-    comma_count:i32=str.count(line;",");
-    ??(semi_count>5||comma_count>5){
-      heavy_lines=heavy_lines+1
+    semicount:i32=str.count(line;";");
+    commacount:i32=str.count(line;",");
+    if(semicount>5||commacount>5){
+      heavylines=heavylines+1
     }{};
     idx=idx+1
   }{};
-  ??(heavy_lines>3){
-    <$rule_hook_result{
+  if(heavylines>3){
+    <$rulehookresult{
       blocked=true;
       reason="Raw tabular data detected — use schema-first protocol";
-      hook_id="moke.raw_data_guard"
-    }
+      hookid="moke.raw_data_guard"
+    };
   }{};
-  <$rule_hook_result{
+  <$rulehookresult{
     blocked=false;
     reason="";
-    hook_id="moke.raw_data_guard"
-  }
-}
+    hookid="moke.raw_data_guard"
+  };
+};
 
-pub f=detect_raw_data(text:str):bool{
-  pipe_lines:i32=0;
-  csv_lines:i32=0;
-  lines:@(str)=str.split(text;"\n");
+f=detectrawdata(text:str):bool{
+  pipelines:i32=0;
+  csvlines:i32=0;
+  lines:@(str)=str.split(text;"
+");
   idx:i32=0;
-  ??(str.contains(text;"|\n")){
+  if(str.contains(text;"|
+")){
     idx=0;
-    ??(idx<str.len(lines)){
+    if(idx<str.len(lines)){
       line:str=str.get(lines;idx);
-      ??(str.contains(line;"|")){
-        pipe_lines=pipe_lines+1
+      if(str.contains(line;"|")){
+        pipelines=pipelines+1
       }{};
       idx=idx+1
-    }{}
+    }{};
   }{};
-  ??(pipe_lines>5){
+  if(pipelines>5){
     <true
   }{};
   idx=0;
-  ??(idx<str.len(lines)){
+  if(idx<str.len(lines)){
     line:str=str.get(lines;idx);
-    comma_count:i32=str.count(line;",");
-    ??(comma_count>3){
-      csv_lines=csv_lines+1
+    commacount:i32=str.count(line;",");
+    if(commacount>3){
+      csvlines=csvlines+1
     }{};
     idx=idx+1
   }{};
-  ??(csv_lines>5){
+  if(csvlines>5){
     <true
   }{};
   <false
-}
+};
 
-pub f=extract_schema(csv_text:str;dataset_name:str):$schema_profile{
-  lines:@(str)=str.split(csv_text;"\n");
-  total_lines:i32=str.len(lines);
-  header_line:str=str.get(lines;0);
-  headers:@(str)=str.split(header_line;",");
-  col_count:i32=str.len(headers);
-  row_count:i32=total_lines-1;
-  sample_limit:i32=100;
-  ??(sample_limit>row_count){ sample_limit=row_count }{};
-  columns:@($col_profile)=[];
-  col_idx:i32=0;
-  ??(col_idx<col_count){
-    col_name:str=str.trim(str.get(headers;col_idx));
-    values:@(str)=[];
-    row_idx:i32=1;
-    ??(row_idx<=sample_limit){
-      row_line:str=str.get(lines;row_idx);
-      cells:@(str)=str.split(row_line;",");
-      cell:str=str.trim(str.get(cells;col_idx));
+f=extractschema(csvtext:str;datasetname:str):$schemaprofile{
+  lines:@(str)=str.split(csvtext;"
+");
+  totallines:i32=str.len(lines);
+  headerline:str=str.get(lines;0);
+  headers:@(str)=str.split(headerline;",");
+  colcount:i32=str.len(headers);
+  rowcount:i32=totallines-1;
+  samplelimit:i32=100;
+  if(samplelimit>rowcount){ samplelimit=rowcount }{};
+  columns:@$colprofile=@();
+  colidx:i32=0;
+  if(colidx<colcount){
+    colname:str=str.trim(str.get(headers;colidx));
+    values:@(str)=@();
+    rowidx:i32=1;
+    if(rowidx<=samplelimit){
+      rowline:str=str.get(lines;rowidx);
+      cells:@(str)=str.split(rowline;",");
+      cell:str=str.trim(str.get(cells;colidx));
       str.push(values;cell);
-      row_idx=row_idx+1
+      rowidx=rowidx+1
     }{};
-    null_count:i32=0;
-    unique_set:@(str)=[];
-    sample_vals:@(str)=[];
-    sample_collected:i32=0;
-    numeric_count:i32=0;
-    bool_count:i32=0;
-    date_count:i32=0;
-    sum_val:f32=0.0;
-    min_str:str="";
-    max_str:str="";
-    min_num:f32=0.0;
-    max_num:f32=0.0;
-    first_numeric:bool=true;
-    v_idx:i32=0;
-    ??(v_idx<str.len(values)){
-      v:str=str.get(values;v_idx);
-      ??(str.len(v)==0){
-        null_count=null_count+1
+    nullcount:i32=0;
+    uniqueset:@(str)=@();
+    samplevals:@(str)=@();
+    samplecollected:i32=0;
+    numericcount:i32=0;
+    boolcount:i32=0;
+    datecount:i32=0;
+    sumval:f32=0.0;
+    minstr:str="";
+    maxstr:str="";
+    minnum:f32=0.0;
+    maxnum:f32=0.0;
+    firstnumeric:bool=true;
+    vidx:i32=0;
+    if(vidx<str.len(values)){
+      v:str=str.get(values;vidx);
+      if(str.len(v)==0){
+        nullcount=nullcount+1
       }{
         already:bool=false;
-        u_idx:i32=0;
-        ??(u_idx<str.len(unique_set)){
-          ??(str.eq(str.get(unique_set;u_idx);v)){
+        uidx:i32=0;
+        if(uidx<str.len(uniqueset)){
+          if(str.eq(str.get(uniqueset;uidx);v)){
             already=true
           }{};
-          u_idx=u_idx+1
+          uidx=uidx+1
         }{};
-        ??(already==false){ str.push(unique_set;v) }{};
-        ??(sample_collected<3){
-          str.push(sample_vals;v);
-          sample_collected=sample_collected+1
+        if(already==false){ str.push(uniqueset;v) }{};
+        if(samplecollected<3){
+          str.push(samplevals;v);
+          samplecollected=samplecollected+1
         }{};
-        is_num:bool=str.is_numeric(v);
-        ??(is_num){
-          numeric_count=numeric_count+1;
-          n:f32=str.parse_f32(v);
-          sum_val=sum_val+n;
-          ??(first_numeric){
-            min_num=n;
-            max_num=n;
-            first_numeric=false
+        isnum:bool=str.isnumeric(v);
+        if(isnum){
+          numericcount=numericcount+1;
+          n:f32=str.parsef32(v);
+          sumval=sumval+n;
+          if(firstnumeric){
+            minnum=n;
+            maxnum=n;
+            firstnumeric=false
           }{
-            ??(n<min_num){ min_num=n }{};
-            ??(n>max_num){ max_num=n }{}
-          }
+            if(n<minnum){ minnum=n }{};
+            if(n>maxnum){ maxnum=n }{};
+          };
         }{};
-        v_lower:str=str.lower(v);
-        ??(str.eq(v_lower;"yes")||str.eq(v_lower;"no")||str.eq(v_lower;"true")||str.eq(v_lower;"false")||str.eq(v_lower;"1")||str.eq(v_lower;"0")){
-          bool_count=bool_count+1
+        vlower:str=str.lower(v);
+        if(str.eq(vlower;"yes")||str.eq(vlower;"no")||str.eq(vlower;"true")||str.eq(vlower;"false")||str.eq(vlower;"1")||str.eq(vlower;"0")){
+          boolcount=boolcount+1
         }{};
-        ??(str.contains(v;"-")&&str.len(v)>=8){
-          date_count=date_count+1
-        }{}
+        if(str.contains(v;"-")&&str.len(v)>=8){
+          datecount=datecount+1
+        }{};
       };
-      v_idx=v_idx+1
+      vidx=vidx+1
     }{};
-    unique_count:i32=str.len(unique_set);
-    non_null:i32=str.len(values)-null_count;
-    inferred_type:str="unknown";
-    ??(non_null>0&&numeric_count==non_null){
-      inferred_type="numeric"
+    uniquecount:i32=str.len(uniqueset);
+    nonnull:i32=str.len(values)-nullcount;
+    inferredtype:str="unknown";
+    if(nonnull>0&&numericcount==nonnull){
+      inferredtype="numeric"
     }{
-      ??(non_null>0&&bool_count==non_null){
-        inferred_type="boolean"
+      if(nonnull>0&&boolcount==nonnull){
+        inferredtype="boolean"
       }{
-        ??(non_null>0&&date_count>non_null/2){
-          inferred_type="datetime"
+        if(nonnull>0&&datecount>nonnull/2){
+          inferredtype="datetime"
         }{
-          ??(unique_count<20){
-            inferred_type="categorical"
+          if(uniquecount<20){
+            inferredtype="categorical"
           }{
-            inferred_type="text"
-          }
-        }
-      }
+            inferredtype="text"
+          };
+        };
+      };
     };
-    min_out:str="";
-    max_out:str="";
-    mean_out:str="";
-    ??(str.eq(inferred_type;"numeric")){
-      min_out=str.from_f32(min_num);
-      max_out=str.from_f32(max_num);
-      ??(non_null>0){
-        mean_out=str.from_f32(sum_val/str.to_f32(non_null))
-      }{}
+    minout:str="";
+    maxout:str="";
+    meanout:str="";
+    if(str.eq(inferredtype;"numeric")){
+      minout=str.fromf32(minnum);
+      maxout=str.fromf32(maxnum);
+      if(nonnull>0){
+        meanout=str.fromf32(sumval/str.tof32(nonnull))
+      }{};
     }{};
-    profile:$col_profile={
-      name=col_name;
-      col_type=inferred_type;
-      null_count=null_count;
-      unique_count=unique_count;
-      sample_values=sample_vals;
-      min_val=min_out;
-      max_val=max_out;
-      mean_val=mean_out
+    profile:$colprofile={
+      name=colname;
+      coltype=inferredtype;
+      nullcount=nullcount;
+      uniquecount=uniquecount;
+      samplevalues=samplevals;
+      minval=minout;
+      maxval=maxout;
+      meanval=meanout
     };
     str.push(columns;profile);
-    col_idx=col_idx+1
+    colidx=colidx+1
   }{};
-  <$schema_profile{
-    dataset_name=dataset_name;
-    row_count=row_count;
-    col_count=col_count;
+  <$schemaprofile{
+    datasetname=datasetname;
+    rowcount=rowcount;
+    colcount=colcount;
     columns=columns
-  }
-}
+  };
+};
 
-pub f=profile_to_toon(profile:$schema_profile):str{
+f=profiletotoon(profile:$schemaprofile):str{
   out:str="";
   out=str.concat(out;"DATASET: ");
-  out=str.concat(out;profile.dataset_name);
+  out=str.concat(out;profile.datasetname);
   out=str.concat(out;" | ROWS: ");
-  out=str.concat(out;str.from_i32(profile.row_count));
+  out=str.concat(out;str.fromi32(profile.rowcount));
   out=str.concat(out;" | COLS: ");
-  out=str.concat(out;str.from_i32(profile.col_count));
-  out=str.concat(out;"\n");
+  out=str.concat(out;str.fromi32(profile.colcount));
+  out=str.concat(out;"
+");
   out=str.concat(out;"COLS: ");
   idx:i32=0;
-  ??(idx<str.len(profile.columns)){
-    col:$col_profile=str.get(profile.columns;idx);
+  if(idx<str.len(profile.columns)){
+    col:$colprofile=str.get(profile.columns;idx);
     out=str.concat(out;col.name);
     out=str.concat(out;"(");
-    out=str.concat(out;col.col_type);
+    out=str.concat(out;col.coltype);
     out=str.concat(out;",nulls=");
-    out=str.concat(out;str.from_i32(col.null_count));
+    out=str.concat(out;str.fromi32(col.nullcount));
     out=str.concat(out;",unique=");
-    out=str.concat(out;str.from_i32(col.unique_count));
+    out=str.concat(out;str.fromi32(col.uniquecount));
     out=str.concat(out;",sample=[");
-    s_idx:i32=0;
-    ??(s_idx<str.len(col.sample_values)){
-      ??(s_idx>0){ out=str.concat(out;";") }{};
-      out=str.concat(out;str.get(col.sample_values;s_idx));
-      s_idx=s_idx+1
+    sidx:i32=0;
+    if(sidx<str.len(col.samplevalues)){
+      if(sidx>0){ out=str.concat(out;";") }{};
+      out=str.concat(out;str.get(col.samplevalues;sidx));
+      sidx=sidx+1
     }{};
     out=str.concat(out;"])");
-    ??(idx<profile.col_count-1){ out=str.concat(out;" ") }{};
+    if(idx<profile.colcount-1){ out=str.concat(out;" ") }{};
     idx=idx+1
   }{};
-  out=str.concat(out;"\n");
+  out=str.concat(out;"
+");
   out=str.concat(out;"STATS: ");
-  has_stats:bool=false;
-  s_idx:i32=0;
-  ??(s_idx<str.len(profile.columns)){
-    col:$col_profile=str.get(profile.columns;s_idx);
-    ??(str.eq(col.col_type;"numeric")){
-      ??(has_stats){ out=str.concat(out;" ") }{};
+  hasstats:bool=false;
+  sidx:i32=0;
+  if(sidx<str.len(profile.columns)){
+    col:$colprofile=str.get(profile.columns;sidx);
+    if(str.eq(col.coltype;"numeric")){
+      if(hasstats){ out=str.concat(out;" ") }{};
       out=str.concat(out;col.name);
       out=str.concat(out;"=");
-      out=str.concat(out;col.min_val);
+      out=str.concat(out;col.minval);
       out=str.concat(out;"/");
-      out=str.concat(out;col.max_val);
+      out=str.concat(out;col.maxval);
       out=str.concat(out;"/");
-      out=str.concat(out;col.mean_val);
-      has_stats=true
+      out=str.concat(out;col.meanval);
+      hasstats=true
     }{};
-    s_idx=s_idx+1
+    sidx=sidx+1
   }{};
-  ??(has_stats==false){ out=str.concat(out;"(none)") }{};
+  if(hasstats==false){ out=str.concat(out;"(none)") }{};
   <out
-}
+};
 
-pub f=apply_schema_first(text:str;dataset_name:str):$hook_result{
-  is_raw:bool=detect_raw_data(text);
-  ??(is_raw){
+f=applyschemafirst(text:str;datasetname:str):$hookresult{
+  israw:bool=detectrawdata(text);
+  if(israw){
     log.info("moke.hooks: raw data detected, extracting schema");
-    profile:$schema_profile=extract_schema(text;dataset_name);
-    toon:str=profile_to_toon(profile);
-    notice:str="[moke: raw data replaced by schema profile]\n";
+    profile:$schemaprofile=extractschema(text;datasetname);
+    toon:str=profiletotoon(profile);
+    notice:str="[moke: raw data replaced by schema profile]
+";
     transformed:str=str.concat(notice;toon);
-    <$hook_result{
+    <$hookresult{
       transformed=transformed;
       profile=profile;
-      raw_data_detected=true
-    }
-  }{
-    empty_profile:$schema_profile={
-      dataset_name="";
-      row_count=0;
-      col_count=0;
-      columns=[]
+      rawdatadetected=true
     };
-    <$hook_result{
+  }{
+    emptyprofile:$schemaprofile={
+      datasetname="";
+      rowcount=0;
+      colcount=0;
+      columns=@()
+    };
+    <$hookresult{
       transformed=text;
-      profile=empty_profile;
-      raw_data_detected=false
-    }
-  }
-}
+      profile=emptyprofile;
+      rawdatadetected=false
+    };
+  };
+};

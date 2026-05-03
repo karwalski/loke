@@ -1,0 +1,114 @@
+
+m=tests.unit.models.teststreaming;
+
+i=disk:loke.core.inference.streaming.disk;
+i=hw:loke.core.hardware.profile;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:$n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:$n;passed:false;message:$msg} };
+
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+
+f=assertfalse(n:$str;v:bool):$result{
+  if(!$v){ <pass(n) }el{ <fail(n;"expected false") };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=runall():bool{
+  let results = @$result@();
+
+  let dir = disk.sharddir("qwen2.5-72b");
+  results = str.arraypush(results;asserttrue("shard_dir contains model id";str.contains(dir;"qwen2.5-72b")));
+  results = str.arraypush(results;asserttrue("shard_dir starts with ~/.loke";str.contains(dir;".loke/models/shards/")));
+
+  let cfg = disk.defaultconfig("llama-3.1-70b";8);
+  results = str.arraypush(results;asserteq("default_config model_id";cfg.modelid;"llama-3.1-70b"));
+  results = str.arraypush(results;asserttrue("default_config ram_ceiling_gb is 8";cfg.ramceilinggb = 8));
+
+  results = str.arraypush(results;asserttrue("default_config layer_count is 80";cfg.layercount = 80));
+
+  results = str.arraypush(results;asserttrue("default_config prefetch_layers is 4";cfg.prefetchlayers = 4));
+
+  let nvmeprofile = hw.$hardwareprofile{
+    ramgb:16;vramgb:0;unifiedmemorygb:16;cpucores:8;
+    gpuname:"Apple M-series";disktype:"nvme";diskspeedmbs:3000;platform:"darwin"
+  };
+  results = str.arraypush(results;asserttrue("is_available true for nvme";disk.isavailable(nvmeprofile)));
+
+  let sataprofile = hw.$hardwareprofile{
+    ramgb:16;vramgb:0;unifiedmemorygb:0;cpucores:4;
+    gpuname:"";disktype:"sata";diskspeedmbs:500;platform:"linux"
+  };
+  results = str.arraypush(results;assertfalse("is_available false for sata";disk.isavailable(sataprofile)));
+
+  let hddprofile = hw.$hardwareprofile{
+    ramgb:8;vramgb:0;unifiedmemorygb:0;cpucores:2;
+    gpuname:"";disktype:"hdd";diskspeedmbs:150;platform:"linux"
+  };
+  results = str.arraypush(results;assertfalse("is_available false for hdd";disk.isavailable(hddprofile)));
+
+  let toks = disk.estimatetokpersec(nvmeprofile;70.0);
+  results = str.arraypush(results;asserttrue("tok_per_sec > 0 for nvme";toks > 0.0));
+
+  results = str.arraypush(results;asserttrue("tok_per_sec <= 5.0";toks <= 5.0));
+
+  let cost = disk.cloudcostcomparison(1000;"llama-3.1-70b");
+  results = str.arraypush(results;asserttrue("cost comparison contains $";str.contains(cost;"$")));
+
+  let progress = disk.$streamprogress{
+    loadedlayers:10;totallayers:80;tokpersec:2.5;phase:"loading"
+  };
+  let pjson = disk.progresstojson(progress);
+  results = str.arraypush(results;asserttrue("progress json contains loaded_layers";str.contains(pjson;"loaded_layers")));
+  results = str.arraypush(results;asserttrue("progress json contains phase";str.contains(pjson;"phase")));
+
+  let res = disk.$streamresult{
+    text:"Generated text";tokpersec:1.5;tokensin:50;tokensout:20;ok:true;error:""
+  };
+  let rjson = disk.resulttojson(res);
+  results = str.arraypush(results;asserttrue("result json contains text";str.contains(rjson;"text")));
+  results = str.arraypush(results;asserttrue("result json contains ok";str.contains(rjson;"ok")));
+
+  let errres = disk.$streamresult{
+    text:"";tokpersec:0.0;tokensin:0;tokensout:0;ok:false;error:"NVMe required"
+  };
+  let errjson = disk.resulttojson(errres);
+  results = str.arraypush(results;asserttrue("error result json contains error text";str.contains(errjson;"NVMe required")));
+
+  let custom = disk.$shardconfig{
+    modelid:"test-model";sharddir:"/tmp/shards";
+    ramceilinggb:4;layercount:32;prefetchlayers:2
+  };
+  results = str.arraypush(results;asserteq("custom shard_config model_id";custom.modelid;"test-model"));
+  results = str.arraypush(results;asserttrue("custom layer_count is 32";custom.layercount = 32));
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i + 1
+    };
+  };
+  <all
+};

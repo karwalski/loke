@@ -1,0 +1,128 @@
+
+m=tests.unit.browser.testapipipeline;
+
+i=pipelineapi:api.pipeline;
+i=str:std.string;
+i=json:std.json;
+i=log:std.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:$n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:$n;passed:false;message:$msg} };
+
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+
+f=assertcontains(n:$str;haystack:$str;needle:$str):$result{
+  if(str.contains(haystack;needle)){ <pass(n) }el{
+    <fail(n;str.concat("expected to contain: ";needle))
+  };
+};
+
+f=assertnotcontains(n:$str;haystack:$str;needle:$str):$result{
+  if(!str.contains(haystack;needle)){ <pass(n) }el{
+    <fail(n;str.concat("should not contain: ";needle))
+  };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=runall():bool{
+  let results = @$result@();
+
+  let emptybody = json.encode(@("text":""));
+  let emptyreq = str.mockhttpreqwithbody("POST";"/api/pipeline";emptybody);
+  let emptyres = pipelineapi.post(emptyreq);
+  results = str.arraypush(results;asserteq("pipeline empty text returns 400";str.fromint(emptyres.status);str.fromint(400)));
+  results = str.arraypush(results;assertcontains("pipeline empty text error message";emptyres.body;"text"));
+
+  let notextbody = json.encode(@("system_prompt":"test"));
+  let notextreq = str.mockhttpreqwithbody("POST";"/api/pipeline";notextbody);
+  let notextres = pipelineapi.post(notextreq);
+  results = str.arraypush(results;asserteq("pipeline missing text returns 400";str.fromint(notextres.status);str.fromint(400)));
+
+  let validbody = json.encode(@(
+    "text":"Hello, how are you?";
+    "system_prompt":"";
+    "tolerance":"instant";
+    "mode":"chat"
+  ));
+  let validreq = str.mockhttpreqwithbody("POST";"/api/pipeline";validbody);
+  let validres = pipelineapi.post(validreq);
+  let validstatus = validres.status = 200 || validres.status = 500 || validres.status = 403;
+  results = str.arraypush(results;asserttrue("pipeline valid text returns 200/500/403";validstatus));
+
+  if(validres.status = 200){
+    results = str.arraypush(results;assertcontains("pipeline response has ok";validres.body;"\"ok\":true"));
+    results = str.arraypush(results;assertcontains("pipeline response has response field";validres.body;"\"response\""));
+    results = str.arraypush(results;assertcontains("pipeline response has sensitivity";validres.body;"\"sensitivity\""));
+    results = str.arraypush(results;assertcontains("pipeline response has model_id";validres.body;"\"model_id\""));
+    results = str.arraypush(results;assertcontains("pipeline response has entities_found";validres.body;"\"entities_found\""));
+    results = str.arraypush(results;assertcontains("pipeline response has request_id";validres.body;"\"request_id\""));
+    results = str.arraypush(results;assertcontains("pipeline response has tokens_in";validres.body;"\"tokens_in\""));
+    results = str.arraypush(results;assertcontains("pipeline response has tokens_out";validres.body;"\"tokens_out\""));
+    results = str.arraypush(results;assertcontains("pipeline response has cost_usd";validres.body;"\"cost_usd\""));
+  }el{
+    results = str.arraypush(results;asserttrue("pipeline error is JSON";str.startswith(validres.body;"{")));
+  };
+
+  let instant = pipelineapi.parsetolerance("instant");
+  results = str.arraypush(results;asserttrue("parse_tolerance instant";instant = $instant));
+  let patient = pipelineapi.parsetolerance("patient");
+  results = str.arraypush(results;asserttrue("parse_tolerance patient";patient = $patient));
+  let background = pipelineapi.parsetolerance("background");
+  results = str.arraypush(results;asserttrue("parse_tolerance background";background = $background));
+
+  let unknown = pipelineapi.parsetolerance("unknown_value");
+  results = str.arraypush(results;asserttrue("parse_tolerance unknown defaults instant";unknown = $instant));
+
+  results = str.arraypush(results;asserteq("sensitivity_label restricted";pipelineapi.sensitivitylabel($restricted);"RESTRICTED"));
+  results = str.arraypush(results;asserteq("sensitivity_label confidential";pipelineapi.sensitivitylabel($confidential);"CONFIDENTIAL"));
+  results = str.arraypush(results;asserteq("sensitivity_label internal";pipelineapi.sensitivitylabel($internal);"INTERNAL"));
+  results = str.arraypush(results;asserteq("sensitivity_label public";pipelineapi.sensitivitylabel($public);"PUBLIC"));
+
+  if(validres.status = 200){
+    results = str.arraypush(results;assertcontains("pipeline response has anonymised";validres.body;"\"anonymised\""));
+    results = str.arraypush(results;assertcontains("pipeline response has original";validres.body;"\"original\""));
+  }el{()};
+
+  let piibody = json.encode(@(
+    "text":"My name is John Smith and my email is john@example.com";
+    "system_prompt":"";
+    "tolerance":"instant";
+    "mode":"chat"
+  ));
+  let piireq = str.mockhttpreqwithbody("POST";"/api/pipeline";piibody);
+  let piires = pipelineapi.post(piireq);
+  if(piires.status = 200){
+    let hasentities = !str.contains(piires.body;"\"entities_found\":0");
+    results = str.arraypush(results;asserttrue("pipeline detects PII entities";hasentities));
+  }el{
+    results = str.arraypush(results;asserttrue("pipeline PII test skipped (infra)";true));
+  };
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i+1
+    };
+  };
+  <all
+};

@@ -1,0 +1,68 @@
+
+m=page.moke.api.stream;
+i=http:std.http;
+i=json:std.json;
+i=str:std.string;
+i=hooks:moke.hooks;
+i=streaming:moke.streaming;
+i=routing:moke.routingexplainer;
+i=cost:moke.costcomparison;
+i=consolelog:moke.consolelog;
+
+f=post(req:i64):i64{
+  let body=req.body;
+
+  let prompt=mt json.getstr(body;"prompt") {
+    ok:$v v;
+    $err:e ""
+  };
+  let model=mt json.getstr(body;"model") {
+    ok:$v v;
+    $err:e ""
+  };
+  let sessionid=mt json.getstr(body;"session_id") {
+    ok:$v v;
+    $err:e "unknown"
+  };
+
+  if(str.eq(prompt;"")){
+    <http.res.err(400;"missing required field: prompt")
+  };
+
+  let stream=mut.streaming.newsession(sessionid;model);
+
+  stream=streaming.setstage(stream;"schema_extract");
+  let hookresult=hooks.applyschemafirst(prompt;"dataset");
+  let effectiveprompt=hookresult.transformed;
+
+  stream=streaming.setstage(stream;"anonymise");
+
+  stream=streaming.setstage(stream;"llm_call");
+
+  let upstreambody=mut."{";
+  upstreambody=str.concat(upstreambody;str.concat("\"text\":";str.jsonencode(effectiveprompt)));
+  upstreambody=str.concat(upstreambody;",\"system_prompt\":\"\"");
+  upstreambody=str.concat(upstreambody;",\"tolerance\":\"instant\"");
+  upstreambody=str.concat(upstreambody;",\"mode\":\"chat\"");
+  upstreambody=str.concat(upstreambody;",\"stream\":true");
+  if(str.len(model) > 0){
+    upstreambody=str.concat(upstreambody;str.concat(",\"model\":";str.jsonencode(model)))
+  };
+  upstreambody=str.concat(upstreambody;"}");
+
+  let upstreamres=http.post("http://127.0.0.1:11430/api/pipeline";
+    "application/json";upstreambody);
+
+  stream=streaming.setstage(stream;"restore");
+  stream=streaming.setstate(stream;streaming.$streamstate.$complete);
+
+  let upstreamjson=http.body(upstreamres);
+
+  let respbody=mut."{";
+  respbody=str.concat(respbody;"\"ok\":true");
+  respbody=str.concat(respbody;",\"stream_session\":" + streaming.sessiontojson(stream));
+  respbody=str.concat(respbody;",\"upstream\":" + upstreamjson);
+  respbody=str.concat(respbody;"}");
+
+  <http.res.json(200;respbody)
+};

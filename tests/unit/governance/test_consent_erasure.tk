@@ -1,0 +1,128 @@
+
+m=tests.unit.governance.testconsenterasure;
+
+i=consent:core.governance.consent;
+i=dsar:core.governance.dsar;
+i=comp:core.governance.compliance;
+i=db:core.storage.db;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(name:$str):$result{ <$result{name:$name;passed:true;message:"ok"} };
+f=fail(name:$str;msg:$str):$result{ <$result{name:$name;passed:false;message:$msg} };
+
+f=asserttrue(name:$str;v:bool):$result{
+  if(v){ <pass(name) }el{ <fail(name;"expected true") };
+};
+
+f=assertfalse(name:$str;v:bool):$result{
+  if(!$v){ <pass(name) }el{ <fail(name;"expected false") };
+};
+
+f=asserteq(name:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(name) }el{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=runall():bool{
+  let store=mt db.open(":memory:") {
+    $ok:s s;
+    $err:e {
+      log.error("failed to open in-memory store for consent/erasure tests");
+      <false
+    };
+  };
+
+  let results=mut.@$result@();
+
+
+  let tableok=consent.ensuretable(store);
+  results=str.arraypush(results;asserttrue("consent table created";tableok));
+
+  let before=consent.check(store;"user-1";"telemetry");
+  results=str.arraypush(results;assertfalse("no consent before grant";before));
+
+  let granted=consent.grant(store;"user-1";"telemetry";365);
+  results=str.arraypush(results;asserttrue("grant returns true";granted));
+
+  let after=consent.check(store;"user-1";"telemetry");
+  results=str.arraypush(results;asserttrue("consent active after grant";after));
+
+  let revoked=consent.revoke(store;"user-1";"telemetry");
+  results=str.arraypush(results;asserttrue("revoke returns true";revoked));
+
+  let postrevoke=consent.check(store;"user-1";"telemetry");
+  results=str.arraypush(results;assertfalse("consent inactive after revoke";postrevoke));
+
+  let perm=consent.grant(store;"user-2";"cloud_routing";0);
+  results=str.arraypush(results;asserttrue("permanent grant returns true";perm));
+  let permcheck=consent.check(store;"user-2";"cloud_routing");
+  results=str.arraypush(results;asserttrue("permanent consent is active";permcheck));
+
+  let prefs=consent.loadprefs(store;"user-2");
+  results=str.arraypush(results;asserttrue("load_prefs cloud_routing true";prefs.cloudrouting));
+  results=str.arraypush(results;assertfalse("load_prefs telemetry false";prefs.telemetry));
+
+
+  let dsartableok=dsar.ensuretable(store);
+  results=str.arraypush(results;asserttrue("dsar table created";dsartableok));
+
+  let req=dsar.submit(store;"erasure";"user-1");
+  results=str.arraypush(results;asserteq("dsar status is pending";"pending";req.status));
+  results=str.arraypush(results;asserteq("dsar kind is erasure";"erasure";req.kind));
+
+  let lookedup=dsar.status(store;req.id);
+  results=str.arraypush(results;asserteq("dsar lookup status";"pending";lookedup.status));
+
+  let erasureok=dsar.processerasure(store;req);
+  results=str.arraypush(results;asserttrue("erasure completes successfully";erasureok));
+
+  let posterasure=dsar.status(store;req.id);
+  results=str.arraypush(results;asserteq("dsar status after erasure";"completed";posterasure.status));
+
+  let pending=dsar.listpending(store);
+  results=str.arraypush(results;asserttrue("no pending dsars after completion";pending.len=0));
+
+
+  let gdpr=comp.rungdprchecks(store);
+  let consentpass=mut.false;
+  let erasurepass=mut.false;
+  gdpr.checks.each|c{
+    if(str.eq(c.name;"User consent recorded")){
+      if(str.eq(c.status;"PASS")){
+        consentpass=true
+      };
+    };
+    if(str.eq(c.name;"Right to erasure supported")){
+      if(str.eq(c.status;"PASS")){
+        erasurepass=true
+      };
+    };
+  };
+  results=str.arraypush(results;asserttrue("gdpr consent check is PASS";consentpass));
+  results=str.arraypush(results;asserttrue("gdpr erasure check is PASS";erasurepass));
+
+  results=str.arraypush(results;asserteq("gdpr overall is PASS";"PASS";gdpr.overall));
+
+  let all=true;
+  let i=0;
+  let n=str.arraylen(results);
+  loop{
+    if(i>=n){ break }el{
+      let r=str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all=false }el{};
+      i=i+1
+    };
+  };
+  <all
+};

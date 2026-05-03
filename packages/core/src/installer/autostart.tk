@@ -1,0 +1,125 @@
+
+m=core.installer.autostart;
+i=ollama:core.models.ollama;
+i=proc:std.process;
+i=str:std.str;
+i=log:shared.log;
+i=time:std.time;
+
+t=$autostartconfig{
+  enabled:bool;
+  ollamaurl:$str;
+  maxrestarts:i64;
+  restartdelayms:i64
+};
+
+f=defaultconfig():$autostartconfig{
+  <$autostartconfig{
+    enabled:true;
+    ollamaurl:"http://localhost:11434";
+    maxrestarts:1;
+    restartdelayms:2000
+  };
+};
+
+f=ensurerunning(config:$autostartconfig):bool{
+  log.info("checking if Ollama is running";"installer.autostart";"system");
+  let client=ollama.new(config.ollamaurl);
+  let status=mt ollama.healthcheck(client);
+
+  status {
+    $running:i64;
+      log.info("Ollama is already running";"installer.autostart";"system");
+      <true
+    $stopped:i64;
+      if(config.enabled){
+        log.info("Ollama is stopped, attempting auto-start";"installer.autostart";"system");
+        <startandwait(config)
+      }el{
+        log.warn("Ollama is stopped but auto-start is disabled";"installer.autostart";"system");
+        <false
+      };
+    $unreachable:i64;
+      if(config.enabled){
+        log.info("Ollama is unreachable, attempting auto-start";"installer.autostart";"system");
+        <startandwait(config)
+      }el{
+        log.warn("Ollama is unreachable and auto-start is disabled";"installer.autostart";"system");
+        <false
+      };
+  };
+};
+
+f=startandwait(config:$autostartconfig):bool{
+  log.info("starting ollama serve";"installer.autostart";"system");
+  let spawnresult=proc.spawndetached("ollama";@("serve"));
+  mt spawnresult {
+    $err e;
+      log.error(str.concat("failed to spawn ollama serve: ";e.message);"installer.autostart";"system");
+      <false
+    $ok pid;
+      log.info(str.concat("ollama serve spawned with pid ";str.fromint(pid));"installer.autostart";"system");
+      <waitforhealth(config;15000;500)
+  };
+};
+
+f=waitforhealth(config:i64;timeoutms:i64;pollintervalms:i64):bool{
+  let client=ollama.new(config.ollamaurl);
+  let start=time.nowms();
+
+  loop{
+    let elapsed=time.elapsedms(start);
+    if(elapsed >= timeoutms){
+      log.error(str.concat("Ollama health timeout after ";str.concat(str.fromint(timeoutms);"ms"));"installer.autostart";"system");
+      <false
+    }el{};
+
+    let status=mt ollama.healthcheck(client);
+    status {
+      $running:i64;
+        log.info(str.concat("Ollama healthy after ";str.concat(str.fromint(elapsed);"ms"));"installer.autostart";"system");
+        <true
+      ;
+        time.sleepms(pollintervalms)
+    };
+  };
+};
+
+f=oncrash(config:i64;restartcount:i64):bool{
+  log.warn(str.concat("Ollama crash detected, restart_count=";str.fromint(restartcount));"installer.autostart";"system");
+
+  if(restartcount < config.maxrestarts){
+    log.info("attempting crash recovery restart";"installer.autostart";"system");
+    time.sleepms(config.restartdelayms);
+    let started=startandwait(config);
+    if(started){
+      log.info("crash recovery successful";"installer.autostart";"system");
+      <true
+    }el{
+      log.error("crash recovery failed -- Ollama did not become healthy";"installer.autostart";"system");
+      <false
+    };
+  }el{
+    log.error(str.concat("Ollama crashed and max restarts (";str.concat(str.fromint(config.maxrestarts);") exceeded. Manual intervention required."));"installer.autostart";"system");
+    log.error("Troubleshoot: check if port 11434 is in use with `lsof -i :11434`";"installer.autostart";"system");
+    <false
+  };
+};
+
+f=isconfigured():bool{
+  log.info("checking if Ollama was configured by loke";"installer.autostart";"system");
+  let lokebinresult=proc.exec("test";@("-x";str.concat(proc.homedir();"/.loke/bin/ollama")));
+  mt lokebinresult {
+    $ok code;
+      if(code = 0){
+        log.info("Ollama found at ~/.loke/bin/ollama (loke-managed)";"installer.autostart";"system");
+        <true
+      }el{
+        log.info("Ollama not found at ~/.loke/bin -- likely external install";"installer.autostart";"system");
+        <false
+      };
+    $err e;
+      log.info("could not check ~/.loke/bin/ollama -- assuming external install";"installer.autostart";"system");
+      <false
+  };
+};

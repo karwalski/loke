@@ -1,0 +1,136 @@
+
+m=core.installer.start;
+i=str:std.str;
+i=log:shared.log;
+i=process:std.process;
+i=http:std.http;
+i=detect:core.installer.detect;
+
+t=$startresult{
+  success:bool;
+  message:$str
+};
+
+let gollamahandlei64 = 0;
+
+let gollamaurl = "http://localhost:11434";
+let ghealthpollms = 500;
+let ghealthtimeoutms = 15000;
+
+f=startollama():$startresult{
+  log.info("starting ollama serve";"installer.start";"system");
+
+  let handle = process.spawn(["ollama";"serve"]);
+  mt handle {
+    Ok:h {
+      gollamahandle = $some(h);
+      log.info("ollama serve process spawned";"installer.start";"system");
+      <$startresult{success:true;message:"ollama serve started"}
+    };
+    Err:e {
+      log.error("failed to start ollama serve";"installer.start";"system");
+      mt e {
+        $notfound {
+          <$startresult{success:false;message:"ollama binary not found  install Ollama first"}
+        };
+        $permission {
+          <$startresult{success:false;message:"permission denied running ollama"}
+        };
+        $io {
+          <$startresult{success:false;message:"IO error starting ollama serve"}
+        };
+      };
+    };
+  };
+};
+
+f=waitforhealth():$startresult{
+  log.info("waiting for ollama health";"installer.start";"system");
+
+  let client = http.client(gollamaurl);
+  let elapsed = 0;
+  let healthy = false;
+
+  loop{
+    if(elapsed >= ghealthtimeoutms){ break }el{};
+    if(healthy){ break }el{};
+
+    let resp = http.get(client;"/api/version");
+    mt resp {
+      Ok:r {
+        if(r.status = 200){
+          let healthy = true;
+          log.info("ollama health check passed";"installer.start";"system")
+        }el{}
+      };
+      Err:e {}
+    };
+
+    if(!healthy){
+      let sleephandle = process.spawn(["sleep";"0.5"]);
+      mt sleephandle {
+        Ok:h { mt process.wait(h) { Ok:c {}; Err:e {} } };
+        Err:e {}
+      };
+      let elapsed = elapsed + ghealthpollms
+    }el{}
+  };
+
+  if(healthy){
+    <$startresult{success:true;message:"ollama is healthy"}
+  }el{
+    log.error("ollama health check timed out after 15s";"installer.start";"system");
+    <$startresult{success:false;message:"ollama failed to start within 15 seconds  check if port 11434 is in use: lsof -i :11434"}
+  };
+};
+
+f=stopollama():$startresult{
+  log.info("stopping ollama serve";"installer.start";"system");
+
+  mt gollamahandle {
+    $some:h {
+      let killed = process.kill(h);
+      gollamahandle = 0;
+      if(killed){
+        log.info("ollama serve process stopped";"installer.start";"system");
+        <$startresult{success:true;message:"ollama stopped"}
+      }el{
+        log.warn("could not kill ollama process  may have already exited";"installer.start";"system");
+        <$startresult{success:true;message:"ollama process may have already exited"}
+      };
+    };
+    $none {
+      log.info("no ollama process to stop";"installer.start";"system");
+      <$startresult{success:true;message:"no ollama process was running"}
+    };
+  };
+};
+
+f=autostartifneeded(autostart:bool):$startresult{
+  if(!autostart){
+    log.info("auto_start disabled, skipping";"installer.start";"system");
+    <$startresult{success:true;message:"auto_start disabled"}
+  }el{};
+
+  log.info("checking if ollama needs auto-start";"installer.start";"system");
+
+  let running = detect.detectollamarunning();
+  if(running.ok){
+    log.info("ollama already running, no action needed";"installer.start";"system");
+    <$startresult{success:true;message:"ollama already running"}
+  }el{};
+
+  let installed = detect.detectollamainstalled();
+  if(!installed.ok){
+    log.warn("ollama not installed, cannot auto-start";"installer.start";"system");
+    <$startresult{success:false;message:"ollama not installed  run setup to install"}
+  }el{};
+
+  let start = startollama();
+  if(!start.success){
+    <start
+  }el{};
+
+  let health = waitforhealth();
+  <health
+};

@@ -1,0 +1,121 @@
+
+m=tests.integration.testmcproundtrip;
+
+i=broker:loke.mcpbroker.broker;
+i=reg:loke.mcpbroker.registry;
+i=cfg:loke.mcpbroker.config;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:n;passed:false;message:msg} };
+
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+
+f=assertfalse(n:$str;v:bool):$result{
+  if(!$v){ <pass(n) }el{ <fail(n;"expected false") };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=runall():bool{
+  let results = @$result@();
+
+
+  let servercfg = cfg.newserver("test-server";"stdio");
+  results = str.arraypush(results;asserteq("server config name";servercfg.name;"test-server"));
+  results = str.arraypush(results;asserteq("server config transport";servercfg.transport;"stdio"));
+
+  reg.register(servercfg);
+  results = str.arraypush(results;pass("register does not crash"));
+
+  let found = reg.getserver("test-server");
+  let foundok = mt found { some() { true }; none { false } };
+  results = str.arraypush(results;asserttrue("registered server found";foundok));
+
+  let status = mt found { some(s) { s.status }; none { "not_found" } };
+  results = str.arraypush(results;asserteq("server initial status";status;"disconnected"));
+
+  reg.setstatus("test-server";"connected";"");
+  let afterconnect = reg.getserver("test-server");
+  let connectedstatus = mt afterconnect { some(s) { s.status }; none { "not_found" } };
+  results = str.arraypush(results;asserteq("server status after connect";connectedstatus;"connected"));
+
+
+  let toolsjson = broker.listalltools();
+  results = str.arraypush(results;asserttrue("tools JSON starts with [";str.startswith(toolsjson;"[")));
+  results = str.arraypush(results;asserttrue("tools JSON ends with ]";str.endswith(toolsjson;"]")));
+
+  let statusjson = broker.serverstatusjson();
+  results = str.arraypush(results;asserttrue("status JSON starts with [";str.startswith(statusjson;"[")));
+
+
+  let badcall = broker.$toolcall{
+    servername:"nonexistent-server";
+    toolname:"search";
+    argsjson:"{}";
+    requestid:"req-001";
+    sensitivity:"public"
+  };
+  let badresult = broker.dispatch(badcall);
+  results = str.arraypush(results;assertfalse("dispatch to missing server fails";badresult.ok));
+  results = str.arraypush(results;asserttrue(
+    "error mentions server not found";
+    str.contains(badresult.error;"server not found")
+  ));
+
+  results = str.arraypush(results;asserteq("result server name";badresult.server;"nonexistent-server"));
+
+  results = str.arraypush(results;asserteq("result tool name";badresult.tool;"search"));
+
+  results = str.arraypush(results;asserteq("result audit_id";badresult.auditid;"req-001"));
+
+  let goodcall = broker.$toolcall{
+    servername:"test-server";
+    toolname:"execute";
+    argsjson:"{\"code\":\"print('hello')\"}";
+    requestid:"req-002";
+    sensitivity:"public"
+  };
+  let goodresult = broker.dispatch(goodcall);
+  let notmissing = !str.contains(goodresult.error;"server not found");
+  results = str.arraypush(results;asserttrue("dispatch to connected server reaches transport";notmissing));
+
+  results = str.arraypush(results;asserttrue("privacy applied on dispatch";goodresult.privacyapplied));
+
+
+  broker.disableserver("test-server");
+  let afterdisable = reg.getserver("test-server");
+  let disabledstatus = mt afterdisable { some(s) { s.status }; none { "not_found" } };
+  results = str.arraypush(results;asserteq("server disabled";disabledstatus;"disconnected"));
+
+  let disabledresult = broker.dispatch(goodcall);
+  results = str.arraypush(results;assertfalse("dispatch to disabled server fails";disabledresult.ok));
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i + 1
+    };
+  };
+  <all
+};

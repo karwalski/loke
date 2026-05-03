@@ -300,10 +300,10 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| A6.1 | M | **Done** | electron-builder packaging config (DMG for Mac, per-user NSIS for Windows, universal binary, output paths, app metadata — `dev.tokelang.loke`) |
+| A6.1 | M | **Done** | ooke packaging config (DMG for Mac, per-user NSIS for Windows, universal binary, output paths, app metadata — `dev.tokelang.loke`) |
 | A6.2 | L | **Done** | Code signing and notarization (Apple Developer ID + notarization pipeline, Windows EV certificate + timestamping, CI secret wiring) |
-| A6.3 | L | **Done** | Auto-update (electron-updater, startup version check, background download, user-prompted restart via P3.8, stable and beta channels, force-update flag for security releases, channel preference in F6.7) |
-| A6.4 | M | **Done** | Portable CLI binary (Node.js SEA build for `packages/cli`, bundles core + mcp-toke + mcp-broker + shared, single-file Mac/Windows output, GitHub Release attachment) |
+| A6.3 | L | **Done** | Auto-update (ooke update mechanism, startup version check, background download, user-prompted restart via P3.8, stable and beta channels, force-update flag for security releases, channel preference in F6.7) |
+| A6.4 | M | **Done** | Portable CLI binary (ooke native build for `packages/cli`, bundles core + mcp-toke + mcp-broker + shared, single-file Mac/Windows output, GitHub Release attachment) |
 | A6.5 | M | **Done** | Per-user proxy configuration (MCP environment variable injection into shell profiles without admin; system-wide proxy as optional elevated step; runs after A6.6 port confirmation) |
 | A6.6 | S | **Done** | Port conflict detection and resolution (bind default `11430`, auto-select next free port in range, persist in F6.7, surface in first-run wizard A4.1 and `loke doctor` A2.5) |
 

@@ -1,0 +1,144 @@
+m=page.api.savings;
+
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=core:browser.extensions.core;
+i=metrics:core.audit.metrics;
+i=log:shared.log;
+
+f=get(req:i64):i64{
+  let cid=log.newcorrelationid();
+  log.info("savings API called";"api/savings";cid);
+
+  let period=mt http.queryparam(req;"period") {ok:$v v;
+    $err:e "today"
+  };
+
+  let store=core.getauditstore();
+
+  let m=mt metrics.summary(store;period) {ok:$v v;
+    $err:e metrics.emptysummary()
+  };
+
+  let rows=mt metrics.byprovider(store;period) {ok:$v v;
+    $err:e @()
+  };
+  let provcount=rows.len;
+  let provitems="";
+  let pi=mut.0;
+  loop{
+    if(pi>=provcount){ break }el{
+      let r=str.arrayget(rows;pi);
+      let entry=str.concat("{";
+        str.concat("\"provider\":";
+        str.concat(json.encstr(r.provider);
+        str.concat(",\"requests\":";
+        str.concat(str.fromu32(r.requests);
+        str.concat(",\"tokens_in\":";
+        str.concat(str.fromu64(r.tokensin);
+        str.concat(",\"tokens_out\":";
+        str.concat(str.fromu64(r.tokensout);
+        str.concat(",\"cost_usd\":";
+        str.concat(str.fromf64(r.costusd);
+        "}")))))))))));
+      if(pi=0){
+        let provitems=entry
+      }el{
+        let provitems=str.concat(provitems;str.concat(",";entry))
+      };
+      pi=pi+1
+    };
+  };
+  let providersjson=str.concat("[";str.concat(provitems;"]"));
+
+  let points=mt metrics.tokensavingsseries(store;period) {ok:$v v;
+    $err:e @()
+  };
+  let tscount=points.len;
+  let tsitems="";
+  let ti=mut.0;
+  loop{
+    if(ti>=tscount){ break }el{
+      let p=str.arrayget(points;ti);
+      let entry=str.concat("{";
+        str.concat("\"date\":";
+        str.concat(json.encstr(p.date);
+        str.concat(",\"tokens_saved\":";
+        str.concat(str.fromu64(p.tokenssaved);
+        str.concat(",\"cost_saved\":";
+        str.concat(str.fromf64(p.costsaved);
+        "}")))))));
+      if(ti=0){
+        let tsitems=entry
+      }el{
+        let tsitems=str.concat(tsitems;str.concat(",";entry))
+      };
+      ti=ti+1
+    };
+  };
+  let timeseriesjson=str.concat("[";str.concat(tsitems;"]"));
+
+  let c=mt metrics.cachestats(store) {ok:$v v;
+    $err:e metrics.emptycachestats()
+  };
+
+  let respbody=str.concat("{";
+    str.concat("\"ok\":true,";
+    str.concat("\"period\":";
+    str.concat(json.encstr(period);
+    str.concat(",\"tokens_saved\":";
+    str.concat(str.fromu64(m.tokenssaved);
+    str.concat(",\"cost_saved_usd\":";
+    str.concat(str.fromf64(m.costsavedusd);
+    str.concat(",\"cache_hit_rate\":";
+    str.concat(str.fromf64(m.cachehitrate);
+    str.concat(",\"entities_redacted\":";
+    str.concat(str.fromu32(m.entitiesredacted);
+    str.concat(",\"total_requests\":";
+    str.concat(str.fromu32(m.totalrequests);
+    str.concat(",\"local_ratio\":";
+    str.concat(str.fromf64(m.localratio);
+    str.concat(",\"providers\":";
+    str.concat(providersjson;
+    str.concat(",\"timeseries\":";
+    str.concat(timeseriesjson;
+    str.concat(",\"cache\":{";
+    str.concat("\"total_entries\":";
+    str.concat(str.fromu32(c.totalentries);
+    str.concat(",\"hits\":";
+    str.concat(str.fromu32(c.hits);
+    str.concat(",\"misses\":";
+    str.concat(str.fromu32(c.misses);
+    str.concat(",\"avg_similarity\":";
+    str.concat(str.fromf64(c.avgsimilarity);
+    "}}")))))))))))))))))))))))))))));
+
+  <http.res.json(200;respbody)
+};
+
+f=post(req:i64):i64{
+  let cid=log.newcorrelationid();
+  log.info("savings export requested";"api/savings";cid);
+
+  let body=req.body;
+  let format=mt json.getstr(body;"format") {ok:$v v;
+    $err:e "json"
+  };
+  let period=mt json.getstr(body;"period") {ok:$v v;
+    $err:e "all"
+  };
+
+  let store=core.getauditstore();
+  let exportdata=mt metrics.export(store;period;format) {ok:$v v;
+    err:$e{
+      <http.res.err(500;"export failed")
+    };
+  };
+
+  if(str.eq(format;"csv")){
+    <http.res.text(200;exportdata;"text/csv")
+  }el{
+    <http.res.json(200;exportdata)
+  };
+};

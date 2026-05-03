@@ -1,0 +1,141 @@
+
+m=page.moke.api.agents;
+i=http:std.http;
+i=json:std.json;
+i=str:std.string;
+i=scanner:moke.agents.qualityscanner;
+i=detector:moke.agents.schemadetector;
+i=status:moke.agents.status;
+i=hooks:moke.hooks;
+i=registry:moke.data.registry;
+
+
+let gagents=@(
+  status.newagentstatus(
+    "data-quality-scanner";
+    "Data Quality Scanner";
+    "Nightly scan of all datasets for anomalies via local ML engine";
+    "0 2 * * *";
+    "schedule"
+  );
+  status.newagentstatus(
+    "schema-change-detector";
+    "Schema Change Detector";
+    "Triggered on re-upload -- compares old vs new schema and flags changes";
+    "";
+    "file_change"
+  )
+);
+
+let glastreport=mut.scanner.newreport("none";"never");
+let glastdiff=mut.detector.$schemadiff{
+  datasetid:"";
+  timestamp:"";
+  oldrowcount:0;
+  newrowcount:0;
+  oldcolcount:0;
+  newcolcount:0;
+  changes:@();
+  hasbreakingchanges:false;
+  summary:""
+};
+
+
+f=get(req:i64):i64{
+  let panel=status.buildpanelstate(gagents;"now");
+  let resp=status.panelstatetojson(panel);
+  <http.res.json(200;resp)
+};
+
+
+f=postscan(req:i64):i64{
+  let body=req.body;
+  let datasetid=mt json.getstr(body;"dataset_id") {
+    ok:v v;
+    err: "unknown"
+  };
+  let headers=mt json.getstrarray(body;"headers") {
+    ok:v v;
+    err: @()
+  };
+  let rowsjson=mt json.getstr(body;"rows_json") {
+    ok:v v;
+    err: "@()"
+  };
+  let rows=mt json.parse2dstrarray(rowsjson) {
+    ok:v v;
+    err: @()
+  };
+
+  let config=scanner.defaultconfig();
+  let findings=scanner.scandataset(datasetid;headers;rows;config);
+
+  let scanid=str.concat("scan-";str.fromi64(str.timestampms()));
+  let report=scanner.newreport(scanid;"now");
+  let report=scanner.addfindings(report;findings);
+  glastreport=report;
+
+  let run=status.newrunentry(scanid;"data-quality-scanner";"now");
+  let run=status.completerun(run;"now";0;0;0.0;report.totalfindings;
+    str.concat(str.fromi32(report.totalfindings);" findings"));
+  if(gagents.len() > 0){
+    gagents.get(0)=status.recordrun(gagents.get(0);run)
+  };
+
+  let resp=scanner.reporttojson(report);
+  <http.res.json(200;resp)
+};
+
+
+f=postschema(req:i64):i64{
+  let body=req.body;
+  let datasetid=mt json.getstr(body;"dataset_id") {
+    ok:v v;
+    err: "unknown"
+  };
+  let oldcsv=mt json.getstr(body;"old_csv") {
+    ok:v v;
+    err: ""
+  };
+  let newcsv=mt json.getstr(body;"new_csv") {
+    ok:v v;
+    err: ""
+  };
+
+  if(str.len(oldcsv) = 0 || str.len(newcsv) = 0){
+    <http.res.err(400;"{\"ok\":false,\"error\":\"old_csv and new_csv are required\"}")
+  };
+
+  let oldschema=hooks.extractschema(oldcsv;datasetid);
+  let newschema=hooks.extractschema(newcsv;datasetid);
+  let diff=detector.compareschemas(datasetid;oldschema;newschema;"now");
+  glastdiff=diff;
+
+  let runid=str.concat("schema-";str.fromi64(str.timestampms()));
+  let run=status.newrunentry(runid;"schema-change-detector";"now");
+  let run=status.completerun(run;"now";0;0;0.0;diff.changes.len();diff.summary);
+  if(gagents.len() > 1){
+    gagents.get(1)=status.recordrun(gagents.get(1);run)
+  };
+
+  let resp=detector.difftojson(diff);
+  <http.res.json(200;resp)
+};
+
+
+f=getdiary(req:i64):i64{
+  let agentid=http.queryparam(req;"agent_id");
+  if(str.len(agentid) = 0){
+    <http.res.err(400;"{\"ok\":false,\"error\":\"agent_id query param is required\"}")
+  };
+  let ai=mut.0;
+  if(ai < gagents.len()){
+    if(str.eq(gagents.get(ai).agentid;agentid)){
+      let resp=status.agentstatustojson(gagents.get(ai));
+      <http.res.json(200;resp)
+    };
+    ai=ai + 1
+  }el{};
+  <http.res.json(404;str.concat("{\"ok\":false,\"error\":\"agent not found: \"";
+    str.concat(str.jsonencode(agentid);"}")))
+};

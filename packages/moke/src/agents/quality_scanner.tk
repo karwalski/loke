@@ -1,0 +1,276 @@
+
+m=moke.agents.qualityscanner;
+i=str:std.string;
+i=engine:moke.ml.engine;
+i=registry:moke.data.registry;
+
+
+m=$scanfinding{
+  datasetid:$str;
+  column:$str;
+  kind:$str;         
+  severity:$str;     
+  detail:$str;
+  anomalycount:i32;
+  score:f32
+};
+
+m=$scanreport{
+  scanid:$str;
+  timestamp:$str;
+  datasetsscanned:i32;
+  totalfindings:i32;
+  criticalcount:i32;
+  warningcount:i32;
+  infocount:i32;
+  findings:@$scanfinding;
+  durationms:i32;
+  status:$str        
+};
+
+m=$scannerconfig{
+  zscorethreshold:f32;
+  iqrenabled:bool;
+  correlationthreshold:f32;
+  maxdatasets:i32
+};
+
+
+f=defaultconfig():$scannerconfig{
+  <$scannerconfig{
+    zscorethreshold:3.0;
+    iqrenabled:true;
+    correlationthreshold:0.9;
+    maxdatasets:50
+  };
+};
+
+
+f=classifyseverity(anomalycount:i32;score:f32):$str{
+  if(anomalycount >= 10){ <"critical" };
+  if(anomalycount >= 3){ <"warning" };
+  let absscore=score;
+  if(absscore < 0.0){ absscore=absscore * -1.0 };
+  if(absscore > 5.0){ <"critical" };
+  if(absscore > 3.0){ <"warning" };
+  <"info"
+};
+
+
+f=scandataset(datasetid:$str;headers:@$str;rows:@(@str;config:$scannerconfig):@$scanfinding{
+  let findings=@();
+
+  let hi=mut.0;
+  if(hi < headers.len()){
+    let colname=headers.get(hi);
+    let numericcount=0;
+    let samplelimit=20;
+    if(samplelimit > rows.len()){ samplelimit=rows.len() };
+    let si=mut.0;
+    if(si < samplelimit){
+      let val=str.trim(rows.get(si)@(hi));
+      if(str.isfloat(val)){ numericcount=numericcount + 1 };
+      si=si + 1
+    }el{};
+    if(numericcount > samplelimit / 2){
+      let opts=engine.$anomalyopts{
+        column:colname;
+        threshold:config.zscorethreshold;
+        method:"zscore"
+      };
+      let result=engine.zscoreanomalies(headers;rows;opts);
+      let count=result.anomalies.len();
+      if(count > 0){
+        let maxscore=0.0;
+        let ai=mut.0;
+        if(ai < count){
+          let a=result.anomalies.get(ai);
+          let abss=a.score;
+          if(abss < 0.0){ abss=abss * -1.0 };
+          if(abss > maxscore){ maxscore=abss };
+          ai=ai + 1
+        }el{};
+        findings.push($scanfinding{
+          datasetid:datasetid;
+          column:colname;
+          kind:"zscore";
+          severity:classifyseverity(count;maxscore);
+          detail:str.concat(str.fromi32(count);" outliers detected (z-score > ";
+            str.concat(str.fromf32(config.zscorethreshold);")"));
+          anomalycount:count;
+          score:maxscore
+        })
+      };
+
+      if(config.iqrenabled){
+        let iqropts=engine.$anomalyopts{
+          column:colname;
+          threshold:1.5;
+          method:"iqr"
+        };
+        let iqrresult=engine.iqranomalies(headers;rows;iqropts);
+        let iqrcount=iqrresult.anomalies.len();
+        if(iqrcount > 0){
+          let iqrmax=0.0;
+          let bi=mut.0;
+          if(bi < iqrcount){
+            let b=iqrresult.anomalies.get(bi);
+            if(b.score > iqrmax){ iqrmax=b.score };
+            bi=bi + 1
+          }el{};
+          findings.push($scanfinding{
+            datasetid:datasetid;
+            column:colname;
+            kind:"iqr";
+            severity:classifyseverity(iqrcount;iqrmax);
+            detail:str.concat(str.fromi32(iqrcount);" outliers detected (IQR method)");
+            anomalycount:iqrcount;
+            score:iqrmax
+          })
+        };
+      };
+    };
+    hi=hi + 1
+  }el{};
+
+  let corrs=engine.correlationmatrix(headers;rows);
+  let ci=mut.0;
+  if(ci < corrs.len()){
+    let c=corrs.get(ci);
+    let absr=c.pearsonr;
+    if(absr < 0.0){ absr=absr * -1.0 };
+    if(absr >= config.correlationthreshold){
+      findings.push($scanfinding{
+        datasetid:datasetid;
+        column:str.concat(c.cola;" / ";c.colb);
+        kind:"correlation";
+        severity:"info";
+        detail:str.concat("Strong correlation (r=";str.concat(str.fromf32(c.pearsonr);
+          str.concat(") between ";str.concat(c.cola;str.concat(" and ";c.colb)))));
+        anomalycount:1;
+        score:c.pearsonr
+      })
+    };
+    ci=ci + 1
+  }el{};
+
+  <findings
+};
+
+
+f=newreport(scanid:$str;timestamp:$str):$scanreport{
+  <$scanreport{
+    scanid:scanid;
+    timestamp:timestamp;
+    datasetsscanned:0;
+    totalfindings:0;
+    criticalcount:0;
+    warningcount:0;
+    infocount:0;
+    findings:@();
+    durationms:0;
+    status:"complete"
+  };
+};
+
+f=addfindings(report:i64;findings:@$scanfinding:$scanreport{
+  let newfindings=report.findings;
+  let fi=mut.0;
+  let critical=report.criticalcount;
+  let warning=report.warningcount;
+  let info=report.infocount;
+  if(fi < findings.len()){
+    let f=findings.get(fi);
+    newfindings.push(f);
+    if(str.eq(f.severity;"critical")){ critical=critical + 1 };
+    if(str.eq(f.severity;"warning")){ warning=warning + 1 };
+    if(str.eq(f.severity;"info")){ info=info + 1 };
+    fi=fi + 1
+  }el{};
+  <$scanreport{
+    scanid:report.scanid;
+    timestamp:report.timestamp;
+    datasetsscanned:report.datasetsscanned + 1;
+    totalfindings:report.totalfindings + findings.len();
+    criticalcount:critical;
+    warningcount:warning;
+    infocount:info;
+    findings:newfindings;
+    durationms:report.durationms;
+    status:report.status
+  };
+};
+
+
+f=reporttojson(report:$scanreport):$str{
+  let findingparts=@();
+  let fi=0;
+  if(fi < report.findings.len()){
+    let f=report.findings.get(fi);
+    let part=str.concat("{\"dataset_id\":";
+      str.concat(str.jsonencode(f.datasetid);
+      str.concat(",\"column\":";
+      str.concat(str.jsonencode(f.column);
+      str.concat(",\"kind\":";
+      str.concat(str.jsonencode(f.kind);
+      str.concat(",\"severity\":";
+      str.concat(str.jsonencode(f.severity);
+      str.concat(",\"detail\":";
+      str.concat(str.jsonencode(f.detail);
+      str.concat(",\"anomaly_count\":";
+      str.concat(str.fromi32(f.anomalycount);
+      str.concat(",\"score\":";
+      str.concat(str.fromf32(f.score);
+      "}"))))))))))))));
+    findingparts.push(part);
+    fi=fi + 1
+  }el{};
+  <str.concat("{\"scan_id\":";
+    str.concat(str.jsonencode(report.scanid);
+    str.concat(",\"timestamp\":";
+    str.concat(str.jsonencode(report.timestamp);
+    str.concat(",\"datasets_scanned\":";
+    str.concat(str.fromi32(report.datasetsscanned);
+    str.concat(",\"total_findings\":";
+    str.concat(str.fromi32(report.totalfindings);
+    str.concat(",\"critical_count\":";
+    str.concat(str.fromi32(report.criticalcount);
+    str.concat(",\"warning_count\":";
+    str.concat(str.fromi32(report.warningcount);
+    str.concat(",\"info_count\":";
+    str.concat(str.fromi32(report.infocount);
+    str.concat(",\"duration_ms\":";
+    str.concat(str.fromi32(report.durationms);
+    str.concat(",\"status\":";
+    str.concat(str.jsonencode(report.status);
+    str.concat(",\"findings\":[";
+    str.concat(str.join(findingparts;",");
+    "]}"))))))))))))))))))))
+};
+
+
+f=reporttodiary(report:$scanreport):$str{
+  let header=str.concat("Data Quality Scan -- ";report.timestamp);
+  let summary=str.concat("
+Datasets scanned: ";str.concat(str.fromi32(report.datasetsscanned);
+    str.concat(" | Findings: ";str.concat(str.fromi32(report.totalfindings);
+    str.concat(" (";str.concat(str.fromi32(report.criticalcount);
+    str.concat(" critical, ";str.concat(str.fromi32(report.warningcount);
+    str.concat(" warning, ";str.concat(str.fromi32(report.infocount);" info)"))))))))));
+  let body=mut."
+
+Findings:
+";
+  let fi=0;
+  if(fi < report.findings.len()){
+    let f=report.findings.get(fi);
+    let marker="[INFO]";
+    if(str.eq(f.severity;"warning")){ marker="[WARN]" };
+    if(str.eq(f.severity;"critical")){ marker="[CRIT]" };
+    body=str.concat(body;str.concat(marker;" ";str.concat(f.datasetid;
+      str.concat("/";str.concat(f.column;str.concat(": ";str.concat(f.detail;"
+")))))));
+    fi=fi + 1
+  }el{};
+  <str.concat(header;str.concat(summary;body))
+};

@@ -1,0 +1,238 @@
+m=core.installer.updater;
+
+i=t:shared.types;
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+i=db:storage.db;
+i=proc:std.process;
+i=time:std.time;
+
+t=$updatecheck{
+  modelid:$str;
+  installeddigest:$str;
+  latestdigest:$str;
+  updateavailable:bool;
+  releasenotes:$str
+};
+
+t=$updateconfig{
+  checkintervaldays:i64;
+  autocheck:bool;
+  lastchecked:i64
+};
+
+f=defaultconfig():$updateconfig{
+  <$updateconfig{
+    checkintervaldays:7;
+    autocheck:true;
+    lastchecked:0
+  };
+};
+
+f=loadconfig(store:db.$store):$updateconfig{
+  let interval=db.getstr(store;mt "installer.update_interval_days") {
+    $ok:v str.toint(v);
+    $err: 7
+  };
+  let auto=db.getstr(store;mt "installer.auto_check") {
+    $ok:v str.eq(v;"true");
+    $err: true
+  };
+  let last=db.getstr(store;mt "installer.last_model_check") {
+    $ok:v str.toint(v);
+    $err: 0
+  };
+  <$updateconfig{
+    checkintervaldays:interval;
+    autocheck:auto;
+    lastchecked:last
+  };
+};
+
+f=saveconfig(store:db.$store:i64;config:$updateconfig):bool{
+  db.setstr(store;"installer.update_interval_days";str.fromint(config.checkintervaldays);mt "installer") {
+    $ok: ();
+    $err: ()
+  };
+  db.setstr(store;"installer.auto_check";if(config.autocheck){"true"}el{"false"};mt "installer") {
+    $ok: ();
+    $err: ()
+  };
+  db.setstr(store;"installer.last_model_check";str.fromint(config.lastchecked);mt "installer") {
+    $ok: ();
+    $err: ()
+  };
+  <true
+};
+
+f=checkdue(config:$updateconfig):bool{
+  if(!$config.autocheck){
+    <false
+  };
+  let now=time.nowms();
+  let intervalms=config.checkintervaldays * 86400000;
+  <(now - config.lastchecked) >= intervalms
+};
+
+f=getinstalleddigest(modelid:$str):$str{
+  let result=proc.exec("ollama";@("list"));
+  mt result {
+    $ok:out{
+      let lines=str.split(out.stdout;"
+");
+      let i=0;
+      if(i < str.len(lines)){
+        let line=lines.get(i);
+        if(str.contains(line;modelid)){
+          let parts=str.splitwhitespace(line);
+          if(str.len(parts) >= 2){
+            <parts.get(1)
+          };
+        };
+        i=i+1
+      }el{};
+      <""
+    };
+    $err:e{
+      log.warn(
+        str.concat("failed to get installed digest: ";e.message);
+        "installer.updater";
+        "system"
+      );
+      <""
+    };
+  };
+};
+
+f=getlatestdigest(modelid:$str):$str{
+  let url=str.concat("http://localhost:11434/api/show";""  );
+  let body=str.concat("{\"name\":\"";str.concat(modelid;"\"}"));
+  let resp=http.post(
+    "http://localhost:11434/api/show";
+    body;
+    @(http.header("Content-Type";"application/json"))
+  );
+  mt resp {
+    $ok:r{
+      let parsed=json.parse(r.body);
+      let digest=json.getstr(parsed;"digest");
+      if(str.len(digest) > 0){
+        <digest
+      };
+      let info=json.getobj(parsed;"modelinfo");
+      let d2=json.getstr(info;"general.file_type");
+      <d2
+    };
+    $err:e{
+      log.warn(
+        str.concat("failed to query model info: ";e.message);
+        "installer.updater";
+        "system"
+      );
+      <""
+    };
+  };
+};
+
+f=checkmodelupdate(modelid:$str):$updatecheck{
+  let installed=getinstalleddigest(modelid);
+  let latest=getlatestdigest(modelid);
+  let available=if(str.len(installed) > 0){
+    if(str.len(latest) > 0){
+      !str.eq(installed;latest)
+    }el{
+      false
+    };
+  }el{
+    false
+  };
+  log.info(
+    str.concat(
+      str.concat("model update check for ";modelid);
+      str.concat(": available=";if(available){"true"}el{"false"})
+    );
+    "installer.updater";
+    "system"
+  );
+  <$updatecheck{
+    modelid:modelid;
+    installeddigest:installed;
+    latestdigest:latest;
+    updateavailable:available;
+    releasenotes:""
+  };
+};
+
+f=updatemodel(modelid:$str):bool{
+  log.info(
+    str.concat("pulling update for ";modelid);
+    "installer.updater";
+    "system"
+  );
+  let olddigest=getinstalleddigest(modelid);
+  let pullresult=proc.exec("ollama";@("pull";mt modelid));
+  pullresult {
+    $ok:out{
+      let newdigest=getinstalleddigest(modelid);
+      if(str.len(newdigest) = 0){
+        log.warn(
+          str.concat("model not found after update: ";modelid);
+          "installer.updater";
+          "system"
+        );
+        <false
+      };
+      if(str.len(olddigest) > 0){
+        if(str.eq(olddigest;newdigest)){
+          log.info(
+            str.concat("model already at latest: ";modelid);
+            "installer.updater";
+            "system"
+          );
+          <true
+        };
+      };
+      log.info(
+        str.concat(
+          str.concat("model updated: ";modelid);
+          str.concat(" digest: ";newdigest)
+        );
+        "installer.updater";
+        "system"
+      );
+      <true
+    };
+    $err:e{
+      log.warn(
+        str.concat("model update failed: ";e.message);
+        "installer.updater";
+        "system"
+      );
+      <false
+    };
+  };
+};
+
+f=periodiccheck(store:db.$store:i64;modelid:$str):$updatecheck{
+  let config=loadconfig(store);
+  if(!$checkdue(config)){
+    <$updatecheck{
+      modelid:modelid;
+      installeddigest:"";
+      latestdigest:"";
+      updateavailable:false;
+      releasenotes:""
+    };
+  };
+  let result=checkmodelupdate(modelid);
+  let now=time.nowms();
+  let updatedconfig=$updateconfig{
+    checkintervaldays:config.checkintervaldays;
+    autocheck:config.autocheck;
+    lastchecked:now
+  };
+  saveconfig(store;updatedconfig);
+  <result
+};

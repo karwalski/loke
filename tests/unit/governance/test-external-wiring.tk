@@ -1,0 +1,224 @@
+
+m=tests.unit.governance.testexternalwiring;
+
+i=external:core.governance.external;
+i=incidents:core.governance.incidents;
+i=compliance:core.governance.compliance;
+i=ks:core.governance.killswitch;
+i=reportengine:core.governance.reportengine;
+i=collector:core.metrics.collector;
+i=db:core.storage.db;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(name:$str):$result{ <$result{name:$name;passed:true;message:"ok"} };
+f=fail(name:$str;msg:$str):$result{ <$result{name:$name;passed:false;message:$msg} };
+
+f=asserteq(name:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(name) }el{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+
+f=asserttrue(name:$str;v:bool):$result{
+  if(v){ <pass(name) }el{ <fail(name;"expected true") };
+};
+
+f=assertfalse(name:$str;v:bool):$result{
+  if(!$v){ <pass(name) }el{ <fail(name;"expected false") };
+};
+
+f=assertgt(name:$str;got:i64;min:i64):$result{
+  if(got > min){ <pass(name) }el{
+    <fail(name;str.concat("expected > ";str.concat(str.fromint(min);str.concat(" got=";str.fromint(got)))))
+  };
+};
+
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=maketestconfig():$external.$externalconfig{
+  let ep=external.$externalendpoint{
+    id:"test_webhook";
+    name:"Test Webhook";
+    integrationtype:"monitoring";
+    url:"http://localhost:19999/test";
+    authmethod:"none";
+    authtokenenv:"";
+    authheadername:"";
+    enabled:true;
+    retrycount:0;
+    timeoutms:1000;
+    events:@("audit.all";"incident.all";"violation.all";"kill_switch.engaged";"kill_switch.released";"compliance.report";"metrics.pipeline";"metrics.tokens";"metrics.cost";"metrics.pii";"metrics.cache")
+  };
+  <external.$externalconfig{
+    endpoints:@(ep);
+    batchintervalms:1000;
+    maxbatchsize:10;
+    failopen:true
+  };
+};
+
+f=makeemptyconfig():$external.$externalconfig{
+  <external.defaultconfig()
+};
+
+f=runall():bool{
+  let store=mt db.open(":memory:") {
+    $ok:s s;
+    $err:e {
+      log.error("failed to open in-memory store for external wiring tests");
+      <false
+    };
+  };
+
+  incidents.ensuretable(store);
+
+  let results=mut.@$result@();
+  let cfg=maketestconfig();
+  let emptycfg=makeemptyconfig();
+
+
+  let incid=incidents.openincident(store;"Test incident";"P1";"Wiring test";$ok(cfg));
+  results=@.push(results;asserttrue("open_incident with config returns id";str.len(incid) > 0));
+
+  let incid2=incidents.openincident(store;"No dispatch incident";"P2";"No ext config";$err(void));
+  results=@.push(results;asserttrue("open_incident without config returns id";str.len(incid2) > 0));
+
+  let resolved=incidents.resolve(store;incid;"resolved via test";$ok(cfg));
+  results=@.push(results;asserttrue("resolve with config succeeds";resolved));
+
+  let resolved2=incidents.resolve(store;incid2;"resolved no ext";$err(void));
+  results=@.push(results;asserttrue("resolve without config succeeds";resolved2));
+
+
+  let gdprreport=compliance.rungdprchecks(store;$ok(cfg));
+  results=@.push(results;asserteq("GDPR report framework";"GDPR";gdprreport.framework));
+  results=@.push(results;assertgt("GDPR report has checks";gdprreport.checks.len;0));
+
+  let hipaareport=compliance.runhipaachecks(store;$ok(cfg));
+  results=@.push(results;asserteq("HIPAA report framework";"HIPAA";hipaareport.framework));
+  results=@.push(results;assertgt("HIPAA report has checks";hipaareport.checks.len;0));
+
+  let gdprnoext=compliance.rungdprchecks(store;$err(void));
+  results=@.push(results;asserteq("GDPR no ext still works";"GDPR";gdprnoext.framework));
+
+
+  let engaged=ks.engage(store;"test reason";0;$ok(cfg));
+  results=@.push(results;asserttrue("engage with config succeeds";engaged));
+
+  let released=ks.release(store;$ok(cfg));
+  results=@.push(results;asserttrue("release with config succeeds";released));
+
+  let engaged2=ks.engage(store;"no ext reason";0;$err(void));
+  results=@.push(results;asserttrue("engage without config succeeds";engaged2));
+  let released2=ks.release(store;$err(void));
+  results=@.push(results;asserttrue("release without config succeeds";released2));
+
+  let iseng=ks.isengaged(store;$err(void));
+  results=@.push(results;assertfalse("is_engaged after release";iseng));
+
+
+  let reportresults=external.dispatchreport(cfg;"compliance_summary";"5 checks passed");
+  results=@.push(results;asserttrue("dispatch_report returns results";reportresults.len > 0));
+
+
+  let metricsresults=external.dispatchmetrics(cfg;"tokens";"1500");
+  results=@.push(results;asserttrue("dispatch_metrics returns results";metricsresults.len > 0));
+
+  let costresults=external.dispatchmetrics(cfg;"cost";"0.05");
+  results=@.push(results;asserttrue("dispatch_metrics cost returns results";costresults.len > 0));
+
+  let piiresults=external.dispatchmetrics(cfg;"pii";"3");
+  results=@.push(results;asserttrue("dispatch_metrics pii returns results";piiresults.len > 0));
+
+  let cacheresults=external.dispatchmetrics(cfg;"cache";"1");
+  results=@.push(results;asserttrue("dispatch_metrics cache returns results";cacheresults.len > 0));
+
+
+  let wildcardresults=external.dispatch(cfg;external.$governanceevent{
+    eventtype:"incident.created";
+    timestamp:"";
+    severity:"P1";
+    title:"wildcard test";
+    description:"test";
+    source:"test";
+    requestid:"test-123";
+    metadata:"{}"
+  });
+  results=@.push(results;asserttrue("wildcard incident.all matches incident.created";wildcardresults.len > 0));
+
+  let auditallresults=external.dispatch(cfg;external.$governanceevent{
+    eventtype:"some.random.event";
+    timestamp:"";
+    severity:"P3";
+    title:"audit all test";
+    description:"test";
+    source:"test";
+    requestid:"";
+    metadata:"{}"
+  });
+  results=@.push(results;asserttrue("audit.all matches any event";auditallresults.len > 0));
+
+  let emptyresults=external.dispatch(emptycfg;external.$governanceevent{
+    eventtype:"incident.created";
+    timestamp:"";
+    severity:"P1";
+    title:"empty config test";
+    description:"test";
+    source:"test";
+    requestid:"";
+    metadata:"{}"
+  });
+  results=@.push(results;asserteq("empty config no results";str.fromint(emptyresults.len);"0"));
+
+  let disabledep=external.$externalendpoint{
+    id:"disabled";
+    name:"Disabled";
+    integrationtype:"monitoring";
+    url:"http://localhost:19999/disabled";
+    authmethod:"none";
+    authtokenenv:"";
+    authheadername:"";
+    enabled:false;
+    retrycount:0;
+    timeoutms:1000;
+    events:@("audit.all")
+  };
+  let disabledcfg=external.$externalconfig{
+    endpoints:@(disabledep);
+    batchintervalms:1000;
+    maxbatchsize:10;
+    failopen:true
+  };
+  let disabledresults=external.dispatch(disabledcfg;external.$governanceevent{
+    eventtype:"incident.created";
+    timestamp:"";
+    severity:"P1";
+    title:"disabled test";
+    description:"test";
+    source:"test";
+    requestid:"";
+    metadata:"{}"
+  });
+  results=@.push(results;asserteq("disabled endpoint skipped";str.fromint(disabledresults.len);"0"));
+
+  let allpassed=true;
+  results.each|r{
+    logresult(r);
+    if(!$r.passed){ allpassed=false }el{};
+  };
+
+  if(allpassed){
+    log.info(str.concat("All ";str.concat(str.fromint(results.len);" external wiring tests passed")))
+  }el{
+    log.error("Some external wiring tests FAILED")
+  };
+
+  <allpassed
+};

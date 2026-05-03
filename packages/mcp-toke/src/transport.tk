@@ -1,0 +1,193 @@
+m=mcptoke.transport;
+
+i=srv:mcptoke.server;
+i=proto:core.mcp.protocol;
+i=json:std.json;
+i=str:std.str;
+i=log:shared.log;
+i=io:std.io;
+i=net:std.net;
+
+t=$sseevent{
+  event:$str;
+  data:$str;
+  id:$str
+};
+
+f=framemessage(body:$str):$str{
+  let len=str.bytelen(body);
+  let lenstr=str.fromint(len);
+  let header=str.concat("Content-Length: ";lenstr);
+  <str.concat(header;str.concat("
+
+";body))
+};
+f=readframedmessage(reader:mut $io.bufferedreader):$str|$lokeerr{
+  let contentlength=mut.0;
+  let headersdone=mut.false;
+  loop{
+    if(headersdone){ break }el{
+      let line=mt io.readline(reader);
+      line {
+        $ioerr e;
+          <$lokeerr.$networkerr("stdio: failed to read header line")
+        l;
+          let trimmed=str.trim(l);
+          if(str.len(trimmed)=0){
+            headersdone=true
+          }el{
+            if(str.startswithci(trimmed;"content-length:")){
+              let val=str.trim(str.slice(trimmed;16;str.len(trimmed)));
+              contentlength=str.toint(val)
+            }el{
+            };
+          };
+      };
+    };
+  };
+  if(contentlength<=0){
+    <$lokeerr.$networkerr("stdio: missing or invalid Content-Length header")
+  }el{
+    let body=mt io.readexact(reader;contentlength);
+    body {
+      $ioerr e;
+        <$lokeerr.$networkerr("stdio: failed to read message body")
+      data;
+        <data
+    };
+  };
+};
+f=startstdio(config:$srv.serverconfig):void{
+  let cid=log.newcorrelationid();
+  let state=srv.newstate();
+  log.info("loke MCP server starting on stdio";"mcp-stdio";cid);
+
+  let reader=io.bufferedreader(io.stdin());
+  let writer=io.stdout();
+
+  loop{
+    let msg=mt readframedmessage(reader);
+    msg {
+      $lokeerr e;
+        log.debug("stdio: read error or EOF, shutting down";"mcp-stdio";cid);
+        break
+      raw;
+        let response=srv.handlerequest(raw;config;state);
+        if(str.len(response) > 0){
+          let framed=framemessage(response);
+          io.write(writer;framed);
+          io.flush(writer)
+        }el{};
+    };
+  };
+  log.info("loke MCP stdio server stopped";"mcp-stdio";cid)
+};
+f=formatsseevent(evt:$sseevent):$str{
+  let parts=mut."";
+  if(str.len(evt.event) > 0){
+    parts=str.concat(parts;str.concat("event: ";str.concat(evt.event;"
+")))
+  }el{};
+  if(str.len(evt.id) > 0){
+    parts=str.concat(parts;str.concat("id: ";str.concat(evt.id;"
+")))
+  }el{};
+  parts=str.concat(parts;str.concat("data: ";str.concat(evt.data;"
+")));
+  <str.concat(parts;"
+")
+};
+f=startsse(config:$srv.serverconfig):void{
+  let cid=log.newcorrelationid();
+  let state=srv.newstate();
+  let portstr=str.fromint(config.port);
+  log.info(str.concat("loke MCP SSE server starting on port ";portstr);"mcp-sse";cid);
+
+  let listener=mt net.listen(config.host;config.port);
+  listener {
+    $neterr e;
+      log.error(str.concat("mcp-sse: failed to listen on port ";portstr);"mcp-sse";cid)
+    l;
+      loop{
+        let conn=mt net.accept(l);
+        conn {
+          $neterr e;
+            log.warn("mcp-sse: accept error";"mcp-sse";cid)
+          c;
+            let data=mt net.read(c);
+            data {
+              $neterr e;
+                log.warn("mcp-sse: read error";"mcp-sse";cid);
+                net.close(c)
+              raw;
+                let reqinfo=net.parsehttprequest(raw);
+
+                if(str.eq(reqinfo.method;"GET")){
+                  if(str.eq(reqinfo.path;"/sse")){
+                    let sseheaders=str.concat(
+                      "HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+Access-Control-Allow-Origin: *
+
+";
+                      "");
+                    net.write(c;sseheaders);
+                    let endpointevt=$sseevent{
+                      event:"endpoint";
+                      data:$str.concat("/message?session_id=";cid);
+                      id:""
+                    };
+                    net.write(c;formatsseevent(endpointevt));
+                    log.info("SSE client connected";"mcp-sse";cid)
+                  }el{
+                    if(str.eq(reqinfo.path;"/health")){
+                      let resp=srv.healthresponse(config;state);
+                      let httpresp=net.httpresponse(200;"application/json";resp);
+                      net.write(c;httpresp);
+                      net.close(c)
+                    }el{
+                      let httpresp=net.httpresponse(404;"text/plain";"Not found");
+                      net.write(c;httpresp);
+                      net.close(c)
+                    };
+                  };
+                }el{
+                  if(str.eq(reqinfo.method;"POST")){
+                    if(str.startswith(reqinfo.path;"/message")){
+                      let response=srv.handlerequest(reqinfo.body;config;state);
+                      if(str.len(response) > 0){
+                        let httpresp=net.httpresponse(200;"application/json";response);
+                        net.write(c;httpresp)
+                      }el{
+                        let httpresp=net.httpresponse(202;"text/plain";"Accepted");
+                        net.write(c;httpresp)
+                      };
+                      net.close(c)
+                    }el{
+                      let httpresp=net.httpresponse(404;"text/plain";"Not found");
+                      net.write(c;httpresp);
+                      net.close(c)
+                    };
+                  }el{
+                    if(str.eq(reqinfo.method;"OPTIONS")){
+                      let corsresp="HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, OPTIONS
+Access-Control-Allow-Headers: Content-Type
+";
+                      net.write(c;corsresp);
+                      net.close(c)
+                    }el{
+                      let httpresp=net.httpresponse(405;"text/plain";"Method not allowed");
+                      net.write(c;httpresp);
+                      net.close(c)
+                    };
+                  };
+                };
+            };
+        };
+      };
+  };
+};

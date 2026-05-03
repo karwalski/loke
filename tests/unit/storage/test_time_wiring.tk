@@ -1,0 +1,124 @@
+
+m=tests.unit.storage.testtimewiring;
+
+i=backup:core.storage.backup;
+i=dashboard:core.storage.dashboard;
+i=audit:core.storage.audit;
+i=db:core.storage.db;
+i=str:std.str;
+i=time:std.time;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:n;passed:false;message:msg} };
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=runall():bool{
+  let results = @$result@();
+  let store = mt db.open(":memory:") {
+    $ok:s s;
+    $err:e {
+      log.error("failed to open test db");
+      <false
+    };
+  };
+
+  let backupresult = backup.createbackup(store;mt "/tmp/loke-test-backups") {
+    $ok:info info;
+    $err:e {
+      let results = str.arraypush(results;fail("backup create_backup succeeds";"create_backup returned error"));
+      $backup.backupinfo{ filename:""; path:""; sizebytes:0; createdat:"" };
+    };
+  };
+  let rbackupname = asserttrue(
+    "backup filename contains timestamp dash separator";
+    str.contains(backupresult.filename;"-")
+  );
+  let results = str.arraypush(results;rbackupname);
+
+  let rbackupts = asserttrue(
+    "backup created_at is ISO formatted";
+    str.contains(backupresult.createdat;"T")
+  );
+  let results = str.arraypush(results;rbackupts);
+
+  let rnotstub = asserttrue(
+    "backup created_at is not the old stub 'now()'";
+    !str.eq(backupresult.createdat;"now()")
+  );
+  let results = str.arraypush(results;rnotstub);
+
+  let prefs = dashboard.defaultprefs();
+  let saved = dashboard.save(store;prefs);
+  let updated = dashboard.setwidget(store;"savings";true;"30d");
+  let loaded = dashboard.load(store);
+  let savingswidgetts = 0;
+  loaded.widgets.each(w{
+    if(str.eq(w.id;"savings")){
+      savingswidgetts = w.updatedat
+    }el{};
+  });
+  let rdashts = asserttrue(
+    "dashboard widget updated_at is non-zero after set_widget";
+    savingswidgetts > 0
+  );
+  let results = str.arraypush(results;rdashts);
+
+  let event = $audit.auditevent{
+    eventtype:"request";
+    usecase:"test_time";
+    modelid:"gpt-4o";
+    provider:"openai";
+    sensitivity:"low";
+    risktier:"green";
+    tokensin:10;
+    tokensout:5;
+    costusd:0.001;
+    durationms:50;
+    correlationid:"time-test-001"
+  };
+  let auditok = mt audit.logevent(store;event) {
+    $ok: true;
+    $err: false
+  };
+  let raudit = asserttrue("audit log_event succeeds with real timestamp";auditok);
+  let results = str.arraypush(results;raudit);
+
+  let now = time.now();
+  let rnow = asserttrue("time.now() returns non-zero";now > 0);
+  let results = str.arraypush(results;rnow);
+
+  let formatted = time.format(now;"%Y-%m-%d");
+  let rformat = asserttrue(
+    "time.format produces date string with dash separators";
+    str.contains(formatted;"-")
+  );
+  let results = str.arraypush(results;rformat);
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i+1
+    };
+  };
+  <all
+};

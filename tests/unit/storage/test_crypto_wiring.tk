@@ -1,0 +1,144 @@
+
+m=tests.unit.storage.testcryptowiring;
+
+i=audit:core.storage.audit;
+i=db:core.storage.db;
+i=semantic:loke.core.cache.semantic;
+i=crypto:std.crypto;
+i=str:std.str;
+i=json:std.json;
+i=log:shared.log;
+
+t=$result{ name:$str; passed:bool; message:$str };
+
+f=pass(n:$str):$result{ <$result{name:n;passed:true;message:"ok"} };
+f=fail(n:$str;msg:$str):$result{ <$result{name:n;passed:false;message:msg} };
+f=asserteq(n:$str;got:$str;want:$str):$result{
+  if(str.eq(got;want)){ <pass(n) }el{
+    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  };
+};
+f=asserttrue(n:$str;v:bool):$result{
+  if(v){ <pass(n) }el{ <fail(n;"expected true") };
+};
+f=logresult(r:$result){
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  };
+};
+
+f=runall():bool{
+  let results = @$result@();
+
+  let key = semantic.makekey("hello world");
+  let rkeylen = asserttrue(
+    "make_key returns 64-char hex (SHA-256)";
+    str.len(key) = 64
+  );
+  let results = str.arraypush(results;rkeylen);
+
+  let key2 = semantic.makekey("hello world");
+  let rdeterministic = asserteq("make_key is deterministic";key;key2);
+  let results = str.arraypush(results;rdeterministic);
+
+  let key3 = semantic.makekey("goodbye world");
+  let rdifferent = asserttrue(
+    "different inputs produce different hashes";
+    !str.eq(key;key3)
+  );
+  let results = str.arraypush(results;rdifferent);
+
+  let rnotstub = asserttrue(
+    "make_key does not return old length-based stub";
+    !str.eq(key;"11")
+  );
+  let results = str.arraypush(results;rnotstub);
+
+  let store = mt db.open(":memory:") {
+    $ok:s s;
+    $err:e {
+      log.error("failed to open test db");
+      <false
+    };
+  };
+  let event1 = $audit.auditevent{
+    eventtype:"request";
+    usecase:"crypto_test";
+    modelid:"claude-3";
+    provider:"anthropic";
+    sensitivity:"medium";
+    risktier:"amber";
+    tokensin:200;
+    tokensout:100;
+    costusd:0.01;
+    durationms:300;
+    correlationid:"crypto-001"
+  };
+  let event2 = $audit.auditevent{
+    eventtype:"response";
+    usecase:"crypto_test";
+    modelid:"claude-3";
+    provider:"anthropic";
+    sensitivity:"medium";
+    risktier:"amber";
+    tokensin:200;
+    tokensout:150;
+    costusd:0.015;
+    durationms:400;
+    correlationid:"crypto-002"
+  };
+  audit.logevent(store;event1);
+  audit.logevent(store;event2);
+
+  let rows = db.query(store.conn;mt "SELECT hash FROM audit_log ORDER BY created_at DESC LIMIT 1") {
+    $ok:r r;
+    $err: @()@()
+  };
+  let rhashlen = if(str.arraylen(rows) > 0){
+    let hashval = json.getstr(str.arrayget(rows;0);"hash");
+    asserttrue(
+      "audit hash is 64-char hex (SHA-256)";
+      str.len(hashval) = 64
+    )
+  }el{
+    fail("audit hash is 64-char hex";"no rows returned from audit_log")
+  };
+  let results = str.arraypush(results;rhashlen);
+
+  let allrows = db.query(store.conn;mt "SELECT hash FROM audit_log ORDER BY created_at ASC") {
+    $ok:r r;
+    $err: @()@()
+  };
+  let rchain = if(str.arraylen(allrows) >= 2){
+    let h1 = json.getstr(str.arrayget(allrows;0);"hash");
+    let h2 = json.getstr(str.arrayget(allrows;1);"hash");
+    asserttrue(
+      "consecutive audit hashes differ (chain integrity)";
+      !str.eq(h1;h2)
+    )
+  }el{
+    fail("consecutive audit hashes differ";"need at least 2 rows")
+  };
+  let results = str.arraypush(results;rchain);
+
+  let directhash = crypto.tohex(crypto.sha256(str.tobytes("hello world")));
+  let rconsistent = asserteq(
+    "make_key matches direct crypto.sha256 call";
+    key;
+    directhash
+  );
+  let results = str.arraypush(results;rconsistent);
+
+  let all = true;
+  let i = 0;
+  let n = str.arraylen(results);
+  loop{
+    if(i >= n){ break }el{
+      let r = str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all = false }el{};
+      i = i+1
+    };
+  };
+  <all
+};

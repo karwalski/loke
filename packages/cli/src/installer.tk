@@ -1,0 +1,489 @@
+m=cli.installer;
+
+i=str:std.str;
+i=out:cli.output;
+i=log:shared.log;
+i=http:std.http;
+i=sys:std.sys;
+i=proc:std.process;
+i=file:std.file;
+i=env:std.env;
+          i=i+1;
+              i=i+1;
+                i=i+1;
+    i=i+1
+    i=i+1
+
+t=$installerflags{
+  yes:bool;
+  model:$str;
+  skipmodel:bool;
+  ollamaurl:$str;
+  installdir:$str
+};
+t=$hwinfo{
+  chip:$str;
+  arch:$str;
+  ramgb:i64;
+  diskfreegb:i64
+};
+t=$modelrec{
+  modelid:$str;
+  sizegb:f64;
+  toks:$str
+};
+t=$verifyresult{
+  success:bool;
+  latencyms:i64
+};
+
+f=defaultflags():$installerflags{
+  <$installerflags{
+    yes:false;
+    model:"";
+    skipmodel:false;
+    ollamaurl:"http://localhost:11434";
+    installdir:"~/.loke"
+  };
+};
+f=parseinstallerflags(args:@$str:$installerflags{
+  let flags=defaultflags();
+  let i=0;
+  let argc=args.len;
+  if(i<argc){
+    let arg=args.get(i);
+    if(str.eq(arg;"--yes")){
+      flags.yes=true
+    }el{
+      if(str.eq(arg;"--model")){
+        if(i+1<argc){
+          flags.model=args.get(i)
+        }el{()};
+      }el{
+        if(str.eq(arg;"--skip-model")){
+          flags.skipmodel=true
+        }el{
+          if(str.eq(arg;"--ollama-url")){
+            if(i+1<argc){
+              flags.ollamaurl=args.get(i)
+            }el{()};
+          }el{
+            if(str.eq(arg;"--install-dir")){
+              if(i+1<argc){
+                flags.installdir=args.get(i)
+              }el{()};
+            }el{()};
+          };
+        };
+      };
+    };
+  }el{};
+  <flags
+};
+f=detecthw():$hwinfo{
+  let ram=sys.totalramgb();
+  let cores=sys.cpucount();
+  let arm=sys.isarm64();
+  let arch=if(arm){"arm64"}el{"x86_64"};
+  let chip=if(arm){
+    str.concat("Apple Silicon (";str.concat(arch;")"))
+  }el{
+    str.concat("CPU ";str.concat(str.fromint(cores);str.concat("-core (";str.concat(arch;")"))))
+  };
+  let disk=sys.diskfreegb("~");
+  <$hwinfo{chip:chip;arch:arch;ramgb:ram;diskfreegb:disk};
+};
+f=printhwsummary(hw:$hwinfo){
+  out.printline("");
+  out.printline("  Hardware detected:");
+  out.printline(str.concat("    Chip:      ";hw.chip));
+  out.printline(str.concat("    Memory:    ";str.concat(str.fromint(hw.ramgb);" GB")));
+  out.printline(str.concat("    Disk:      ";str.concat(str.fromint(hw.diskfreegb);" GB available")));
+  out.printline("")
+};
+f=recommendmodel(ramgb:i64):$modelrec{
+  if(ramgb>=64){
+    <$modelrec{modelid:"qwen2.5:32b";sizegb:20.0;toks:"5-15"};
+  }el{
+    if(ramgb>=32){
+      <$modelrec{modelid:"qwen2.5:14b";sizegb:9.0;toks:"10-25"};
+    }el{
+      if(ramgb>=16){
+        <$modelrec{modelid:"qwen2.5:7b";sizegb:4.5;toks:"20-40"};
+      }el{
+        if(ramgb>=8){
+          <$modelrec{modelid:"qwen2.5:3b";sizegb:2.0;toks:"30-50"};
+        }el{
+          <$modelrec{modelid:"qwen2.5:1.5b";sizegb:1.0;toks:"40-60"};
+        };
+      };
+    };
+  };
+};
+f=checkollamainstalled():bool{
+  let result=proc.run("ollama";"--version");
+  mt result {
+    $ok:v true;
+    $err:e false
+  };
+};
+f=checkollamarunning(url:$str):bool{
+  let apiurl=str.concat(url;"/api/version");
+  let result=mt http.gettimeout(apiurl;3000);
+  result {
+    $ok:resp resp.status=200;
+    $err:e false
+  };
+};
+f=checkmodelpulled(url:$str;modelid:$str):bool{
+  let apiurl=str.concat(url;"/api/tags");
+  let result=mt http.gettimeout(apiurl;3000);
+  result {
+    $ok:resp{
+      if(resp.status=200){
+        str.contains(resp.body;modelid)
+      }el{
+        false
+      };
+    };
+    $err:e false
+  };
+};
+f=progressbar(pct:i64;width:i64):$str{
+  let filled=pct * width / 100;
+  let empty=width - filled;
+  let bar=str.repeat("█";filled);
+  let rest=str.repeat("░";empty);
+  <str.concat(bar;rest)
+};
+f=installollama(installdir:$str):bool{
+  out.printline("  Downloading Ollama (90 MB)...");
+  let bindir=str.concat(installdir;"/bin");
+  mt file.mkdir(bindir) {
+    $ok:v ();
+    $err:e{
+      out.printerror(str.concat("Could not create ";str.concat(bindir;str.concat(": ";e))));
+      <false
+    };
+  };
+  let downloadurl="https://ollama.com/download/Ollama-darwin.zip";
+  let zippath=str.concat(installdir;"/ollama-download.zip");
+  let dlresult=http.download(downloadurl;zippath;f=onprogress(downloaded:i64;total:i64){
+    let pct=if(total>0){ downloaded * 100 / total }el{ 0 };
+    let bar=progressbar(pct;32);
+    out.printline(str.concat("  ";str.concat(bar;str.concat(" ";str.concat(str.fromint(pct);"%")))))
+  });
+  mt dlresult {
+    $ok:v{
+      out.printline(str.concat("  ";str.concat(progressbar(100;32);" 100%")));
+      let extractresult=proc.run("unzip";str.concat("-o ";str.concat(zippath;str.concat(" -d ";mt bindir))));
+      extractresult {
+        $ok:v{
+          let verify=proc.run(str.concat(bindir;"/ollama");"--version");
+          mt verify {
+            $ok:v true;
+            $err:e{
+              out.printerror("Ollama installed but verification failed");
+              <false
+            };
+          };
+        };
+        $err:e{
+          out.printerror(str.concat("Extraction failed: ";e));
+          <false
+        };
+      };
+    };
+    $err:e{
+      out.printerror(str.concat("Download failed: ";e));
+      out.printline("  Download Ollama manually from https://ollama.com/download");
+      <false
+    };
+  };
+};
+f=startollamaserver():bool{
+  out.printline("  Starting Ollama server...");
+  let spawnresult=proc.spawn("ollama";@("serve");mt true);
+  spawnresult {
+    $ok:pid{
+      let attempts=mut.0;
+      let healthy=mut.false;
+      if(attempts<30){
+        let check=http.gettimeout("http://localhost:11434/api/version";mt 1000);
+        check {
+          $ok:resp{
+            if(resp.status=200){
+              healthy=true;
+              attempts=30
+            }el{()};
+          };
+          $err:e ()
+        };
+        if(healthy=false){
+          proc.sleep(500);
+          attempts=attempts+1
+        }el{()};
+      }el{};
+      if(healthy){
+        out.printline("  Starting Ollama server... ✓ running on :11434");
+        <true
+      }el{
+        out.printerror("Ollama failed to start within 15s. Check if port 11434 is in use: `lsof -i :11434`");
+        <false
+      };
+    };
+    $err:e{
+      out.printerror(str.concat("Could not start Ollama: ";e));
+      <false
+    };
+  };
+};
+f=pullmodel(modelid:$str):bool{
+  out.printline(str.concat("  Pulling ";str.concat(modelid;"...")));
+  let result=proc.runwithoutput("ollama";str.concat("pull ";mt modelid));
+  result {
+    $ok:output{
+      out.printline(str.concat("  ";str.concat(progressbar(100;32);" 100%")));
+      <true
+    };
+    $err:e{
+      out.printerror(str.concat("Pull failed: ";e));
+      out.printline(str.concat("  Try manually: `ollama pull ";str.concat(modelid;"`")));
+      <false
+    };
+  };
+};
+f=verifymodel(url:$str;modelid:$str):$verifyresult{
+  out.printline("  Verifying...");
+  let apiurl=str.concat(url;"/api/generate");
+  let body=str.concat("{\"model\":\"";str.concat(modelid;"\",\"prompt\":\"What is 2 + 2? Reply with just the number.\",\"stream\":false}"));
+
+  let start=sys.monotonicms();
+  let result=http.postjson(apiurl;body;15000);
+  let elapsed=sys.monotonicms() - mt start;
+
+  result {
+    $ok:resp{
+      if(resp.status=200){
+        if(str.contains(resp.body;"4")){
+          <$verifyresult{success:true;latencyms:elapsed};
+        }el{
+          let start2=sys.monotonicms();
+          let retry=http.postjson(apiurl;body;10000);
+          let elapsed2=sys.monotonicms() - mt start2;
+          retry {
+            $ok:resp2{
+              if(str.contains(resp2.body;"4")){
+                <$verifyresult{success:true;latencyms:elapsed2};
+              }el{
+                <$verifyresult{success:false;latencyms:0};
+              };
+            };
+            $err:e2 <$verifyresult{success:false;latencyms:0};
+          };
+        };
+      }el{
+        <$verifyresult{success:false;latencyms:0};
+      };
+    };
+    $err:e <$verifyresult{success:false;latencyms:0};
+  };
+};
+f=promptyn(question:$str;defaultyes:bool):bool{
+  let suffix=if(defaultyes){"[Y/n]"}el{"[y/N]"};
+  out.printline(str.concat("  ";str.concat(question;" ";suffix;" ")));
+  let answer=std.readline();
+  if(str.eq(answer;"")){
+    <defaultyes
+  }el{
+    if(str.eq(str.tolower(answer);"y")){
+      <true
+    }el{
+      if(str.eq(str.tolower(answer);"yes")){
+        <true
+      }el{
+        <false
+      };
+    };
+  };
+};
+f=runinteractive(flags:$installerflags):i32{
+  let cid=log.newcorrelationid();
+  log.info("installer: starting interactive flow";"cli.installer";cid);
+
+  let hw=detecthw();
+  printhwsummary(hw);
+
+  let ollamaurl=flags.ollamaurl;
+  let running=checkollamarunning(ollamaurl);
+  let installed=checkollamainstalled();
+
+  if(running){
+    out.printline(str.concat("  Checking for Ollama... ✓ running on ";ollamaurl))
+  }el{
+    if(installed){
+      out.printline("  Checking for Ollama... installed but not running.")
+    }el{
+      out.printline("  Checking for Ollama... not found.")
+    };
+  };
+  if(running=false){
+    if(installed=false){
+      let doinstall=promptyn("loke needs a local model server. Install Ollama?";true);
+      if(doinstall){
+        let ok=installollama(flags.installdir);
+        if(ok=false){
+          <1
+        }el{()};
+      }el{
+        out.printline("  Skipping Ollama install.");
+        <0
+      };
+    }el{()};
+    let started=startollamaserver();
+    if(started=false){
+      <1
+    }el{()};
+  }el{()};
+  if(flags.skipmodel){
+    out.printline("");
+    out.printline(str.concat("  ✓ loke configured with Ollama at ";ollamaurl));
+    <0
+  }el{()};
+  let rec=recommendmodel(hw.ramgb);
+  let modelid=if(str.eq(flags.model;"")){
+    rec.modelid
+  }el{
+    flags.model
+  };
+  let sizestr=str.fromfloat(rec.sizegb);
+  let alreadypulled=checkmodelpulled(ollamaurl;modelid);
+  if(alreadypulled){
+    out.printline(str.concat("  Model ";str.concat(modelid;" already pulled.")))
+  }el{
+    out.printline(str.concat("  Recommended model: ";str.concat(modelid;str.concat(" (";str.concat(sizestr;" GB)")))));
+    let dopull=promptyn(str.concat("Pull ";str.concat(modelid;"?"));true);
+    if(dopull){
+      let ok=pullmodel(modelid);
+      if(ok=false){
+        <1
+      }el{()};
+    }el{
+      out.printline("  Skipping model pull.");
+      <0
+    };
+  };
+  let vresult=verifymodel(ollamaurl;modelid);
+  if(vresult.success){
+    out.printline(str.concat("  Verifying... ✓ ";str.concat(modelid;str.concat(" responded in ";str.concat(str.fromint(vresult.latencyms);"ms")))));
+    out.printline("");
+    out.printline("  ✓ loke is ready. Run `loke ask \"hello\"` to get started.");
+    log.info("installer: complete";"cli.installer";cid);
+    <0
+  }el{
+    out.printerror(str.concat("Model loaded but not responding. Try: `ollama run ";str.concat(modelid;"` in your terminal")));
+    <1
+  };
+};
+f=runnoninteractive(flags:$installerflags):i32{
+  let cid=log.newcorrelationid();
+  log.info("installer: starting non-interactive flow";"cli.installer";cid);
+
+  let hw=detecthw();
+  printhwsummary(hw);
+
+  let ollamaurl=flags.ollamaurl;
+  let running=checkollamarunning(ollamaurl);
+  let installed=checkollamainstalled();
+
+  if(running=false){
+    if(installed=false){
+      out.printline("  Installing Ollama...");
+      let ok=installollama(flags.installdir);
+      if(ok=false){
+        <1
+      }el{()};
+    }el{()};
+    let started=startollamaserver();
+    if(started=false){
+      <1
+    }el{()};
+  }el{
+    out.printline(str.concat("  Ollama already running on ";ollamaurl))
+  };
+  if(flags.skipmodel){
+    out.printline("  ✓ loke configured (model skipped).");
+    <0
+  }el{()};
+  let rec=recommendmodel(hw.ramgb);
+  let modelid=if(str.eq(flags.model;"")){
+    rec.modelid
+  }el{
+    flags.model
+  };
+  let alreadypulled=checkmodelpulled(ollamaurl;modelid);
+  if(alreadypulled=false){
+    out.printline(str.concat("  Pulling ";str.concat(modelid;"...")));
+    let ok=pullmodel(modelid);
+    if(ok=false){
+      <1
+    }el{()};
+  }el{
+    out.printline(str.concat("  Model ";str.concat(modelid;" already available.")))
+  };
+  let vresult=verifymodel(ollamaurl;modelid);
+  if(vresult.success){
+    out.printline(str.concat("  ✓ ";str.concat(modelid;str.concat(" responded in ";str.concat(str.fromint(vresult.latencyms);"ms")))));
+    out.printline("  ✓ loke is ready.");
+    <0
+  }el{
+    out.printerror("Verification failed.");
+    <1
+  };
+};
+f=runskipmodel(flags:$installerflags):i32{
+  let cid=log.newcorrelationid();
+  log.info("installer: skip-model flow";"cli.installer";cid);
+
+  let hw=detecthw();
+  printhwsummary(hw);
+
+  let ollamaurl=flags.ollamaurl;
+  let running=checkollamarunning(ollamaurl);
+
+  if(running){
+    out.printline(str.concat("  Ollama reachable at ";ollamaurl))
+  }el{
+    out.printline(str.concat("  Warning: Ollama not reachable at ";ollamaurl));
+    out.printline("  loke will attempt to connect when needed.")
+  };
+  out.printline(str.concat("  ✓ loke configured with Ollama at ";ollamaurl));
+  out.printline("  No model was pulled. Point loke at an existing model or run `loke init` later.");
+  <0
+};
+f=run(args:@$str:i32{
+  let flagargs=@str@();
+  let i=0;
+  let argc=args.len;
+  let foundinit=mut.false;
+  if(i<argc){
+    if(foundinit=false){
+      if(str.eq(args.get(i);"init")){
+        foundinit=true
+      }el{
+      };
+    }el{
+      flagargs.push(args.get(i))
+    };
+  }el{};
+  let flags=parseinstallerflags(flagargs);
+  if(flags.skipmodel){
+    <runskipmodel(flags)
+  }el{
+    if(flags.yes){
+      <runnoninteractive(flags)
+    }el{
+      <runinteractive(flags)
+    };
+  };
+};
