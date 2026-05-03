@@ -1,0 +1,1 @@
+Background agent that scans datasets for data quality issues using z-score and IQR anomaly detection plus correlation analysis. Produces scan reports with severity-classified findings (critical/warning/info) and supports JSON and diary-format output. Depends on moke.ml.engine for statistical functions and moke.data.registry for dataset access.

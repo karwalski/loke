@@ -1,0 +1,1 @@
+Setup wizard that detects hardware capabilities (RAM, CPU cores, Apple Silicon), recommends appropriately-sized local models, and guides users through a multi-step onboarding flow covering model selection, provider configuration, privacy presets, and validation testing.

@@ -1,0 +1,1 @@
+Shared type definitions for the provider layer: chat message, completion request, completion response, and provider config structs. Also provides convenience constructors for user, assistant, and system messages.

@@ -1,0 +1,1 @@
+Unit tests for the health API endpoint. Validates HTTP 200 response, JSON structure (ok, version, ollama status, port fields), ollama status enum values, content-type header, and absence of secret/key leaks. Depends on api.health.

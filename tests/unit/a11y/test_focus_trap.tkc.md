@@ -1,0 +1,1 @@
+Unit tests for the focus trap JavaScript module. Verifies the generated JS includes create, activate, deactivate functions, Escape/Tab key handling, aria-hidden and inert attribute management, and focus restoration. Depends on loke.platform.a11y.focustrap, std.str, shared.log.

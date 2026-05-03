@@ -1,0 +1,1 @@
+Unit tests for the MCP broker integration. Tests registry operations (new, register, find-for-tool, format), permission enforcement (allow-all, deny-specific, allow-specific, no-permissions-default), and broker server request handling (initialize, ping, unknown method, bad JSON). Depends on mcpbroker.registry, mcpbroker.permissions, mcpbroker.server, std.str, shared.log.

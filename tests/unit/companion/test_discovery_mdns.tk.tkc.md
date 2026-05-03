@@ -1,0 +1,1 @@
+Unit tests for mDNS-based companion discovery (companion.discovery). Covers device state, on-found events, confirmation code generation, pairing with correct and incorrect codes, device rejection, security checks, and listing paired devices. Depends on companion.discovery, std.str, and std.log.

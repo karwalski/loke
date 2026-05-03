@@ -1,0 +1,1 @@
+The loke privacy proxy server that intercepts LLM traffic from coding tools (Claude Code, Codex, Gemini CLI). Listens on a local port, runs requests through the privacy pipeline (anonymise, forward, restore), and tracks session statistics. Supports --verbose and --dry-run modes.

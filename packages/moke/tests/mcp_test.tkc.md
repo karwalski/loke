@@ -1,0 +1,1 @@
+Tests for MCP (Model Context Protocol) integration: tool panel display and invocation tracking, broker server health monitoring with permission badge classification, and memory palace MCP tool state management with invocation list trimming. Depends on moke.mcp.toolpanel, moke.mcp.brokerstatus, moke.mcp.memorydemo, std.assert.

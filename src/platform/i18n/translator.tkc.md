@@ -1,0 +1,1 @@
+Internationalisation translation engine providing key-based string lookup with pluralisation (tn) and parameter interpolation (tparams). Manages a global locale registry and active locale state. Also provides number, date, and relative time formatting helpers. Depends on std.str and std.log.

@@ -1,0 +1,1 @@
+Implements the "loke ask" command which sends a user prompt through the privacy pipeline, routes it to an appropriate LLM via the dispatcher, and prints the response. Supports dry-run mode, streaming, model selection, system prompts, and latency tolerance options.

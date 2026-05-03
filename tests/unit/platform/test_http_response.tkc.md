@@ -1,0 +1,1 @@
+Tests HTTP response helpers: success responses with data/requestId keys, error responses with code but no internal field, and paginated responses with total/page/perPage metadata. Depends on loke.platform.http.response.

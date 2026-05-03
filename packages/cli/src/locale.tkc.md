@@ -1,0 +1,1 @@
+CLI locale management with list and validate subcommands. Lists available locales (en-AU, en-US) and validates that all translation keys in the baseline locale exist in other locales. Depends on the i18n translator and locales modules.

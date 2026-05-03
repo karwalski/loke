@@ -1,0 +1,1 @@
+Tests for the TOON (token-optimised notation) module. Validates encoding of primitives (str, null, bool, int), JSON-to-TOON conversion, table encoding with HDR prefix, TOON-to-JSON round-trip, compression measurement, and invalid JSON error handling. Depends on optimiser.toon.

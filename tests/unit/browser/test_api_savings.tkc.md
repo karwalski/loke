@@ -1,0 +1,1 @@
+Unit tests for the savings API endpoint. Validates GET response fields (tokens_saved, cost_saved_usd, cache_hit_rate, entities_redacted, total_requests, local_ratio, period, providers, timeseries, cache), period query parameter handling, and POST export in JSON/CSV formats. Depends on api.savings.

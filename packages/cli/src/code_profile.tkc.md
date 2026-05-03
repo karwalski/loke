@@ -1,0 +1,1 @@
+Scans source code for secrets (PEM keys, API keys, environment secrets, connection strings) and produces a redacted version with findings. Used by the privacy pipeline to prevent accidental credential leakage when sending code to external LLMs.

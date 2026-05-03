@@ -1,0 +1,1 @@
+Interactive memory palace MCP tool demonstration module. Invokes memory tools (search, store, status, facts, context, diary_write) through the MCP memory server, records invocation history with result previews, and serialises state to JSON. Depends on core.memory.mcpserver and core.mcp.protocol.

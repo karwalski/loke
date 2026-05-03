@@ -1,0 +1,1 @@
+Unit tests for the kill-switch module (core.governance.killswitch). Tests fresh state, engage/release lifecycle, reason field persistence, widget formatting for engaged/disengaged states, auto-release-at behaviour, and check-auto-release logic. Uses an in-memory database store. Depends on core.governance.killswitch, core.storage.db, std.str, and shared.log.

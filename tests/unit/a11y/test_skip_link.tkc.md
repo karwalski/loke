@@ -1,0 +1,1 @@
+Unit tests for the skip link accessibility component. Validates HTML output (anchor targeting main-content), CSS (hidden by default, revealed on focus with position absolute), and JS (focus management, preventDefault, tabindex). Depends on loke.platform.a11y.skiplink, std.str, shared.log.

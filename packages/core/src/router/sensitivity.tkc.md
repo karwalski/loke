@@ -1,0 +1,1 @@
+Sensitivity scoring module that combines PII detection results with content-based keyword analysis to produce a final sensitivity level (PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED). Used by the router to determine whether cloud providers may be used.

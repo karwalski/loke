@@ -1,0 +1,1 @@
+PII entity pattern registry for the anonymisation pipeline. Stores regex-based detection patterns with confidence scores and provides lookup by ID or entity type. Ships with default Australian patterns (TFN, ABN, Medicare) registered via initdefaults(). Depends on std.str and std.log.

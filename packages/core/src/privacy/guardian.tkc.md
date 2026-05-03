@@ -1,0 +1,1 @@
+Guardian system prompt module that injects loke's immutable privacy rules into every LLM conversation. Covers PII protection, placeholder token handling, prompt injection detection, and audit logging disclosure. Depends on shared.types and std.str.

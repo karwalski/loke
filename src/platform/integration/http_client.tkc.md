@@ -1,0 +1,1 @@
+HTTP client utilities providing retry logic with exponential backoff, response construction, and circuit-breaker configuration. Determines retry eligibility based on HTTP status codes (429, 5xx). Depends on std.str.

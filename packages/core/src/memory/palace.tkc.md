@@ -1,0 +1,1 @@
+Core memory palace module providing database connection management and structural navigation. Handles opening the SQLite-backed palace, listing wings/halls/rooms, querying status statistics, and walking the full palace hierarchy. Depends on core.memory.schema for table creation and std.db for database access.

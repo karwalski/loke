@@ -1,0 +1,1 @@
+Tests cryptographic wiring: semantic cache key generation produces 64-char hex (SHA-256), deterministic hashing, different inputs yield different hashes, audit log hash chain integrity (consecutive hashes differ), and consistency between makekey and direct crypto.sha256 calls. Depends on loke.core.cache.semantic, core.storage.audit, core.storage.db, and std.crypto.

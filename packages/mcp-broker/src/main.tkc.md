@@ -1,0 +1,1 @@
+MCP broker entry point. Initialises the broker configuration and server registry with default upstream servers (mcp-toke, mcp-memory), then starts the broker HTTP server on port 11436. Depends on mcpbroker.server, mcpbroker.registry, and shared.log.

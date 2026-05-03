@@ -1,0 +1,1 @@
+MLX inference backend for Apple Silicon, with native Metal path (stub) and REST bridge fallback at localhost:11435. Provides generation with configurable model, context length, temperature, and top-p. Depends on std.string, std.log, std.http, and std.json.

@@ -1,0 +1,1 @@
+Implements AAAK (Abbreviated Associative Archival Knowledge) compression for memory palace content. Encodes facts using pattern-matched shorthand (decisions, team structures, copula statements) at configurable compression levels (light/medium/aggressive). Provides encode, decode, and compression ratio measurement.

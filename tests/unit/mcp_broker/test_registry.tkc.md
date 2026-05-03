@@ -1,0 +1,1 @@
+Unit tests for the MCP broker registry module. Validates server registration, lookup (known/unknown), status updates, tool listing, and tool name prefixing. Depends on loke.mcpbroker.registry and loke.mcpbroker.config.

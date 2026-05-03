@@ -1,0 +1,1 @@
+User feedback collection module for thumbs-up/down ratings on LLM interactions. Stores entries with feature area, model ID, dataset context, and free-text comments. Provides per-model and per-dataset satisfaction summaries. Depends only on std.string.

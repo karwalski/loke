@@ -1,0 +1,1 @@
+Core extension that initialises and holds global state for the loke browser application including configuration, privacy pipeline, router, governance gateway, and provider dispatcher. Provides accessor functions and API key management for other modules.

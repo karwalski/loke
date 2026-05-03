@@ -1,0 +1,1 @@
+MCP broker proxy module. Routes tools/call requests to the appropriate upstream MCP server, applying privacy anonymisation before sending and restoration on response. Depends on mcp.protocol, std.http, std.json, shared.log, mcpbroker.registry, and core.privacy.pipeline.

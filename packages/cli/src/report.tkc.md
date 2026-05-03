@@ -1,0 +1,1 @@
+CLI interface for compliance reporting. Provides generate and templates subcommands. Generates reports using core.governance.reportengine with configurable template, date range, and output format. Depends on reportexport for rendering.

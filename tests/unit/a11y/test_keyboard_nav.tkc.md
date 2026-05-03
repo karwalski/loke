@@ -1,0 +1,1 @@
+Unit tests for the keyboard navigation JavaScript module. Verifies support for ARIA widget roles (listbox, menu, tablist, toolbar), arrow key handling with wrapping, Home/End keys, Escape overlay close, roving tabindex initialisation, keyboard help overlay, and orientation modes. Depends on loke.platform.a11y.keyboard, std.str, shared.log.

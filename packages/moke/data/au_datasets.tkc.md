@@ -1,0 +1,1 @@
+Australian public sector demo datasets including Medicare Benefits Schedule claims, NSW public school records, Opal card tap data, Sydney Water quality readings, NSW property transactions, and ABS employment statistics. Contains realistic synthetic PII for privacy filter testing. Depends on std.string and moke.compute for dataset types.

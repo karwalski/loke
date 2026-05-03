@@ -1,0 +1,1 @@
+Handles cross-platform Ollama installation (macOS zip download, Windows silent installer, Linux shell script). Downloads, extracts, sets permissions, and verifies the installed binary reports a valid version.

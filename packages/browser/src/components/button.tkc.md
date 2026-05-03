@@ -1,0 +1,1 @@
+Renders accessible HTML button elements with variant (primary, secondary, danger, ghost), size, loading, and disabled states. Provides a full CSS stylesheet for button styling including focus, hover, and reduced-motion support.

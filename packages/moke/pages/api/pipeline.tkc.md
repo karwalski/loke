@@ -1,0 +1,1 @@
+Pipeline API endpoint that applies schema-first hooks, forwards prompts to the loke pipeline upstream at port 11430, and appends console log metadata to the response. Depends on std.http, std.json, std.string, moke.hooks, moke.compute, and moke.consolelog.

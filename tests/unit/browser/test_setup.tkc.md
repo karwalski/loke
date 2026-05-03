@@ -1,0 +1,1 @@
+Unit tests for the browser setup wizard page (page.setup). Tests hardware JSON output, initial setup state, GET handler with wizard steps and privacy presets, and POST handler for completing setup with a privacy preset selection. Depends on std.string, std.json, std.log.

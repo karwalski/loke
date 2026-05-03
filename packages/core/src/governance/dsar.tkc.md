@@ -1,0 +1,1 @@
+Implements Data Subject Access Request (DSAR) workflows for GDPR compliance: submit, process access exports (JSON file with all user data across tables), process erasure (delete user data from all tables), and status tracking. Depends on std.db, std.str, std.fs, shared.log, and std.time.

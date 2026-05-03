@@ -1,0 +1,1 @@
+Manages external observability integrations (PagerDuty, Datadog, Slack, etc.). Provides list/add/test subcommands for configuring webhook endpoints that receive governance events. Depends on core.governance.external for endpoint construction and dispatch.

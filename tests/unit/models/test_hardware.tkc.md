@@ -1,0 +1,1 @@
+Core hardware profile tests. Validates empty profile defaults, total memory calculation (unified vs discrete vs RAM-only), tier viability for capable/weak/NVMe-low-mem machines, disk type enum variants, and field storage correctness. Depends on models.hardware.

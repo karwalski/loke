@@ -1,0 +1,1 @@
+Unit tests for the approve API endpoint. Tests cancel flow, missing-field handling, approval dispatch (with model hint and dont-ask-again options), and validates JSON response structure. Depends on api.approve.

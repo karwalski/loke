@@ -1,0 +1,1 @@
+Tests ephemeral (session-scoped) storage for placeholder mappings: store/retrieve round-trip, wipe clears entries, sweep reclaims expired sessions, unknown placeholders return none, and multiple entries coexist correctly. Depends on core.storage.ephemeral.

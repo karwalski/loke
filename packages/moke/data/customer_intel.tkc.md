@@ -1,0 +1,1 @@
+Customer intelligence demo dataset with 4 natural segments (young digital, mid-premium, high-value infrequent, churned) plus anomaly rows (VIP whales, suspicious accounts, dormant accounts, luxury segment). Contains 18 columns including PII fields for privacy filter testing. Depends on moke.compute for dataset types.

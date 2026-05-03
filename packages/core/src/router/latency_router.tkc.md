@@ -1,0 +1,1 @@
+Latency-aware routing layer that applies time-to-first-token and total-time constraints based on tolerance tier (interactive, considered, background). Interactive requests are restricted to local models only to meet sub-500ms TTFT targets.

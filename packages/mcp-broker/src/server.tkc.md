@@ -1,0 +1,1 @@
+MCP broker HTTP server module. Listens for JSON-RPC requests, dispatches initialize/tools-list/tools-call methods to the aggregator and proxy, and manages the connection accept loop. Depends on std.net, mcp.protocol, std.json, shared.log, mcpbroker.registry, mcpbroker.aggregator, and mcpbroker.proxy.

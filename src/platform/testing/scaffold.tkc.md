@@ -1,0 +1,1 @@
+Code scaffolding generator that creates boilerplate files for migrations (.sql), routes (.tk), adapters (.tk), and locales (.json). Checks for existing files before writing to prevent overwrites. Depends on std.log, std.fs, and std.str.

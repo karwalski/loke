@@ -1,0 +1,1 @@
+Tests for governance module: regulatory preset lookup (GDPR, HIPAA, CCPA, etc.), compliance report generation with violation counting and risk breakdown, CSV/JSON export, and risk classification scoring based on sensitivity level, entity count, cross-border flag, and blocked entities. Depends on moke.governance, std.assert.

@@ -1,0 +1,1 @@
+CLI session management: create, activate, deactivate, find, list sessions with shared/isolated mode support. Tracks message counts, context summaries, and active state. Provides JSON serialisation and formatted tabular listing. Depends on std.string, std.log. Note: uses module-level function as pseudo-global session store.

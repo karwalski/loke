@@ -1,0 +1,1 @@
+Renders accessible modal dialogs with overlay, title, body, footer, and close button. Includes JavaScript for keyboard trap (Tab/Escape), overlay click-to-close, and focus management via the lokeModal API.

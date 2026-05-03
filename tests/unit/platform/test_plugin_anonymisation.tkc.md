@@ -1,0 +1,1 @@
+Tests the anonymisation plugin pattern registry: listing patterns, finding patterns by entity type (AU_TFN, AU_MEDICARE, AU_ABN), and verifying confidence thresholds and distinct entity types. Depends on loke.platform.plugin.anonymisation.

@@ -1,0 +1,1 @@
+Tests that PII detection regex patterns (email, phone AU, credit card, AU TFN, AU ABN, API key) are non-empty, structurally valid (email contains @), and distinct from each other. Depends on core.privacy.patterns.

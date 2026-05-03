@@ -1,0 +1,1 @@
+Shared type definitions for the loke processing pipeline including stage identifiers, status enums, stage events, and pipeline run records. Also provides human-readable label and status symbol formatters. Depends on std.str.

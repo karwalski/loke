@@ -1,0 +1,1 @@
+Determines which agents are due for execution based on their trigger type (manual, cron schedule, file change, webhook, MCP event) and provides manual trigger firing. Depends on shared.types, core.agents.types, core.agents.registry, std.str, and shared.log.

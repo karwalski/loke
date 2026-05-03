@@ -1,0 +1,1 @@
+ML API endpoint providing k-means clustering, z-score and IQR anomaly detection, correlation matrix computation, and ML proposal generation from dataset schemas. Depends on std.http, std.json, std.string, moke.ml.engine, and moke.ml.proposal.

@@ -1,0 +1,1 @@
+Unit tests for the companion device discovery module (loke.companion.discovery). Tests device browsing state transitions, device found/reject/pair flows, confirmation code generation, JSON serialisation, and security validation checks. Depends on loke.companion.discovery, std.str, and shared.log.

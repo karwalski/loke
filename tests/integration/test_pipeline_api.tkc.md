@@ -1,0 +1,1 @@
+Integration test for the pipeline API surface. Verifies clean text passthrough, email anonymisation, credit card sensitivity classification, entity counting, placeholder restoration, guardian injection, and original field preservation. Depends on core.privacy.pipeline, core.privacy.regex, core.privacy.guardian, core.privacy.placeholder, std.str, shared.log.

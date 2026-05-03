@@ -1,6 +1,5 @@
 m=cli.proxy;
 
-
 i=t:shared.types;
 i=log:shared.log;
 i=out:cli.output;
@@ -27,8 +26,6 @@ t=$proxysession{
   tokenssaved:i32;
   startedat:i64
 };
-
-let defaultport = 11431;
 
 f=defaultconfig(tool:str):$proxyconfig{
   <$proxyconfig{
@@ -77,30 +74,39 @@ f=parseopts(args:@str):$proxyconfig{
 
 f=handlerequest(reqbody:str;session:$proxysession;cfg:$proxyconfig;pipecfg:i64):str{
   let cid=log.newcorrelationid();
-
-  let parsed=mt json.parse(reqbody) {
-    $ok:v v;
-    $err:e;
-      log.error(str.concat("proxy: failed to parse request body — ";e);"proxy";cid);
-      <"{\"error\":\"invalid request body\"}"
+  let parseresult=json.parse(reqbody);
+  let parseok=mt parseresult {
+    $ok:v true;
+    $err:e false
   };
-
+  if(parseok=false){
+    log.error("proxy: failed to parse request body";"proxy";cid);
+    <"{\"error\":\"invalid request body\"}"
+  }el{};
+  let parsed=mt parseresult {
+    $ok:v v;
+    $err:e v
+  };
   let text=mt json.getstr(parsed;"prompt") {
     $ok:v v;
-    $err:e;
-      let messages=mt json.getarr(parsed;"messages") {
-        $ok:v json.arrtostr(v);
-        $err:e ""
-      }
+    $err:e mt json.getarr(parsed;"messages") {
+      $ok:v2 json.arrtostr(v2);
+      $err:e2 ""
+    }
   };
-
-  let piperesult=mt pipe.run(text;pipecfg) {
+  let piperun=pipe.run(text;pipecfg);
+  let pipeok=mt piperun {
+    $ok:v true;
+    $err:e false
+  };
+  if(pipeok=false){
+    log.error("proxy: pipeline error";"proxy";cid);
+    <"{\"error\":\"pipeline failure\"}"
+  }el{};
+  let piperesult=mt piperun {
     $ok:v v;
-    $err:e;
-      log.error(str.concat("proxy: pipeline error — ";e);"proxy";cid);
-      <"{\"error\":\"pipeline failure\"}"
+    $err:e v
   };
-
   if(cfg.verbose){
     log.info(
       str.concat(
@@ -110,29 +116,29 @@ f=handlerequest(reqbody:str;session:$proxysession;cfg:$proxyconfig;pipecfg:i64):
       "proxy";
       cid
     )
-  };
-
+  }el{};
   if(cfg.dryrun){
     <"{\"content\":\"[dry-run: would send to LLM]\"}"
-  };
-
+  }el{};
   let anonbody=json.setstr(parsed;"prompt";piperesult.anonymised);
   let anonreq=json.tostr(anonbody);
-
-  let rawresponse=mt disp.forward(anonreq;cfg.targettool) {
-    $ok:v v;
-    $err:e;
-      log.error(str.concat("proxy: dispatch error — ";e);"proxy";cid);
-      <"{\"error\":\"upstream failure\"}"
+  let dispresult=disp.forward(anonreq;cfg.targettool);
+  let dispok=mt dispresult {
+    $ok:v true;
+    $err:e false
   };
-
+  if(dispok=false){
+    log.error("proxy: dispatch error";"proxy";cid);
+    <"{\"error\":\"upstream failure\"}"
+  }el{};
+  let rawresponse=mt dispresult {
+    $ok:v v;
+    $err:e v
+  };
   let restored=mt pipe.restore(rawresponse;piperesult.mapping) {
     $ok:v v;
-    $err:e;
-      log.error(str.concat("proxy: restore error — ";e);"proxy";cid);
-      rawresponse
+    $err:e rawresponse
   };
-
   <restored
 };
 
@@ -166,52 +172,61 @@ f=start(cfg:$proxyconfig;lokecfg:i64):i32{
     startedat=net.nowunix()
   };
 
-  let listener=mt net.listen(cfg.port) {
-    $ok:v v;
-    $err:e;
-      out.printerror(str.concat("proxy: failed to bind port — ";e));
-      <1
+  let listenresult=net.listen(cfg.port);
+  let listenok=mt listenresult {
+    $ok:v true;
+    $err:e false
   };
-
+  if(listenok=false){
+    out.printerror("proxy: failed to bind port");
+    <1
+  }el{};
+  let listener=mt listenresult {
+    $ok:v v;
+    $err:e v
+  };
   log.info(
     str.concat("proxy: listening on port ";str.fromint(cfg.port));
     "proxy";
     cid
   );
-
-  let running=true;
-  lp(let lv=0;true;lv=lv) running{
-    let conn=mt net.accept(listener) {
-      $ok:v v;
-      $err:e;
-        log.error(str.concat("proxy: accept error — ";e);"proxy";cid);
-        let running=false;
-        net.close(listener);
-        <0
+  let running=mut.true;
+  lp(let lv=0;running;lv=lv){
+    let acceptresult=net.accept(listener);
+    let acceptok=mt acceptresult {
+      $ok:v true;
+      $err:e false
     };
-    let reqbody=mt net.readbody(conn) {
-      $ok:v v;
-      $err:e;
-        log.error(str.concat("proxy: read error — ";e);"proxy";cid);
-        net.closeconn(conn);
-        ""
-    };
-    if(str.len(reqbody)>0){
-      let response=handlerequest(reqbody;session;cfg;pipecfg);
-      mt net.write(conn;response) {
-        $ok:v ();
-        $err:e log.error(str.concat("proxy: write error — ";e);"proxy";cid)
+    if(acceptok=false){
+      log.error("proxy: accept error";"proxy";cid);
+      running=false;
+      net.close(listener)
+    }el{
+      let conn=mt acceptresult {
+        $ok:v v;
+        $err:e v
       };
-      let session=$proxysession{
-        id=session.id;
-        tool=session.tool;
-        requestsintercepted=session.requestsintercepted+1;
-        entitiesredacted=session.entitiesredacted;
-        tokenssaved=session.tokenssaved;
-        startedat=session.startedat
-      }
-    };
-    net.closeconn(conn)
+      let reqbody=mt net.readbody(conn) {
+        $ok:v v;
+        $err:e ""
+      };
+      if(str.len(reqbody)>0){
+        let response=handlerequest(reqbody;session;cfg;pipecfg);
+        mt net.write(conn;response) {
+          $ok:v ();
+          $err:e log.error(str.concat("proxy: write error — ";e);"proxy";cid)
+        };
+        session=$proxysession{
+          id=session.id;
+          tool=session.tool;
+          requestsintercepted=session.requestsintercepted+1;
+          entitiesredacted=session.entitiesredacted;
+          tokenssaved=session.tokenssaved;
+          startedat=session.startedat
+        }
+      }el{};
+      net.closeconn(conn)
+    }
   };
 
   out.printline("loke proxy shutdown");

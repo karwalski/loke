@@ -1,0 +1,1 @@
+Notification system with an in-memory store for creating, reading, and removing notifications. Renders a bell icon with unread badge, a dropdown panel listing notifications, and toast popups with auto-dismiss timers and pause-on-hover behaviour.

@@ -1,0 +1,1 @@
+Checks for and applies Ollama model updates by comparing installed vs latest digests. Supports configurable check intervals with persistence via the storage layer, and periodic automated checking with last-checked timestamp tracking.

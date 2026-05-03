@@ -1,0 +1,1 @@
+Verifies a pulled Ollama model by sending a simple arithmetic prompt and checking the response. Measures throughput in tokens per second and supports retry with exponential backoff for flaky model loads.

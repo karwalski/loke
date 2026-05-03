@@ -1,0 +1,1 @@
+File-based policy watcher that monitors enterprise, team, and user policy files for changes using a hash-based approach. On change detection it reloads, merges, and validates the policy tiers. Depends on core.policy.schema, core.policy.loader, core.policy.merge, core.policy.validate, std.file, std.str, and shared.log.

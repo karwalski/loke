@@ -1,0 +1,1 @@
+Unit tests for the CLI code preprocessor (loke.cli.codepreprocess). Tests language detection by file extension, proprietary pattern detection (INTERNAL_ONLY, CONFIDENTIAL), secret scrubbing (API keys), and codebase profiling with language breakdown. Depends on std.string, std.log.

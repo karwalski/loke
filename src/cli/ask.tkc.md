@@ -1,0 +1,1 @@
+CLI ask command: sends prompts through the loke privacy pipeline via HTTP to the local daemon (port 11430). Supports dry-run mode, configurable model/tolerance/system-prompt, streaming, stdin input, and verbose output with token/cost/sensitivity metadata. Depends on std.string, std.log, std.json, std.http.

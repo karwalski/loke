@@ -1,0 +1,159 @@
+m=loke.governance.dsar;
+
+i=db:std.db;
+i=str:std.str;
+i=fs:std.fs;
+i=log:shared.log;
+i=time:std.time;
+
+t=$dsarrequest{
+  id:str;
+  kind:str;
+  userid:str;
+  submittedat:i64;
+  completedat:i64;
+  status:str
+};
+
+f=statuspending():str{ <"pending" };
+f=statusprocessing():str{ <"processing" };
+f=statuscompleted():str{ <"completed" };
+f=statusfailed():str{ <"failed" };
+
+f=ensuretable(store:i64):bool{
+  let sql="CREATE TABLE IF NOT EXISTS dsar_requests (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  submitted_at INTEGER NOT NULL,
+  completed_at INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+)";
+  mt db.execparams(store.conn;sql;@()) { $ok:v true; $err:e false }
+};
+
+f=submit(store:i64;kind:str;userid:str):$dsarrequest{
+  let id=str.randhex(16);
+  let now=time.nowunix();
+  let nows=str.fromint(now);
+  mt db.execparams(
+    store.conn;
+    "INSERT INTO dsar_requests (id,kind,user_id,submitted_at,completed_at,status) VALUES (?,?,?,?,0,'pending')";
+    @(id;kind;userid;nows)
+  ) {
+    $ok:v log.info(
+        str.concat(
+          str.concat(
+            str.concat("DSAR submitted kind=";kind);
+            " user=");
+          userid
+        );
+        "dsar";
+        userid
+      );
+    $err:e log.warn(
+        str.concat("failed to persist DSAR for user=";userid);
+        "dsar";
+        userid
+      )
+  };
+  <$dsarrequest{
+    id:id;
+    kind:kind;
+    userid:userid;
+    submittedat:now;
+    completedat:0;
+    status:statuspending()
+  }
+};
+
+f=setstatus(store:i64;id:str;newstatus:str;completedat:i64):bool{
+  let tss=str.fromint(completedat);
+  mt db.execparams(
+    store.conn;
+    "UPDATE dsar_requests SET status=?,completed_at=? WHERE id=?";
+    @(newstatus;tss;id)
+  ) { $ok:v true; $err:e false }
+};
+
+f=exporttable(store:i64;table:str;userid:str):str{
+  let sql=str.concat(
+    str.concat("SELECT * FROM ";table);
+    " WHERE user_id=?"
+  );
+  mt db.queryparams(store.conn;sql;@(userid)) {
+    $ok:rows mt rows.len=0 { $ok:v "[]"; $err:e str.concat(str.concat("[";rows.tojson());"]") };
+    $err:e "[]"
+  }
+};
+
+f=processaccess(store:i64;req:$dsarrequest;outpath:str):bool{
+  let s1=setstatus(store;req.id;statusprocessing();0);
+  let consent=exporttable(store;"consent_records";req.userid);
+  let quota=exporttable(store;"quota_usage";req.userid);
+  let audit=exporttable(store;"audit_events";req.userid);
+  let dsars=exporttable(store;"dsar_requests";req.userid);
+  let quality=exporttable(store;"quality_signals";req.userid);
+  let payload=str.concat("{\"user_id\":\"";str.concat(req.userid;str.concat("\",\"exported_at\":\"";str.concat(str.fromint(time.nowunix());str.concat("\",\"consent_records\":";str.concat(consent;str.concat(",\"quota_usage\":";str.concat(quota;str.concat(",\"audit_events\":";str.concat(audit;str.concat(",\"dsar_requests\":";str.concat(dsars;str.concat(",\"quality_signals\":";str.concat(quality;"}")))))))))))));
+  mt fs.writetext(outpath;payload) {
+    $ok:v setstatus(store;req.id;statuscompleted();time.nowunix());
+    $err:e setstatus(store;req.id;statusfailed();0)
+  }
+};
+
+f=processerasure(store:i64;req:$dsarrequest):bool{
+  let s1=setstatus(store;req.id;statusprocessing();0);
+  let tables=@(
+    "consent_records";
+    "quota_usage";
+    "audit_events";
+    "quality_signals"
+  );
+  let allok=mut.true;
+  tables.each(table{
+    let sql=str.concat(
+      str.concat("DELETE FROM ";table);
+      " WHERE user_id=?"
+    );
+    mt db.execparams(store.conn;sql;@(req.userid)) {
+      $ok:v log.debug(
+          str.concat(str.concat("erased rows from ";table);str.concat(" for user=";req.userid));
+          "dsar";
+          req.userid
+        );
+      $err:e allok=false
+    }
+  });
+  let now=time.nowunix();
+  if(allok){
+    let s2=setstatus(store;req.id;statuscompleted();now)
+  }el{
+    let s3=setstatus(store;req.id;statusfailed();0)
+  };
+  <allok
+};
+
+f=status(store:i64;id:str):$dsarrequest{
+  mt db.queryparams(
+    store.conn;
+    "SELECT id,kind,user_id,submitted_at,completed_at,status FROM dsar_requests WHERE id=? LIMIT 1";
+    @(id)
+  ) {
+    $ok:rows mt rows.len=0 {
+      $ok:v $dsarrequest{id:id;kind:"";userid:"";submittedat:0;completedat:0;status:"not_found"};
+      $err:e $dsarrequest{id:rows.get(0).id;kind:rows.get(0).kind;userid:rows.get(0).userid;submittedat:rows.get(0).submittedat;completedat:rows.get(0).completedat;status:rows.get(0).status}
+    };
+    $err:e $dsarrequest{id:id;kind:"";userid:"";submittedat:0;completedat:0;status:"not_found"}
+  }
+};
+
+f=listpending(store:i64):@$dsarrequest{
+  mt db.queryparams(
+    store.conn;
+    "SELECT id,kind,user_id,submitted_at,completed_at,status FROM dsar_requests WHERE status IN ('pending','processing') ORDER BY submitted_at ASC";
+    @()
+  ) {
+    $ok:rows @();
+    $err:e @()
+  }
+};

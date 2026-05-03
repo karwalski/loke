@@ -1,0 +1,1 @@
+Self-update mechanism for the loke binary. Checks GitHub releases for newer versions, downloads platform-specific assets, verifies checksums, applies updates with rollback on failure, and implements a 24-hour snooze to avoid nagging.

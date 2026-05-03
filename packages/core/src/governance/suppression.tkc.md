@@ -1,0 +1,1 @@
+Manages suppression rules that silence known or accepted violations. Checks whether a violation matches a suppression rule by type and optional entity type, and marks matched violations as suppressed in scan results.

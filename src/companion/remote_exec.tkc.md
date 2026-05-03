@@ -1,0 +1,1 @@
+Executes LLM inference requests on remote companion devices via the companion channel protocol or directly via Ollama REST API. Handles sensitivity-based prompt redaction for RESTRICTED content. Depends on std.string, std.log, std.json, std.http, and loke.companion.channel.

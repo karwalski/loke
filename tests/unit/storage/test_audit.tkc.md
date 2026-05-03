@@ -1,0 +1,1 @@
+Tests the audit log storage: appending events increases count, filtering by event type, JSON serialisation with expected fields (event_type, correlation_id), CSV header format, and append-only guarantee (count only grows). Depends on core.storage.audit and core.storage.db with in-memory SQLite.

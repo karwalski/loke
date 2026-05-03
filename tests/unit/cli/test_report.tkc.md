@@ -1,0 +1,1 @@
+Unit tests for CLI report subcommand flag parsing. Tests default values for template/start/end/format flags, individual flag overrides, combined multi-flag parsing, dangling flags, unknown flag skipping, and flag reordering. Self-contained parser implementation. Depends on std.string, std.log.

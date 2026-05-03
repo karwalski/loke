@@ -1,0 +1,1 @@
+Tests input sanitisation functions: HTML escaping (striphtml), tag removal (striptags), SQL quote escaping, log injection prevention (newline removal), and string length clamping. Depends on loke.platform.integration.sanitise.

@@ -1,0 +1,1 @@
+Pipeline event emitter that records stage transitions (start, complete, skip, error) during a request's journey through the loke processing pipeline. Produces a finalised pipeline run record with overall status and total duration. Depends on core.pipeline.types, std.str, and shared.log.

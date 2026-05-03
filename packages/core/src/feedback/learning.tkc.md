@@ -1,0 +1,1 @@
+Computes learning signals from feedback data (thumbs-up rates by feature area), derives routing adjustments based on those signals, and persists them to the settings store. Depends on shared.types, shared.log, feedback.store, and storage.db.

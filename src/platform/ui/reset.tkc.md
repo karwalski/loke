@@ -1,0 +1,1 @@
+CSS reset generator providing box-sizing normalisation, margin/padding reset, system font stack, focus-visible outline, and reduced-motion media query. Returns a CSS string for injection into the web view. Depends on std.str.

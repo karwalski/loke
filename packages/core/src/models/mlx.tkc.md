@@ -1,0 +1,1 @@
+Apple MLX backend for local model inference on Apple Silicon. Provides a pool-based model management API with availability detection, model loading, and text generation. Falls back gracefully when MLX is not available.

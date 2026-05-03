@@ -1,0 +1,1 @@
+Memory mining module for importing knowledge from external sources (Claude exports, ChatGPT exports, Slack JSON, markdown, code repos). Manages mining jobs with privacy scanning before storage. Depends on std.string, std.log, and std.json.

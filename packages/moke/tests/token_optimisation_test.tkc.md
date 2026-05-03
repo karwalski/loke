@@ -1,0 +1,1 @@
+Tests for token optimisation subsystem: token estimation, JSON-to-TOON compression comparison, LLMLingua integration info, semantic cache hit/miss tracking, cumulative savings accounting, budget management with threshold detection, and formatted output. Depends on moke.tokenoptimisation, std.assert.

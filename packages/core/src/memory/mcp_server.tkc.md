@@ -1,0 +1,1 @@
+MCP tool server for memory palace operations, exposing search, store, context loading, status, facts lookup, and agent diary writing as MCP-compatible tools. Routes incoming tool calls to the appropriate memory subsystem handler. Depends on core.mcp.protocol, core.memory.palace, core.memory.storage, and core.memory.search.

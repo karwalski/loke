@@ -1,0 +1,1 @@
+Pulls Ollama models with progress tracking, parsing stdout lines for download percentage, bytes transferred, and ETA. Also provides model availability checking via the Ollama API tags endpoint and listing of installed models.

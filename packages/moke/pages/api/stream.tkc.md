@@ -1,0 +1,1 @@
+Streaming API endpoint that processes prompts through schema extraction and anonymisation stages, then forwards to the loke pipeline with stream=true. Depends on std.http, std.json, std.string, moke.hooks, moke.streaming, moke.routingexplainer, moke.costcomparison, and moke.consolelog.

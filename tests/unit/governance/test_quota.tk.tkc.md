@@ -1,0 +1,1 @@
+Unit tests for the governance quota module (core.governance.quota). Tests no-rule status, rule creation, usage below/at limit, scope isolation, rule listing, daily-period rules, and recording usage without a matching rule. Uses an in-memory database store. Depends on core.governance.quota, core.storage.db, std.str, and shared.log.

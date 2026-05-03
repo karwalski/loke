@@ -1,0 +1,1 @@
+Persists and retrieves feedback entries in SQLite, provides summary queries (thumbs-up rates over configurable day windows), manages submission state, and lists pending feedback for batch export. Depends on shared.types, core.feedback.types, core.storage.db, std.db, std.str, and shared.log.

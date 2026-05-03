@@ -1,0 +1,1 @@
+Central dataset registry that aggregates all demo datasets (au_datasets, it_hardware, it_platform, customer_intel) into a unified catalogue with metadata (sensitivity level, category, row/column counts). Provides lookup by ID for loading any dataset. Depends on all data modules and moke.compute.

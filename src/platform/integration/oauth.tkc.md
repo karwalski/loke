@@ -1,0 +1,1 @@
+OAuth 2.0 authorization code flow implementation providing config construction, authorization URL building, scope joining, token expiry checking, and JSON serialisation/deserialisation of tokens. Depends on std.str, std.json, and std.time.

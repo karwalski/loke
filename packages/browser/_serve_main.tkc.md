@@ -1,0 +1,1 @@
+Application entry point that parses CLI arguments, loads ooke configuration, registers all route handlers, and starts the HTTP server. Depends on std.args, ooke.config, ooke.serve, and the handlers module.

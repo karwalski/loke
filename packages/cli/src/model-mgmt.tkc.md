@@ -1,0 +1,1 @@
+Model lifecycle management commands: update (check and pull newer model versions) and uninstall (remove models or Ollama itself). Depends on core.installer.updater and core.installer.uninstall for the actual operations.

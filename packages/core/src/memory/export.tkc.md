@@ -1,0 +1,1 @@
+Handles exporting memory palace contents to JSON, CSV, or Markdown formats, and importing from JSON. Queries drawers from the database and formats them for external consumption or backup. Depends on std.db, std.fs, and std.json.

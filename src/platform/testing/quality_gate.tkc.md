@@ -1,0 +1,1 @@
+CI/CD quality gate runner that executes a sequence of required steps (lint, format, audit, tests, build) and stops on first required failure. Provides result formatting and an allpassed check. Depends on std.str and std.log.

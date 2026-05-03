@@ -1,0 +1,1 @@
+Debug instrumentation module providing conditional logging for HTTP requests/responses, database queries, pipeline stages, and route matching. All logging is gated by a $debugconfig struct with per-category enable flags. Depends on std.log and std.str.

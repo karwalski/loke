@@ -1,0 +1,1 @@
+CLI stats dashboard that displays a summary of loke usage metrics: total requests, tokens saved, cost savings, PII intercepted, local/cloud request ratio, and cache hit rate. Depends on core.metrics.collector for data aggregation.

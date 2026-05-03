@@ -1,0 +1,1 @@
+Tests for moke agent subsystem: quality scanner (z-score/IQR/correlation anomaly detection), schema change detector, and agent status panel. Depends on moke.agents.qualityscanner, moke.agents.schemadetector, moke.agents.status, and moke.hooks.

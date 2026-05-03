@@ -1,0 +1,1 @@
+Built-in policy preset for the Australian Privacy Act 1988. Blocks TFN and Medicare numbers, applies reasonable anonymisation to names/email/phone, enforces no cross-border data transfer, and requires APP8-comparable protections. Depends on core.policy.schema.

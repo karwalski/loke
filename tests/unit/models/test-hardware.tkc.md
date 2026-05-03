@@ -1,0 +1,1 @@
+Extended hardware profile tests. Validates tier viability across Windows/Linux/Mac platforms with varying GPU VRAM, unified memory, disk types, and core counts. Tests edge cases like empty profiles, HDD limitations, and weak machines. Depends on models.hardware.

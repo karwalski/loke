@@ -1,0 +1,1 @@
+Unit tests for the CLI feedback subcommand dispatch logic. Tests routing of report/version subcommands, unknown command handling, valid feedback types (bug, feature, question), version string format, and update channel validation. Self-contained with no external module imports beyond std.string, std.log.

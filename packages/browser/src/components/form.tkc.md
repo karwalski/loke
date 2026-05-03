@@ -1,0 +1,1 @@
+Client-side form validation module providing rule definitions (required, min/max length, pattern, email), server-side field validation logic, and an inline JavaScript validator that shows errors on blur and prevents submission of invalid forms.

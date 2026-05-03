@@ -1,0 +1,1 @@
+Route handler registry for the browser server. Maps HTTP GET/POST endpoints to their page and API handler functions, and exposes a registerall function that wires all routes and returns a list of registered paths.

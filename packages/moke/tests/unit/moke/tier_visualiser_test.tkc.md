@@ -1,0 +1,1 @@
+Tests for the tier visualiser module: verifies three-tier visual structure (interactive, considered, background) with correct active tier flagging, GPU layer and context size settings per tier, and JSON serialisation of individual tiers and full visual state. Depends on moke.tiervisualiser, std.string, std.test.

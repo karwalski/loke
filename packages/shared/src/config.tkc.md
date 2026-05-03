@@ -1,0 +1,1 @@
+Configuration loading for loke. Defines the lokeconfig struct with server port, data directory, log level, and provider URLs. Loads config from a TOML file with sensible defaults for all fields. Depends on std.file and shared.types.

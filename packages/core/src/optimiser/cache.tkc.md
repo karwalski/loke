@@ -1,0 +1,1 @@
+Semantic prompt cache backed by a vector store. Embeds prompts and performs similarity search to find cached responses above a configurable threshold, with TTL-based expiry. Depends on std.vecstore, models.infer, std.json, std.str, std.time, and shared.log.

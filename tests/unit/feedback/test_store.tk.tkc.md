@@ -1,0 +1,1 @@
+Unit tests for the feedback persistence store (core.feedback.store). Tests table creation, saving entries, pending submission queries, mark-submitted flow, summary generation, formatting, and rating/area label helpers. Depends on core.feedback.store, core.feedback.types, core.storage.db, std.str, and shared.log.

@@ -1,0 +1,1 @@
+Database schema initialisation for the memory palace, creating the core tables (memory_drawers, memory_closets, memory_index) and their indexes if they do not already exist. Depends on std.db for SQL execution.

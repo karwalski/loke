@@ -1,0 +1,1 @@
+Tests for the memory palace module. Validates palace open, status (zero drawers), default wings (work, personal), walk output, hall/room listing, and status call success. Depends on core.memory.palace and core.memory.types.

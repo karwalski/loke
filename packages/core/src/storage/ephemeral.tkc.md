@@ -1,0 +1,1 @@
+Ephemeral secure-memory storage for PII placeholder mappings. Uses std.securemem to hold original-to-placeholder mappings in wiped-on-TTL buffers, supporting the privacy restore flow without persisting sensitive data to disk.

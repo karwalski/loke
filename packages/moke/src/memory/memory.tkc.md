@@ -1,0 +1,1 @@
+Memory palace data model module. Defines the drawer (storage unit), search result, palace status, and AAAK context compression types. Provides drawer ID generation and drawer creation. Used as the foundational types for the memory palace system. Depends only on std.string.

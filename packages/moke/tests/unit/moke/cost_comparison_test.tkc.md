@@ -1,0 +1,1 @@
+Tests for cost comparison module: cloud cost estimation for different models, local-vs-cloud cost computation with savings calculation, session savings accumulation across multiple requests, and JSON serialisation of comparisons and savings. Depends on moke.costcomparison, std.string, std.test.

@@ -1,0 +1,1 @@
+API endpoint that proxies health checks to the loke core service. Attempts to reach loke at 127.0.0.1:11430 and returns either the upstream response or a 503 fallback with error details. Depends on std.http, std.str, and std.log.

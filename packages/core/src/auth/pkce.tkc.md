@@ -1,0 +1,1 @@
+Implements PKCE (Proof Key for Code Exchange) for OAuth: generates code verifiers, computes S256 code challenges, and verifies challenge-verifier pairs. Depends on std.str, std.crypto, and std.encoding.

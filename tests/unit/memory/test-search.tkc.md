@@ -1,0 +1,1 @@
+Tests for the memory enrichment/search module. Validates default config fields (enabled, max_memories, token_budget, relevance_threshold, anonymise_for_cloud), search query truncation at 100 chars, and custom config construction. Depends on loke.memory.enrichment.

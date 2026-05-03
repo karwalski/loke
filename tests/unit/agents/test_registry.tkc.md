@@ -1,0 +1,1 @@
+Unit tests for the agent registry module. Tests registration, lookup, duplicate handling, validation (empty name/prompt rejection), enable/disable toggling, listing enabled agents, and run recording. Depends on core.agents.registry and core.agents.types.

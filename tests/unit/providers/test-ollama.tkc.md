@@ -1,0 +1,1 @@
+Tests Ollama provider integration: URL storage in dispatcher, dispatch routing to the ollama branch, request fields for local models (qwen, llama, phi3, mistral), custom/empty URL handling, and zero-cost response verification. Depends on core.providers.dispatcher and core.providers.types.

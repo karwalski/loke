@@ -1,0 +1,1 @@
+Tests the provider dispatcher: key storage for anthropic/openai, Ollama URL storage, routing dispatch to correct provider branches (ollama, google/unknown), message type helpers (user/assistant/system), guardian injection for system prompts, and response JSON serialisation. Depends on core.providers.dispatcher and core.providers.types.

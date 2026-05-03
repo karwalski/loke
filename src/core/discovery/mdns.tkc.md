@@ -1,0 +1,1 @@
+Implements mDNS-based discovery of MCP servers on the local network (_mcp._tcp.local). Manages discovery state with found/confirmed/rejected server lifecycle and user consent prompts before connecting. Depends on std.string and std.log.

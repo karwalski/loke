@@ -1,0 +1,1 @@
+Tests for the disk-streaming inference module. Validates shard directory naming, default config fields, NVMe/SATA/HDD availability checks, token-per-second estimation, cloud cost comparison output, and progress/result JSON serialisation. Depends on loke.core.inference.streaming.disk and loke.core.hardware.profile.

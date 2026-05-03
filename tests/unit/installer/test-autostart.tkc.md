@@ -1,0 +1,1 @@
+Unit tests for the Ollama autostart configuration module. Validates default config values, disabled/remote/custom configs, restart count boundary logic, and config field round-tripping. Depends on core.installer.autostart, std.str, shared.log.

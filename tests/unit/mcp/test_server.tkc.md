@@ -1,0 +1,1 @@
+Unit tests for the MCP toke server request handler. Tests the full MCP lifecycle: initialize, notification, ping, tools/list, tools/call (compress, decompress, unknown), unknown method, bad JSON, resources/list, prompts/list, request counting, and health endpoint. Depends on mcptoke.server, core.mcp.protocol, std.str, std.json, shared.log.

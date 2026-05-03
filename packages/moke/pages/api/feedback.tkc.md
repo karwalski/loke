@@ -1,0 +1,1 @@
+API endpoint for user feedback submission in moke. Accepts thumbs up/down ratings with optional context (feature area, request ID, model, dataset, comment) and returns a generated feedback ID. Depends on std.http, std.json, and std.string.

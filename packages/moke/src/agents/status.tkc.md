@@ -1,0 +1,1 @@
+Agent status and run history tracking module. Manages agent lifecycle (idle/running/error), records run entries with duration, cost, and token usage, computes success rates, and serialises panel state to JSON for the UI dashboard. No external dependencies beyond std.string.

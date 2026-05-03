@@ -1,0 +1,1 @@
+Detects and represents the local hardware profile (RAM, VRAM, unified memory, CPU cores, GPU, disk type/speed, platform). Provides JSON serialisation and a human-readable summary string. Depends on std.string and std.log.

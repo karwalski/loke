@@ -1,0 +1,1 @@
+Shorthand expansion system that converts abbreviated notation (arrows, dot-chains, pipe operators, technical abbreviations) into full natural language text. Supports built-in and custom shorthand definitions, with detection and preview capabilities for the memory palace input pipeline.

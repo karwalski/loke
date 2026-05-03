@@ -1,0 +1,1 @@
+Unit tests for the settings API endpoint. Validates GET response fields (port, data_dir, log_level, ollama_url, presidio_url, llmlingua_url, default_provider), ensures no API key/secret leakage, and tests POST for setting locale, API keys, empty values, and unknown keys. Depends on api.settings.

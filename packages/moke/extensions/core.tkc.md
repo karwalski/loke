@@ -1,0 +1,1 @@
+Moke core extension initialisation module. Registers pipeline hooks (schema-first post-NER), governance gateway rules (raw data guard), and a local compute provider into the extension registries. Depends on core.extensions.pipelinehooks, core.extensions.gatewayhooks, core.extensions.providerregistry, moke.hooks, moke.provider, and std.log.

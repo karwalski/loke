@@ -1,0 +1,1 @@
+Hardware profiling module that detects system capabilities (RAM, GPU VRAM, unified memory, disk type, CPU cores) and estimates model tier viability. Calculates expected token throughput for interactive, considered, and background inference tiers based on available resources.

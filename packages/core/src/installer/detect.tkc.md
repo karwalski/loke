@@ -1,0 +1,1 @@
+Performs full system detection for loke setup: checks whether Ollama is installed and running, probes disk space and RAM, detects CPU architecture (ARM64), verifies internet connectivity, and selects an appropriate default model based on available memory.

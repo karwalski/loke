@@ -1,0 +1,1 @@
+Model escalation logic that determines when a response is inadequate (empty, too short, or contains uncertainty phrases) and selects a stronger model to retry. Maintains a local-to-cloud escalation chain from small Ollama models up to Claude Sonnet.

@@ -1,0 +1,1 @@
+Tests the HTTP router registry: registering routes by method/path/namespace, finding routes by full API path, verifying method-specific matching, and listing all registered routes. Depends on loke.platform.http.router.

@@ -1,0 +1,1 @@
+Persistent placeholder storage backed by SQLite. Stores placeholder-to-original mappings per request with automatic expiry, enabling response restoration across sessions. Depends on core.storage.db and std.db.

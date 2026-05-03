@@ -1,0 +1,1 @@
+Audit event logging module. Writes tamper-evident audit records (with hash chaining) to the audit_log table and retrieves recent events. Depends on std.db, std.str, std.json, and shared.types for the $lokeerr error type.

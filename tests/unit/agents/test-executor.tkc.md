@@ -1,0 +1,1 @@
+Unit tests for the agent executor module. Validates config creation, provider resolution (Anthropic/OpenAI/Ollama routing by model name and heuristics), cost limit enforcement, sandbox cost tracking, and completion request/response construction. Depends on core.agents.executor, core.agents.sandbox, core.providers.dispatcher, core.providers.types, and core.models.registry.

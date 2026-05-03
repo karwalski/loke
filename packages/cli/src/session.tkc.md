@@ -1,0 +1,1 @@
+Named session management backed by SQLite. Supports creating, listing, switching, and closing sessions. Tracks per-session request counts and timestamps. Provides formatted table output of session state.

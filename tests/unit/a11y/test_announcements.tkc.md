@@ -1,0 +1,1 @@
+Unit tests for the accessibility announcements module. Verifies the generated JavaScript includes live-region announcement functions (stage, violation, toast, streaming) with correct ARIA politeness levels, throttling, and batch logic. Depends on loke.platform.a11y.announcements, std.str, shared.log.

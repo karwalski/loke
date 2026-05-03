@@ -1,0 +1,1 @@
+Comprehensive test suite for the i18n translator module covering named parameter substitution, pluralisation rules, locale fallback chains (en-AU, en-US, en base), relative time formatting, date/time/number formatting, and edge cases. Depends on loke.platform.i18n.translator and std.str.

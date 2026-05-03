@@ -1,0 +1,1 @@
+Generates AI content disclosure labels and metadata (generated, assisted, summarised, translated) for transparency compliance. Produces HTML indicator spans and clipboard metadata comments. Depends on std.log and std.string.

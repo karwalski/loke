@@ -1,0 +1,1 @@
+Plugin lifecycle hook registry supporting before-start, after-start, and before-shutdown events. Plugins register hooks by ID and handler key; the run functions iterate and log each hook invocation. Depends on std.str and std.log.

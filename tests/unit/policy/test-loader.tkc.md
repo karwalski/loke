@@ -1,0 +1,1 @@
+Tests the policy system: default policy creation, validation (empty name fails, valid policy passes), two-policy merge with priority, three-tier merge (enterprise/team/user), regulatory presets (GDPR, AU Privacy, HIPAA), and conflict resolution for retention and anonymisation strength. Depends on core.policy.schema, merge, validate, conflict, and preset modules.

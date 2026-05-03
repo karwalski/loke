@@ -1,0 +1,1 @@
+Local NER (Named Entity Recognition) and embedding generation via Ollama LLM or native bindings. Extracts entities (PERSON, ORG, LOCATION, etc.) from text and produces vector embeddings for semantic operations. Includes cosine similarity computation. Depends on std.string, std.log, std.http, and std.json.

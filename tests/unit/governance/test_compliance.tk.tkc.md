@@ -1,0 +1,1 @@
+Unit tests for the compliance reporting module (core.governance.compliance). Tests GDPR and HIPAA check execution, report framework labels, overall status, formatted output content, and generated-at timestamps. Uses an in-memory database store. Depends on core.governance.compliance, core.storage.db, std.str, and shared.log.

@@ -1,0 +1,1 @@
+Local NER (Named Entity Recognition) client that uses an Ollama-hosted SLM to extract named entities from text. Maps entity types to sensitivity levels and confidence scores, and generates placeholder tokens for anonymisation. Depends on shared.types, std.http, std.json, std.str, and shared.log.

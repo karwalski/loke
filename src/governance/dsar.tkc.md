@@ -1,0 +1,1 @@
+DSAR (Data Subject Access Request) handler for GDPR compliance. Manages submission, processing, and fulfilment of access and erasure requests against the local SQLite store. Depends on std.db, std.fs, std.str, std.time, and shared.log.

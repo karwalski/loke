@@ -1,0 +1,1 @@
+TOON (Token-Optimised Object Notation) codec that converts between JSON and a compact pipe-delimited representation to reduce token usage when sending structured data to LLMs. Supports encoding, decoding, table format, and savings measurement. Depends on shared.types, std.str, and std.json.

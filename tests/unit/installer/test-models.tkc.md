@@ -1,0 +1,1 @@
+Unit tests for the model recommendation module. Validates RAM-to-model mapping across all tiers (1.5b through 32b), disk space sufficiency checks, and the allmodels() catalogue ordering and min-RAM values. Depends on core.installer.models, std.str, shared.log.

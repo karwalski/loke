@@ -1,0 +1,1 @@
+Keyword-based search engine for the memory palace. Extracts keywords from queries, scores drawers by summing index weights, and returns ranked results with content excerpts. Supports wing-scoped searching and provides keyword indexing for new drawers.

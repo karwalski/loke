@@ -1,0 +1,1 @@
+Storage layer for memory palace drawers and closets, handling CRUD operations against the SQLite database. Includes content-based location classification that routes memories to appropriate wings/halls based on keywords. Depends on std.db and core.memory.types.

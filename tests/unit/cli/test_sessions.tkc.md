@@ -1,0 +1,1 @@
+Unit tests for CLI session management (loke.cli.sessions). Tests session store lifecycle: creation, listing, active session get/set, activation/deactivation, find by name, and format list output. Depends on std.string, std.log.

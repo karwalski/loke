@@ -1,0 +1,1 @@
+Advises whether a task can run on local models by keyword-matching the task description (code, summarise, creative, complex) and recommending an appropriate model with confidence and quality estimates. Depends on shared.types, shared.log, and models.registry.

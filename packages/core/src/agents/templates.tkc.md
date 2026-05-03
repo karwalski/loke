@@ -1,0 +1,1 @@
+Defines built-in agent templates (daily digest, nightly code reviewer, doc freshness checker, weekly security scan, meeting prep, expense categoriser, documentation updater) and provides functions to list, find, and install them into the registry. Depends on shared.types, core.agents.types, core.agents.registry, std.str, and shared.log.

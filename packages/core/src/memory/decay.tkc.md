@@ -1,0 +1,1 @@
+Memory decay module that applies time-based score degradation to stored memories using a half-life formula. Provides sweep functionality to prune low-scoring memories and refresh access timestamps. Depends on std.db for persistence and core.memory.types for shared type definitions.

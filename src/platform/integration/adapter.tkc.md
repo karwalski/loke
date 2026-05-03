@@ -1,0 +1,1 @@
+Generic integration adapter with circuit-breaker pattern. Tracks connection state (connected, disconnected, degraded, error) and failure counts, opening the circuit after a configurable threshold. Depends on std.str and std.log.

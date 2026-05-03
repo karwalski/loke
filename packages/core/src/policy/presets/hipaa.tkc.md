@@ -1,0 +1,1 @@
+Built-in policy preset for US HIPAA. Uses restricted classification default, blocks health/SSN/medical records/insurance data, requires BAA agreements, enforces safe-harbor de-identification, and applies minimum-necessary standard. Depends on core.policy.schema.

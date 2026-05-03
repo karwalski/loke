@@ -1,0 +1,1 @@
+Tests for the semantic cache module. Validates default config (threshold=0.92, TTL=86400s), custom config construction, cache stats struct fields, and formatted stats output containing hit/miss/entry/eviction counts. Depends on optimiser.cache.

@@ -1,0 +1,1 @@
+MCP-toke tool definitions and handlers. Implements anonymise, compress, profile, decompress, and analyse tools that expose loke's privacy pipeline and TOON optimiser as MCP-callable tools. Depends on core.mcp.protocol, core.privacy.pipeline, core.optimiser.toon, core.optimiser.profiler, std.json, std.str, and shared.log.

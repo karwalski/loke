@@ -1,0 +1,1 @@
+Tests the keychain API key storage: set/get round-trip, unknown service returns none, delete removes entry, service name preserved exactly, and has_key lifecycle (true after set, false after delete). Depends on core.storage.keychain.

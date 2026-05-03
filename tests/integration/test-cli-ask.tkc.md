@@ -1,0 +1,1 @@
+Integration test for the CLI ask command. Validates default options (model, dry-run, stream, tolerance), dry-run execution producing expected markers and zero-cost results, and model ID preservation for both cloud and local (Ollama) providers. Depends on loke.cli.ask, std.str, shared.log.

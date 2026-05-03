@@ -1,0 +1,1 @@
+MCP broker status panel module. Tracks connected MCP servers with health status, tool lists, and permission badges. Provides demo server definitions (loke-mcp-toke and loke-memory) and JSON serialisation for the broker dashboard. Depends only on std.string.

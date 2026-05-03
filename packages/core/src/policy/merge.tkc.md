@@ -1,0 +1,1 @@
+Policy merge engine that combines enterprise, team, and user policy tiers using overlay semantics. Higher-priority or non-empty overlay fields win, with string lists deduplicated. Depends on core.policy.schema, std.str, and shared.log.

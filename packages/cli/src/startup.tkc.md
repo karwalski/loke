@@ -1,0 +1,1 @@
+Boot sequence for the loke CLI daemon. Loads and validates configuration (ollama_url, data_dir required), logs a boot summary, and provides a shutdown sequence for cleanup. Returns the validated config or a typed error.

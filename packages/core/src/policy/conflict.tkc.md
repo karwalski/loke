@@ -1,0 +1,1 @@
+Policy conflict resolver that applies privacy-maximising merge strategies: shortest retention, strongest anonymisation, broadest PII scope, most restrictive cross-border rules, and longest audit retention. Depends on core.policy.schema, std.str, and shared.log.

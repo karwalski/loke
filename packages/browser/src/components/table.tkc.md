@@ -1,0 +1,1 @@
+Renders accessible data tables with sortable column headers, ARIA sort indicators, and a client-side JavaScript sort handler. Supports compact mode and provides open/close/row rendering for streaming table construction.

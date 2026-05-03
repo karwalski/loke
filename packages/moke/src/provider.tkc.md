@@ -1,0 +1,1 @@
+Provider registration and local compute dispatch module. Manages a store of provider registrations with capabilities, registers the schema-first interceptor provider, creates custom provider entries for the core registry, and handles local compute requests by delegating to moke.compute. Depends on std.string, std.http, std.log, core.extensions.providerregistry, and moke.compute.

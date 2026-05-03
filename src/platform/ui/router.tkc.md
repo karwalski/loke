@@ -1,0 +1,1 @@
+Client-side hash-based router (window.__router) supporting exact and parameterised route matching, navigation, 404 handling, and screen-reader route announcements via aria-live. Returns a self-executing JS string for injection into the web view. Depends on std.str.

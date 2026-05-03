@@ -1,0 +1,1 @@
+Unit tests for the privacy API endpoint. Tests GET config response (entities, layers, preset fields), POST actions (set_preset, toggle_entity, toggle_layer), and error handling for unknown/empty/missing actions. Depends on api.privacy.

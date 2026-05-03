@@ -1,0 +1,1 @@
+Core ML engine providing k-means clustering, z-score and IQR anomaly detection, and Pearson correlation matrix computation. All algorithms operate on in-memory tabular data (headers + rows). Includes helper functions for numeric column extraction, Euclidean distance, and statistical primitives (mean, stddev). Depends only on std.string.

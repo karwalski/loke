@@ -1,0 +1,1 @@
+Dashboard generation flow implementing a three-phase pipeline: (1) send schema to LLM to generate DDL JSON, (2) resolve compute queries against local data, (3) render final dashboard JSON. Supports iterative refinement via follow-up LLM calls. Depends on std.string, std.http, and moke.ddl.

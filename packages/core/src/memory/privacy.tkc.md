@@ -1,0 +1,1 @@
+Privacy controls for the memory palace including opt-out topic management, time-based and PII-based forgetting, and content filtering. Loads and saves user privacy preferences from the database and enforces them before storage. Ensures the memory system respects user data sovereignty.

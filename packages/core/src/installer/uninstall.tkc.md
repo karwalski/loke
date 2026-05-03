@@ -1,0 +1,1 @@
+Removes individual Ollama models or the entire Ollama binary from the loke-managed install location (~/.loke/bin). Cleans PATH entries from shell profiles and verifies removal. Lists removable models via the Ollama API or CLI fallback.

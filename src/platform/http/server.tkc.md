@@ -1,0 +1,1 @@
+HTTP server configuration and lifecycle management. Defines server config (host, port, TLS, static dir, SPA fallback) and middleware slot types, with start/stop functions. Depends on shared.log and std.str.

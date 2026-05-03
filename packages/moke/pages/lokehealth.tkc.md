@@ -1,0 +1,1 @@
+Page handler for the loke health status view. Checks loke core and Ollama connectivity, builds a JSON status object, and renders the lokehealth template with results. Depends on std.http, std.str, and ooke.template.

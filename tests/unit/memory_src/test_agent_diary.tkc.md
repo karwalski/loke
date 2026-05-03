@@ -1,0 +1,1 @@
+Tests for the agent diary module. Validates diary creation, entry append/retrieval, recent entry limiting, startup context generation (including empty diary header), and AAAK serialisation of diary entries. Depends on loke.memory.agentdiary.

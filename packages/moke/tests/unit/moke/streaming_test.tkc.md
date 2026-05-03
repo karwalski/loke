@@ -1,0 +1,1 @@
+Tests for the streaming session module: state machine transitions (idle, connecting, streaming, complete, error), token accumulation, stage progression with event tracking, SSE (Server-Sent Events) formatting, and full session JSON serialisation. Depends on moke.streaming, std.string, std.test.

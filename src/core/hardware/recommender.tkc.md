@@ -1,0 +1,1 @@
+Recommends local LLM models based on hardware capabilities, classifying each into tiers (interactive, considered, background, not_recommended) based on estimated VRAM usage vs available memory. Covers models from 0.5B to 72B parameters. Depends on std.string, std.log, and loke.core.hardware.profile.

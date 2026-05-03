@@ -1,0 +1,1 @@
+Core decay tests validating default config values (half_life_days=30, min_score=0.1, prune_below=0.05, sweep_interval=24h), fresh/aged/ancient score behaviour, monotonic decay, and zero-input clamping. Depends on core.memory.decay.

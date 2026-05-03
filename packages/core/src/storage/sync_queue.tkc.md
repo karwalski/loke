@@ -1,0 +1,1 @@
+Durable sync queue with retry and dead-letter support. Implements enqueue, dequeue, ack, nack (with exponential backoff), and depth queries backed by the sync_queue SQLite table. Depends on std.db, std.str, shared.types, shared.log, and core.storage.db.

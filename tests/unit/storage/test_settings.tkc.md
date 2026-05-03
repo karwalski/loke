@@ -1,0 +1,1 @@
+Tests the settings storage module: string/bool/int set/get round-trips, missing key returns error, type mismatch detection (get_bool on string key), key overwrite, and namespace listing. Uses in-memory SQLite via core.storage.db. Depends on core.storage.settings.

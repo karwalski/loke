@@ -1,0 +1,1 @@
+Manages saved dashboard persistence: CRUD operations (save, load, list, delete) for dashboard DDL JSON with run counting, schema hash compatibility checking for re-runs, insertion-sort by last-run time, JSON serialisation, and token savings estimation. Depends on std.string, std.log. Note: uses a module-level function as pseudo-global state store.

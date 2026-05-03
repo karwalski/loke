@@ -1,0 +1,1 @@
+Unit tests for the OAuth authentication subsystem. Covers PKCE verifier/challenge generation and verification, OAuth state validation, authorise URL construction, redirect URI formatting, token store CRUD operations (save/load/clear/update), and refresh token timing logic. Depends on loke.core.auth.oauth, loke.core.auth.pkce, loke.core.auth.tokenstore, and loke.core.auth.refresh.

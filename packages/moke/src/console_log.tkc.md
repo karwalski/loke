@@ -1,0 +1,1 @@
+Console logging module that records pipeline stage events (schema extract, anonymise, LLM call, response, etc.) with timestamps and duration, providing formatted text output and JSON serialisation. Depends on std.string.

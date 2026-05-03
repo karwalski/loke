@@ -1,0 +1,1 @@
+Policy validator that checks a policy struct for required fields, valid classification levels, non-negative budget values, and well-formed provider and anonymisation entries. Returns a validation result with errors and warnings. Depends on core.policy.schema, std.str, and shared.log.

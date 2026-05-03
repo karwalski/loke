@@ -1,0 +1,1 @@
+Verbose pipeline output formatter for debugging. Renders detailed pipeline run information including per-stage status symbols, durations, error messages, and detail key-value pairs. Used when --verbose flag is active.

@@ -1,0 +1,1 @@
+CLI interface for policy management with list, validate, and show subcommands. Lists active policy sources, validates policy files against the schema, and displays policy details. Depends on core.policy.loader and core.policy.validate.

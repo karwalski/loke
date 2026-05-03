@@ -1,0 +1,1 @@
+Manages sidecar processes (Presidio, LLMLingua) with spawn, stop, health-check, and auto-restart logic. Tracks restart count with a configurable maximum to prevent infinite restart loops. Depends on std.string, std.log, std.http, and std.process.

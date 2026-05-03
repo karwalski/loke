@@ -1,0 +1,1 @@
+Aggregates feedback summaries into batches and submits them as GitHub issues via the GitHub API. Provides formatting for issue bodies with ratings and top areas needing attention. Depends on shared.types, std.http, std.json, shared.log, and feedback.store.

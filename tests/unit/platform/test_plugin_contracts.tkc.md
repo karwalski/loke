@@ -1,0 +1,1 @@
+Tests the plugin contracts module: current interface version (0.1.0), version string formatting, compatibility checking across major/minor versions, and listing breaking changes. Depends on loke.platform.plugin.contracts.

@@ -1,0 +1,1 @@
+Unit test for the a11y HTML scanner. Tests violation detection for missing img alt, empty role attributes, and unlabelled inputs, verifies clean HTML and aria-label buttons pass, checks assert_no_violations helper, result_to_json serialisation, and violation object field completeness. Depends on loke.platform.a11y.testing, std.str, shared.log.

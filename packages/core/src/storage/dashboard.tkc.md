@@ -1,0 +1,1 @@
+Dashboard preferences persistence module. Stores and retrieves per-widget state (collapsed, time range, sort) and theme settings in the settings table as JSON. Depends on std.db, std.str, std.json, and core.storage.db.

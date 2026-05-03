@@ -1,0 +1,1 @@
+Tests sensitivity scoring: PII-based scoring with entity count escalation thresholds, content-based scoring for keywords (password, bank account, patient, internal memo, weather), sensitivity level combination (max wins), cloud usage restrictions by level, and level_to_str formatting. Depends on core.router.sensitivity.

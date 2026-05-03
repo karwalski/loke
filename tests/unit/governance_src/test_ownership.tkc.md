@@ -1,0 +1,1 @@
+Unit tests for the governance ownership module. Validates assigning business/technical/risk owners to use cases, checking for missing roles, and listing all ownership records. Depends on loke.governance.ownership, std.string, std.log.

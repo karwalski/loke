@@ -1,0 +1,1 @@
+Integration test for the health check API. Tests report building with empty/healthy/unhealthy/degraded probes, status aggregation, JSON serialisation of reports, probe registration, and version preservation. Depends on loke.core.health.checker, loke.core.health.api, std.str, shared.log.

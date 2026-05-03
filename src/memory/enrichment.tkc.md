@@ -1,0 +1,1 @@
+Memory enrichment module that augments LLM prompts with relevant memories from the memory palace. Builds search queries, formats context for injection into prompts, and respects token budgets. Depends on std.string, std.log, and std.json.

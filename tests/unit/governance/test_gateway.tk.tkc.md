@@ -1,0 +1,1 @@
+Unit tests for the governance gateway (core.governance.gateway). Tests clean request submission, kill-switch activation/deactivation blocking behaviour, explanation content, risk tier labelling, unknown use-case blocking, and allow-decision construction. Depends on core.governance.gateway, core.governance.types, shared.types, std.str, and shared.log.

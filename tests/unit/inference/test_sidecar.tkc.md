@@ -1,0 +1,1 @@
+Unit tests for the sidecar process manager. Tests construction (generic, presidio, llmlingua), stop/health/wait/read operations on non-running sidecars, spawn of non-existent binaries, and ensure-healthy restart logic including max-restart limits. Depends on core.inference.sidecar, std.str, std.log.

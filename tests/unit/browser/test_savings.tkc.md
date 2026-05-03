@@ -1,0 +1,1 @@
+Unit tests for the browser savings page (page.savings). Validates JSON output for summary stats, provider breakdown, timeseries, and cache stats, plus HTTP GET handler response containing stat-card, export, and provider-table elements. Depends on std.string, std.log.

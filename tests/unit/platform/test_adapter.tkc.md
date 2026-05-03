@@ -1,0 +1,1 @@
+Tests the platform integration adapter module including circuit-breaker state transitions: new state is disconnected, failure recording increments count, breaker opens after threshold, and success resets state. Depends on loke.platform.integration.adapter.

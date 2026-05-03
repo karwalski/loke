@@ -1,0 +1,1 @@
+Tests for the AAAK (abbreviated knowledge encoding) module. Validates fact encoding (copula, decision, management patterns), multi-sentence text encoding, compression measurement, and decode expansion for DEC: and TEAM: prefixes. Depends on core.memory.aaak.

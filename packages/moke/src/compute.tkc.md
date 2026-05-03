@@ -1,0 +1,1 @@
+Local compute engine implementing dataset operations: count, sum, avg, min, max, group, timeseries, top-n, distribution, correlate, percentile, count-by, latest, distinct, and join. All computations run locally without sending data externally. Depends on std.string and std.log.

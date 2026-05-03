@@ -1,0 +1,1 @@
+Manages user consent records with grant/revoke/check operations, supports expiry timestamps, and provides a preferences loader for the four consent purposes (telemetry, improvement, cloud routing, companion sync). Persists to SQLite via std.db.

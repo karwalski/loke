@@ -1,0 +1,1 @@
+Built-in policy preset for EU GDPR (2016/679). Blocks health, biometric, political, and religion data; applies full anonymisation to all personal identifiers; disables cross-border transfer; and enforces DPA requirements and right-to-erasure support. Depends on core.policy.schema.

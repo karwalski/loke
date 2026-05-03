@@ -1,0 +1,1 @@
+OS keychain integration module. Stores and retrieves API keys, the database encryption key, and other secrets via the platform keychain (macOS Keychain). Depends on std.keychain, shared.log, and std.str.

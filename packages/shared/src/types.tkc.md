@@ -1,0 +1,1 @@
+Core type definitions for loke. Defines enums for sensitivity levels, providers, model tiers, and latency tolerance. Defines structs for PII entities, detection results, model specs, routing decisions, pipeline results, and the lokeerr tagged union for error handling. No dependencies.

@@ -1,0 +1,1 @@
+Built-in policy preset for the California Consumer Privacy Act (CCPA/CPRA). Applies full anonymisation to SSN, financial and biometric data, allows cross-border transfers, and enforces 45-day consumer response and opt-out-of-sale requirements. Depends on core.policy.schema.

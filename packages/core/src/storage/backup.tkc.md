@@ -1,0 +1,1 @@
+Database backup and restore module. Creates SQLite backups via VACUUM INTO, lists existing backups, restores from a backup file, and prunes old backups. Depends on std.db, std.file, std.str, and shared.log.

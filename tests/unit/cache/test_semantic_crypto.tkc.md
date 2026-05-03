@@ -1,0 +1,1 @@
+Unit tests for the semantic cache cryptographic layer (core.cache.semantic). Tests key generation (SHA-256 determinism, length, uniqueness), default config, store creation, entry storage with embedding vectors, cosine similarity computation, stats JSON output, and expired entry eviction. Depends on std.string, std.log.

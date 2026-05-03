@@ -1,0 +1,1 @@
+Integration-style tests for the memory graph module with palace storage. Tests entity upsert, relation creation, neighbour traversal, entity search, deletion, and post-deletion state. Depends on core.memory.graph, core.memory.types, core.memory.palace.

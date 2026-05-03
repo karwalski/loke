@@ -1,0 +1,1 @@
+Unit tests for MCP broker permission parsing and enforcement. Tests TOML permission parsing (single/multi-server, empty, no-mcp-section), apply-permissions to registry, and deny-takes-precedence logic when a tool appears in both allow and deny lists. Depends on mcpbroker.permissions, mcpbroker.registry, std.str, shared.log.

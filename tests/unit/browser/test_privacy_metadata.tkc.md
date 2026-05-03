@@ -1,0 +1,1 @@
+Unit tests for the browser workspace privacy metadata module (loke.browser.workspace.privacymetadata). Tests page sensitivity resolution from data-ai attributes, robots.txt parsing for AI crawler directives (GPTBot, ClaudeBot), HTML attribute detection, and compliance note generation. Depends on std.string, std.log.

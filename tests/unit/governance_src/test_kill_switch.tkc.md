@@ -1,0 +1,1 @@
+Unit tests for the governance kill switch module. Verifies global enable/disable, per-provider blocking, active listing, and fallback messages. Depends on loke.governance.killswitch, std.string, std.log.

@@ -1,0 +1,1 @@
+Port management for the loke proxy server. Checks port availability, finds free ports in the 11430-11450 range, persists the configured port to the database, and resolves conflicts by falling back to an available port.

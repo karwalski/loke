@@ -1,0 +1,1 @@
+Cost comparison module that estimates cloud API costs for various LLM models (Claude, GPT-4o, Llama, Qwen) based on token counts and calculates savings when routing locally. Depends on std.string. Provides JSON serialisation for both individual comparisons and session-level savings accumulation.

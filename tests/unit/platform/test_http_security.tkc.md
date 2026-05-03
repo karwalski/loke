@@ -1,0 +1,1 @@
+Tests HTTP security header generation: CSP with default-src self, X-Frame-Options, X-Content-Type-Options, HSTS defaults to off, and rate limit config is positive. Depends on loke.platform.http.security.

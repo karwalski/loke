@@ -1,0 +1,1 @@
+Typed key-value settings storage module. Provides get/set operations for str, int, float, bool settings with namespace support, backed by the settings SQLite table. Depends on std.db, std.str, std.json, shared.types, and core.storage.db.

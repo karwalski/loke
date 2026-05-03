@@ -1,0 +1,1 @@
+Builds and formats a provider scorecard showing per-provider statistics (requests, latency, error rate, cost) for Anthropic, OpenAI, and Ollama. Currently returns stub data; intended to be backed by the storage layer.

@@ -1,0 +1,1 @@
+Additional built-in policy presets: UK GDPR, Singapore PDPA, Minimal (for dev/testing), EU AI Act (biometric/emotion blocking, 10-year record keeping), and Colorado AI Act (algorithmic discrimination prevention). Depends on core.policy.schema.

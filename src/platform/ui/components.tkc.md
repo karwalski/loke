@@ -1,0 +1,1 @@
+CSS component library generator outputting styles for buttons (primary, ghost), cards, badges (colour variants), alerts (info, warn, error), and a spinner animation. Returns a complete CSS string for injection into the web view. Depends on std.str.

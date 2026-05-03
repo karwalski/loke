@@ -1,0 +1,1 @@
+Integration test for MCP broker roundtrip. Tests server registration, status transitions, tool listing, dispatch to missing/connected/disabled servers, error propagation, and privacy application on dispatch. Depends on loke.mcpbroker.broker, loke.mcpbroker.registry, loke.mcpbroker.config, std.str, shared.log.

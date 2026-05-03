@@ -1,0 +1,1 @@
+Token optimisation metrics module. Provides TOON comparison (original vs compressed), LLMLingua compression info, semantic cache hit/miss tracking, cumulative savings aggregation, and per-request token budgets. Used by the UI dashboard to show cost and efficiency gains. Depends on std.string and std.json.

@@ -1,0 +1,1 @@
+Runs GDPR and HIPAA compliance checks against the current system state, producing a structured report with pass/warn/fail status for each control. Formats reports as plain text tables. Depends on shared.types, storage.db, storage.audit, and std.str.

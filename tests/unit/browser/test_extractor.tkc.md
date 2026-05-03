@@ -1,0 +1,1 @@
+Unit tests for the browser workspace extractor module. Tests HTML tag stripping (basic, empty, nested, plain text), PII detection (email patterns, digit runs with length thresholds), selection extraction (kind, content), full page extraction with tag stripping, and PII flagging on extracted content. Depends on loke.browser.workspace.extractor.

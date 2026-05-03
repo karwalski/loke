@@ -1,0 +1,1 @@
+Route registration module that maps HTTP paths and methods to handler functions. Delegates to page modules for both API endpoints and HTML page handlers, returning the list of registered paths for the server.

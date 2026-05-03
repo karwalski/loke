@@ -1,0 +1,1 @@
+Routing explainer module that builds structured routing decisions capturing intent classification, sensitivity level, model selection, provider, cost estimate, and tier assignment. Provides immutable-style update functions (withintent, withsensitivity, withselection) and JSON serialisation. Depends on std.string.

@@ -1,0 +1,1 @@
+Streaming session state machine for LLM token-by-token responses. Tracks stream lifecycle (idle, connecting, streaming, complete, error), accumulates token events, and provides JSON and SSE serialisation. Depends on moke.consolelog for session logging.

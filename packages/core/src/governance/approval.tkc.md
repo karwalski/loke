@@ -1,0 +1,1 @@
+Implements the user approval gate for LLM requests based on configurable modes (always, never, by sensitivity, by provider). Generates text diffs between original and transformed prompts for user review. Supports "don't ask again" rules to suppress repeat approvals.

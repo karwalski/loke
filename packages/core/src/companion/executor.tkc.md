@@ -1,0 +1,1 @@
+Executes inference requests on remote companion devices over the TLS channel, handling connection, payload serialisation, response parsing, and status queries. Depends on companion.types, companion.channel, std.tls, std.json, shared.log, and providers.types.

@@ -1,0 +1,1 @@
+Test harness for the privacy pipeline with predefined test cases covering email, phone, credit card, API key, and multi-PII detection scenarios. Runs regex detection, checks entity counts and sensitivity levels, and verifies guardian prompt injection.

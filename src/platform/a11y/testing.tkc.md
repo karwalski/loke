@@ -1,0 +1,1 @@
+Accessibility testing utilities that check HTML for common violations (missing img alt, unlabelled inputs, empty role attributes). Returns structured violation results with JSON serialisation. Depends on std.str and std.log.

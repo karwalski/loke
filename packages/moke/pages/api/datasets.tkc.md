@@ -1,0 +1,1 @@
+API endpoint for dataset detail retrieval in moke. Accepts a POST with dataset ID, looks it up in the registry, profiles its columns for PII detection, and returns full metadata including headers, rows, and column statistics as JSON. Depends on std.http, std.json, std.string, moke.data.registry, and moke.profiler.

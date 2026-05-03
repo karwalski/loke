@@ -1,0 +1,1 @@
+Implements the OAuth 2.0 authorization code flow with PKCE for provider authentication, including URL building, code exchange, token storage, refresh delegation, and revocation. Depends on std.str, std.log, std.http, std.crypto, std.encoding, and sibling auth modules (pkce, tokenstore, refresh).

@@ -1,0 +1,1 @@
+Tests the router configuration and creation: prefer_local defaults, max cost per 1k tokens, Ollama URL storage, default latency tolerance, and tolerance_from_str parsing for patient/background/instant/unknown values. Depends on core.router.router and core.router.selector.

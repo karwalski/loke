@@ -1,0 +1,1 @@
+Unit tests for the model verification module. Tests verification result construction across success/failure/unreachable/retry-exhausted states, throughput measurement, multi-model iteration, and error message content validation. Depends on core.installer.verify, std.str, shared.log.

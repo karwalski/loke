@@ -1,0 +1,1 @@
+Unit tests for CLI policy subcommand argument handling. Tests command parsing for bare/unknown commands, validates list/validate/show subcommand argument structures including path arguments, empty args triggering usage, and case-sensitive/partial matching rejection. Depends on cli.commands, std.string, std.log.

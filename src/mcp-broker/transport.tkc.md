@@ -1,0 +1,1 @@
+MCP broker transport layer handling connections and tool calls over stdio, SSE, and HTTP transports. Provides a unified call result type across all transport mechanisms. Depends on std.string, std.log, std.http, and std.json.

@@ -1,0 +1,1 @@
+Manages the sidebar navigation tree including item registration, ordering, active state tracking, and compact mode. Renders an accessible tree-view with keyboard navigation (arrow keys, Home/End) and badge/icon support.

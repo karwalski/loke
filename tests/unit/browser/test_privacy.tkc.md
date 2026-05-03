@@ -1,0 +1,1 @@
+Unit tests for the privacy page renderer. Tests entity and layer config JSON output, GET page response (preset-selector, layers-list, entities-list), and POST actions (set_preset, toggle_entity, toggle_layer, unknown action error). Depends on page.privacy.

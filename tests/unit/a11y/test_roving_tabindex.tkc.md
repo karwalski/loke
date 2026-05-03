@@ -1,0 +1,1 @@
+Unit tests for the roving tabindex JavaScript module. Verifies init/destroy/focusItem functions, arrow key navigation, Home/End support, tabindex management, and wrap/orientation options. Depends on loke.platform.a11y.rovingtabindex, std.str, shared.log.

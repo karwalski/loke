@@ -1,0 +1,1 @@
+Manages token and cost quotas with configurable rules (daily, weekly, monthly periods). Checks quota status before requests, records usage after completion, and reports remaining percentage and exceeded state. Depends on std.db, std.str, shared.log, and std.time.

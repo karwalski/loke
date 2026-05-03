@@ -1,0 +1,1 @@
+Compares two models head-to-head by running identical benchmark cases and determining a winner based on score (tie-breaking on cost), then formatting the comparison as a side-by-side report. Depends on shared.types, shared.log, eval.bench, and providers.dispatcher.

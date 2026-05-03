@@ -1,0 +1,1 @@
+Unit tests for colour contrast checking. Validates WCAG AA/AAA ratio calculations, hex parsing, symmetric contrast ratios, flexible size-aware checks, theme pair validation, and high-contrast CSS generation. Depends on loke.platform.a11y.colour, std.str, shared.log.

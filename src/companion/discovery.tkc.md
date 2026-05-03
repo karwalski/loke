@@ -1,0 +1,1 @@
+Companion device discovery via mDNS: browses for _loke._tcp.local services, manages discovered device list with confirmation-code pairing workflow, supports reject/find/list operations, provides JSON serialisation and basic security validation (non-empty host, valid port). Depends on std.str, std.log, std.json.

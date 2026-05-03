@@ -1,0 +1,1 @@
+Client for the LLMLingua prompt compression service. Provides ratio-based and token-target compression modes via HTTP POST, with availability checking and savings calculation. Depends on std.http, std.json, std.str, and shared.log.

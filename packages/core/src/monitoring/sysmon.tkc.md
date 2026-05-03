@@ -1,0 +1,1 @@
+System monitoring module that collects real-time CPU, RAM, and process statistics on macOS via shell commands (sysctl, vm_stat, ps, top). Tracks Ollama and loke process resource usage, detects active SLM models, and serialises the snapshot to JSON. Depends on std.process, std.str, and shared.log.

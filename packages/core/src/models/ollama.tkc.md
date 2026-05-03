@@ -1,0 +1,1 @@
+Ollama REST API client providing health checks, model listing, text generation, chat completion, model pulling, and model deletion. Wraps all Ollama endpoints with proper error handling and JSON parsing. Depends on std.http and std.json.

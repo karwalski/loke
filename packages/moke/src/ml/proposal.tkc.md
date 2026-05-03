@@ -1,0 +1,1 @@
+ML analysis proposal generator. Given a dataset schema with numeric and categorical column lists, generates suggested analyses (k-means, z-score, correlation, group-by) either via LLM or heuristic fallback. Builds privacy-safe prompts using TOON schema profiles rather than raw data. Depends on std.string and std.http for LLM calls.

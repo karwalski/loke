@@ -1,0 +1,1 @@
+Settings UI HTML generator. Produces the HTML for the application settings page including appearance (theme), timezone, language, integrations status, backup/restore, and about sections. Depends on std.str for string concatenation.

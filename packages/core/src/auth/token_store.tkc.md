@@ -1,0 +1,1 @@
+Persists OAuth tokens (access, refresh, expiry, scopes) in the system keychain using a service/account naming scheme, providing save, load, update, check, and clear operations. Depends on std.str, std.log, and std.keychain.

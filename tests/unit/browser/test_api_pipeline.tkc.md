@@ -1,0 +1,1 @@
+Unit tests for the pipeline API endpoint. Tests validation (empty/missing text returns 400), successful pipeline execution response fields (sensitivity, model_id, entities_found, tokens, cost), tolerance parsing (instant/patient/background), sensitivity labels, and PII detection. Depends on api.pipeline.

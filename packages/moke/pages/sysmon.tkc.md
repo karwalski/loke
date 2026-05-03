@@ -1,0 +1,1 @@
+System monitoring API endpoint for moke. Returns JSON with CPU count, RAM usage, and per-process stats for Ollama and loke by parsing ps output and sysctl values. Depends on std.http, std.str, and std.process.

@@ -1,0 +1,1 @@
+Tests for pipeline stage events. Validates stage labels, status symbols, all-stages count (9), emitter lifecycle (start/complete/skip stages with duration tracking), history add/recent retrieval, and history eviction at capacity. Depends on core.pipeline.types, core.pipeline.emitter, core.pipeline.history.

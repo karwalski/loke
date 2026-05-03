@@ -1,0 +1,1 @@
+Tests for the routing explainer module: verifies default routing decision creation, intent/sensitivity/selection field updates, and JSON serialisation of the full decision structure (request ID, intent, sensitivity, model selection, cost estimate). Depends on moke.routingexplainer, std.string, std.test.

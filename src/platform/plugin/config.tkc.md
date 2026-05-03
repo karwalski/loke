@@ -1,0 +1,1 @@
+Plugin configuration section registry allowing plugins to register namespaced config sections with schema keys and environment variable prefixes. Supports upsert semantics (re-registering replaces existing). Depends on std.str and std.log.

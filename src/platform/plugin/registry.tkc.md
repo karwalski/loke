@@ -1,0 +1,1 @@
+Central plugin registration system storing plugin metadata including routes, health checks, navigation items, and settings sections. Provides aggregate queries across all registered plugins (allroutes, allnavitems, allhealthchecks). Depends on std.str and std.log.

@@ -8,11 +8,11 @@ i=store:loke.core.auth.tokenstore;
 
 t=$refreshresult{
   ok:bool;
-  accesstoken:$str;
-  refreshtoken:$str;
+  accesstoken:str;
+  refreshtoken:str;
   expiresin:i64;
   status:i32;
-  errormsg:$str
+  errormsg:str
 };
 
 f=refreshbuffersecs():i64{ <300 };
@@ -21,80 +21,91 @@ f=needsrefresh(expiresat:i64;now:i64):bool{
   let threshold=expiresat-refreshbuffersecs();
   <now>threshold
 };
+
 f=isexpired(expiresat:i64;now:i64):bool{
   <now>expiresat
 };
-f=dorefresh(tokenurl:$str;clientid:$str;refreshtok:$str):$refreshresult{
+
+f=dorefresh(tokenurl:str;clientid:str;refreshtok:str):$refreshresult{
   let client=http.client(tokenurl);
   let body=str.concat("grant_type=refresh_token";
     str.concat("&refresh_token=";str.concat(refreshtok;
     str.concat("&client_id=";clientid))));
   let resp=http.post(client;"";str.tobytes(body);"application/x-www-form-urlencoded")!{
-    <$refreshresult{ok:false;accesstoken:"";refreshtoken:"";expiresin:0;status:0;errormsg:"network error"};
+    <$refreshresult{ok:false;accesstoken:"";refreshtoken:"";expiresin:0;status:0;errormsg:"network error"}
   };
   if(resp.status>400){
+    let msg=str.concat("refresh failed with status ";str.fromint(resp.status));
     <$refreshresult{
       ok:false;
       accesstoken:"";
       refreshtoken:"";
       expiresin:0;
-      status:i64;
-      errormsg:i64("refresh failed with status ";str.fromint(resp.status))
-    };
-  }el{};
-  let bodystr=str.frombytes(resp.body);
-  let access=encoding.jsonfield(bodystr;"access_token");
-  let newrefresh=encoding.jsonfield(bodystr;"refresh_token");
-  let exp=encoding.jsonfieldint(bodystr;"expires_in");
-  if(str.len(newrefresh)=0){
-    let newrefresh=refreshtok
-  }el{};
-  <$refreshresult{ok:true;accesstoken:$access;refreshtoken:$newrefresh;expiresin:$exp;status:i64;errormsg:""};
+      status:resp.status;
+      errormsg:msg
+    }
+  }el{
+    let bodystr=str.frombytes(resp.body);
+    let access=encoding.jsonfield(bodystr;"access_token");
+    let newrefresh=encoding.jsonfield(bodystr;"refresh_token");
+    let exp=encoding.jsonfieldint(bodystr;"expires_in");
+    if(str.len(newrefresh)=0){
+      <$refreshresult{ok:true;accesstoken:access;refreshtoken:refreshtok;expiresin:exp;status:resp.status;errormsg:""}
+    }el{
+      <$refreshresult{ok:true;accesstoken:access;refreshtoken:newrefresh;expiresin:exp;status:resp.status;errormsg:""}
+    }
+  }
 };
-f=getvalidtoken(cfg:i64.auth.oauth.$oauthconfig):$str{
+
+f=getvalidtoken(cfg:$oauthconfig):str{
   let access=store.loadaccesstoken(cfg.adapterid);
   if(str.len(access)=0){
     <""
-  }el{};
-  let expiresat=store.loadexpiresat(cfg.adapterid);
-  let now=std.time.nowunix();
-  if(!$needsrefresh(expiresat;now)){
-    <access
-  }el{};
-  let refreshtok=store.loadrefreshtoken(cfg.adapterid);
-  if(str.len(refreshtok)=0){
-    if(isexpired(expiresat;now)){
-      log.warn(str.concat("loke.core.auth.refresh: token expired and no refresh token for ";cfg.adapterid));
-      <""
-    }el{
-      <access
-    };
-  }el{};
-  let result=dorefresh(cfg.tokenurl;cfg.clientid;refreshtok);
-  if(result.ok){
-    let newexpires=now+result.expiresin;
-    store.updateaccesstoken(cfg.adapterid;result.accesstoken;newexpires);
-    if(!str.eq(result.refreshtoken;refreshtok)){
-      store.savetokens(cfg.adapterid;loke.core.auth.oauth.$tokenset{
-        accesstoken:i64;
-        refreshtoken:i64;
-        expiresat:$newexpires;
-        scopes:i64(cfg.adapterid)
-      })
-    }el{};
-    log.info(str.concat("loke.core.auth.refresh: token refreshed for ";cfg.adapterid));
-    <result.accesstoken
-  }el{};
-  if(result.status>400&&result.status<500){
-    log.warn(str.concat("loke.core.auth.refresh: permanent refresh failure for ";cfg.adapterid));
-    store.cleartokens(cfg.adapterid);
-    <""
   }el{
-    log.warn(str.concat("loke.core.auth.refresh: transient refresh failure for ";cfg.adapterid));
-    if(isexpired(expiresat;now)){
-      <""
+    let expiresat=store.loadexpiresat(cfg.adapterid);
+    let now=std.time.nowunix();
+    if(needsrefresh(expiresat;now)){
+      let refreshtok=store.loadrefreshtoken(cfg.adapterid);
+      if(str.len(refreshtok)=0){
+        if(isexpired(expiresat;now)){
+          log.warn(str.concat("loke.core.auth.refresh: token expired and no refresh token for ";cfg.adapterid));
+          <""
+        }el{
+          <access
+        }
+      }el{
+        let result=dorefresh(cfg.tokenurl;cfg.clientid;refreshtok);
+        if(result.ok){
+          let newexpires=now+result.expiresin;
+          store.updateaccesstoken(cfg.adapterid;result.accesstoken;newexpires);
+          log.info(str.concat("loke.core.auth.refresh: token refreshed for ";cfg.adapterid));
+          <result.accesstoken
+        }el{
+          if(result.status>400){
+            if(result.status<500){
+              log.warn(str.concat("loke.core.auth.refresh: permanent refresh failure for ";cfg.adapterid));
+              store.cleartokens(cfg.adapterid);
+              <""
+            }el{
+              log.warn(str.concat("loke.core.auth.refresh: transient refresh failure for ";cfg.adapterid));
+              if(isexpired(expiresat;now)){
+                <""
+              }el{
+                <access
+              }
+            }
+          }el{
+            log.warn(str.concat("loke.core.auth.refresh: transient refresh failure for ";cfg.adapterid));
+            if(isexpired(expiresat;now)){
+              <""
+            }el{
+              <access
+            }
+          }
+        }
+      }
     }el{
       <access
-    };
-  };
+    }
+  }
 };

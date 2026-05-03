@@ -1,0 +1,1 @@
+Unit tests for the browser workspace tabs module (loke.browser.workspace.tabs). Tests tab store lifecycle: creation, opening, closing, activation, pin toggling, and bookmark add/remove operations. Depends on std.string, std.log.

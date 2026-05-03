@@ -1,0 +1,1 @@
+Computes and formats a value dashboard showing tokens saved, cost avoided, local request ratio, PII entities blocked, and cache hits over a configurable period. Calculates trend percentages and directional arrows for period-over-period comparison.

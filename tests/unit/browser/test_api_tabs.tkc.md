@@ -1,0 +1,1 @@
+Unit tests for the tabs API endpoint. Tests GET (tabs/active fields), POST actions (open, switch, pin, reorder, close), DELETE by id, validation for empty URL and empty tab id, and default action handling. Depends on api.tabs.

@@ -1,0 +1,1 @@
+OpenAI API provider client. Sends chat completion requests to the OpenAI API with Bearer token auth, parses streamed/non-streamed responses, extracts token usage, and calculates cost based on model-specific pricing tiers.

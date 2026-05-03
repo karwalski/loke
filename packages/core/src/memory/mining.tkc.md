@@ -1,0 +1,1 @@
+Fact extraction module that mines text from various sources (clipboard, files, raw text) into memory palace drawers. Splits text into sentences, filters by length, encodes via AAAK, and stores results. Provides formatted result tables for reporting.

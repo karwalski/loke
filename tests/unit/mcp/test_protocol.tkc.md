@@ -1,0 +1,1 @@
+Unit tests for the MCP JSON-RPC protocol layer. Validates request parsing (valid/invalid JSON), ok/error response formatting, initialize response structure, tool result construction (ok/error), and tools-list serialisation. Depends on core.mcp.protocol, std.str, std.json, shared.log.

@@ -1,0 +1,1 @@
+Tests for the inference tier system. Validates tier labels, per-tier config (GPU layers, mlock, mmap, ctx_size), Ollama options JSON output, model size assumptions, hardware viability at different tiers, and tier selection logic. Depends on models.tiers and models.hardware.

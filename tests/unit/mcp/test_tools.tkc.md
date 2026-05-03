@@ -1,0 +1,1 @@
+Unit tests for the MCP toke tool registry. Tests tool enumeration (alltools, toolnames), find-tool lookup, tool description and schema validation, cursor-based pagination (toolsaftercursor), and handle-tool dispatch for compress/decompress/unknown/analyse. Depends on mcptoke.tools, core.mcp.protocol, std.str, std.json, shared.log.

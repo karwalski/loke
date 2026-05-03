@@ -1,0 +1,1 @@
+Output formatting utilities for the CLI: printline, printerror, printsection, printpipelinestage, printtable, and sensitivitybadge. Provides consistent terminal output with table rendering and sensitivity-level formatting.

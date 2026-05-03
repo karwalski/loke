@@ -1,0 +1,1 @@
+MCP API endpoint module providing tool panel, broker status, and memory demo endpoints. Depends on std.http, std.json, std.string, moke.mcp.toolpanel, moke.mcp.brokerstatus, and moke.mcp.memorydemo. Manages global state for tool invocations, broker server connections, and memory operations.

@@ -1,0 +1,1 @@
+AI governance module that manages model approval policies, assesses prompt injection risk and hallucination likelihood, detects PII in outputs, and provides a default policy catalogue for local and cloud LLM models. Depends on std.str, std.db, and shared.log.

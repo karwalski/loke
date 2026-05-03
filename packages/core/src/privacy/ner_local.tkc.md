@@ -1,0 +1,1 @@
+Local NER (Named Entity Recognition) module that uses a small on-device model (qwen2.5:0.5b) to detect PII entities in text, falling back to Ollama if the model pool is unavailable. Also provides text embedding via the same local model.

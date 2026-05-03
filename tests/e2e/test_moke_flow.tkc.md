@@ -1,0 +1,1 @@
+End-to-end test for the core privacy pipeline (moke flow). Validates PII detection (email, patient name, credit card), anonymisation/restoration round-trip, guardian prompt injection, and sensitivity-based cloud routing decisions. Depends on core.privacy.regex, core.privacy.guardian, core.privacy.placeholder, core.router.sensitivity, std.str, shared.log.

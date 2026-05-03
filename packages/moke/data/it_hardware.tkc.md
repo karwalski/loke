@@ -1,0 +1,1 @@
+IT infrastructure demo datasets for a fictional company (Banksia Digital) covering server inventory (48 servers across SYD and MEL data centres), performance metrics with anomalies, network topology with a deliberate VLAN misconfiguration, and user access assignments with expired entries. Depends on moke.compute for dataset types.

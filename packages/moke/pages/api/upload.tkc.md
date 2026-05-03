@@ -1,0 +1,1 @@
+Upload API endpoint that parses CSV file uploads, extracts headers and preview rows, and returns dataset metadata including column/row counts. Depends on std.http, std.json, std.string, and moke.upload.

@@ -1,0 +1,1 @@
+Client-side navigation JavaScript module (window.__nav) providing active link highlighting, badge count management, and sidebar collapse/expand functionality. Returns a self-executing JS string for injection into the web view. Depends on std.str.

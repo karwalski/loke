@@ -1,0 +1,1 @@
+File watcher configuration for development hot-reload. Monitors src/, packages/, and templates/ directories for .tk, .tkt, and .toml changes, triggering an ooke dev restart with 200ms debounce. Depends on std.str and std.log.

@@ -1,0 +1,1 @@
+Implements the kill switch that blocks all LLM traffic when engaged. Supports auto-release after a configurable timeout, persists state to settings store, and provides a text-based widget for the dashboard. Depends on shared.types, core.storage.db, core.storage.settings, std.str, and shared.log.

@@ -1,0 +1,1 @@
+Decision trace module that records the full pipeline journey of each LLM request: PII detection, anonymisation, routing, model selection, and response. Provides JSON serialisation with PII-safe truncation. Depends on std.str and shared.log.

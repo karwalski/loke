@@ -1,0 +1,1 @@
+Unit tests for the browser tabs page HTTP handler (page.tabs). Validates JSON serialisation of tabs, active tab, and bookmarks, plus the GET response containing tab-list, new-tab-form, tab-preview-wrap, keyboard listener, and draggable support. Depends on std.string, std.json, std.log.

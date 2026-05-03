@@ -1,0 +1,1 @@
+Model tier selection logic that maps latency tolerance (instant, patient, background) to hardware-appropriate inference configurations. Determines GPU layer offloading, memory mapping, context size, and batch size based on hardware viability assessment. Depends on core.models.hardware for profiling.

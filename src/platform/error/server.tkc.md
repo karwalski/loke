@@ -1,0 +1,1 @@
+Server-side error type and utilities. Creates structured error objects with code/message/requestId, serialises them to JSON error envelope format, and logs with internal details. Depends on shared.log, std.str, and std.json.

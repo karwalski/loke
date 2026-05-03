@@ -1,0 +1,1 @@
+Unit tests for the companion TLS channel module (companion.channel). Validates config creation, state initialisation, message construction, certificate pinning, and behaviour when sending/receiving on a disconnected channel. Depends on companion.channel, std.str, and std.log.

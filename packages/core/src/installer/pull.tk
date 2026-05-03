@@ -5,45 +5,51 @@ i=log:shared.log;
 i=http:std.http;
 i=proc:std.process;
 i=json:std.json;
-          i=i+1;
 
 t=$pullprogress{
-  modelid:$str;
+  modelid:str;
   totalbytes:i64;
   downloadedbytes:i64;
   percent:f64;
   etaseconds:i64;
-  status:$str
+  status:str
 };
-t=$bytesinfo{ downloaded:i64; total:i64 };
 
-f=extractbytes(line:$str):$bytesinfo{
+t=$bytesinfo{
+  downloaded:i64;
+  total:i64
+};
+
+f=extractbytes(line:str):$bytesinfo{
   let sepidx=str.indexof(line;"GB/");
   if(sepidx < 0){
     let sepmb=str.indexof(line;"MB/");
     if(sepmb < 0){
-      <$bytesinfo{downloaded:0;total:0};
+      <$bytesinfo{downloaded:0;total:0}
     }el{
       <parsebytepair(line;sepmb;"MB";1048576)
-    };
+    }
+  }el{
+    <parsebytepair(line;sepidx;"GB";1073741824)
+  }
+};
 
-f=pullmodel(modelid:$str):@$pullprogress{
+f=pullmodel(modelid:str):@$pullprogress{
   log.info(str.concat("pulling model: ";modelid);"installer.pull";"system");
-  let results=@$pullprogress@();
+  let results=@($pullprogress);
 
-  let child=proc.spawn("ollama";@("pull";modelid);proc.$opts{capturestdout:true;capturestderr:true});
+  let child=proc.spawn("ollama";@("pull";modelid));
   mt child {
-    $ok:handle {
-      let lines=mt proc.readlines(handle);
-      lines {
-        line;
-          let progress=parseprogressline(modelid;line);
-          results:@.push(results;progress)
+    $ok:handle
+      let lines=proc.readlines(handle);
+      lines.each|line{
+        let progress=parseprogressline(modelid;line);
+        results=@.push(results;progress)
       };
       let exitcode=proc.wait(handle);
       if(exitcode = 0){
-        results:@.push(results;$pullprogress{
-          modelid:$modelid;
+        results=@.push(results;$pullprogress{
+          modelid:modelid;
           totalbytes:0;
           downloadedbytes:0;
           percent:100.0;
@@ -52,8 +58,8 @@ f=pullmodel(modelid:$str):@$pullprogress{
         })
       }el{
         log.error(str.concat("ollama pull failed with exit code: ";str.fromint(exitcode));"installer.pull";"system");
-        results:@.push(results;$pullprogress{
-          modelid:$modelid;
+        results=@.push(results;$pullprogress{
+          modelid:modelid;
           totalbytes:0;
           downloadedbytes:0;
           percent:0.0;
@@ -61,172 +67,205 @@ f=pullmodel(modelid:$str):@$pullprogress{
           status:"error"
         })
       };
-    };
-    $err:e {
+    $err:e
       log.error(str.concat("failed to spawn ollama pull: ";e);"installer.pull";"system");
-      results:@.push(results;$pullprogress{
-        modelid:$modelid;
+      results=@.push(results;$pullprogress{
+        modelid:modelid;
         totalbytes:0;
         downloadedbytes:0;
         percent:0.0;
         etaseconds:0;
         status:"error"
       })
-    };
   };
   <results
 };
-f=parseprogressline(modelid:$str;line:$str):$pullprogress{
+
+f=parseprogressline(modelid:str;line:str):$pullprogress{
   let pct=extractpercent(line);
   let bytesinfo=extractbytes(line);
   let eta=extracteta(line);
-  let status=if(str.contains(line;"success")){"complete"};
-    else{if(str.contains(line;"error")){"error"};
-    else{if(pct > 0.0){"downloading"};
-    else{"preparing"}}};
-  <$pullprogress{
-    modelid:$modelid;
-    totalbytes:i64;
-    downloadedbytes:i64;
-    percent:$pct;
-    etaseconds:$eta;
-    status:$status
+  let status=if(str.contains(line;"success")){"complete"}el{
+    if(str.contains(line;"error")){"error"}el{
+      if(pct > 0.0){"downloading"}el{"preparing"}
+    }
   };
+  <$pullprogress{
+    modelid:modelid;
+    totalbytes:bytesinfo.total;
+    downloadedbytes:bytesinfo.downloaded;
+    percent:pct;
+    etaseconds:eta;
+    status:status
+  }
 };
-f=extractpercent(line:$str):f64{
+
+f=extractpercent(line:str):f64{
   let idx=str.indexof(line;"%");
   if(idx < 0){ <0.0 }el{
     let start=idx - 1;
-    lp(true){
-      if(start < 0){ break }el{
+    lp(let lv=0;true;lv=lv){
+      if(start < 0){ <str.tof64(str.substr(line;1;idx)) }el{
         let ch=str.charat(line;start);
         if(str.isdigit(ch)){ start=start - 1 }el{
-          if(str.eq(ch;".")){ start=start - 1 }el{ break };
-        };
-      };
-    };
-    let numstr=str.substr(line;start + 1;idx);
-    <str.tof64(numstr)
-  };
+          if(str.eq(ch;".")){ start=start - 1 }el{
+            let numstr=str.substr(line;start + 1;idx);
+            <str.tof64(numstr)
+          }
+        }
+      }
+    }
+  }
 };
-  }el{
-    <parsebytepair(line;sepidx;"GB";1073741824)
-  };
-};
-f=parsebytepair(line:$str;sepidx:i64;unit:$str;multiplier:i64):$bytesinfo{
+
+f=parsebytepair(line:str;sepidx:i64;unit:str;multiplier:i64):$bytesinfo{
   let dlend=sepidx;
   let dlstart=dlend - 1;
-  lp(true){
-    if(dlstart < 0){ break }el{
+  lp(let lv=0;true;lv=lv){
+    if(dlstart < 0){
+      let dlstr=str.substr(line;0;dlend);
+      let dlgb=str.tof64(dlstr);
+      let totalstart=sepidx + str.len(unit) + 1;
+      let totalend=totalstart;
+      let linelen=str.len(line);
+      lp(let lv2=0;true;lv2=lv2){
+        if(totalend >= linelen){
+          let totalstr=str.substr(line;totalstart;totalend);
+          let totalgb=str.tof64(totalstr);
+          let dlbytes=str.toi64(str.fromf64(dlgb * str.tof64(str.fromint(multiplier))));
+          let totalbytes=str.toi64(str.fromf64(totalgb * str.tof64(str.fromint(multiplier))));
+          <$bytesinfo{downloaded:dlbytes;total:totalbytes}
+        }el{
+          let ch=str.charat(line;totalend);
+          if(str.isdigit(ch)){ totalend=totalend + 1 }el{
+            if(str.eq(ch;".")){ totalend=totalend + 1 }el{
+              let totalstr=str.substr(line;totalstart;totalend);
+              let totalgb=str.tof64(totalstr);
+              let dlbytes=str.toi64(str.fromf64(dlgb * str.tof64(str.fromint(multiplier))));
+              let totalbytes=str.toi64(str.fromf64(totalgb * str.tof64(str.fromint(multiplier))));
+              <$bytesinfo{downloaded:dlbytes;total:totalbytes}
+            }
+          }
+        }
+      }
+    }el{
       let ch=str.charat(line;dlstart);
       if(str.isdigit(ch)){ dlstart=dlstart - 1 }el{
-        if(str.eq(ch;".")){ dlstart=dlstart - 1 }el{ break };
-      };
-    };
-  };
-  let dlstr=str.substr(line;dlstart + 1;dlend);
-  let dlgb=str.tof64(dlstr);
-  let totalstart=sepidx + str.len(unit) + 1;
-  let totalend=totalstart;
-  let linelen=str.len(line);
-  lp(true){
-    if(totalend > linelen){ break }el{
-      let ch=str.charat(line;totalend);
-      if(str.isdigit(ch)){ totalend=totalend + 1 }el{
-        if(str.eq(ch;".")){ totalend=totalend + 1 }el{ break };
-      };
-    };
-  };
-  let totalstr=str.substr(line;totalstart;totalend);
-  let totalgb=str.tof64(totalstr);
-  let dlbytes=str.toi64(str.fromf64(dlgb * str.tof64(str.fromint(multiplier))));
-  let totalbytes=str.toi64(str.fromf64(totalgb * str.tof64(str.fromint(multiplier))));
-  <$bytesinfo{downloaded:$dlbytes;total:$totalbytes};
+        if(str.eq(ch;".")){ dlstart=dlstart - 1 }el{
+          let dlstr=str.substr(line;dlstart + 1;dlend);
+          let dlgb=str.tof64(dlstr);
+          let totalstart=sepidx + str.len(unit) + 1;
+          let totalend=totalstart;
+          let linelen=str.len(line);
+          lp(let lv2=0;true;lv2=lv2){
+            if(totalend >= linelen){
+              let totalstr=str.substr(line;totalstart;totalend);
+              let totalgb=str.tof64(totalstr);
+              let dlbytes=str.toi64(str.fromf64(dlgb * str.tof64(str.fromint(multiplier))));
+              let totalbytes=str.toi64(str.fromf64(totalgb * str.tof64(str.fromint(multiplier))));
+              <$bytesinfo{downloaded:dlbytes;total:totalbytes}
+            }el{
+              let ch=str.charat(line;totalend);
+              if(str.isdigit(ch)){ totalend=totalend + 1 }el{
+                if(str.eq(ch;".")){ totalend=totalend + 1 }el{
+                  let totalstr=str.substr(line;totalstart;totalend);
+                  let totalgb=str.tof64(totalstr);
+                  let dlbytes=str.toi64(str.fromf64(dlgb * str.tof64(str.fromint(multiplier))));
+                  let totalbytes=str.toi64(str.fromf64(totalgb * str.tof64(str.fromint(multiplier))));
+                  <$bytesinfo{downloaded:dlbytes;total:totalbytes}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 };
-f=extracteta(line:$str):i64{
+
+f=extracteta(line:str):i64{
   let idx=str.lastindexof(line;"s");
   if(idx <= 0){ <0 }el{
     let before=str.charat(line;idx - 1);
     if(str.isdigit(before)){
       let start=idx - 1;
-      lp(true){
-        if(start < 0){ break }el{
+      lp(let lv=0;true;lv=lv){
+        if(start < 0){
+          let numstr=str.substr(line;0;idx);
+          <str.toi64(numstr)
+        }el{
           let ch=str.charat(line;start);
-          if(str.isdigit(ch)){ start=start - 1 }el{ break };
-        };
-      };
-      let numstr=str.substr(line;start + 1;idx);
-      <str.toi64(numstr)
+          if(str.isdigit(ch)){ start=start - 1 }el{
+            let numstr=str.substr(line;start + 1;idx);
+            <str.toi64(numstr)
+          }
+        }
+      }
     }el{
       <0
-    };
-  };
+    }
+  }
 };
-f=ismodelavailable(modelid:$str):bool{
+
+f=ismodelavailable(modelid:str):bool{
   log.info(str.concat("checking model availability: ";modelid);"installer.pull";"system");
   let resp=http.get("http://localhost:11434/api/tags");
   mt resp {
-    $ok:r {
+    $ok:r
       if(r.status = 200){
         let body=r.body;
-        let parsed=mt json.parse(body);
-        parsed {
-          $ok:data {
-            let models=mut.json.getarray(data;"models");
-            let found=mut.mt false;
-            models {
-              entry;
-                let name=json.getstr(entry;"name");
-                if(str.contains(name;modelid)){
-                  found=true
-                }el{};
+        let parsed=json.parse(body);
+        mt parsed {
+          $ok:data
+            let models=json.getarray(data;"models");
+            let found=mut.false;
+            models.each|entry{
+              let name=json.getstr(entry;"name");
+              if(str.contains(name;modelid)){
+                found=true
+              }el{}
             };
-            <found
-          };
-          $err:e {
+            <found;
+          $err:e
             log.warn(str.concat("failed to parse tags response: ";e);"installer.pull";"system");
             <false
-          };
-        };
+        }
       }el{
         log.warn(str.concat("ollama tags returned status: ";str.fromint(r.status));"installer.pull";"system");
         <false
       };
-    };
-    $err:e {
+    $err:e
       log.warn(str.concat("ollama not reachable: ";e);"installer.pull";"system");
       <false
-    };
-  };
+  }
 };
-f=listinstalledmodels():@$str{
+
+f=listinstalledmodels():@str{
   log.info("listing installed models";"installer.pull";"system");
   let result=proc.exec("ollama";@("list"));
   mt result {
-    $ok:output {
+    $ok:output
       let lines=str.split(output;"
 ");
-      let models=@str@();
-      let i=mt 0;
-      lines {
-        line;
-          if(i > 0){
-            let trimmed=str.trim(line);
-            if(str.len(trimmed) > 0){
-              let name=str.splitfirst(trimmed;" ");
-              let nametab=str.splitfirst(trimmed;"	");
-              let modelname=if(str.len(name) > 0){name}el{nametab};
-              if(str.len(modelname) > 0){
-                models=@.push(models;modelname)
-              }el{};
-            }el{};
-          }el{};
+      let models=@(str);
+      let i=0;
+      lines.each|line{
+        if(i > 0){
+          let trimmed=str.trim(line);
+          if(str.len(trimmed) > 0){
+            let name=str.splitfirst(trimmed;" ");
+            let nametab=str.splitfirst(trimmed;"	");
+            let modelname=if(str.len(name) > 0){name}el{nametab};
+            if(str.len(modelname) > 0){
+              models=@.push(models;modelname)
+            }el{}
+          }el{}
+        }el{};
+        i=i+1
       };
-      <models
-    };
-    $err:e {
+      <models;
+    $err:e
       log.warn(str.concat("failed to run ollama list: ";e);"installer.pull";"system");
-      <@str@()
-    };
-  };
+      <@(str)
+  }
 };

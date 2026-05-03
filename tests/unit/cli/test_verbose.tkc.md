@@ -1,0 +1,1 @@
+Unit tests for CLI verbose pipeline output formatting. Tests event line formatting with symbols, labels, duration suffixes, and error messages, plus summary line generation with stage counts and error counts. Self-contained formatter functions. Depends on std.string, std.log.

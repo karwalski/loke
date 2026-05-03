@@ -1,0 +1,1 @@
+Records quality signals (thumbs-up, coherence score, relevance score) per model and computes quality trends over configurable periods. Detects degradation when thumbs-up rate drops below 70% with sufficient sample size. Depends on shared.types, core.storage.db, std.db, std.str, and shared.log.

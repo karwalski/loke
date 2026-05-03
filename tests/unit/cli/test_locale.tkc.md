@@ -1,0 +1,1 @@
+Unit tests for locale data integrity. Verifies en-AU and en-US locale bundles have entries, correct codes, matching entry counts, presence of cli/browser/locale key namespaces, key parity between locales, and translation lookup functionality. Depends on loke.platform.i18n.translator, loke.platform.i18n.locales, std.string, std.log.

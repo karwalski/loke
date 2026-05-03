@@ -1,0 +1,1 @@
+Unit tests for native inference engine configuration (loke.core.inference.native.engine). Tests default config values (threads, GPU layers, context length, seed), default generation options (temperature, top-p, max tokens, stop sequences), custom config and options, and generate result struct construction. Depends on loke.core.inference.native.engine, std.str, and shared.log.

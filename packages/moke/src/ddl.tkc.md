@@ -1,0 +1,1 @@
+Dashboard Definition Language (DDL) module defining card types (metric, chart, table, text, list) and providing constructors, JSON serialisation, validation, and a demo dashboard factory. Depends on std.string.

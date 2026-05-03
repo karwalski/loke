@@ -1,0 +1,1 @@
+Unit tests for the MCP broker configuration module. Validates server construction, tool allow/deny list enforcement (empty allowlist allows all, allowlist blocks unlisted, denylist blocks specific), and JSON serialisation of server config. Depends on loke.mcpbroker.config, std.string, std.log.

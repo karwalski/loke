@@ -1,0 +1,1 @@
+Client-side error report handler. Parses JSON error reports from the browser webview, extracts source/line/col/message fields, and logs them with correlation IDs. Depends on shared.log, std.str, and std.json.

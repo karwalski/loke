@@ -1,0 +1,1 @@
+Locale definitions for en-AU and en-US containing all user-facing strings for the loke application. Depends on the translator module for type definitions ($localeentry, $locale) and locale registration functions. Provides an initdefault() function that loads both locales and sets en-AU as the active locale.

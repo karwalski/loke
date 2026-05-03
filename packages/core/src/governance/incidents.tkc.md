@@ -1,0 +1,1 @@
+Manages governance incidents with open/update/resolve lifecycle, severity levels (P0-P3), and auto-opening incidents when quality degrades below thresholds. Provides a formatted table view of open incidents. Depends on shared.types, storage.db, shared.log, std.str, std.db, and std.time.

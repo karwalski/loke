@@ -1,0 +1,1 @@
+Error formatting and classification utilities for loke. Provides human-readable error message formatting and criticality classification for the lokeerr tagged union. Depends on shared.types and std.str.

@@ -1,0 +1,1 @@
+Assembles layered context for LLM prompts from the memory palace: L0 (identity), L1 (compressed palace map), L2 (task-relevant facts via search), and L3 (deep search results). Manages token budgets across layers to fit within constraints.

@@ -1,0 +1,1 @@
+Unit tests for the MCP stdio transport framing. Validates Content-Length header generation, CRLF separator, body preservation, empty body handling, unicode byte-length correctness, round-trip extraction, and frame independence between messages. Depends on mcptoke.transport, std.str, shared.log.

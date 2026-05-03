@@ -1,0 +1,1 @@
+CLI environment doctor: runs health checks (loke daemon reachable, Ollama running, port availability, data directory exists), produces a formatted diagnostic report with fix suggestions, and provides shell profile / git hook / VS Code config initialisation helpers. Depends on std.string, std.log, std.http.

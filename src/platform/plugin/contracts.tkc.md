@@ -1,0 +1,1 @@
+Plugin interface versioning and compatibility checking using semver (major.minor.patch). Provides version string formatting and a compatibility check that requires matching major version and sufficient minor version. Depends on std.str and std.log.

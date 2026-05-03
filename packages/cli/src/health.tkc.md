@@ -1,0 +1,1 @@
+Subsystem health checker that probes Ollama, Presidio, and LLMLingua endpoints with timeouts and produces a structured health report with overall/degraded/down status. Used by the doctor command and the browser dashboard.

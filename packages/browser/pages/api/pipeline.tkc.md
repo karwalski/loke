@@ -1,0 +1,1 @@
+Main pipeline API endpoint that accepts user text, runs it through the full privacy-governance-routing-dispatch pipeline, and returns the LLM response along with anonymisation metadata, routing decisions, and cost information. Supports API key injection and latency tolerance settings.

@@ -1,0 +1,1 @@
+CSV file upload and parsing module. Detects delimiters (comma/tab), handles quoted fields, generates column headers when absent, and produces a parse result with preview rows. Depends on moke.compute for the dataset type.

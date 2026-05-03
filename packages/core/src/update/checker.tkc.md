@@ -1,0 +1,1 @@
+Application update checker module. Queries the GitHub releases API (with 24h caching via settings store) to determine if a newer loke version is available, and formats user-facing notifications. Depends on std.http, std.json, shared.types, shared.log, and storage.db.

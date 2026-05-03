@@ -1,0 +1,1 @@
+Generates install and uninstall shell scripts for the loke binary. Handles copying the binary to the install directory, creating the ~/.loke data directories, and updating the shell profile PATH. Used for portable/standalone distribution.

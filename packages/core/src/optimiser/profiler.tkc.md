@@ -1,0 +1,1 @@
+Dataset profiler that analyses JSON arrays to produce column-level statistics including type inference, null counts, uniqueness, min/max, PII candidate detection, and TOON schema output. Depends on shared.types, core.optimiser.toon, std.str, and std.json.

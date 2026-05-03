@@ -1,0 +1,1 @@
+Approval workflow module that determines whether a request requires human review based on sensitivity level, builds word-level diff tokens between original and transformed prompts highlighting PII removal and anonymisation, and logs approval decisions. Depends on std.str, std.log, moke.sensitivity, and moke.consolelog.

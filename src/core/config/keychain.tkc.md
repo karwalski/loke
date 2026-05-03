@@ -1,0 +1,1 @@
+Provides secure credential storage for API keys and secrets, with an in-memory fallback when the native keychain binding is unavailable. Exposes store/retrieve/delete operations on a keychainstate struct (no top-level mutable state). Depends on std.log.

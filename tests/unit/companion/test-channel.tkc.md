@@ -1,0 +1,1 @@
+Unit tests for the companion device communication channel (loke.companion.channel). Tests config creation, state management (connect/disconnect), message send/recv operations, byte counting, heartbeat, certificate pinning, and multi-send accumulation. Depends on std.string, std.log.

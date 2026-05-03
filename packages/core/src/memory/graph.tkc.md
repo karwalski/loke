@@ -1,0 +1,1 @@
+Knowledge graph layer for the memory palace, managing entities and their relationships. Supports upserting entities, adding weighted relations, BFS neighbour traversal to a given depth, and text-based entity search. Depends on std.db and std.json for persistence.

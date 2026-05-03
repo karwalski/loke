@@ -1,0 +1,1 @@
+Provides a permission-checked sandbox for agent execution, enforcing file read/write, HTTP, and model access permissions while tracking cost and recording violations. Depends on shared.types, core.agents.types, std.str, shared.log, std.http, and std.file.

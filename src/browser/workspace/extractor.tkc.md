@@ -1,0 +1,1 @@
+Browser workspace content extractor: strips HTML tags, truncates text, detects PII (email @ signs, long digit runs), generates HTML previews, and produces structured extraction results for both text selections and full pages. Supports configurable options (max chars, strip nav/ads). Depends on std.string, std.log.

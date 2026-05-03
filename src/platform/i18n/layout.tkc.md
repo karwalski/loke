@@ -1,0 +1,1 @@
+Provides text directionality and layout helpers for internationalisation. Determines RTL/LTR direction and lang attribute for locale codes, and defines an expand tolerance for responsive layout. Depends on std.str.

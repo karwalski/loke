@@ -1,0 +1,1 @@
+Builds a governance scorecard with RAG-status metrics (privacy coverage, local routing ratio, cost, open incidents, governance coverage) from the audit log. Formats as a fixed-width text dashboard widget. Depends on shared.types, core.storage.db, std.db, core.governance.types, std.str, and shared.log.

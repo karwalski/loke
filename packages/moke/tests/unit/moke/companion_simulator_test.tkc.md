@@ -1,0 +1,1 @@
+Tests for the companion device simulator: session state machine transitions (idle, scanning, device found, pairing, paired, offloading, complete), token/duration recording during offload, event accumulation, and JSON serialisation. Depends on moke.companionsimulator, std.string, std.test.

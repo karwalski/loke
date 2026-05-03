@@ -1,0 +1,1 @@
+Unit tests for the models API endpoint. Tests GET response (200 or 502 for unreachable Ollama), validates JSON array structure, checks model fields (id, size, running boolean), and content-type. Depends on api.models.

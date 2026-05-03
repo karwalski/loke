@@ -1,0 +1,1 @@
+Orchestrates the full privacy detection pipeline: regex scan, NER scan, Presidio scan, deduplication, anonymisation, and guardian prompt injection. Produces a complete pipeline run result with per-stage metrics, sensitivity classification, and the final anonymised text.

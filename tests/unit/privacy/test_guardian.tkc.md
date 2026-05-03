@@ -1,0 +1,1 @@
+Tests the privacy guardian module: building system prompts with guardian markers, detecting guardian presence in prompts, verifying custom prompts are included, and ensuring the loke keyword appears. Depends on core.privacy.guardian.

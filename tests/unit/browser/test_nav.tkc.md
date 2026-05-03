@@ -1,0 +1,1 @@
+Unit tests for the browser navigation module. Tests state management (new state, register/unregister items, ordering), active state tracking, child route matching, compact toggle, rendered HTML (ARIA roles, active classes, badges, tabindex), and CSS styles output. Depends on browser.nav.

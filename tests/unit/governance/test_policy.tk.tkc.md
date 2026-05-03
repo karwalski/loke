@@ -1,0 +1,1 @@
+Unit tests for the governance policy evaluation module (core.governance.policy). Tests risk classification by sensitivity level, cost escalation, policy decision evaluation (allow, warn, require-approval), and control selection for different risk tiers and sensitivity levels. Depends on core.governance.policy, core.governance.types, shared.types, std.str, and shared.log.

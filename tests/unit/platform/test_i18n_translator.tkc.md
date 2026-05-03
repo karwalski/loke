@@ -1,0 +1,1 @@
+Tests core translator functionality: key lookup returns translations (not raw keys), fallback for missing keys, locale get/set round-trip, number formatting, and parameter substitution. Depends on loke.platform.i18n.translator and loke.platform.i18n.locales.

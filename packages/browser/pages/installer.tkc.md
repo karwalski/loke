@@ -1,0 +1,1 @@
+Local model installer page that detects hardware capabilities (RAM, chip, platform), checks Ollama status, recommends an appropriately-sized model, and renders the installer template with hardware summary and available model options.

@@ -1,0 +1,1 @@
+Handles mDNS-based companion device discovery: advertising, browsing, pairing code generation, and SQLite-backed companion persistence. Depends on companion.types, std.mdns, shared.log, storage.db, and std.str.

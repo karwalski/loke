@@ -1,0 +1,1 @@
+Memory Palace API endpoint handling store and aaak (compress) actions. Depends on std.http, std.json, std.string. Accepts POST requests to store memory drawers with wing/hall/room organisation and GET for status check.

@@ -1,0 +1,1 @@
+Unit tests for CLI stats dashboard formatting. Uses mock summary data to verify stat fields (requests, tokens saved, cost, PII intercepted, local ratio, cache hit rate), formatted output lines, and empty/zero-state handling. Self-contained with mock types. Depends on std.string, std.log.

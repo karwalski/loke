@@ -1,0 +1,1 @@
+Overnight batch processing for background agents. Collects agents assigned to the background latency class, sorts by priority, executes them during the configured overnight window (default 22h-06h), and reports batch run results. Depends on agents.registry and agents.scheduler.

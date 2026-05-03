@@ -1,0 +1,1 @@
+API endpoint for the moke agents panel. Manages two built-in agents (data quality scanner, schema change detector) with module-level state. Provides GET for panel state, POST /scan for on-demand data quality scanning, POST /schema for schema diff detection, and GET /diary for agent run history. Depends on std.http, std.json, std.string, and multiple moke agent/hook modules.

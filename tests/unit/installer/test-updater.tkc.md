@@ -1,0 +1,1 @@
+Unit tests for the model updater module. Validates default config (7-day interval, auto-check), check-due logic across various states, update-check struct construction with digest comparison, and edge cases for empty digests. Depends on core.installer.updater, std.str, shared.log.

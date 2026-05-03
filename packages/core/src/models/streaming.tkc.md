@@ -1,0 +1,1 @@
+Disk-streaming inference module for running models larger than available RAM by streaming layers from NVMe storage. Provides load, generate, and unload operations with configurable RAM ceiling and prefetch layer count.

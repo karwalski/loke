@@ -1,0 +1,1 @@
+Index page handler providing both a template-rendered status page and a full single-page application (SPA) with embedded HTML/CSS/JS for the loke browser UI including chat, dashboard, pipeline console, models list, and settings panels.

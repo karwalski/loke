@@ -1,0 +1,1 @@
+Builds a prompt from pipeline context and user description, sends it to the local LLM API to draft a GitHub issue, then parses the JSON response into a structured draft result. Depends on std.http, std.str, std.arr, and shared.log.

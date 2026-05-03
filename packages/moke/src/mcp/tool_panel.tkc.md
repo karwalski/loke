@@ -1,0 +1,1 @@
+MCP tool panel UI module. Displays available MCP-toke tools (anonymise, compress, decompress, profile, analyse) with categories and icons, handles tool invocations through the tools handler, and maintains an invocation history with JSON serialisation. Depends on mcptoke.tools and core.mcp.protocol.

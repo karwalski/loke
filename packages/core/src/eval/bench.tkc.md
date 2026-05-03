@@ -1,0 +1,1 @@
+Runs benchmark suites against LLM models, scoring responses by keyword matching, tracking latency and cost per case, and formatting results as tabular reports. Depends on shared.types, shared.log, providers.types, providers.dispatcher, and std.json.

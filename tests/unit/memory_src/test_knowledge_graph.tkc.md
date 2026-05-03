@@ -1,0 +1,1 @@
+Tests for the knowledge graph module. Validates graph construction, node/relation addition, fact querying (known/unknown subjects), contradiction detection, and DOT visualisation output. Depends on loke.memory.knowledgegraph.

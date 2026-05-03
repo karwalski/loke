@@ -1,0 +1,1 @@
+Renders the application shell HTML: header with brand, sidebar toggle, and a collapsible sidebar with sectioned navigation items. Provides default nav items for loke workspaces (Dashboard, Analysis, Insight Lab, Upload, Settings, Docs). Depends on std.str.

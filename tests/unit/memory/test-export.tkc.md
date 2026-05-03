@@ -1,0 +1,1 @@
+Tests for the memory mining/export module. Validates mining job struct fields across pending/completed/failed states, mined item construction with tags, and enum variant construction for mining modes and sources. Depends on loke.memory.mining.

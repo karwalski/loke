@@ -1,0 +1,1 @@
+Unit tests for the system detection module. Tests install state construction, ready/needs-start/needs-model/full-install/offline decision logic, RAM-based model selection, and live detect functions (RAM, arch, Ollama, internet, full). Depends on core.installer.detect, std.str, shared.log.

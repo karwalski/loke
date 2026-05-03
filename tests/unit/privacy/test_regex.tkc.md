@@ -1,0 +1,1 @@
+Tests regex-based PII detection: identifies emails, AU phone numbers, credit cards, TFNs, and API keys with correct entity types and sensitivity levels; clean text produces zero entities; multiple PII items detected in one string; placeholder format verified. Depends on core.privacy.regex.

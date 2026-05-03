@@ -1,0 +1,1 @@
+MCP server registry module. Maintains a list of upstream MCP server entries with connection details, tool-name prefixes, and health status. Provides registration, tool-to-server lookup, health checking, and formatted display. Depends on shared.types, shared.log, std.http, and std.str.

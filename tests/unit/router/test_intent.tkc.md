@@ -1,0 +1,1 @@
+Tests intent classification: keyword-based fast classification for code generation, code review, summarisation, classification, embedding, data analysis, NER, and chat; confidence range validation; task_from_str round-trip; and unknown task defaults to chat. Depends on core.router.intent.

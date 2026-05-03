@@ -1,0 +1,1 @@
+Unit tests for the governance incidents module (loke.governance.incidents). Tests incident creation, global state append, get by ID, resolve flow, list-open filtering, list-all inclusion of both open and resolved incidents, and post-incident template generation. Uses a global mutable incidents list. Depends on loke.governance.incidents, std.string, and std.log.

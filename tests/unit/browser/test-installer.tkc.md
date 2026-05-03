@@ -1,0 +1,1 @@
+Unit tests for the browser installer page. Validates model recommendation logic based on available RAM (selecting appropriate Qwen 2.5 model tiers), model metadata fields (size, label, token speed), installer screen transitions, and accessibility attributes. Depends on page.installer.

@@ -1,0 +1,1 @@
+Unit tests for CLI internationalisation. Verifies that all CLI translation keys (starting, ask_prefix, policy, report, stats, feedback, verbose, locale namespaces) are translated in both en-AU and en-US locales via the translator module. Depends on loke.platform.i18n.translator, loke.platform.i18n.locales, std.string, std.log.

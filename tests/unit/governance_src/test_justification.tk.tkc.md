@@ -1,0 +1,1 @@
+Unit tests for the governance justification module (loke.governance.justification). Tests justification submission and retrieval, field access (why-ai rationale), approval flow, simpler-alternatives suggestion, and JSON serialisation. Uses a global mutable justifications list. Depends on loke.governance.justification, std.string, and std.log.

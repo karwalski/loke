@@ -1,0 +1,1 @@
+Dataset profiler that analyses column statistics (type inference, null percentage, cardinality, PII candidate detection, numeric min/max/mean) and suggests a sensitivity classification. Provides formatted text output for display. Depends on std.string.

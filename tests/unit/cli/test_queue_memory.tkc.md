@@ -1,0 +1,1 @@
+Unit tests for CLI queue and memory commands. Tests queue cancel/list parsing, job enqueue/cancel lifecycle with priority handling, memory search command parsing, and empty queue formatting. Depends on cli.commands, core.models.queue, std.string, std.log.

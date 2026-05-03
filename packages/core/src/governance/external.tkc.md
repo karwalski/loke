@@ -1,0 +1,1 @@
+Dispatches governance events to external integrations (PagerDuty, Datadog, Grafana, Splunk, Elastic, Slack, Teams, Opsgenie, ServiceNow, generic webhooks). Handles payload formatting per platform, retry logic, and authentication. Provides convenience dispatchers for incidents, violations, kill switch events, reports, and metrics.

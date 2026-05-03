@@ -1,0 +1,1 @@
+Implements a semantic cache that stores LLM responses keyed by embedding similarity, enabling cache hits when prompts are semantically close (above a configurable threshold). Supports TTL-based expiry and eviction. Depends on std.log and std.string.

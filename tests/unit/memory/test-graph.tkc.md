@@ -1,0 +1,1 @@
+Tests for the knowledge graph module. Validates graph creation, node addition, entity node properties, relation construction with confidence/validity, fact queries, and full graph assembly. Depends on loke.memory.knowledgegraph.

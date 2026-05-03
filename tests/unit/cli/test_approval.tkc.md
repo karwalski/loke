@@ -1,0 +1,1 @@
+Unit tests for the governance approval module (core.governance.approval). Tests approval requirement logic across modes (always, never, by_sensitivity, by_provider), dont-ask rule suppression, and diff generation for text transformations. Depends on std.string, std.log.

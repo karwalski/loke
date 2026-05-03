@@ -1,0 +1,1 @@
+Tests model selection logic: selection criteria fields, provider_to_str for all providers (anthropic, openai, ollama, local, google, mistral, openrouter), tolerance parsing, and selection behaviour for restricted/public/prefer_local/background criteria against a model registry. Depends on core.router.selector and core.models.registry.

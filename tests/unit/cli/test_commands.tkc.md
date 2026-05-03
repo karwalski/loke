@@ -1,0 +1,1 @@
+Unit tests for the CLI command parser (cli.commands). Exercises parsing of all subcommands (help, version, doctor, ask, pipeline, queue, models, memory, agents, overnight, locale, integrations), error cases, --lang flag handling, and usage text content. Depends on std.string, std.log.

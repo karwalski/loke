@@ -1,0 +1,1 @@
+Unit tests for the installer orchestration module. Validates install/start result construction, decision logic for install/start/pull actions across ready/needs-start/needs-pull/offline states, platform detection, and verify/stop operations. Depends on core.installer.install, core.installer.start, core.installer.detect, std.str, shared.log.

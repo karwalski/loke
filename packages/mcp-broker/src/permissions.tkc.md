@@ -1,0 +1,1 @@
+MCP broker permissions module. Loads per-server tool allow/deny lists from TOML configuration, checks tool-level permissions at call time, and applies permission state to the server registry. Depends on mcpbroker.registry, std.json, std.str, std.fs, and shared.log.

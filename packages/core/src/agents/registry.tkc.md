@@ -1,0 +1,1 @@
+Manages the agent registry: registering, enabling, disabling, finding, and listing agent definitions, plus recording and retrieving agent run history. Depends on shared.types, core.agents.types, core.governance.usecases, std.str, and shared.log.

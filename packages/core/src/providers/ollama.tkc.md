@@ -1,0 +1,1 @@
+Ollama local model provider client. This file was expected in the batch but does not exist on disk; the dispatcher references it as core.providers.ollamaprovider.

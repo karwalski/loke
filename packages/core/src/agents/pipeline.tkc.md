@@ -1,0 +1,1 @@
+Orchestrates multi-step agent pipelines, running a sequence of named agents where each step can optionally pass its output to the next. Depends on shared.types, shared.log, agents.executor, and agents.registry.

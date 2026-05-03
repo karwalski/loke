@@ -1,0 +1,1 @@
+MCP tool aggregator module. Fetches tool lists from all healthy registered MCP servers, prefixes tool names with server-specific prefixes, and builds a combined tools/list JSON-RPC response. Depends on mcp.protocol, std.http, std.json, shared.log, and mcpbroker.registry.

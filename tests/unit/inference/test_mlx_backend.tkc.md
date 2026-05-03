@@ -1,0 +1,1 @@
+Unit tests for the MLX inference backend. Tests default config construction, tokens-per-second labelling thresholds, JSON serialisation of results, and graceful fallback when MLX is unavailable. Depends on core.inference.mlx.backend, std.str, std.log.

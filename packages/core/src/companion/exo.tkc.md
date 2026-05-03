@@ -1,0 +1,1 @@
+Integrates with the Exo distributed inference cluster: health checks, cluster status retrieval, chat completion generation, and status formatting. Depends on companion.types, std.http, std.json, shared.log, and std.str.

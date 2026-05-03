@@ -1,0 +1,1 @@
+Unit tests for feedback learning signal processing (core.feedback.learning). Validates deriving adjustments from low/high/neutral thumbs-up rates, sample-size thresholds, formatting learning state output, and confidence-based filtering. Depends on core.feedback.learning, std.str, and shared.log.

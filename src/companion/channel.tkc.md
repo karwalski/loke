@@ -1,0 +1,1 @@
+Companion device communication channel: manages TLS 1.3 connection state, message send/receive, heartbeat pings, byte transfer accounting, and certificate pinning. Designed for secure local-network communication between loke instances via ooke.tls binding. Depends on std.str, std.log, std.json.

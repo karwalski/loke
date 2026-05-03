@@ -1,0 +1,1 @@
+Metrics collection module that records pipeline events (token savings, cost savings, PII interceptions, cache hits, routing decisions) to a database and optionally dispatches them to an external monitoring system. Provides a summarise function for aggregate statistics.

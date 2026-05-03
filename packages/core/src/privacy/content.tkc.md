@@ -1,0 +1,1 @@
+Web page content analyser that extracts text, titles, link/form counts, and detects login and payment indicators from raw HTML. Computes a privacy score (0-100) based on sensitive page features and generates a human-readable summary. Depends on std.str.

@@ -1,0 +1,1 @@
+Tests for the token/cost budget manager. Validates default limits, manager initialisation with zero usage, budget checks (allowed/exceeded for tokens and cost), remaining token calculation, exceed reasons, and formatted usage output. Depends on optimiser.budget.

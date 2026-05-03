@@ -1,0 +1,1 @@
+System-level hardware detection tests. Validates hw.detect() returns positive RAM/cores/platform, tests total memory calculation for unified and discrete profiles, JSON/summary serialisation, and config/data directory resolution. Depends on core.hardware.profile.

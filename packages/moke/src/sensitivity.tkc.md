@@ -1,0 +1,1 @@
+Sensitivity classification module providing four levels (PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED) with routing hints and colour badges. Used by the privacy filter to determine whether data can be sent to cloud LLMs or must stay local. No external dependencies beyond std.string.

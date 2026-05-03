@@ -1,0 +1,1 @@
+The governance gateway is the central decision point for all LLM requests. It enforces the kill switch, validates use cases, classifies risk, evaluates policy, and returns a gateway decision with applied controls and routing. Depends on shared.types, core.governance.types, core.governance.usecases, core.governance.policy, shared.log, and std.str.

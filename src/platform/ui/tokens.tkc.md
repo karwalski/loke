@@ -1,0 +1,1 @@
+Design token system defining colour palettes, spacing scale, font size, and border radius for dark and light themes. Provides a tocssvars function that emits CSS custom properties from a theme struct. Depends on std.str.

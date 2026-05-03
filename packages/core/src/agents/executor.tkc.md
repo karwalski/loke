@@ -1,0 +1,1 @@
+Agent execution engine that runs an agent within a sandbox. Checks cost limits, runs the prompt through the privacy pipeline, evaluates sensitivity levels, enforces permission checks for restricted data, and returns the sandboxed result. Depends on core.agents.sandbox and core.privacy.pipeline.

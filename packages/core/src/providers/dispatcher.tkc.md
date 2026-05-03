@@ -1,0 +1,1 @@
+Provider dispatcher that routes completion requests to the appropriate backend (Anthropic, OpenAI, or Ollama) based on the selected provider. Also provides a guardian-aware dispatch variant that prepends the loke privacy guardian system prompt.

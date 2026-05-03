@@ -1,0 +1,1 @@
+Builds visual representations of the three inference tiers (interactive, considered, background) with GPU layer counts, context sizes, and recommended models for each. Used in the moke UI to show which tier is active given current hardware. Depends only on std.string.

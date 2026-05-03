@@ -1,0 +1,1 @@
+Provides a hook registry for the privacy pipeline with named slots (before NER, after anonymise, before/after restore), allowing extensions to transform text at each stage with delta logging. Depends on std.str and shared.log.

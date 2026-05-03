@@ -1,0 +1,1 @@
+Governance module providing regulatory preset definitions (GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA, Minimal), risk assessment classification based on sensitivity/entity counts/cross-border flags, and compliance report generation with CSV/JSON export. Depends on std.string.

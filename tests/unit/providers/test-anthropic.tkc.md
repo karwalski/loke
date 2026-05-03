@@ -1,0 +1,1 @@
+Tests Anthropic provider integration: API key storage in dispatcher, dispatch routing to the anthropic branch, request field verification (model, system prompt, max tokens, temperature, stream, messages), and response structure validation. Depends on core.providers.dispatcher and core.providers.types.

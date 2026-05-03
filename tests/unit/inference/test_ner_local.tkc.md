@@ -1,0 +1,1 @@
+Unit tests for the local NER (named entity recognition) inference module. Validates cosine similarity calculations, entity/result JSON serialisation, and graceful fallback when native NER model is not loaded. Depends on core.inference.ner.local, std.str, std.log.

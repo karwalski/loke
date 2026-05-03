@@ -1,0 +1,1 @@
+Unit tests for the governance rules engine (core.governance.rulesengine). Tests compound rule evaluation with AND, OR, and NOT logic, empty-condition vacuous truth, evaluate-all batch execution, default rules loading, and external-partner scope deny-rule triggering. Depends on core.governance.rulesengine, std.str, and shared.log.

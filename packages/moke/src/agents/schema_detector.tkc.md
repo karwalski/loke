@@ -1,0 +1,1 @@
+Schema change detection agent that compares old and new dataset schemas to identify added, removed, and type-changed columns. Flags breaking changes and produces structured diffs with JSON and diary-format serialisation. Depends on moke.hooks for notification integration.

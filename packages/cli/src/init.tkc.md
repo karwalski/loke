@@ -1,0 +1,1 @@
+First-run initialisation command that creates ~/.loke/ directories, appends LOKE_HOME and PATH to the user's shell profile (zsh/bash), and verifies Ollama is reachable. Reports setup results with tick/cross indicators.

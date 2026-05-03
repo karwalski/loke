@@ -1,0 +1,1 @@
+Tests the privacy pipeline in offline mode: email anonymisation removes PII from output, clean text passes through unchanged, credit card triggers restricted sensitivity, entity counts match, and original text is preserved. Depends on core.privacy.pipeline and core.privacy.regex.

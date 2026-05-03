@@ -1,0 +1,1 @@
+In-memory vector store supporting insert, search (top-k by cosine similarity), delete by ID or namespace, and basic statistics. Used for semantic cache and embedding-based retrieval. Depends on std.log and std.string.

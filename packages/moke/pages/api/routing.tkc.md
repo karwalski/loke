@@ -1,0 +1,1 @@
+Routing API endpoint that builds a routing decision, tier visualisation, and cost comparison for a given prompt and sensitivity level. Depends on std.http, std.json, std.string, moke.routingexplainer, moke.tiervisualiser, moke.companionsimulator, and moke.costcomparison.

@@ -1,0 +1,1 @@
+Unit tests for the governance tier dashboard reporting module. Tests report creation, tier updates (interactive/considered/background), percentage recalculation, and JSON serialisation. Depends on loke.governance.tierdashboard, std.string, std.log.

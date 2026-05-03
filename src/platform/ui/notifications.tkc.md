@@ -1,0 +1,1 @@
+Notification system providing creation, JSON serialisation, toast HTML rendering with dismiss button, and a bell icon with unread badge count. Supports accessibility attributes (aria-live, aria-label). Depends on std.str.

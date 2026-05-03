@@ -1,0 +1,1 @@
+Tests the model escalation system: default policy parameters (min confidence, max retries, cloud escalation), escalation target mapping for local models to larger/cloud models, recording escalation triggers with timestamps, and formatting trigger messages. Depends on core.router.escalation.

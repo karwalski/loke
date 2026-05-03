@@ -1,0 +1,1 @@
+Scans LLM responses for PII leakage and policy violations (blocked entities). Returns a scan result with violations, severity levels, and whether user confirmation is required. Depends on violation-types and the privacy pipeline.

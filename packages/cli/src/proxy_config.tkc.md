@@ -1,0 +1,1 @@
+Configures environment variables for routing tool traffic through the loke proxy. Maps tool names to their respective base URL environment variables (ANTHROPIC_BASE_URL, OPENAI_BASE_URL, etc.) and injects export lines into the user's shell profile.

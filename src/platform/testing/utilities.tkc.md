@@ -1,0 +1,1 @@
+Test infrastructure utilities providing in-memory database setup, test server configuration, HTTP request helpers, and string equality assertions with pass/fail logging. Depends on std.str and std.log.

@@ -1,0 +1,1 @@
+MCP-toke transport layer module. Implements both stdio (Content-Length framed) and SSE (Server-Sent Events over HTTP) transports for the MCP server, handling connection lifecycle and message framing. Depends on mcptoke.server, core.mcp.protocol, std.json, std.str, std.io, std.net, and shared.log.

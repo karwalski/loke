@@ -1,0 +1,1 @@
+MCP-toke JSON-RPC server module. Handles initialize, tools/list, and tools/call MCP methods over a TCP socket accept loop, dispatching tool calls to the tools module. Depends on core.mcp.protocol, mcptoke.tools, std.http, std.json, std.str, std.net, and shared.log.

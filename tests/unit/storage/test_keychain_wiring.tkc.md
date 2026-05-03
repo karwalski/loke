@@ -1,0 +1,1 @@
+Tests the macOS Keychain wiring layer: store/retrieve round-trip, missing key returns error, delete removes entry, convenience API key helpers (store_api_key/get_api_key), service name formatting, and overwrite updates stored value. Depends on loke.core.config.keychain.

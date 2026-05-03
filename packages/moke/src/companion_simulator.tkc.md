@@ -1,0 +1,1 @@
+Companion device simulator that models the lifecycle of discovering, pairing, and offloading inference to a local companion device (e.g. Mac Studio) over mDNS/TLS. Depends on std.string. Provides state machine transitions and JSON serialisation of session state.

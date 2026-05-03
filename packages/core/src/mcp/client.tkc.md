@@ -1,0 +1,1 @@
+MCP client that communicates with Model Context Protocol servers over HTTP JSON-RPC. Supports initialization handshake, tool listing, and tool invocation with error propagation. Depends on the protocol module for type definitions.

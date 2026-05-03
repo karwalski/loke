@@ -1,0 +1,1 @@
+Model selector that chooses the best model for a request based on task type, sensitivity level, latency tolerance, and cost constraints. Enforces local-only routing for RESTRICTED data and falls back to cloud models when no local option is available.

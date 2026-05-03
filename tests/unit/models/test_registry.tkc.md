@@ -1,0 +1,1 @@
+Tests for the model registry. Validates registry construction with 10+ entries, lookup by ID (Sonnet, GPT-4o, Qwen, unknown), task-filtered queries (chat, local-only), best-model selection (chat background, embedding local), and dynamic registration. Depends on models.registry.

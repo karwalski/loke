@@ -1,0 +1,1 @@
+Unit tests for the governance approval module (core.governance.approval). Tests approval mode logic (always, never, by-sensitivity, by-provider), dont-ask-again rule suppression, and diff generation between original and anonymised text. Depends on core.governance.approval, std.str, and std.test.

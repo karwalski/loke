@@ -1,0 +1,1 @@
+Tests OpenAI provider integration: API key storage, dispatch routing to the openai branch, streaming flag, multi-message request construction (system/user/assistant roles), and response field validation (model, finish reason, token counts). Depends on core.providers.dispatcher and core.providers.types.

@@ -1,0 +1,1 @@
+Incident management module for tracking privacy leaks, policy violations, outages, and other operational issues. Provides creation, resolution, listing, and JSON serialisation of incidents. Depends on std.log and std.string.

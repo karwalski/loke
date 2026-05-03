@@ -1,0 +1,1 @@
+Extended decay tests validating temporal score degradation over multiple time horizons (10d, 30d, 60d, ancient), initial score scaling, and config field constraints (sweep interval, prune threshold). Depends on core.memory.decay.

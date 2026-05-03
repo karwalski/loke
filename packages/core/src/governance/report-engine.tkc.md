@@ -1,0 +1,1 @@
+Generates governance reports (compliance summary, PII detection log, routing decisions, policy changes, cost savings) by querying the audit log with date filters. Optionally dispatches report summaries to external integrations. Depends on std.db, core.storage.audit, std.str, shared.log, and core.governance.external.

@@ -1,0 +1,1 @@
+Health check system for loke. Maintains a probe registry, runs individual probes, aggregates status (healthy/degraded/unhealthy), builds a health report, and serialises it to JSON. Registers default probes for database and settings subsystems. Depends on std.log and std.str.

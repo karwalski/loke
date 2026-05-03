@@ -1,0 +1,1 @@
+Core database initialisation module. Opens the SQLite database at the configured data directory, runs all pending schema migrations, and exposes a $store handle. Depends on std.db, std.str, shared.types, and core.storage.migrations.

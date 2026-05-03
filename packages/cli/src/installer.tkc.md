@@ -1,0 +1,1 @@
+CLI installer module that handles the `loke init` flow: detects hardware, installs/starts Ollama, pulls a recommended local model, and verifies the setup. Supports interactive, non-interactive (--yes), and skip-model modes. Depends on std.http, std.sys, std.process, and cli.output.

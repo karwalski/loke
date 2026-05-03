@@ -1,0 +1,1 @@
+Code signing and notarization for loke binaries. Handles macOS codesign, notarytool submission with Apple ID credentials, stapling, and verification. Also supports Windows signtool signing. Generates default entitlements plist.

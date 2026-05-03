@@ -1,0 +1,1 @@
+Unit tests for the CLI installer module (cli.installer). Tests default flag values, flag parsing (--yes, --model, --skip-model, --ollama-url, --install-dir, combined flags, empty args), model recommendation by RAM size (4-128GB boundaries), and model size metadata. Depends on std.string, std.log.

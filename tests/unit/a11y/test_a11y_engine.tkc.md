@@ -1,0 +1,1 @@
+Unit tests for the accessibility checking engine. Validates HTML rule detection (img-alt, input-label, role-value, heading-hierarchy, landmark-structure, aria-role-valid, keyboard-operable) and options (run-only, disable-rules). Depends on loke.platform.a11y.testing, std.str, shared.log.

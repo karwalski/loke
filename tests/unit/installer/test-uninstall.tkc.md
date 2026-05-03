@@ -1,0 +1,1 @@
+Unit tests for the model/Ollama uninstall module. Tests result and removable model struct construction, format_size across GB/MB/KB/zero ranges, uninstall validation for non-existent models/binary, confirmation input parsing, and command argument parsing. Depends on core.installer.uninstall, std.str, shared.log.

@@ -1,0 +1,1 @@
+Workspace and project management module. Manages a collection of projects, each containing multiple datasets with an active selection index. Provides schema combination across datasets and automatic join-key detection between dataset pairs. Depends on moke.compute for dataset types.

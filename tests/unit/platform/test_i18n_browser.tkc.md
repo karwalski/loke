@@ -1,0 +1,1 @@
+Tests that all browser UI translation keys (browser, chat, pipeline, savings, approve, setup, settings, privacy, tabs) are translated and not returned as raw keys, for both en-AU and en-US locales. Depends on loke.platform.i18n.translator and loke.platform.i18n.locales.

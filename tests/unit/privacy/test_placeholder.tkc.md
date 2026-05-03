@@ -1,0 +1,1 @@
+Tests placeholder generation and restoration: creating typed placeholders (EMAIL_1, PHONE_AU_3), managing placeholder maps, restoring single/multiple placeholders to original values, and handling no-match cases. Depends on core.privacy.placeholder.

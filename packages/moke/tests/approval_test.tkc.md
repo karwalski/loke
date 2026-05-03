@@ -1,0 +1,1 @@
+Tests for the moke approval workflow: sensitivity-based review gating, diff-token generation (PII removal, compression markers), decision logging to session console log, and sensitivity level normalisation. Depends on moke.approval, moke.sensitivity, moke.consolelog, std.test.

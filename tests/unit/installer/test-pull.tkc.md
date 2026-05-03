@@ -1,0 +1,1 @@
+Unit tests for the model pull progress parser. Validates parsing of downloading/manifest/success/error/verify/writing progress lines, pull progress struct fields, and graceful handling when Ollama is not running. Depends on core.installer.pull, std.str, shared.log.
