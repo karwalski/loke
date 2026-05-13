@@ -21,60 +21,73 @@ t=$uninstallresult{
   freedspace:str
 };
 
+f=parseremovablefromapi(r:i64;models:@$removablemodel):@$removablemodel{
+  let parsed=json.parse(r.body);
+  let modellist=json.getarr(parsed;"models");
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(!(i<json.arrlen(modellist))){
+      <models
+    }el{
+      let m=json.arrget(modellist;i);
+      let name=json.getstr(m;"name");
+      let sizebytes=json.getint(m;"size");
+      let size=formatsize(sizebytes);
+      let digest=json.getstr(m;"digest");
+      let modified=json.getstr(m;"modified_at");
+      models=models.push($removablemodel{
+        name:name;
+        size:size;
+        digest:digest;
+        modified:modified
+      });
+      i=i+1
+    }
+  }
+};
+
+f=parseremovablefromcli(out:str;models:@$removablemodel):@$removablemodel{
+  let lines=str.split(out;"
+");
+  let j=mut.1;
+  lp(let ii52=0;ii52<lines.len;ii52=ii52+1){
+    let line=lines.get(ii52);
+    if(j > 0){
+      if(str.len(str.trim(line)) > 0){
+        let parts=str.splitwhitespace(line);
+        if(str.len(parts) > 3){
+          let modifiedval=mut."";
+          if(str.len(parts) > 4){modifiedval=parts.get(3)}el{};
+          models=models.push($removablemodel{
+            name:parts.get(0);
+            size:parts.get(2);
+            digest:parts.get(1);
+            modified:modifiedval
+          })
+        }el{};
+      }el{};
+    }el{};
+    j=j+1
+
+  };
+  <models
+};
+
+f=parseremovablefallback(e:str;models:@$removablemodel):@$removablemodel{
+  let result=proc.exec("ollama";@("list"));
+  mt result {
+    $ok:out parseremovablefromcli(out;models);
+    $err:e models
+  }
+};
+
 f=listremovable():@$removablemodel{
   let models=@($removablemodel);
   let resp=http.get("http://localhost:11434/api/tags");
   mt resp {
-    $ok:r
-      let parsed=json.parse(r.body);
-      let modellist=json.getarr(parsed;"models");
-      let i=mut.0;
-      lp(let lv=0;true;lv=lv){
-        if(!(i<json.arrlen(modellist))){
-          <models
-        }el{
-          let m=json.arrget(modellist;i);
-          let name=json.getstr(m;"name");
-          let sizebytes=json.getint(m;"size");
-          let size=formatsize(sizebytes);
-          let digest=json.getstr(m;"digest");
-          let modified=json.getstr(m;"modified_at");
-          models=@.push(models;$removablemodel{
-            name:name;
-            size:size;
-            digest:digest;
-            modified:modified
-          });
-          i=i+1
-        }
-      };
-    $err:e
-      let result=proc.exec("ollama";@("list"));
-      mt result {
-        $ok:out
-          let lines=str.split(out;"
-");
-          let j=mut.1;
-          lines.each|line{
-            if(j > 0){
-              if(str.len(str.trim(line)) > 0){
-                let parts=str.splitwhitespace(line);
-                if(str.len(parts) > 3){
-                  models=@.push(models;$removablemodel{
-                    name:parts.get(0);
-                    size:parts.get(2);
-                    digest:parts.get(1);
-                    modified:if(str.len(parts) > 4){parts.get(3)}el{""}
-                  })
-                }el{}
-              }el{}
-            }el{};
-            j=j+1
-          };
-        $err:e 0
-      }
-  };
-  <models
+    $ok:r parseremovablefromapi(r;models);
+    $err:e parseremovablefallback(e;models)
+  }
 };
 
 f=formatsize(bytes:i64):str{
@@ -94,15 +107,67 @@ f=formatsize(bytes:i64):str{
   <str.concat(str.fromint(kb);" KB")
 };
 
+f=verifymodelremoval(modelid:str;modelsize:str):$uninstallresult{
+  let after=listremovable();
+  let stillexists=mut.false;
+  lp(let ii112=0;ii112<after.len;ii112=ii112+1){
+    let m=after.get(ii112);
+    if(str.eq(m.name;modelid)){
+      stillexists=true
+    }el{}
+
+  };
+  if(stillexists){
+    log.warn(
+      str.concat("model still present after removal: ";modelid);
+      "installer.uninstall";
+      "system"
+    );
+    <$uninstallresult{
+      success:false;
+      message:str.concat("removal failed  model still present: ";modelid);
+      freedspace:""
+    }
+  }el{};
+  log.info(
+    str.concat(
+      str.concat("model removed: ";modelid);
+      str.concat(" freed: ";modelsize)
+    );
+    "installer.uninstall";
+    "system"
+  );
+  <$uninstallresult{
+    success:true;
+    message:str.concat("removed ";modelid);
+    freedspace:modelsize
+  }
+};
+
+f=handlermfailed(e:i64):$uninstallresult{
+  log.warn(
+    str.concat("ollama rm failed: ";e.message);
+    "installer.uninstall";
+    "system"
+  );
+  <$uninstallresult{
+    success:false;
+    message:str.concat("removal failed: ";e.message);
+    freedspace:""
+  }
+};
+
 f=uninstallmodel(modelid:str):$uninstallresult{
   let models=listremovable();
   let modelsize=mut."";
   let found=mut.false;
-  models.each|m{
+  lp(let ii163=0;ii163<models.len;ii163=ii163+1){
+    let m=models.get(ii163);
     if(str.eq(m.name;modelid)){
       modelsize=m.size;
       found=true
     }el{}
+
   };
   if(found=false){
     <$uninstallresult{
@@ -118,50 +183,35 @@ f=uninstallmodel(modelid:str):$uninstallresult{
   );
   let result=proc.exec("ollama";@("rm";modelid));
   mt result {
-    $ok:out
-      let after=listremovable();
-      let stillexists=mut.false;
-      after.each|m{
-        if(str.eq(m.name;modelid)){
-          stillexists=true
-        }el{}
-      };
-      if(stillexists){
-        log.warn(
-          str.concat("model still present after removal: ";modelid);
-          "installer.uninstall";
-          "system"
-        );
-        <$uninstallresult{
-          success:false;
-          message:str.concat("removal failed  model still present: ";modelid);
-          freedspace:""
-        }
-      }el{};
-      log.info(
-        str.concat(
-          str.concat("model removed: ";modelid);
-          str.concat(" freed: ";modelsize)
-        );
-        "installer.uninstall";
-        "system"
-      );
-      <$uninstallresult{
-        success:true;
-        message:str.concat("removed ";modelid);
-        freedspace:modelsize
-      };
-    $err:e
-      log.warn(
-        str.concat("ollama rm failed: ";e.message);
-        "installer.uninstall";
-        "system"
-      );
-      <$uninstallresult{
-        success:false;
-        message:str.concat("removal failed: ";e.message);
-        freedspace:""
-      }
+    $ok:out verifymodelremoval(modelid;modelsize);
+    $err:e handlermfailed(e)
+  }
+};
+
+f=handleollamaremoved(home:str):$uninstallresult{
+  cleanpathentry(home);
+  log.info(
+    "Ollama binary removed  models in ~/.ollama left untouched";
+    "installer.uninstall";
+    "system"
+  );
+  <$uninstallresult{
+    success:true;
+    message:"Ollama removed from ~/.loke/bin. Models in ~/.ollama were not removed.";
+    freedspace:""
+  }
+};
+
+f=handleollamaremovefailed(e:i64):$uninstallresult{
+  log.warn(
+    str.concat("failed to remove Ollama binary: ";e.message);
+    "installer.uninstall";
+    "system"
+  );
+  <$uninstallresult{
+    success:false;
+    message:str.concat("removal failed: ";e.message);
+    freedspace:""
   }
 };
 
@@ -182,30 +232,52 @@ f=uninstallollama():$uninstallresult{
   );
   let rmresult=file.remove(ollamapath);
   mt rmresult {
-    $ok:v
-      cleanpathentry(home);
-      log.info(
-        "Ollama binary removed  models in ~/.ollama left untouched";
-        "installer.uninstall";
-        "system"
-      );
-      <$uninstallresult{
-        success:true;
-        message:"Ollama removed from ~/.loke/bin. Models in ~/.ollama were not removed.";
-        freedspace:""
-      };
-    $err:e
-      log.warn(
-        str.concat("failed to remove Ollama binary: ";e.message);
-        "installer.uninstall";
-        "system"
-      );
-      <$uninstallresult{
-        success:false;
-        message:str.concat("removal failed: ";e.message);
-        freedspace:""
-      }
+    $ok:v handleollamaremoved(home);
+    $err:e handleollamaremovefailed(e)
   }
+};
+
+f=cleanprofilefile(profile:str;pathline:str):i64{
+  let content=file.read(profile);
+  mt content {
+    $ok:c cleanprofilecontent(c;profile;pathline);
+    $err:e 0
+  }
+};
+
+f=cleanprofilecontent(c:str;profile:str;pathline:str):i64{
+  if(str.contains(c;pathline)){
+    let cleaned=str.replace(c;pathline;"");
+    let cleaned=str.replace(cleaned;"
+
+
+";"
+");
+    mt file.write(profile;cleaned) {
+      $ok:v logpathcleaned(profile);
+      $err:e logpathcleanfailed(profile;e)
+    }
+  }el{
+    0
+  }
+};
+
+f=logpathcleaned(profile:str):i64{
+  log.info(
+    str.concat("cleaned PATH entry from ";profile);
+    "installer.uninstall";
+    "system"
+  );
+  <0
+};
+
+f=logpathcleanfailed(profile:str;e:i64):i64{
+  log.warn(
+    str.concat("failed to clean PATH from ";str.concat(profile;str.concat(": ";e.message)));
+    "installer.uninstall";
+    "system"
+  );
+  <0
 };
 
 f=cleanpathentry(home:str):i64{
@@ -215,36 +287,14 @@ f=cleanpathentry(home:str):i64{
     str.concat(home;"/.bashrc");
     str.concat(home;"/.bash_profile")
   );
-  profiles.each|profile{
+  lp(let ii289=0;ii289<profiles.len;ii289=ii289+1){
+    let profile=profiles.get(ii289);
     if(file.exists(profile)){
-      let content=file.read(profile);
-      mt content {
-        $ok:c
-          if(str.contains(c;pathline)){
-            let cleaned=str.replace(c;pathline;"");
-            let cleaned=str.replace(cleaned;"
+      cleanprofilefile(profile;pathline)
+    }el{
+      0
+    }
 
-
-";"
-");
-            mt file.write(profile;cleaned) {
-              $ok:v
-                log.info(
-                  str.concat("cleaned PATH entry from ";profile);
-                  "installer.uninstall";
-                  "system"
-                );
-              $err:e
-                log.warn(
-                  str.concat("failed to clean PATH from ";str.concat(profile;str.concat(": ";e.message)));
-                  "installer.uninstall";
-                  "system"
-                )
-            }
-          }el{};
-        $err:e 0
-      }
-    }el{}
   };
   <0
 };

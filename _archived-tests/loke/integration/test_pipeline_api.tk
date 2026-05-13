@@ -1,0 +1,133 @@
+
+
+
+
+m=tests.integration.testpipelineapi;
+
+i=pipeline:core.privacy.pipeline;
+i=regex:core.privacy.regex;
+i=guardian:core.privacy.guardian;
+i=ph:core.privacy.placeholder;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:str; passed:bool; message:str };
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} };
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} };
+
+f=asserteq(name:str;got:str;want:str):$result{
+  if(str.eq(got;want)){ <pass(name) }el{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+};
+
+f=asserttrue(name:str;v:bool):$result{
+  if(v){ <pass(name) }el{ <fail(name;"expected true") }
+};
+
+f=assertfalse(name:str;v:bool):$result{
+  if(v=false){ <pass(name) }el{ <fail(name;"expected false") }
+};
+
+f=assertequ32(name:str;got:u32;want:u32):$result{
+  if(got=want){ <pass(name) }el{
+    <fail(name;str.concat("want=";str.concat(str.fromu32(want);str.concat(" got=";str.fromu32(got)))))
+  }
+};
+
+f=logresult(r:$result):i64{
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+};
+
+
+f=offlineconfig():$pipelineconfig{
+  <$pipelineconfig{
+    presidiourl:"";
+    ollamaurl:"";
+    nermodelid:"";
+    usepresidio:false;
+    usener:false;
+    dryrun:false
+  }
+};
+
+f=runall():bool{
+  let results=@($result);
+  let cfg=offlineconfig();
+
+  
+  let cleantext="The weather is fine today";
+  let cleanrun=pipeline.run(cleantext;"";cfg);
+  results=str.arraypush(results;asserteq("clean text anonymised equals input";cleanrun.result.anonymised;cleantext));
+
+  
+  let emailtext="Contact john@example.com for info";
+  let emailrun=pipeline.run(emailtext;"";cfg);
+  results=str.arraypush(results;assertfalse("email text anonymised does not contain original";str.contains(emailrun.result.anonymised;"john@example.com")));
+
+  
+  let cctext="Card: 4111 1111 1111 1111";
+  let ccrun=pipeline.run(cctext;"";cfg);
+  results=str.arraypush(results;asserttrue("credit card sensitivity is RESTRICTED";ccrun.result.sensitivity=$restricted));
+
+  
+  results=str.arraypush(results;asserttrue("email text entity count >= 1";ccrun.totalentities>1||emailrun.totalentities>1));
+  let emailentitycount=str.arraylen(emailrun.result.entities);
+  results=str.arraypush(results;asserttrue("email pipeline entity_count >= 1";emailentitycount>1));
+
+  
+  let cleanentitycount=str.arraylen(cleanrun.result.entities);
+  results=str.arraypush(results;assertequ32("clean text entity_count is 0";cleanentitycount;0));
+
+  
+  
+  let restoreinput="Email john@example.com about it";
+  let detectresult=regex.detect(restoreinput);
+
+  
+  let anontext=detectresult.anonymised;
+  results=str.arraypush(results;assertfalse("detection anonymised text is different from input";str.eq(anontext;restoreinput)));
+
+  
+  let phmap=ph.newmap();
+  let entitycount=str.arraylen(detectresult.entities);
+  let ei=0;
+  lp(let lv=0;true;lv=lv){
+    if(ei<entitycount){
+      let entity=str.arrayget(detectresult.entities;ei);
+      ph.addentry(phmap;entity.value;entity.placeholder;entity.entitytype);
+      ei=ei+1
+    }el{
+      br
+    }
+  };
+
+  
+  let restored=ph.restore(anontext;phmap);
+  results=str.arraypush(results;asserteq("restore returns original input";restored;restoreinput));
+
+  
+  let guardianrun=pipeline.run("Hello";"You are an assistant.";cfg);
+  results=str.arraypush(results;asserttrue("pipeline final_system_prompt contains guardian";guardian.isguardianpresent(guardianrun.finalsystemprompt)));
+
+  
+  results=str.arraypush(results;asserteq("pipeline result original field matches input";cleanrun.result.original;cleantext));
+
+  let all=true;
+  let i=0;
+  let n=str.arraylen(results);
+  lp(let lv=0;true;lv=lv){
+    if(i<n){
+      let r=str.arrayget(results;i);
+      logresult(r);
+      if(r.passed=false){ all=false }el{};
+      i=i+1
+    }el{
+      br
+    }
+  };
+  <all
+};

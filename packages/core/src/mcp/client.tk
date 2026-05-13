@@ -21,6 +21,26 @@ f=new(serverurl:str;servername:str):$mcpclient{
   }
 };
 
+f=extractresultorerr(obj:i64):str!$lokeerr{
+  let iserror=json.haskey(obj;"error");
+  if(iserror){
+    let errobj=json.getval(obj;"error");
+    let errmsg=json.getstr(errobj;"message");
+    <$networkerr(str.concat("mcp server error: ";errmsg))
+  }el{
+    let resultval=json.getval(obj;"result");
+    <json.enc(resultval)
+  }
+};
+
+f=parsesendresponse(raw:str):str!$lokeerr{
+  let parsed=json.dec(raw);
+  mt parsed {
+    $jsonerr:e $networkerr("mcp send_request: invalid JSON response");
+    $ok:obj extractresultorerr(obj)
+  }
+};
+
 f=sendrequest(client:$mcpclient;method:str;paramsjson:str):str!$lokeerr{
   let cid=log.newcorrelationid();
   let id=client.nextid;
@@ -39,21 +59,26 @@ f=sendrequest(client:$mcpclient;method:str;paramsjson:str):str!$lokeerr{
   let resp=http.post(url;body;"application/json");
   mt resp {
     $httperr:e $networkerr(str.concat("mcp send_request: HTTP error calling ";url));
-    $ok:raw
-      let parsed=json.dec(raw);
-      mt parsed {
-        $jsonerr:e $networkerr("mcp send_request: invalid JSON response");
-        $ok:obj
-          let iserror=json.haskey(obj;"error");
-          if(iserror){
-            let errobj=json.getval(obj;"error");
-            let errmsg=json.getstr(errobj;"message");
-            <$networkerr(str.concat("mcp server error: ";errmsg))
-          }el{
-            let resultval=json.getval(obj;"result");
-            <json.enc(resultval)
-          }
-      }
+    $ok:raw parsesendresponse(raw)
+  }
+};
+
+f=checkinitobj(obj:i64;servername:str;cid:str):bool{
+  let protover=json.getstr(obj;"protocolVersion");
+  let ok=str.eq(protover;"2024-11-05");
+  if(ok){
+    log.info(str.concat("MCP initialized with server: ";servername);"mcp-client";cid)
+  }el{
+    log.warn(str.concat("MCP protocol version mismatch: ";protover);"mcp-client";cid)
+  };
+  <ok
+};
+
+f=parseinitresponse(raw:str;servername:str;cid:str):bool!$lokeerr{
+  let parsed=json.dec(raw);
+  mt parsed {
+    $jsonerr:e $networkerr("initialize: could not parse response");
+    $ok:obj $ok(checkinitobj(obj;servername;cid))
   }
 };
 
@@ -63,20 +88,33 @@ f=initialize(client:$mcpclient):bool!$lokeerr{
   let result=sendrequest(client;"initialize";params);
   mt result {
     $lokeerr:e $lokeerr(e);
-    $ok:raw
-      let parsed=json.dec(raw);
-      mt parsed {
-        $jsonerr:e $networkerr("initialize: could not parse response");
-        $ok:obj
-          let protover=json.getstr(obj;"protocolVersion");
-          let ok=str.eq(protover;"2024-11-05");
-          if(ok){
-            log.info(str.concat("MCP initialized with server: ";client.servername);"mcp-client";cid)
-          }el{
-            log.warn(str.concat("MCP protocol version mismatch: ";protover);"mcp-client";cid)
-          };
-          <ok
-      }
+    $ok:raw parseinitresponse(raw;client.servername;cid)
+  }
+};
+
+f=parsetoolsobj(obj:i64):@$mcptool{
+  let toolsarr=json.getarr(obj;"tools");
+  let tools=@($mcptool);
+  lp(let i=0;i<str.arraylen(toolsarr);i=i+1){ let item=str.arrayget(toolsarr;i);
+    let name=json.getstr(item;"name");
+    let desc=json.getstr(item;"description");
+    let schemaval=json.getval(item;"inputSchema");
+    let schema=json.enc(schemaval);
+    let tool=$mcptool{
+      name:name;
+      description:desc;
+      inputschema:schema
+    };
+    tools=@(tools;tool)
+  };
+  <tools
+};
+
+f=parsetoolsresponse(raw:str):@$mcptool!$lokeerr{
+  let parsed=json.dec(raw);
+  mt parsed {
+    $jsonerr:e $networkerr("list_tools: could not parse response");
+    $ok:obj $ok(parsetoolsobj(obj))
   }
 };
 
@@ -84,60 +122,48 @@ f=listtools(client:$mcpclient):@$mcptool!$lokeerr{
   let result=sendrequest(client;"tools/list";"null");
   mt result {
     $lokeerr:e $lokeerr(e);
-    $ok:raw
-      let parsed=json.dec(raw);
-      mt parsed {
-        $jsonerr:e $networkerr("list_tools: could not parse response");
-        $ok:obj
-          let toolsarr=json.getarr(obj;"tools");
-          let tools=@($mcptool);
-          toolsarr.each|item{
-            let name=json.getstr(item;"name");
-            let desc=json.getstr(item;"description");
-            let schemaval=json.getval(item;"inputSchema");
-            let schema=json.enc(schemaval);
-            let tool=$mcptool{
-              name:name;
-              description:desc;
-              inputschema:schema
-            };
-            tools=@(tools;tool)
-          };
-          <tools
-      }
+    $ok:raw parsetoolsresponse(raw)
+  }
+};
+
+f=parsecalltoolobj(obj:i64;toolname:str;cid:str):$toolresult{
+  let iserr=json.haskey(obj;"isError");
+  let contentarr=json.getarr(obj;"content");
+  let text="";
+  lp(let ii132=0;ii132<contentarr.len;ii132=ii132+1){
+    let item=contentarr.get(ii132);
+    let itemtext=json.getstr(item;"text");
+    if(str.eq(text;"")){
+      text=itemtext
+    }el{
+      text=str.concat(text;str.concat("
+";itemtext))
+    };
+
+  };
+  log.debug(str.concat("call_tool result for: ";toolname);"mcp-client";cid);
+  <$toolresult{
+    contenttype:"text";
+    text:text;
+    iserror:iserr
+  }
+};
+
+f=parsecalltoolresponse(raw:str;toolname:str;cid:str):$toolresult!$lokeerr{
+  let parsed=json.dec(raw);
+  mt parsed {
+    $jsonerr:e $networkerr("call_tool: could not parse response");
+    $ok:obj $ok(parsecalltoolobj(obj;toolname;cid))
   }
 };
 
 f=calltool(client:$mcpclient;toolname:str;argsjson:str):$toolresult!$lokeerr{
   let cid=log.newcorrelationid();
-  let nameescaped=str.replace(toolname;"\"";"\\"");
+  let nameescaped=str.replace(toolname;"\"";"\\\"");
   let params=str.concat("{\"name\":\"";str.concat(nameescaped;str.concat("\",\"arguments\":";str.concat(argsjson;"}"))));
   let result=sendrequest(client;"tools/call";params);
   mt result {
     $lokeerr:e $lokeerr(e);
-    $ok:raw
-      let parsed=json.dec(raw);
-      mt parsed {
-        $jsonerr:e $networkerr("call_tool: could not parse response");
-        $ok:obj
-          let iserr=json.haskey(obj;"isError");
-          let contentarr=json.getarr(obj;"content");
-          let text="";
-          contentarr.each|item{
-            let itemtext=json.getstr(item;"text");
-            if(str.eq(text;"")){
-              text=itemtext
-            }el{
-              text=str.concat(text;str.concat("
-";itemtext))
-            }
-          };
-          log.debug(str.concat("call_tool result for: ";toolname);"mcp-client";cid);
-          <$toolresult{
-            contenttype:"text";
-            text:text;
-            iserror:iserr
-          }
-      }
+    $ok:raw parsecalltoolresponse(raw;toolname;cid)
   }
 };

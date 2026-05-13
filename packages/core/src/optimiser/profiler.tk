@@ -119,28 +119,43 @@ f=infercoltype(samples:@str):$coltype{
   }
 };
 
+f=tryfloatorbool(row:i64;colname:str;vals:@str):@str{
+  let fval=json.tryfloatkey(row;colname);
+  mt fval {
+    $ok:f @(vals;str.fromfloat(f));
+    $err:e3 tryboolval(row;colname;vals)
+  }
+};
+
+f=formatboolval(b:bool;vals:@str):@str{
+  let bstr=mut."false";
+  if(b){bstr="true"}el{};
+  <@(vals;bstr)
+};
+
+f=tryboolval(row:i64;colname:str;vals:@str):@str{
+  let bval=json.tryboolkey(row;colname);
+  mt bval {
+    $ok:b formatboolval(b;vals);
+    $err:e4 vals
+  }
+};
+
+f=tryintorfloat(row:i64;colname:str;vals:@str):@str{
+  let ival=json.tryintkey(row;colname);
+  mt ival {
+    $ok:n @(vals;str.fromint(n));
+    $err:e2 tryfloatorbool(row;colname;vals)
+  }
+};
+
 f=extractcolvalues(rows:@$any;colname:str):@str{
   let vals=mut.@(str);
   lp(let i=0;i<str.arraylen(rows);i=i+1){ let row=str.arrayget(rows;i);
     let sval=json.trystrkey(row;colname);
-    mt sval {
-      $ok:s vals=@(vals;s);
-      $err:e
-        let ival=json.tryintkey(row;colname);
-        mt ival {
-          $ok:n vals=@(vals;str.fromint(n));
-          $err:e2
-            let fval=json.tryfloatkey(row;colname);
-            mt fval {
-              $ok:f vals=@(vals;str.fromfloat(f));
-              $err:e3
-                let bval=json.tryboolkey(row;colname);
-                mt bval {
-                  $ok:b if(b){vals=@(vals;"true")}el{vals=@(vals;"false")};
-                  $err:e4 0
-                }
-            }
-        }
+    vals=mt sval {
+      $ok:s @(vals;s);
+      $err:e tryintorfloat(row;colname;vals)
     }
   };
   <vals
@@ -211,7 +226,7 @@ f=findmax(vals:@str):str{
 };
 
 f=takesamples(vals:@str;n:u32):@str{
-  if(vals.!(len>n)){
+  if(!(vals.len>n)){
     <vals
   }el{
     <vals.slice(0;n)
@@ -220,7 +235,8 @@ f=takesamples(vals:@str;n:u32):@str{
 
 f=profilecol(rows:@$any;colname:str;totalrows:u32):$colprofile{
   let nullcount=countnulls(rows;colname);
-  let nullpct=if(totalrows=0){0.0}el{(nullcount as f64/(totalrows as f64))*100.0};
+  let nullpct=mut.0.0;
+  if(totalrows=0){}el{nullpct=(nullcount as f64/(totalrows as f64))*100.0};
   let vals=extractcolvalues(rows;colname);
   let uniquecount=countunique(vals);
   let minval=findmin(vals);
@@ -241,60 +257,66 @@ f=profilecol(rows:@$any;colname:str;totalrows:u32):$colprofile{
   }
 };
 
+f=profilerowarr(rowarr:@$any;name:str):$datasetprofile!$lokeerr{
+  let rowcount=rowarr.len;
+  if(rowcount=0){
+    let profile=$datasetprofile{
+      name:name;
+      rowcount:0;
+      colcount:0;
+      columns:@();
+      sensitivityhint:"no data"
+    };
+    <$ok(profile)
+  }el{
+    let colnames=json.keys(rowarr.get(0));
+    let colcount=colnames.len;
+    let columns=@();
+    lp(let ci=0;ci<str.arraylen(colnames);ci=ci+1){ let colname=str.arrayget(colnames;ci);
+      columns=columns.append(profilecol(rowarr;colname;rowcount))
+    };
+    let haspii=mut.false;
+    lp(let ci=0;ci<str.arraylen(columns);ci=ci+1){ let cp=str.arrayget(columns;ci);
+      if(cp.ispiicandidate){
+        haspii=true
+      }el{}
+    };
+    let sensitivityhint=mut."no obvious PII";
+    if(haspii){sensitivityhint="contains PII candidates"}el{};
+    let profile=$datasetprofile{
+      name:name;
+      rowcount:rowcount;
+      colcount:colcount;
+      columns:columns;
+      sensitivityhint:sensitivityhint
+    };
+    <$ok(profile)
+  }
+};
+
+f=profileparsedjson(parsed:i64;name:str):$datasetprofile!$lokeerr{
+  let rows=json.tryarr(parsed);
+  mt rows {
+    $ok:rowarr profilerowarr(rowarr;name);
+    $err:e $err($unknownerr("profile_json_array: input is not a JSON array"))
+  }
+};
+
 f=profilejsonarray(data:str;name:str):$datasetprofile!$lokeerr{
   mt json.dec(data) {
-    $ok:parsed
-      let rows=json.tryarr(parsed);
-      mt rows {
-        $ok:rowarr
-          let rowcount=rowarr.len;
-          if(rowcount=0){
-            let profile=$datasetprofile{
-              name:name;
-              rowcount:0;
-              colcount:0;
-              columns:@();
-              sensitivityhint:"no data"
-            };
-            <$ok(profile)
-          }el{
-            let colnames=json.keys(rowarr.get(0));
-            let colcount=colnames.len;
-            let columns=@();
-            lp(let ci=0;ci<str.arraylen(colnames);ci=ci+1){ let colname=str.arrayget(colnames;ci);
-              columns=columns.append(profilecol(rowarr;colname;rowcount))
-            };
-            let haspii=mut.false;
-            lp(let ci=0;ci<str.arraylen(columns);ci=ci+1){ let cp=str.arrayget(columns;ci);
-              if(cp.ispiicandidate){
-                haspii=true
-              }el{}
-            };
-            let sensitivityhint=if(haspii){"contains PII candidates"}el{"no obvious PII"};
-            let profile=$datasetprofile{
-              name:name;
-              rowcount:rowcount;
-              colcount:colcount;
-              columns:columns;
-              sensitivityhint:sensitivityhint
-            };
-            <$ok(profile)
-          };
-        $err:e $err($unknownerr("profile_json_array: input is not a JSON array"))
-      };
-    $err:e2
-      <$err($unknownerr(str.concat("profile_json_array: JSON parse failed for dataset: ";name)))
+    $ok:parsed profileparsedjson(parsed;name);
+    $err:e2 $err($unknownerr(str.concat("profile_json_array: JSON parse failed for dataset: ";name)))
   }
 };
 
 f=coltypetostr(ct:$coltype):str{
   mt ct {
-    $intcol "int";
-    $floatcol "float";
-    $strcol "str";
-    $boolcol "bool";
-    $datecol "date";
-    $unknowncol "?"
+    $intcol:v "int";
+    $floatcol:v "float";
+    $strcol:v "str";
+    $boolcol:v "bool";
+    $datecol:v "date";
+    $unknowncol:v "?"
   }
 };
 
@@ -326,24 +348,25 @@ f=totoonschema(profile:$datasetprofile):str{
   let collines=@();
   lp(let i=0;i<str.arraylen(profile.columns);i=i+1){ let cp=str.arrayget(profile.columns;i);
     let types=coltypetostr(cp.coltype);
-    let samplepart=if(cp.samplevals.len=0){
-      ""
-    }el{
+    let samplepart=mut."";
+    if(cp.samplevals.len=0){}el{
       let inner=str.join(cp.samplevals;",");
-      str.concat("[";str.concat(inner;"]"))
+      samplepart=str.concat("[";str.concat(inner;"]"))
     };
     let nullss=fmtpct(cp.nullpct);
     let uniqs=str.fromint(cp.uniquecount);
-    let piipart=if(cp.ispiicandidate){" [PII]"}el{""};
+    let piipart=mut."";
+    if(cp.ispiicandidate){piipart=" [PII]"}el{};
     let datehint=mt cp.coltype {
-      $datecol " [date?]";
-      $intcol "";
-      $floatcol "";
-      $strcol "";
-      $boolcol "";
-      $unknowncol ""
+      $datecol:v " [date?]";
+      $intcol:v "";
+      $floatcol:v "";
+      $strcol:v "";
+      $boolcol:v "";
+      $unknowncol:v ""
     };
-    let suffix=if(cp.ispiicandidate){piipart}el{datehint};
+    let suffix=mut.datehint;
+    if(cp.ispiicandidate){suffix=piipart}el{};
     collines=collines.append(str.concat(
       cp.name;
       str.concat(

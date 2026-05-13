@@ -393,6 +393,40 @@ f=summariserun(run:$pipelinerun):str{
 
 
 
+f=pipelinenerskip(stages:i64;requestid:str):void{
+  log.warn("NER scan failed -- skipping";"pipeline";requestid);
+  let nerstage=$stageresult{
+    stage:$nerscan;
+    entitiesfound:0;
+    durationms:0;
+    skipped:true;
+    skipreason:"NER detect_entities returned error"
+  };
+  stages=@(stages;nerstage)
+};
+
+f=pipelinenerok(nerentities:i64;allentities:i64;stages:i64):void{
+  let nercount=str.arraylen(nerentities);
+  let ni=0;
+  lp(let lv=0;true;lv=lv){
+    if(ni>nercount){
+      br
+    }el{
+      let entity=str.arrayget(nerentities;ni);
+      allentities=@(allentities;entity);
+      ni=ni+1
+    }
+  };
+  let nerstage=$stageresult{
+    stage:$nerscan;
+    entitiesfound:nercount;
+    durationms:0;
+    skipped:false;
+    skipreason:""
+  };
+  stages=@(stages;nerstage)
+};
+
 f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let requestid=str.randhex(16);
   log.info("pipeline start";"pipeline";requestid);
@@ -429,36 +463,8 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     if(neravailable){
       let nerresult=ner.detectentities(nerclient;text);
       mt nerresult {
-        $lokeerr:e;
-          log.warn("NER scan failed -- skipping";"pipeline";requestid);
-          let nerstage=$stageresult{
-            stage:$nerscan;
-            entitiesfound:0;
-            durationms:0;
-            skipped:true;
-            skipreason:"NER detect_entities returned error"
-          };
-          stages=@(stages;nerstage)
-        nerentities;
-          let nercount=str.arraylen(nerentities);
-          let ni=0;
-          lp(let lv=0;true;lv=lv){
-            if(ni>nercount){
-              br
-            }el{
-              let entity=str.arrayget(nerentities;ni);
-              allentities=@(allentities;entity);
-              ni=ni+1
-            }
-          };
-          let nerstage=$stageresult{
-            stage:$nerscan;
-            entitiesfound:nercount;
-            durationms:0;
-            skipped:false;
-            skipreason:""
-          };
-          stages=@(stages;nerstage)
+        $lokeerr:e pipelinenerskip(stages;requestid);
+        $ok:nerentities pipelinenerok(nerentities;allentities;stages)
       }
     }el{
       log.warn("NER unavailable -- skipping NER scan";"pipeline";requestid);
@@ -488,38 +494,41 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     let presidioavailable=presidio.isavailable(presidioclient);
     if(presidioavailable){
       let presidioresult=presidio.analyze(presidioclient;text);
-      mt presidioresult {
-        $lokeerr:e;
-          log.warn("Presidio scan failed -- degraded mode";"pipeline";requestid);
-          let presidiostage=$stageresult{
-            stage:$presidioscan;
-            entitiesfound:0;
-            durationms:0;
-            skipped:true;
-            skipreason:"Presidio analyze returned error"
-          };
-          stages=@(stages;presidiostage)
-        rawpresidioentities;
-          let piifrompresidio=presidio.topiientities(rawpresidioentities;text);
-          let presidiocount=str.arraylen(piifrompresidio);
-          let pri=0;
-          lp(let lv=0;true;lv=lv){
-            if(pri>presidiocount){
-              br
-            }el{
-              let entity=str.arrayget(piifrompresidio;pri);
-              allentities=@(allentities;entity);
-              pri=pri+1
-            }
-          };
-          let presidiostage=$stageresult{
-            stage:$presidioscan;
-            entitiesfound:presidiocount;
-            durationms:0;
-            skipped:false;
-            skipreason:""
-          };
-          stages=@(stages;presidiostage)
+      let presidiosuccess=mt presidioresult {
+        $lokeerr:e false;
+        $ok:rawpresidioentities true
+      };
+      if(presidiosuccess){
+        let rawpresidioentities=mt presidioresult {
+          $ok:v v;
+          $lokeerr:e @()
+        };
+        let piifrompresidio=presidio.topiientities(rawpresidioentities;text);
+        let presidiocount=str.arraylen(piifrompresidio);
+        let pri=mut.0;
+        lp(let lv=0;pri<presidiocount;lv=lv){
+          let entity=str.arrayget(piifrompresidio;pri);
+          allentities=@(allentities;entity);
+          pri=pri+1
+        };
+        let presidiostage=$stageresult{
+          stage:$presidioscan;
+          entitiesfound:presidiocount;
+          durationms:0;
+          skipped:false;
+          skipreason:""
+        };
+        stages=@(stages;presidiostage)
+      }el{
+        log.warn("Presidio scan failed -- degraded mode";"pipeline";requestid);
+        let presidiostage=$stageresult{
+          stage:$presidioscan;
+          entitiesfound:0;
+          durationms:0;
+          skipped:true;
+          skipreason:"Presidio analyze returned error"
+        };
+        stages=@(stages;presidiostage)
       }
     }el{
       log.warn("Presidio unavailable -- running in degraded mode";"pipeline";requestid);

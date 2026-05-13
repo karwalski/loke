@@ -18,7 +18,7 @@ f=new(apikey:str):$anthropicclient{
   let config=$providerconfig{
     apikey:apikey;
     baseurl:"https://api.anthropic.com";
-    provider:i64$anthropic;
+    provider:$anthropic(0);
     timeoutms:30000
   };
   <$anthropicclient{config:config}
@@ -29,8 +29,10 @@ f=new(apikey:str):$anthropicclient{
 
 
 f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
-  let costin=if(str.contains(modelid;"claude-3-5-haiku")){0.0000008}el{0.000003};
-  let costout=if(str.contains(modelid;"claude-3-5-haiku")){0.000004}el{0.000015};
+  let costin=mut.0.000003;
+  if(str.contains(modelid;"claude-3-5-haiku")){costin=0.0000008}el{};
+  let costout=mut.0.000015;
+  if(str.contains(modelid;"claude-3-5-haiku")){costout=0.000004}el{};
   let inputcost=inputtokens*costin;
   let outputcost=outputtokens*costout;
   <inputcost+outputcost
@@ -40,9 +42,45 @@ f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
 
 
 
+f=parseresponse(obj:i64):i64!$lokeerr{
+  let contentarr=json.getarr(obj;"content");
+  let first=contentarr.get(0);
+  let text=json.getstr(first;"text");
+  let usage=json.getstr(obj;"usage");
+  let usageobj=json.dec(usage);
+  let inputtokens=mt usageobj {
+    $jsonerr:e 0;
+    $ok:u json.getint(u;"input_tokens")
+  };
+  let outputtokens=mt usageobj {
+    $jsonerr:e 0;
+    $ok:u json.getint(u;"output_tokens")
+  };
+  let modelout=json.getstr(obj;"model");
+  let cost=calccost(modelout;inputtokens;outputtokens);
+  let resp=$completionresponse{
+    content:text;
+    modelid:modelout;
+    inputtokens:inputtokens;
+    outputtokens:outputtokens;
+    finishreason:"stop";
+    costusd:cost
+  };
+  log.info(str.concat("anthropic complete: ok model=";modelout);"anthropic";"");
+  <resp
+};
+
+f=parseraw(raw:str):i64!$lokeerr{
+  let parsed=json.dec(raw);
+  mt parsed {
+    $jsonerr:e $err($modelerr("anthropic complete: failed to parse response JSON"));
+    $ok:obj parseresponse(obj)
+  }
+};
+
 f=complete(client:$anthropicclient;req:i64):i64!$lokeerr{
   let url="https://api.anthropic.com/v1/messages";
-  let body=json.enc({
+  let body=json.enc($jsonobj{
     model:req.modelid;
     maxtokens:req.maxtokens;
     system:req.systemprompt;
@@ -55,44 +93,8 @@ f=complete(client:$anthropicclient;req:i64):i64!$lokeerr{
   );
   let result=http.postheaders(url;body;headers);
   mt result {
-    $httperr:e;
-      let msg=str.concat("anthropic complete: HTTP error — ";json.enc(e));
-      log.error(msg;"anthropic";"");
-      <$err($networkerr(msg))
-    raw;
-      let parsed=json.dec(raw);
-      mt parsed {
-        $jsonerr:e;
-          let msg="anthropic complete: failed to parse response JSON";
-          log.error(msg;"anthropic";"");
-          <$err($modelerr(msg))
-        obj;
-          let contentarr=json.getarr(obj;"content");
-          let first=contentarr.get(0);
-          let text=json.getstr(first;"text");
-          let usage=json.getstr(obj;"usage");
-          let usageobj=json.dec(usage);
-          let inputtokens=mt usageobj {
-            $jsonerr:e; 0;
-            u; json.getint(u;"input_tokens")
-          };
-          let outputtokens=mt usageobj {
-            $jsonerr:e; 0;
-            u; json.getint(u;"output_tokens")
-          };
-          let modelout=json.getstr(obj;"model");
-          let cost=calccost(modelout;inputtokens;outputtokens);
-          let resp=$completionresponse{
-            content:text;
-            modelid:modelout;
-            inputtokens:inputtokens;
-            outputtokens:outputtokens;
-            finishreason:"stop";
-            costusd:cost
-          };
-          log.info(str.concat("anthropic complete: ok model=";modelout);"anthropic";"");
-          <resp
-      }
+    $httperr:e $err($networkerr(str.concat("anthropic complete: HTTP error — ";json.enc(e))));
+    $ok:raw parseraw(raw)
   }
 };
 

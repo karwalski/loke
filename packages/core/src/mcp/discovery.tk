@@ -25,6 +25,77 @@ f=wellknownports():@i32{
   <@(11434;11435;11436;11437;3000;8080;8000;5000)
 };
 
+f=extractserverinfo(initraw:str):@str{
+  let name="unknown";
+  let version="unknown";
+  let parsed=json.dec(initraw);
+  mt parsed {
+    $jsonerr:e @(name;version);
+    $ok:obj extractinfofromobj(obj;name;version)
+  }
+};
+
+f=extractinfofromobj(obj:i64;defname:str;defversion:str):@str{
+  let resultval=json.getval(obj;"result");
+  let infoval=json.getval(resultval;"serverInfo");
+  let name=json.getstr(infoval;"name");
+  let version=json.getstr(infoval;"version");
+  let rname=mut.defname;
+  if(str.len(name) > 0){ rname=name };
+  let rversion=mut.defversion;
+  if(str.len(version) > 0){ rversion=version };
+  <@(rname;rversion)
+};
+
+f=counttoolsfromraw(toolsraw:str):i32{
+  let toolsparsed=json.dec(toolsraw);
+  mt toolsparsed {
+    $jsonerr:e 0;
+    $ok:toolsobj counttoolsfromobj(toolsobj)
+  }
+};
+
+f=counttoolsfromobj(toolsobj:i64):i32{
+  let resultval=json.getval(toolsobj;"result");
+  let toolsarr=json.getarr(resultval;"tools");
+  <toolsarr.len
+};
+
+f=buildserver(host:str;port:i32;baseurl:str):$discoveredserver{
+  let initurl=str.concat(baseurl;"/mcp");
+  let initbody="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"loke-discovery\",\"version\":\"0.1.0\"}}}";
+  let initresp=http.post(initurl;initbody;"application/json");
+  let info=mt initresp {
+    $httperr:e @("unknown";"unknown");
+    $ok:initraw extractserverinfo(initraw)
+  };
+  let servername=info.get(0);
+  let serverversion=info.get(1);
+
+  let toolsurl=str.concat(baseurl;"/mcp");
+  let toolsbody="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":null}";
+  let toolsresp=http.post(toolsurl;toolsbody;"application/json");
+  let toolscount=mt toolsresp {
+    $httperr:e 0;
+    $ok:toolsraw counttoolsfromraw(toolsraw)
+  };
+
+  log.debug(
+    str.concat(
+      str.concat("discovered MCP server at ";baseurl);
+      str.concat(" name=";servername));
+    "mcp-discovery";
+    "system"
+  );
+  <$discoveredserver{
+    host:host;
+    port:port;
+    name:servername;
+    version:serverversion;
+    toolscount:toolscount
+  }
+};
+
 f=probeport(host:str;port:i32):$discoveredserver!$lokeerr{
   let ports=str.fromint(port);
   let baseurl=str.concat(str.concat("http://";host);str.concat(":";ports));
@@ -33,65 +104,7 @@ f=probeport(host:str;port:i32):$discoveredserver!$lokeerr{
   let healthresp=http.get(healthurl);
   mt healthresp {
     $httperr:e $networkerr("port not responding");
-    $ok:raw
-      let initurl=str.concat(baseurl;"/mcp");
-      let initbody="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"loke-discovery\",\"version\":\"0.1.0\"}}}";
-      let initresp=http.post(initurl;initbody;"application/json");
-      let servername="unknown";
-      let serverversion="unknown";
-      mt initresp {
-        $httperr:e 0;
-        $ok:initraw
-          let parsed=json.dec(initraw);
-          mt parsed {
-            $jsonerr:e 0;
-            $ok:obj
-              let resultval=json.getval(obj;"result");
-              let infoval=json.getval(resultval;"serverInfo");
-              let name=json.getstr(infoval;"name");
-              let version=json.getstr(infoval;"version");
-              if(str.len(name) > 0){
-                servername=name
-              }el{};
-              if(str.len(version) > 0){
-                serverversion=version
-              }el{};
-              0
-          }
-      };
-
-      let toolsurl=str.concat(baseurl;"/mcp");
-      let toolsbody="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":null}";
-      let toolscount=mut.0;
-      let toolsresp=http.post(toolsurl;toolsbody;"application/json");
-      mt toolsresp {
-        $httperr:e 0;
-        $ok:toolsraw
-          let toolsparsed=json.dec(toolsraw);
-          mt toolsparsed {
-            $jsonerr:e 0;
-            $ok:toolsobj
-              let resultval=json.getval(toolsobj;"result");
-              let toolsarr=json.getarr(resultval;"tools");
-              toolscount=toolsarr.len;
-              0
-          }
-      };
-
-      log.debug(
-        str.concat(
-          str.concat("discovered MCP server at ";baseurl);
-          str.concat(" name=";servername));
-        "mcp-discovery";
-        "system"
-      );
-      <$discoveredserver{
-        host:host;
-        port:port;
-        name:servername;
-        version:serverversion;
-        toolscount:toolscount
-      }
+    $ok:raw $ok(buildserver(host;port;baseurl))
   }
 };
 
@@ -99,13 +112,15 @@ f=scanlocalhost():$discoveryresult{
   let startms=time.nowms();
   let servers=@($discoveredserver);
   let ports=wellknownports();
-  ports.each|port{
+  lp(let ii114=0;ii114<ports.len;ii114=ii114+1){
+    let port=ports.get(ii114);
     let found=probeport("localhost";port);
     mt found {
       $lokeerr:e 0;
       $ok:s
         servers=@(servers;s)
-    }
+    };
+
   };
   let endms=time.nowms();
   let elapsed=endms-startms;
@@ -129,11 +144,10 @@ f=scanrange(startport:i32;endport:i32):$discoveryresult{
   let cap=100;
   let startms=time.nowms();
   let servers=@($discoveredserver);
-  let limit=if((endport-startport)+1 > cap){
-    startport+cap-1
-  }el{
-    endport
-  };
+  let limit=mut.endport;
+  if((endport-startport)+1 > cap){
+    limit=startport+cap-1
+  }el{};
 
   let result=scanrangefrom(startport;limit;servers;0;startms);
   <result
@@ -197,7 +211,8 @@ f=formatresult(result:$discoveryresult):str{
     "")
   ;
   let rows="";
-  result.servers.each|s{
+  lp(let ii213=0;ii213<result.servers.len;ii213=ii213+1){
+    let s=result.servers.get(ii213);
     let ports=str.fromint(s.port);
     let toolss=str.fromint(s.toolscount);
     let row=str.concat(
@@ -214,6 +229,7 @@ f=formatresult(result:$discoveryresult):str{
 ")
     ;
     rows=str.concat(rows;row)
+
   };
   let scanneds=str.fromint(result.scannedports);
   let founds=str.fromint(result.found);

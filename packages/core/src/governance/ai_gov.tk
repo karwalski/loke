@@ -33,7 +33,7 @@ f=ensuretable(store:i64):bool{
   requires_audit INTEGER NOT NULL DEFAULT 0
 )";
   mt db.execparams(store.conn;sql;@()) {
-    $ok: <true;
+    $ok:v true;
     $err:e false
   }
 };
@@ -70,68 +70,58 @@ f=islocalmodel(modelid:str):bool{
   }
 };
 
+f=defaultpolicyfor(modelid:str):$modelpolicy{
+  if(islocalmodel(modelid)){
+    <$modelpolicy{
+      modelid:modelid;
+      approved:true;
+      tier:"local";
+      maxsensitivity:3;
+      requiresaudit:false
+    }
+  }el{
+    <$modelpolicy{
+      modelid:modelid;
+      approved:false;
+      tier:"cloud-standard";
+      maxsensitivity:0;
+      requiresaudit:true
+    }
+  }
+};
+
+f=checkmodelrows(rows:i64;modelid:str):$modelpolicy{
+  if(rows.len=0){
+    <defaultpolicyfor(modelid)
+  }el{
+    let row=rows.get(0);
+    <$modelpolicy{
+      modelid:json.getstr(row;"model_id");
+      approved:json.getint(row;"approved")=1;
+      tier:json.getstr(row;"tier");
+      maxsensitivity:json.getint(row;"max_sensitivity");
+      requiresaudit:json.getint(row;"requires_audit")=1
+    }
+  }
+};
+
 f=checkmodel(store:i64;modelid:str):$modelpolicy{
   mt db.queryparams(
     store.conn;
     "SELECT model_id,approved,tier,max_sensitivity,requires_audit FROM model_policies WHERE model_id=? LIMIT 1";
     @(modelid)
   ) {
-    $ok:rows {
-      if(rows.len=0){
-        if(islocalmodel(modelid)){
-          <$modelpolicy{
-            modelid:modelid;
-            approved:true;
-            tier:"local";
-            maxsensitivity:3;
-            requiresaudit:false
-          }
-        }el{
-          <$modelpolicy{
-            modelid:modelid;
-            approved:false;
-            tier:"cloud-standard";
-            maxsensitivity:0;
-            requiresaudit:true
-          }
-        }
-      }el{
-        let row=rows.get(0);
-        <$modelpolicy{
-          modelid:json.getstr(row;"model_id");
-          approved:json.getint(row;"approved")=1;
-          tier:json.getstr(row;"tier");
-          maxsensitivity:json.getint(row;"max_sensitivity");
-          requiresaudit:json.getint(row;"requires_audit")=1
-        }
-      }
-    };
-    $err:e {
-      if(islocalmodel(modelid)){
-        <$modelpolicy{
-          modelid:modelid;
-          approved:true;
-          tier:"local";
-          maxsensitivity:3;
-          requiresaudit:false
-        }
-      }el{
-        <$modelpolicy{
-          modelid:modelid;
-          approved:false;
-          tier:"cloud-standard";
-          maxsensitivity:0;
-          requiresaudit:true
-        }
-      }
-    }
+    $ok:rows checkmodelrows(rows;modelid);
+    $err:e defaultpolicyfor(modelid)
   }
 };
 
 f=approvemodel(store:i64;policy:$modelpolicy):bool{
-  let approveds=if(policy.approved){ "1" }el{ "0" };
+  let approveds=mut."0";
+  if(policy.approved){ approveds="1" }el{};
   let maxsenss=str.fromint(policy.maxsensitivity);
-  let requiresaudits=if(policy.requiresaudit){ "1" }el{ "0" };
+  let requiresaudits=mut."0";
+  if(policy.requiresaudit){ requiresaudits="1" }el{};
   mt db.execparams(
     store.conn;
     "INSERT INTO model_policies (model_id,approved,tier,max_sensitivity,requires_audit)
@@ -143,7 +133,7 @@ f=approvemodel(store:i64;policy:$modelpolicy):bool{
        requires_audit=excluded.requires_audit";
     @(policy.modelid;approveds;policy.tier;maxsenss;requiresaudits)
   ) {
-    $ok: <true;
+    $ok:v true;
     $err:e false
   }
 };
@@ -191,7 +181,8 @@ f=assessprompt(prompt:str):$promptrisk{
 
   let injectionhitsf=str.tofloat(str.fromint(injectionhits));
   let rawscore=injectionhitsf*0.25;
-  let injectionscore=if(rawscore>1.0){ 1.0 }el{ rawscore };
+  let injectionscore=mut.rawscore;
+  if(rawscore>1.0){ injectionscore=1.0 }el{};
 
   let promptlen=str.len(prompt);
   let hallhits=0;
@@ -218,14 +209,13 @@ f=assessprompt(prompt:str):$promptrisk{
     hallhits=hallhits+1;
     notes=@(notes;"hallucination-risk: requests current information")
   }el{};
-  let hallucinationrisk=if(hallhits>3){
-    "high"
+  let hallucinationrisk=mut."low";
+  if(hallhits>3){
+    hallucinationrisk="high"
   }el{
     if(hallhits>1){
-      "medium"
-    }el{
-      "low"
-    }
+      hallucinationrisk="medium"
+    }el{}
   };
 
   let sensitive=false;
@@ -310,34 +300,36 @@ f=assessoutput(output:str):$outputrisk{
   let sentences=str.split(output;".");
   let factualcount=0;
   let monthwords=@("January";"February";"March";"April";"May";"June";"July";"August";"September";"October";"November";"December");
-  sentences.each|sentence{
+  lp(let ii302=0;ii302<sentences.len;ii302=ii302+1){
+    let sentence=sentences.get(ii302);
     let hasdigit=str.matches(sentence;"\\d");
     let hasmonth=false;
-    monthwords.each|month{
+    lp(let ii1=0;ii1<monthwords.len;ii1=ii1+1){
+      let month=monthwords.get(ii1);
       if(str.contains(sentence;month)){
         hasmonth=true
-      }el{}
+      }el{};
     };
     if(hasdigit){
       factualcount=factualcount+1
     }el{
       if(hasmonth){
         factualcount=factualcount+1
-      }el{}
-    }
+      }el{};
+    };
+
   };
 
-  let risklevel=if(pii){
-    "high"
+  let risklevel=mut."low";
+  if(pii){
+    risklevel="high"
   }el{
     if(factualcount>8){
-      "high"
+      risklevel="high"
     }el{
       if(factualcount>3){
-        "medium"
-      }el{
-        "low"
-      }
+        risklevel="medium"
+      }el{}
     }
   };
 

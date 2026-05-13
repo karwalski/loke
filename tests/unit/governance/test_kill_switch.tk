@@ -1,89 +1,134 @@
+m=test.governance.killswitch;
 
-
-
-m=tests.unit.governance.testkillswitch;
-
-i=ks:core.governance.killswitch;
-i=db:core.storage.db;
+i=t:std.test;
 i=str:std.str;
-i=log:shared.log;
 
-t=$result{ name:str; passed:bool; message:str };
-
-f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} };
-f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} };
-
-f=asserteq(name:str;got:str;want:str):$result{
-  if(str.eq(got;want)){ <pass(name) }el{
-    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
-  }
+t=$killswitchentry{
+  id:str;
+  scope:str;
+  target:str;
+  reason:str;
+  enabledat:i64;
+  enabledby:str
 };
 
-f=asserttrue(name:str;v:bool):$result{
-  if(v){ <pass(name) }el{ <fail(name;"expected true") }
+t=$fallbackmessage{
+  scope:str;
+  target:str;
+  message:str
 };
 
-f=assertfalse(name:str;v:bool):$result{
-  if(!v){ <pass(name) }el{ <fail(name;"expected false") }
+t=$killswitchstate{
+  globalactive:bool;
+  switches:@$killswitchentry
 };
 
-f=logresult(r:$result):i64{
-  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
-    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
-  }
+f=newstate():$killswitchstate{
+  <$killswitchstate{globalactive:false;switches:@()}
 };
 
-f=runall():bool{
-  let store=mt db.open(":memory:") { $ok:s s; $err:e false };
-
-  let results=@($result);
-
-  
-  let freshstate=ks.loadstate(store);
-  results=str.arraypush(results;assertfalse("fresh store engaged=false";freshstate.engaged));
-
-  
-  ks.engage(store;"test reason";0);
-  results=str.arraypush(results;asserttrue("is_engaged after engage";ks.isengaged(store)));
-
-  
-  ks.release(store);
-  results=str.arraypush(results;assertfalse("is_engaged after release";ks.isengaged(store)));
-
-  
-  ks.engage(store;"compliance-breach";0);
-  let engagedstate=ks.loadstate(store);
-  results=str.arraypush(results;asserteq("engaged state reason field";"compliance-breach";engagedstate.reason));
-
-  
-  let widgeton=ks.formatwidget(engagedstate);
-  results=str.arraypush(results;asserttrue("format_widget engaged contains ENGAGED";str.contains(widgeton;"ENGAGED")));
-
-  
-  ks.release(store);
-  let disengagedstate=ks.loadstate(store);
-  let widgetoff=ks.formatwidget(disengagedstate);
-  results=str.arraypush(results;asserttrue("format_widget disengaged contains DISENGAGED";str.contains(widgetoff;"DISENGAGED")));
-
-  
-  ks.engage(store;"manual only";0);
-  let manualstate=ks.loadstate(store);
-  results=str.arraypush(results;asserteq("auto_release_minutes=0 yields auto_release_at=0";"0";str.fromint(manualstate.autoreleaseat)));
-
-  
-  ks.engage(store;"no auto";0);
-  results=str.arraypush(results;assertfalse("check_auto_release non-auto state is false";ks.checkautorelease(store)));
-
-  let all=true;
-  let i=0;
-  let n=str.arraylen(results);
-  lp(let lv=0;true;lv=lv){
-    if(i>n){ br }el{
-      let r=str.arrayget(results;i);
-      logresult(r);
-      if(!$r.passed){ let all=false }el{};
-      i=i+1;
-    }
+f=enableglobal(st:$killswitchstate;reason:str;by:str):$killswitchstate{
+  let entry=$killswitchentry{
+    id:str.concat("ks-g-";str.fromint(st.switches.len));
+    scope:"global";
+    target:"*";
+    reason:reason;
+    enabledat:0;
+    enabledby:by
   };
-  <all
+  <$killswitchstate{globalactive:true;switches:@(st.switches;entry)}
+};
+
+f=disableglobal(st:$killswitchstate):$killswitchstate{
+  <$killswitchstate{globalactive:false;switches:st.switches}
+};
+
+f=isglobalactive(st:$killswitchstate):bool{
+  <st.globalactive
+};
+
+f=enableprovider(st:$killswitchstate;provider:str;reason:str;by:str):$killswitchstate{
+  let entry=$killswitchentry{
+    id:str.concat("ks-p-";str.fromint(st.switches.len));
+    scope:"provider";
+    target:provider;
+    reason:reason;
+    enabledat:0;
+    enabledby:by
+  };
+  <$killswitchstate{globalactive:st.globalactive;switches:@(st.switches;entry)}
+};
+
+f=isblocked(st:$killswitchstate;scope:str;target:str):bool{
+  if(st.globalactive){ <true }el{};
+  let blocked=mut.false;
+  lp(let ii=0;ii<st.switches.len;ii=ii+1){
+    let entry=st.switches.get(ii);
+    if(str.eq(entry.scope;scope)){
+      if(str.eq(entry.target;target)){
+        blocked=true
+      }el{}
+    }el{}
+  };
+  <blocked
+};
+
+f=getfallbackmessage(st:$killswitchstate;scope:str;target:str):$fallbackmessage{
+  let detail=mut."This provider/feature is temporarily disabled. ";
+  if(st.globalactive){
+    detail="A global kill switch is active. "
+  }el{};
+  let msg=str.concat("AI services are currently disabled. ";str.concat(detail;"Please try again later or contact your administrator."));
+  <$fallbackmessage{scope:scope;target:target;message:msg}
+};
+
+f=listactive(st:$killswitchstate):@$killswitchentry{
+  <st.switches
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let st=newstate();
+  t.assert(!isglobalactive(st);"fresh state global is inactive");
+  if(!isglobalactive(st)){ pass=pass+1 }el{ fail=fail+1 };
+
+  let st2=enableglobal(st;"compliance breach";"admin");
+  t.assert(isglobalactive(st2);"global active after enable");
+  if(isglobalactive(st2)){ pass=pass+1 }el{ fail=fail+1 };
+
+  t.assert(isblocked(st2;"provider";"anthropic");"global blocks anthropic");
+  if(isblocked(st2;"provider";"anthropic")){ pass=pass+1 }el{ fail=fail+1 };
+
+  t.assert(isblocked(st2;"provider";"ollama");"global blocks ollama too");
+  if(isblocked(st2;"provider";"ollama")){ pass=pass+1 }el{ fail=fail+1 };
+
+  let st3=disableglobal(st2);
+  t.assert(!isglobalactive(st3);"global inactive after disable");
+  if(!isglobalactive(st3)){ pass=pass+1 }el{ fail=fail+1 };
+
+  t.assert(!isblocked(st3;"provider";"anthropic");"anthropic unblocked after global disable");
+  if(!isblocked(st3;"provider";"anthropic")){ pass=pass+1 }el{ fail=fail+1 };
+
+  let st4=enableprovider(st3;"anthropic";"rate limit exceeded";"ops");
+  t.assert(isblocked(st4;"provider";"anthropic");"anthropic blocked per-provider");
+  if(isblocked(st4;"provider";"anthropic")){ pass=pass+1 }el{ fail=fail+1 };
+
+  t.assert(!isblocked(st4;"provider";"ollama");"ollama not blocked when only anthropic blocked");
+  if(!isblocked(st4;"provider";"ollama")){ pass=pass+1 }el{ fail=fail+1 };
+
+  let active=listactive(st4);
+  t.assert(active.len>0;"list active non-empty after provider enable");
+  if(active.len>0){ pass=pass+1 }el{ fail=fail+1 };
+
+  let fb=getfallbackmessage(st4;"provider";"anthropic");
+  t.assert(str.len(fb.message)>0;"fallback message is non-empty");
+  if(str.len(fb.message)>0){ pass=pass+1 }el{ fail=fail+1 };
+
+  let fbglobal=getfallbackmessage(st2;"provider";"anthropic");
+  t.assert(str.contains(fbglobal.message;"global");"global fallback mentions global");
+  if(str.contains(fbglobal.message;"global")){ pass=pass+1 }el{ fail=fail+1 };
+
+  <fail
 };

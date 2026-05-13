@@ -38,46 +38,87 @@ f=defaultconfig():$serverconfig{
 
 
 
-f=handlerequest(raw:str;config:$serverconfig):str{
-  let cid=log.newcorrelationid();
-  let req=proto.parserequest(raw);
-  mt req {
-    $lokeerr:e proto.errorresponse(0;-32700;"Parse error");
-    $ok:request {
-      log.debug(str.concat("mcp request: ";request.method);"mcp-server";cid);
-      if(str.eq(request.method;"initialize")){
-        let result=proto.initresponse(config.servername;config.version);
-        <proto.okresponse(request.id;result)
+f=handletoolscall(request:i64;config:$serverconfig):str{
+  let paramsparsed=json.dec(request.paramsraw);
+  mt paramsparsed {
+    $jsonerr:e proto.errorresponse(request.id;-32602;"Invalid params");
+    $ok:paramsobj handletoolscallparams(request;paramsobj;config)
+  }
+};
+
+f=handletoolscallparams(request:i64;paramsobj:i64;config:$serverconfig):str{
+  let toolname=json.getstr(paramsobj;"name");
+  let argsval=json.getval(paramsobj;"arguments");
+  let argsjson=json.enc(argsval);
+  let toolresult=tools.handletool(toolname;argsjson;config.presidiourl;config.ollamaurl);
+  <proto.okresponse(request.id;toolresult.text)
+};
+
+f=dispatchrequest(request:i64;config:$serverconfig;cid:str):str{
+  log.debug(str.concat("mcp request: ";request.method);"mcp-server";cid);
+  if(str.eq(request.method;"initialize")){
+    let result=proto.initresponse(config.servername;config.version);
+    <proto.okresponse(request.id;result)
+  }el{
+    if(str.eq(request.method;"tools/list")){
+      let tooldefs=tools.alltools();
+      let result=proto.toolslistresult(tooldefs);
+      <proto.okresponse(request.id;result)
+    }el{
+      if(str.eq(request.method;"tools/call")){
+        <handletoolscall(request;config)
       }el{
-        if(str.eq(request.method;"tools/list")){
-          let tooldefs=tools.alltools();
-          let result=proto.toolslistresult(tooldefs);
-          <proto.okresponse(request.id;result)
-        }el{
-          if(str.eq(request.method;"tools/call")){
-            let paramsparsed=json.dec(request.paramsraw);
-            mt paramsparsed {
-              $jsonerr:e proto.errorresponse(request.id;-32602;"Invalid params");
-              $ok:paramsobj {
-                let toolname=json.getstr(paramsobj;"name");
-                let argsval=json.getval(paramsobj;"arguments");
-                let argsjson=json.enc(argsval);
-                let toolresult=tools.handletool(toolname;argsjson;config.presidiourl;config.ollamaurl);
-                <proto.okresponse(request.id;toolresult.text)
-              }
-            }
-          }el{
-            log.warn(str.concat("mcp unknown method: ";request.method);"mcp-server";cid);
-            <proto.errorresponse(request.id;-32601;"Method not found")
-          }
-        }
+        log.warn(str.concat("mcp unknown method: ";request.method);"mcp-server";cid);
+        <proto.errorresponse(request.id;-32601;"Method not found")
       }
     }
   }
 };
 
+f=handlerequest(raw:str;config:$serverconfig):str{
+  let cid=log.newcorrelationid();
+  let req=proto.parserequest(raw);
+  mt req {
+    $lokeerr:e proto.errorresponse(0;-32700;"Parse error");
+    $ok:request dispatchrequest(request;config;cid)
+  }
+};
 
 
+
+
+f=handleconndata(raw:str;c:i64;config:$serverconfig;cid:str):void{
+  let response=handlerequest(raw;config);
+  let writeresult=net.write(c;response);
+  mt writeresult {
+    $neterr:e log.warn("mcp server: write error";"mcp-server";cid);
+    $ok:v void
+  };
+  net.close(c)
+};
+
+f=handleconnreadfail(c:i64;cid:str):void{
+  log.warn("mcp server: read error";"mcp-server";cid);
+  net.close(c)
+};
+
+f=handleconn(c:i64;config:$serverconfig;cid:str):void{
+  let data=net.read(c);
+  mt data {
+    $neterr:e handleconnreadfail(c;cid);
+    $ok:raw handleconndata(raw;c;config;cid)
+  }
+};
+
+f=startlistener(l:i64;config:$serverconfig;cid:str):void{
+  lp(let lv=0;true;lv=lv){
+    let conn=net.accept(l);
+    mt conn {
+      $neterr:e log.warn("mcp server: accept error";"mcp-server";cid);
+      $ok:c handleconn(c;config;cid)
+    }
+  }
+};
 
 f=start(config:$serverconfig):void{
   let cid=log.newcorrelationid();
@@ -86,31 +127,6 @@ f=start(config:$serverconfig):void{
   let listener=net.listen(config.host;config.port);
   mt listener {
     $neterr:e log.error(str.concat("mcp server: failed to listen on port ";portstr);"mcp-server";cid);
-    $ok:l {
-      lp(let lv=0;true;lv=lv){
-        let conn=net.accept(l);
-        mt conn {
-          $neterr:e log.warn("mcp server: accept error";"mcp-server";cid);
-          $ok:c {
-            let data=net.read(c);
-            mt data {
-              $neterr:e {
-                log.warn("mcp server: read error";"mcp-server";cid);
-                net.close(c)
-              };
-              $ok:raw {
-                let response=handlerequest(raw;config);
-                let writeresult=net.write(c;response);
-                mt writeresult {
-                  $neterr:e log.warn("mcp server: write error";"mcp-server";cid);
-                  $ok: void
-                };
-                net.close(c)
-              }
-            }
-          }
-        }
-      }
-    }
+    $ok:l startlistener(l;config;cid)
   }
 };

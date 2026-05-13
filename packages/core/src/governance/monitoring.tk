@@ -40,7 +40,7 @@ f=ensuretable(store:i64):void!$lokeerr{
   created_at TEXT NOT NULL
 )";
   mt db.execparams(store.conn;sql;@()) {
-    $ok: <$ok(void);
+    $ok:v $ok(void);
     $err:e $err($storageerr("failed to create quality_signals table"))
   }
 };
@@ -48,7 +48,8 @@ f=ensuretable(store:i64):void!$lokeerr{
 
 f=recordsignal(store:i64;signal:$qualitysignal):void!$lokeerr{
   let id=str.randhex(16);
-  let thumbsups=if(signal.thumbsup){ "1" }el{ "0" };
+  let thumbsups=mut."0";
+  if(signal.thumbsup){ thumbsups="1" }el{};
   let coherences=str.fromfloat(signal.coherencescore);
   let relevances=str.fromfloat(signal.relevancescore);
   mt db.execparams(
@@ -65,19 +66,59 @@ f=recordsignal(store:i64;signal:$qualitysignal):void!$lokeerr{
       relevances
     )
   ) {
-    $ok: {
-      log.debug(
-        str.concat("quality signal recorded for model: ";signal.modelid);
-        "monitoring";
-        signal.requestid
-      );
-      <$ok(void)
-    };
+    $ok:v $ok(void);
     $err:e $err($storageerr(str.concat("failed to record quality signal for: ";signal.modelid)))
   }
 };
 
 
+
+f=buildtrend(rows:i64;modelid:str;days:u32):$qualitytrend{
+  let total=rows.len;
+  if(total = 0){
+    <$qualitytrend{
+      modelid:modelid;
+      perioddays:days;
+      thumbsuprate:0.0;
+      avgcoherence:0.0;
+      avgrelevance:0.0;
+      totalsignals:0;
+      degradationdetected:false
+    }
+  }el{
+    let thumbsupcount=mut.0;
+    let coherencesum=mut.0.0;
+    let relevancesum=mut.0.0;
+    lp(let ii91=0;ii91<rows.len;ii91=ii91+1){
+      let row=rows.get(ii91);
+      let tu=json.getint(row;"thumbs_up");
+      if(tu = 1){
+        thumbsupcount=thumbsupcount+1
+      }el{};
+      coherencesum=coherencesum+json.getfloat(row;"coherence_score");
+      relevancesum=relevancesum+json.getfloat(row;"relevance_score")
+
+    };
+    let totalf=str.tofloat(str.fromint(total));
+    let thumbsupcountf=str.tofloat(str.fromint(thumbsupcount));
+    let rate=thumbsupcountf/totalf;
+    let avgcoh=coherencesum/totalf;
+    let avgrel=relevancesum/totalf;
+    let degraded=mut.false;
+    if(total > 10){
+      degraded=rate < 0.7
+    }el{};
+    <$qualitytrend{
+      modelid:modelid;
+      perioddays:days;
+      thumbsuprate:rate;
+      avgcoherence:avgcoh;
+      avgrelevance:avgrel;
+      totalsignals:total;
+      degradationdetected:degraded
+    }
+  };
+};
 
 f=computetrend(store:i64;modelid:str;days:u32):$qualitytrend!$lokeerr{
   let dayss=str.fromint(days);
@@ -86,72 +127,21 @@ f=computetrend(store:i64;modelid:str;days:u32):$qualitytrend!$lokeerr{
     str.concat(dayss;" days')")
   );
   mt db.queryparams(store.conn;sql;@(modelid)) {
-    $ok:rows {
-      let total=rows.len;
-      if(total = 0){
-        <$ok($qualitytrend{
-          modelid:modelid;
-          perioddays:days;
-          thumbsuprate:0.0;
-          avgcoherence:0.0;
-          avgrelevance:0.0;
-          totalsignals:0;
-          degradationdetected:false
-        })
-      }el{
-        let thumbsupcount=0;
-        let coherencesum=0.0;
-        let relevancesum=0.0;
-        rows.each|row{
-          let tu=json.getint(row;"thumbs_up");
-          if(tu = 1){
-            thumbsupcount=thumbsupcount+1
-          }el{};
-          coherencesum=coherencesum+json.getfloat(row;"coherence_score");
-          relevancesum=relevancesum+json.getfloat(row;"relevance_score")
-        };
-        let totalf=str.tofloat(str.fromint(total));
-        let thumbsupcountf=str.tofloat(str.fromint(thumbsupcount));
-        let rate=thumbsupcountf/totalf;
-        let avgcoh=coherencesum/totalf;
-        let avgrel=relevancesum/totalf;
-        let degraded=if(total > 10){
-          rate < 0.7
-        }el{
-          false
-        };
-        log.debug(
-          str.concat("trend computed for model: ";modelid);
-          "monitoring";
-          "system"
-        );
-        <$ok($qualitytrend{
-          modelid:modelid;
-          perioddays:days;
-          thumbsuprate:rate;
-          avgcoherence:avgcoh;
-          avgrelevance:avgrel;
-          totalsignals:total;
-          degradationdetected:degraded
-        })
-      }
-    };
+    $ok:rows $ok(buildtrend(rows;modelid;days));
     $err:e $err($storageerr(str.concat("failed to compute trend for model: ";modelid)))
   }
 };
 
 
 f=thumbsdownrate(store:i64;modelid:str;days:u32):f64!$lokeerr{
-  mt computetrend(store;modelid;days) {
-    $ok:trend {
-      if(trend.totalsignals = 0){
-        <$ok(0.0)
-      }el{
-        <$ok(1.0-trend.thumbsuprate)
-      }
-    };
+  let tresult=computetrend(store;modelid;days);
+  let trend=mt tresult {
+    $ok:trend trend;
     $err:e $err(e)
-  }
+  };
+  let rate=mut.0.0;
+  if(!(trend.totalsignals = 0)){ rate=1.0-trend.thumbsuprate }el{};
+  <rate
 };
 
 
@@ -184,29 +174,19 @@ f=formatqualityreport(trends:@$qualitytrend):str{
 ==============
 ";
   let body="";
-  trends.each|trend{
-    let prefix=if(trend.degradationdetected){
-      "[DEGRADED] "
-    }el{
-      ""
-    };
+  lp(let ii172=0;ii172<trends.len;ii172=ii172+1){
+    let trend=trends.get(ii172);
+    let prefix=mut."";
+    if(trend.degradationdetected){
+      prefix="[DEGRADED] "
+    }el{};
     let name=str.concat(prefix;trend.modelid);
     let namepadded=padright(name;22);
     let rates=pctstr(trend.thumbsuprate);
     let cohs=str.fromfloat(trend.avgcoherence);
     let rels=str.fromfloat(trend.avgrelevance);
     let totals=str.fromint(trend.totalsignals);
-    let line=if(trend.degradationdetected){
-      str.concat(
-        str.concat(
-          str.concat(
-            str.concat(namepadded;"thumbs-up: ");
-            rates);
-          "  <- below threshold
-");
-        "")
-    }el{
-      str.concat(
+    let line=mut.str.concat(
         str.concat(
           str.concat(
             str.concat(
@@ -223,9 +203,19 @@ f=formatqualityreport(trends:@$qualitytrend):str{
             "  (");
           totals);
         " signals)
-")
-    };
+");
+    if(trend.degradationdetected){
+      line=str.concat(
+        str.concat(
+          str.concat(
+            str.concat(namepadded;"thumbs-up: ");
+            rates);
+          "  <- below threshold
+");
+        "")
+    }el{};
     body=str.concat(body;line)
+
   };
   <str.concat(header;body)
 };

@@ -47,8 +47,7 @@ f=ensuretable(store:i64):bool{
 )";
   mt db.execparams(store.conn;sql;@()) {
     $ok:v true;
-    $err:e log.warn("failed to create rate_limit_events table";"rules_engine";"system");
-      <false
+    $err:e false
   }
 };
 
@@ -143,62 +142,86 @@ f=evalcondition(cond:$condition;ctx:$evalcontext):bool{
   }
 };
 
+f=evaland(conditions:@$condition;ctx:$evalcontext):bool{
+  let allpass=mut.true;
+  lp(let ii146=0;ii146<conditions.len;ii146=ii146+1){
+    let cond=conditions.get(ii146);
+    if(allpass){
+      if(evalcondition(cond;ctx)){
+        allpass=allpass
+      }el{
+        allpass=false
+      };
+    }el{}
+
+  };
+  <allpass
+};
+
+f=evalor(conditions:@$condition;ctx:$evalcontext):bool{
+  let anypass=mut.false;
+  lp(let ii162=0;ii162<conditions.len;ii162=ii162+1){
+    let cond=conditions.get(ii162);
+    if(anypass){
+      anypass=anypass
+    }el{
+      if(evalcondition(cond;ctx)){
+        anypass=true
+      }el{}
+    }
+
+  };
+  <anypass
+};
+
+f=evalnot(conditions:@$condition;ctx:$evalcontext):bool{
+  if(conditions.len=0){
+    <false
+  }el{
+    let first=conditions.get(0);
+    <evalcondition(first;ctx)=false
+  }
+};
+
 f=evaluate(rule:$compoundrule;ctx:$evalcontext):$evalresult{
   let matched=mt rule.logic {
-    $and:v
-      let allpass=true;
-      rule.conditions.each|cond{
-        if(allpass){
-          if(evalcondition(cond;ctx)){
-            allpass=allpass
-          }el{
-            allpass=false
-          }
-        }el{}
-      };
-      allpass;
-    $or:v
-      let anypass=false;
-      rule.conditions.each|cond{
-        if(anypass){
-          anypass=anypass
-        }el{
-          if(evalcondition(cond;ctx)){
-            anypass=true
-          }el{}
-        }
-      };
-      anypass;
-    $not:v
-      if(rule.conditions.len=0){
-        false
-      }el{
-        let first=rule.conditions.get(0);
-        evalcondition(first;ctx)=false
-      }
+    $and:v evaland(rule.conditions;ctx);
+    $or:v evalor(rule.conditions;ctx);
+    $not:v evalnot(rule.conditions;ctx)
   };
-  let reason=if(matched){
-    str.concat(str.concat("Rule matched: ";rule.name);str.concat(" -> ";rule.action))
-  }el{
-    str.concat("Rule not matched: ";rule.name)
-  };
+  let reason=mut.str.concat("Rule not matched: ";rule.name);
+  if(matched){
+    reason=str.concat(str.concat("Rule matched: ";rule.name);str.concat(" -> ";rule.action))
+  }el{};
+  let action=mut."allow";
+  if(matched){ action=rule.action }el{};
   <$evalresult{
     ruleid:rule.id;
     matched:matched;
-    action:if(matched){ rule.action }el{ "allow" };
+    action:action;
     reason:reason
   }
 };
 
 f=evaluateall(rules:@$compoundrule;ctx:$evalcontext):@$evalresult{
   let results=@();
-  rules.each|rule{
+  lp(let ii207=0;ii207<rules.len;ii207=ii207+1){
+    let rule=rules.get(ii207);
     let result=evaluate(rule;ctx);
     if(result.matched){
       results=@(results;result)
     }el{}
+
   };
   <results
+};
+
+f=ratecheckcount(rows:i64;limit:i32):bool{
+  let count=mut.0;
+  if(rows.len=0){}el{
+    count=json.getint(rows.get(0);"cnt")
+  };
+  <!(count>limit)
 };
 
 f=ratecheck(store:i64;scope:str;limit:i32;windowseconds:i32):bool{
@@ -233,16 +256,8 @@ f=ratecheck(store:i64;scope:str;limit:i32;windowseconds:i32):bool{
     "SELECT COUNT(*) as cnt FROM rate_limit_events WHERE scope=? AND event_ts>=?";
     @(scope;cutoffs)
   ) {
-    $ok:rows
-      let count=if(rows.len=0){
-        0
-      }el{
-        json.getint(rows.get(0);"cnt")
-      };
-      <!(count>limit);
-    $err:e
-      log.warn(str.concat("rate_check: failed to count events for scope: ";scope);"rules_engine";"system");
-      <true
+    $ok:rows ratecheckcount(rows;limit);
+    $err:e true
   }
 };
 

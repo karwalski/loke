@@ -77,30 +77,56 @@ f=checkdue(config:$updateconfig):bool{
   <(now - config.lastchecked) > intervalms
 };
 
+f=parsedigestfromlist(out:str;modelid:str):str{
+  let lines=str.split(out;"
+");
+  let found="";
+  lp(let i=0;i<str.arraylen(lines);i=i+1){ let line=str.arrayget(lines;i);
+    if(str.contains(line;modelid)){
+      let parts=str.splitwhitespace(line);
+      if(str.len(parts) > 2){
+        found=parts.get(1)
+      }el{}
+    }el{}
+  };
+  <found
+};
+
+f=digestlisterr(e:i64):str{
+  log.warn(
+    str.concat("failed to get installed digest: ";e.message);
+    "installer.updater";
+    "system"
+  );
+  <""
+};
+
 f=getinstalleddigest(modelid:str):str{
   let result=proc.exec("ollama";@("list"));
   mt result {
-    $ok:out
-      let lines=str.split(out;"
-");
-      let found="";
-      lines.each|line{
-        if(str.contains(line;modelid)){
-          let parts=str.splitwhitespace(line);
-          if(str.len(parts) > 2){
-            found=parts.get(1)
-          }el{}
-        }el{}
-      };
-      <found;
-    $err:e
-      log.warn(
-        str.concat("failed to get installed digest: ";e.message);
-        "installer.updater";
-        "system"
-      );
-      <""
+    $ok:out parsedigestfromlist(out;modelid);
+    $err:e digestlisterr(e)
   }
+};
+
+f=parsedigestresponse(r:i64):str{
+  let parsed=json.parse(r.body);
+  let digest=json.getstr(parsed;"digest");
+  if(str.len(digest) > 0){
+    <digest
+  }el{};
+  let info=json.getobj(parsed;"modelinfo");
+  let d2=json.getstr(info;"general.file_type");
+  <d2
+};
+
+f=latestdigesterr(e:i64):str{
+  log.warn(
+    str.concat("failed to query model info: ";e.message);
+    "installer.updater";
+    "system"
+  );
+  <""
 };
 
 f=getlatestdigest(modelid:str):str{
@@ -111,22 +137,8 @@ f=getlatestdigest(modelid:str):str{
     @(http.header("Content-Type";"application/json"))
   );
   mt resp {
-    $ok:r
-      let parsed=json.parse(r.body);
-      let digest=json.getstr(parsed;"digest");
-      if(str.len(digest) > 0){
-        <digest
-      }el{};
-      let info=json.getobj(parsed;"modelinfo");
-      let d2=json.getstr(info;"general.file_type");
-      <d2;
-    $err:e
-      log.warn(
-        str.concat("failed to query model info: ";e.message);
-        "installer.updater";
-        "system"
-      );
-      <""
+    $ok:r parsedigestresponse(r);
+    $err:e latestdigesterr(e)
   }
 };
 
@@ -156,6 +168,46 @@ f=checkmodelupdate(modelid:str):$updatecheck{
   }
 };
 
+f=verifyupdate(modelid:str;olddigest:str):bool{
+  let newdigest=getinstalleddigest(modelid);
+  if(str.len(newdigest) = 0){
+    log.warn(
+      str.concat("model not found after update: ";modelid);
+      "installer.updater";
+      "system"
+    );
+    <false
+  }el{};
+  if(str.len(olddigest) > 0){
+    if(str.eq(olddigest;newdigest)){
+      log.info(
+        str.concat("model already at latest: ";modelid);
+        "installer.updater";
+        "system"
+      );
+      <true
+    }el{}
+  }el{};
+  log.info(
+    str.concat(
+      str.concat("model updated: ";modelid);
+      str.concat(" digest: ";newdigest)
+    );
+    "installer.updater";
+    "system"
+  );
+  <true
+};
+
+f=handleupdatefailed(e:i64):bool{
+  log.warn(
+    str.concat("model update failed: ";e.message);
+    "installer.updater";
+    "system"
+  );
+  <false
+};
+
 f=updatemodel(modelid:str):bool{
   log.info(
     str.concat("pulling update for ";modelid);
@@ -165,42 +217,8 @@ f=updatemodel(modelid:str):bool{
   let olddigest=getinstalleddigest(modelid);
   let pullresult=proc.exec("ollama";@("pull";modelid));
   mt pullresult {
-    $ok:out
-      let newdigest=getinstalleddigest(modelid);
-      if(str.len(newdigest) = 0){
-        log.warn(
-          str.concat("model not found after update: ";modelid);
-          "installer.updater";
-          "system"
-        );
-        <false
-      }el{};
-      if(str.len(olddigest) > 0){
-        if(str.eq(olddigest;newdigest)){
-          log.info(
-            str.concat("model already at latest: ";modelid);
-            "installer.updater";
-            "system"
-          );
-          <true
-        }el{}
-      }el{};
-      log.info(
-        str.concat(
-          str.concat("model updated: ";modelid);
-          str.concat(" digest: ";newdigest)
-        );
-        "installer.updater";
-        "system"
-      );
-      <true;
-    $err:e
-      log.warn(
-        str.concat("model update failed: ";e.message);
-        "installer.updater";
-        "system"
-      );
-      <false
+    $ok:out verifyupdate(modelid;olddigest);
+    $err:e handleupdatefailed(e)
   }
 };
 

@@ -17,127 +17,120 @@ f=defaultconfig(datadir:str):$loaderconfig{
   }
 };
 
-f=loadfile(path:str):i64{
-  result=file.read(path);
-  |result{
-    $ok:contents
-      parsed=json.parse(contents);
-      |parsed{
-        $ok:data $policyset{
-            name:json.getstr(data;"name");
-            source:path;
-            regulations:json.getregulations(data;"regulations");
-            loadedat:std.nowms();
-            hash:str.randhex(8)
-          };
-        $err:e
-          log.warn(str.concat("policy: failed to parse file: ";path));
-          <$policyset{
-            name:"";
-            source:path;
-            regulations:@();
-            loadedat:std.nowms();
-            hash:str.randhex(8)
-          }
-      };
-    $err:e
-      log.warn(str.concat("policy: failed to read file: ";path));
-      <$policyset{
-        name:"";
+f=emptypolicyset(source:str;hash:str):i64{
+  <$policyset{
+    name:"";
+    source:source;
+    regulations:@();
+    loadedat:std.nowms();
+    hash:hash
+  }
+};
+
+f=parsefilecontents(contents:str;path:str):i64{
+  let parsed=json.parse(contents);
+  mt parsed {
+    $ok:data $policyset{
+        name:json.getstr(data;"name");
         source:path;
-        regulations:@();
+        regulations:json.getregulations(data;"regulations");
         loadedat:std.nowms();
         hash:str.randhex(8)
-      }
+      };
+    $err:e emptypolicyset(path;str.randhex(8))
+  }
+};
+
+f=loadfile(path:str):i64{
+  let result=file.read(path);
+  mt result {
+    $ok:contents parsefilecontents(contents;path);
+    $err:e emptypolicyset(path;str.randhex(8))
+  }
+};
+
+f=parseurlcontents(body:str;url:str):i64{
+  let parsed=json.parse(body);
+  mt parsed {
+    $ok:data $policyset{
+        name:json.getstr(data;"name");
+        source:url;
+        regulations:json.getregulations(data;"regulations");
+        loadedat:std.nowms();
+        hash:str.randhex(8)
+      };
+    $err:e emptypolicyset(url;"")
   }
 };
 
 f=loadurl(url:str):i64{
-  result=http.get(url);
-  |result{
-    $ok:resp
-      parsed=json.parse(resp.body);
-      |parsed{
-        $ok:data $policyset{
-            name:json.getstr(data;"name");
-            source:url;
-            regulations:json.getregulations(data;"regulations");
-            loadedat:std.nowms();
-            hash:str.randhex(8)
-          };
-        $err:e
-          log.warn(str.concat("policy: failed to parse url response: ";url));
-          <$policyset{
-            name:"";
-            source:url;
-            regulations:@();
-            loadedat:std.nowms();
-            hash:""
-          }
-      };
-    $err:e
-      log.warn(str.concat("policy: failed to fetch url: ";url));
-      <$policyset{
-        name:"";
-        source:url;
-        regulations:@();
-        loadedat:std.nowms();
-        hash:""
-      }
+  let result=http.get(url);
+  mt result {
+    $ok:resp parseurlcontents(resp.body;url);
+    $err:e emptypolicyset(url;"")
   }
 };
 
-f=loadall(cfg:$loaderconfig):@i64{
-  sets=@();
-  files=file.listglob(cfg.policydir;"*.json");
-  |files{
-    $ok:paths
-      i=0;
-      lp(let lv=0;true;lv=lv) i < paths.len{
-        path=paths.get(i);
-        ps=loadfile(path);
-        sets=sets.push(ps);
-        i=i+1;
-      };
-    $err:e
-      log.warn(str.concat("policy: could not list policy dir: ";cfg.policydir))
-  };
-  cfg.enterpriseurl != ""{
-    ps=loadurl(cfg.enterpriseurl);
-    sets=sets.push(ps)
+f=loadallpaths(cfg:$loaderconfig;paths:i64):@i64{
+  let sets=@();
+  let i=0;
+  lp(let lv=0;i < paths.len;lv=lv){
+    let path=paths.get(i);
+    let ps=loadfile(path);
+    sets=sets.push(ps);
+    i=i+1
   };
   <sets
 };
 
+f=loadall(cfg:$loaderconfig):@i64{
+  let files=file.listglob(cfg.policydir;"*.json");
+  let sets=mt files {
+    $ok:paths loadallpaths(cfg;paths);
+    $err:e @()
+  };
+  if(str.len(cfg.enterpriseurl) > 0){
+    let ps=loadurl(cfg.enterpriseurl);
+    sets=sets.push(ps)
+  }el{};
+  <sets
+};
+
 f=checkreloadneeded(cfg:$loaderconfig;lastloadedat:i64):bool{
-  now=std.nowms();
-  threshold=cfg.reloadintervalseconds * 1000;
+  let now=std.nowms();
+  let threshold=cfg.reloadintervalseconds * 1000;
   <now - lastloadedat > threshold
 };
 
+f=severityrank(sev:str):i32{
+  if(str.eq(sev;"critical")){ <4 }el{
+    if(str.eq(sev;"high")){ <3 }el{
+      if(str.eq(sev;"medium")){ <2 }el{
+        if(str.eq(sev;"low")){ <1 }el{
+          <0
+        }
+      }
+    }
+  }
+};
+
 f=evaluate(sets:@i64;context:str;sensitivity:str):@i64{
-  violations=@();
-  severityrank=f(sev:str):i32{
-    sev = "critical"{ <4 };
-    sev = "high"{ <3 };
-    sev = "medium"{ <2 };
-    sev = "low"{ <1 };
-    <0
-  };
-  sensrank=severityrank(sensitivity);
-  si=0;
-  lp(let lv=0;true;lv=lv) si < sets.len{
-    ps=sets.get(si);
-    ri=0;
-    lp(let lv=0;true;lv=lv) ri < ps.regulations.len{
-      reg=ps.regulations.get(ri);
-      ki=0;
-      lp(let lv=0;true;lv=lv) ki < reg.rules.len{
-        rule=reg.rules.get(ki);
-        keywordmatch=str.contains(context;rule.id) || str.contains(context;rule.description);
-        severitymatch=severityrank(rule.severity) > sensrank;
-        keywordmatch || severitymatch{
-          v=$policyviolation{
+  let violations=@();
+  let sensrank=severityrank(sensitivity);
+  let si=0;
+  lp(let lv=0;si < sets.len;lv=lv){
+    let ps=sets.get(si);
+    let ri=0;
+    lp(let lv2=0;ri < ps.regulations.len;lv2=lv2){
+      let reg=ps.regulations.get(ri);
+      let ki=0;
+      lp(let lv3=0;ki < reg.rules.len;lv3=lv3){
+        let rule=reg.rules.get(ki);
+        let keywordmatch=str.contains(context;rule.id);
+        let descmatch=str.contains(context;rule.description);
+        let severitymatch=severityrank(rule.severity) > sensrank;
+        if(keywordmatch){
+          let v=$policyviolation{
             ruleid:rule.id;
             ruledesc:rule.description;
             action:rule.action;
@@ -145,6 +138,28 @@ f=evaluate(sets:@i64;context:str;sensitivity:str):@i64{
             context:context
           };
           violations=violations.push(v)
+        }el{
+          if(descmatch){
+            let v=$policyviolation{
+              ruleid:rule.id;
+              ruledesc:rule.description;
+              action:rule.action;
+              severity:rule.severity;
+              context:context
+            };
+            violations=violations.push(v)
+          }el{
+            if(severitymatch){
+              let v=$policyviolation{
+                ruleid:rule.id;
+                ruledesc:rule.description;
+                action:rule.action;
+                severity:rule.severity;
+                context:context
+              };
+              violations=violations.push(v)
+            }el{}
+          }
         };
         ki=ki+1
       };
@@ -156,22 +171,21 @@ f=evaluate(sets:@i64;context:str;sensitivity:str):@i64{
 };
 
 f=formatviolations(violations:@i64):str{
-  violations.len = 0{
+  if(violations.len = 0){
     <"No policy violations."
-  };
-  out="";
-  i=0;
-  lp(let lv=0;true;lv=lv) i < violations.len{
-    v=violations.get(i);
-    line=str.concat("[";str.upper(v.severity);"] ";v.ruleid;": ";v.ruledesc;" -> ";v.action);
-    out = ""{
+  }el{};
+  let out=mut."";
+  let i=0;
+  lp(let lv=0;i < violations.len;lv=lv){
+    let v=violations.get(i);
+    let line=str.concat("[";str.concat(str.upper(v.severity);str.concat("] ";str.concat(v.ruleid;str.concat(": ";str.concat(v.ruledesc;str.concat(" -> ";v.action)))))));
+    if(str.len(out) = 0){
       out=line
+    }el{
+      out=str.concat(out;str.concat("
+";line))
     };
-    out != ""{
-      out=str.concat(out;"
-";line)
-    };
-    i=i+1;
+    i=i+1
   };
   <out
 };

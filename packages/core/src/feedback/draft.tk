@@ -25,19 +25,17 @@ t=$draftresult{
 
 f=builddraftprompt(ctx:$draftcontext):str{
   let logcount=arr.len(ctx.pipelinelogs);
-  let cappedlogs=if(logcount > 50){
-    arr.slice(ctx.pipelinelogs;0;50)
-  }el{
-    ctx.pipelinelogs
-  };
+  let cappedlogs=mut.ctx.pipelinelogs;
+  if(logcount > 50){
+    cappedlogs=arr.slice(ctx.pipelinelogs;0;50)
+  }el{};
   let logsjoined=arr.join(cappedlogs;"
 ");
-  let errorsection=if(str.len(ctx.errorcode) > 0){
-    str.concat("
+  let errorsection=mut."";
+  if(str.len(ctx.errorcode) > 0){
+    errorsection=str.concat("
 Error code: ";ctx.errorcode)
-  }el{
-    ""
-  };
+  }el{};
   let prompt=str.concat(
     str.concat(
       str.concat(
@@ -96,60 +94,81 @@ Respond with only valid JSON, no extra text.
 };
 
 f=parsedraftresponse(raw:str):$draftresult{
-  let title=if(str.contains(raw;"\"title\"")){
+  let title=mut."Untitled issue";
+  if(str.contains(raw;"\"title\"")){
     let after=str.slice(raw;str.indexof(raw;"\"title\"");str.len(raw));
     let colonpos=str.indexof(after;":");
     let valstart=str.indexof(str.slice(after;colonpos;str.len(after));"\"");
     let fromquote=str.slice(after;colonpos + valstart + 1;str.len(after));
     let endquote=str.indexof(fromquote;"\"");
-    str.slice(fromquote;0;endquote)
-  }el{
-    "Untitled issue"
-  };
-  let body=if(str.contains(raw;"\"body\"")){
+    title=str.slice(fromquote;0;endquote)
+  }el{};
+  let body=mut."";
+  if(str.contains(raw;"\"body\"")){
     let after=str.slice(raw;str.indexof(raw;"\"body\"");str.len(raw));
     let colonpos=str.indexof(after;":");
     let valstart=str.indexof(str.slice(after;colonpos;str.len(after));"\"");
     let fromquote=str.slice(after;colonpos + valstart + 1;str.len(after));
     let endquote=str.indexof(fromquote;"\"");
-    str.slice(fromquote;0;endquote)
-  }el{
-    ""
-  };
-  let severity=if(str.contains(raw;"\"critical\"")){
-    "critical"
+    body=str.slice(fromquote;0;endquote)
+  }el{};
+  let severity=mut."medium";
+  if(str.contains(raw;"\"critical\"")){
+    severity="critical"
   }el{
     if(str.contains(raw;"\"high\"")){
-      "high"
+      severity="high"
     }el{
       if(str.contains(raw;"\"low\"")){
-        "low"
-      }el{
-        "medium"
-      }
+        severity="low"
+      }el{}
     }
   };
-  let labels=@();
-  let labels=if(str.contains(raw;"\"bug\"")){ arr.push(labels;"bug") }el{ labels };
-  let labels=if(str.contains(raw;"\"enhancement\"")){ arr.push(labels;"enhancement") }el{ labels };
-  let labels=if(str.contains(raw;"\"privacy\"")){ arr.push(labels;"privacy") }el{ labels };
-  let labels=if(str.contains(raw;"\"performance\"")){ arr.push(labels;"performance") }el{ labels };
-  let labels=if(str.contains(raw;"\"ux\"")){ arr.push(labels;"ux") }el{ labels };
-  let confidence=if(str.contains(raw;"\"confidence\"")){
+  let labels=mut.@();
+  if(str.contains(raw;"\"bug\"")){ labels=arr.push(labels;"bug") }el{};
+  if(str.contains(raw;"\"enhancement\"")){ labels=arr.push(labels;"enhancement") }el{};
+  if(str.contains(raw;"\"privacy\"")){ labels=arr.push(labels;"privacy") }el{};
+  if(str.contains(raw;"\"performance\"")){ labels=arr.push(labels;"performance") }el{};
+  if(str.contains(raw;"\"ux\"")){ labels=arr.push(labels;"ux") }el{};
+  let confidence=mut.0.5;
+  if(str.contains(raw;"\"confidence\"")){
     let after=str.slice(raw;str.indexof(raw;"\"confidence\"");str.len(raw));
     let colonpos=str.indexof(after;":");
     let valregion=str.slice(after;colonpos + 1;colonpos + 10);
     let trimmed=str.trim(valregion);
-    str.tof64(trimmed)
-  }el{
-    0.5
-  };
+    confidence=str.tof64(trimmed)
+  }el{};
   <$draftresult{
     title:title;
     body:body;
     labels:labels;
     severity:severity;
     confidence:confidence
+  }
+};
+
+f=draftrespok(r:i64;requestid:str):$draftresult{
+  log.info(
+    str.concat("draft pipeline response received for request: ";requestid);
+    "feedback.draft";
+    requestid
+  );
+  <parsedraftresponse(r.body)
+};
+
+f=draftrespfail(e:i64;requestid:str;userdescription:str):$draftresult{
+  log.warn(
+    str.concat("draft pipeline request failed: ";e.message);
+    "feedback.draft";
+    requestid
+  );
+  <$draftresult{
+    title:"Issue report (draft failed)";
+    body:str.concat("## Description
+";userdescription);
+    labels:@("bug");
+    severity:"medium";
+    confidence:0.0
   }
 };
 
@@ -173,29 +192,8 @@ f=draft(ctx:$draftcontext;apikey:str):$draftresult{
     )
   );
   mt resp {
-    $ok:r {
-      log.info(
-        str.concat("draft pipeline response received for request: ";ctx.requestid);
-        "feedback.draft";
-        ctx.requestid
-      );
-      <parsedraftresponse(r.body)
-    };
-    $err:e {
-      log.warn(
-        str.concat("draft pipeline request failed: ";e.message);
-        "feedback.draft";
-        ctx.requestid
-      );
-      <$draftresult{
-        title:"Issue report (draft failed)";
-        body:str.concat("## Description
-";ctx.userdescription);
-        labels:@("bug");
-        severity:"medium";
-        confidence:0.0
-      }
-    }
+    $ok:r draftrespok(r;ctx.requestid);
+    $err:e draftrespfail(e;ctx.requestid;ctx.userdescription)
   }
 };
 

@@ -221,7 +221,8 @@ f=dispatch(config:$externalconfig;event:$governanceevent):@$dispatchresult{
       lp(let j=0;j<str.arraylen(ep.events);j=j+1){ let evt=str.arrayget(ep.events;j);
         if(str.eq(evt;event.eventtype)){subscribed=true}el{};
         if(str.contains(evt;".all")){
-          let prefix=str.split(evt;".").get(0);
+          let prefixparts=str.split(evt;".");
+          let prefix=prefixparts.get(0);
           if(str.startswith(event.eventtype;prefix)){subscribed=true}el{}
         }el{};
         if(str.eq(evt;"audit.all")){subscribed=true}el{}
@@ -247,15 +248,16 @@ f=sendtoendpoint(ep:$externalendpoint;event:$governanceevent):$dispatchresult{
     if(attempt>ep.retrycount){
       done=true
     }el{
-      mt http.post(ep.url;payload;headers) {
-        $ok:resp {
-          finalresult=$dispatchresult{endpointid:ep.id;success:true;statuscode:200;error:"";latencyms:0};
-          done=true
-        };
-        $err:e {
-          lasterror=str.concat("HTTP error dispatching to ";ep.name);
-          attempt=attempt+1
-        }
+      let httpok=mt http.post(ep.url;payload;headers) {
+        $ok:resp true;
+        $err:e false
+      };
+      if(httpok){
+        finalresult=$dispatchresult{endpointid:ep.id;success:true;statuscode:200;error:"";latencyms:0};
+        done=true
+      }el{
+        lasterror=str.concat("HTTP error dispatching to ";ep.name);
+        attempt=attempt+1
       }
     }
   };
@@ -281,9 +283,10 @@ f=formatpayload(ep:$externalendpoint;event:$governanceevent):str{
   }
 };
 f=formatpagerduty(ep:$externalendpoint;event:$governanceevent):str{
-  let severity=if(str.eq(event.severity;"P0")){"critical"}el{
-    if(str.eq(event.severity;"P1")){"error"}el{
-      if(str.eq(event.severity;"P2")){"warning"}el{"info"}
+  let severity=mut."info";
+  if(str.eq(event.severity;"P0")){severity="critical"}el{
+    if(str.eq(event.severity;"P1")){severity="error"}el{
+      if(str.eq(event.severity;"P2")){severity="warning"}el{}
     }
   };
   <str.concat("{\"routing_key\":\"";str.concat(ep.authtokenenv;
@@ -292,12 +295,13 @@ f=formatpagerduty(ep:$externalendpoint;event:$governanceevent):str{
     str.concat("\",\"source\":\"loke\",\"component\":\"";str.concat(event.source;
     str.concat("\",\"custom_details\":{\"description\":\"";str.concat(event.description;
     str.concat("\",\"request_id\":\"";str.concat(event.requestid;
-    "\"}}}"))))))))))
-  )
+    "\"}}}"))))))))))))
 };
+
 f=formatslack(event:$governanceevent):str{
-  let emoji=if(str.eq(event.severity;"P0")){":rotating_light:"}el{
-    if(str.eq(event.severity;"P1")){":warning:"}el{":information_source:"}
+  let emoji=mut.":informationsource:";
+  if(str.eq(event.severity;"P0")){emoji=":rotatinglight:"}el{
+    if(str.eq(event.severity;"P1")){emoji=":warning:"}el{}
   };
   <str.concat("{\"text\":\"";str.concat(emoji;str.concat(" *";str.concat(event.title;
     str.concat("*\nSeverity: ";str.concat(event.severity;
@@ -306,15 +310,17 @@ f=formatslack(event:$governanceevent):str{
     "\"}"))))))))))
 };
 f=formatteams(event:$governanceevent):str{
+  let themecolor=mut."FFA500";
+  if(str.eq(event.severity;"P0")){themecolor="FF0000"}el{};
   <str.concat("{\"@type\":\"MessageCard\",\"summary\":\"";str.concat(event.title;
-    str.concat("\",\"themeColor\":\"";str.concat(if(str.eq(event.severity;"P0")){"FF0000"}el{"FFA500"};
+    str.concat("\",\"themeColor\":\"";str.concat(themecolor;
     str.concat("\",\"title\":\"loke: ";str.concat(event.title;
     str.concat("\",\"text\":\"";str.concat(event.description;
     str.concat("\n\nSeverity: ";str.concat(event.severity;
     str.concat(" | Source: ";str.concat(event.source;
-    "\"}"))))))))))
-  )
+    "\"}"))))))))))))
 };
+
 f=formatdatadog(event:$governanceevent):str{
   <str.concat("{\"series\":[{\"metric\":\"loke.governance.";str.concat(str.replace(event.eventtype;".";"_");
     str.concat("\",\"type\":0,\"points\":[[";str.concat(event.timestamp;
@@ -370,11 +376,14 @@ f=dispatchviolation(config:$externalconfig;severity:str;violationtype:str;descri
   })
 };
 f=dispatchkillswitch(config:$externalconfig;engaged:bool;scope:str):@$dispatchresult{
-  let action=if(engaged){"engaged"}el{"released"};
+  let action=mut."released";
+  if(engaged){action="engaged"}el{};
+  let kseverity=mut."P3";
+  if(engaged){kseverity="P1"}el{};
   <dispatch(config;$governanceevent{
     eventtype:str.concat("kill_switch.";action);
     timestamp:"";
-    severity:if(engaged){"P1"}el{"P3"};
+    severity:kseverity;
     title:str.concat("Kill switch ";action);
     description:str.concat("Kill switch ";str.concat(action;str.concat(" for scope: ";scope)));
     source:"governance.kill_switch";
@@ -409,14 +418,16 @@ f=dispatchmetrics(config:$externalconfig;metrictype:str;value:str):@$dispatchres
 f=configtojson(config:$externalconfig):str{
   let eps=@();
   lp(let i=0;i<str.arraylen(config.endpoints);i=i+1){ let ep=str.arrayget(config.endpoints;i);
+    let enabledstr=mut."false";
+    if(ep.enabled){enabledstr="true"}el{};
     let epjson=str.concat("{\"id\":\"";str.concat(ep.id;
       str.concat("\",\"name\":\"";str.concat(ep.name;
       str.concat("\",\"type\":\"";str.concat(ep.integrationtype;
       str.concat("\",\"url\":\"";str.concat(ep.url;
-      str.concat("\",\"enabled\":";str.concat(if(ep.enabled){"true"}el{"false"};
+      str.concat("\",\"enabled\":";str.concat(enabledstr;
       str.concat(",\"events\":";str.concat(str.fromint(ep.events.len);
       "}"))))))))))));
-    eps=arr.push(eps;epjson)
+    eps=eps.push(epjson)
   };
   <str.concat("[";str.concat(str.join(eps;",");"]"))
 };

@@ -17,28 +17,27 @@ i=pt:core.providers.types;
 i=disp:core.providers.dispatcher;
 
 
-f=parsetolerance(raw:str):$latencytolerance{
+f=parsetolerance(raw:$str):i64{
   if(str.eq(raw;"patient")){
-    <$patient
+    <2
   }el{
     if(str.eq(raw;"background")){
-      <$background
+      <1
     }el{
-      
-      <$instant
+      <0
     }
   }
 };
 
 
-f=sensitivitylabel(level:$sensitivitylevel):str{
-  if(level=$restricted){
+f=sensitivitylabel(level:i64):$str{
+  if(level=3){
     <"RESTRICTED"
   }el{
-    if(level=$confidential){
+    if(level=2){
       <"CONFIDENTIAL"
     }el{
-      if(level=$internal){
+      if(level=1){
         <"INTERNAL"
       }el{
         <"PUBLIC"
@@ -51,7 +50,7 @@ f=post(req:i64):i64{
   let cid=log.newcorrelationid();
   log.info("pipeline request received";"api/pipeline";cid);
 
-  
+
   let body=req.body;
   let text=mt json.getstr(body;"text") {
     $ok:v v;
@@ -78,62 +77,52 @@ f=post(req:i64):i64{
     $err:e ""
   };
 
-  
-  if(str.eq(apikeyanthropic;"")){
-    ()
-  }el{
-    core.setapikey("anthropic";apikeyanthropic)
-  };
-  if(str.eq(apikeyopenai;"")){
-    ()
-  }el{
-    core.setapikey("openai";apikeyopenai)
-  };
 
-  
+  if(!(str.eq(apikeyanthropic;""))){
+    core.setapikey("anthropic";apikeyanthropic)
+  }el{};
+  if(!(str.eq(apikeyopenai;""))){
+    core.setapikey("openai";apikeyopenai)
+  }el{};
+
+
   if(str.eq(text;"")){
     log.warn("pipeline request missing text field";"api/pipeline";cid);
     <http.res.err(400;"missing required field: text")
   }el{
     let toleranceval=parsetolerance(toleranceraw);
 
-    
+
     let gwreq=$gatewayrequest{
       requestid:cid;
       usecaseid:"chat-completion";
       text:text;
       modelid:"pending";
-      provider:t.provider.$ollama;
-      sensitivity:t.sensitivitylevel.$public;
+      provider:"ollama";
+      sensitivity:0;
       estimatedcost:0.0;
       correlationid:cid
     };
-    let gwdecision=mt gw.submit(core.getgateway();gwreq) {
-      $ok:v v;
-      $err:e http.res.err(403;"governance gateway error")
-    };
+    let gwdecision=gw.submit(core.getgateway();gwreq);
     if(gwdecision.blocked){
       log.warn("governance gateway blocked request";"api/pipeline";cid);
       <http.res.err(403;gwdecision.reason)
     }el{
 
-      
+
       let run=pipeline.run(text;systemprompt;core.getpipelineconfig());
 
-      
-      let routing=mt router.route(
+
+      let routing=router.route(
         core.getrouter();
         run.result.anonymised;
         run.result.sensitivity;
         run.totalentities;
         toleranceval;
         cid
-      ) {
-        $ok:v v;
-        $err:e http.res.err(500;"router error")
-      };
+      );
 
-      
+
       let completionreq=$completionrequest{
         modelid:routing.model.id;
         messages:@(pt.usermsg(run.result.anonymised));
@@ -143,11 +132,8 @@ f=post(req:i64):i64{
         stream:false
       };
 
-      
-      let response=mt disp.dispatch(core.getdispatcher();completionreq;routing.model.provider) {
-        $ok:v v;
-        $err:e http.res.err(500;"dispatch error")
-      };
+
+      let response=disp.dispatch(core.getdispatcher();completionreq;routing.model.provider);
 
       let sensitivitystr=sensitivitylabel(run.result.sensitivity);
       let entitycountstr=str.fromu32(run.totalentities);
@@ -157,7 +143,7 @@ f=post(req:i64):i64{
       let tokensoutstr=str.fromu32(response.tokensout);
       let coststr=str.fromf64(response.costusd);
 
-      
+
       let respbody=str.concat("{";
         str.concat("\"ok\":true,";
         str.concat("\"response\":";
@@ -182,8 +168,7 @@ f=post(req:i64):i64{
         str.concat(tokensoutstr;
         str.concat(",\"cost_usd\":";
         str.concat(coststr;
-        "}"))))))))))))))))))));
-
+        "}"))))))))))))))))))))))));
       log.info("pipeline request complete";"api/pipeline";cid);
       <http.res.json(200;respbody)
     }

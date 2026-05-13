@@ -14,79 +14,82 @@ t=$verificationresult{
   errormsg:str
 };
 
+f=verifyfailresult(modelid:str;errormsg:str):$verificationresult{
+  <$verificationresult{
+    success:false;
+    modelid:modelid;
+    responsetext:"";
+    latencyms:0;
+    throughputtokpersec:0.0;
+    errormsg:errormsg
+  }
+};
+
+f=verifygenresult(modelid:str;response:str;elapsed:i64):$verificationresult{
+  let hasfour=str.contains(response;"4");
+  if(hasfour){
+    <$verificationresult{
+      success:true;
+      modelid:modelid;
+      responsetext:response;
+      latencyms:elapsed;
+      throughputtokpersec:0.0;
+      errormsg:""
+    }
+  }el{
+    let msg=str.concat("model responded but answer does not contain '4': ";response);
+    <$verificationresult{
+      success:false;
+      modelid:modelid;
+      responsetext:response;
+      latencyms:elapsed;
+      throughputtokpersec:0.0;
+      errormsg:msg
+    }
+  }
+};
+
+f=verifygenerate(client:i64;modelid:str):$verificationresult{
+  let start=time.nowms();
+  let opts=$generateopts{
+    model:modelid;
+    prompt:"What is 2 + 2? Reply with just the number.";
+    system:"You are a helpful assistant. Reply concisely.";
+    numgpu:0
+  };
+  let genresult=ollama.generate(client;opts);
+  let elapsed=time.elapsedms(start);
+  mt genresult {
+    $lokeerr:e verifyfailresult(modelid;str.concat("verification generate failed for ";str.concat(modelid;str.concat(": ";e.message))));
+    $ok:response verifygenresult(modelid;response;elapsed)
+  }
+};
+
 f=verifymodel(modelid:str):$verificationresult{
   log.info(str.concat("verifying model ";modelid);"installer.verify";"system");
   let client=ollama.new("http://localhost:11434");
 
   let status=ollama.healthcheck(client);
   mt status {
-    $unreachable:v
-      log.error(str.concat("ollama unreachable during verification of ";modelid);"installer.verify";"system");
-      <$verificationresult{
-        success:false;
-        modelid:modelid;
-        responsetext:"";
-        latencyms:0;
-        throughputtokpersec:0.0;
-        errormsg:"Ollama is not reachable at http://localhost:11434"
-      };
-    $stopped:v
-      log.error(str.concat("ollama stopped during verification of ";modelid);"installer.verify";"system");
-      <$verificationresult{
-        success:false;
-        modelid:modelid;
-        responsetext:"";
-        latencyms:0;
-        throughputtokpersec:0.0;
-        errormsg:"Ollama is installed but not running"
-      };
-    $running:v
-      let start=time.nowms();
-      let opts=$generateopts{
-        model:modelid;
-        prompt:"What is 2 + 2? Reply with just the number.";
-        system:"You are a helpful assistant. Reply concisely.";
-        numgpu:0
-      };
-      let genresult=ollama.generate(client;opts);
-      let elapsed=time.elapsedms(start);
-      mt genresult {
-        $lokeerr:e
-          let msg=str.concat("verification generate failed for ";str.concat(modelid;str.concat(": ";e.message)));
-          log.error(msg;"installer.verify";"system");
-          <$verificationresult{
-            success:false;
-            modelid:modelid;
-            responsetext:"";
-            latencyms:elapsed;
-            throughputtokpersec:0.0;
-            errormsg:msg
-          };
-        $ok:response
-          let hasfour=str.contains(response;"4");
-          if(hasfour){
-            log.info(str.concat("model ";str.concat(modelid;str.concat(" verified in ";str.concat(str.fromint(elapsed);"ms"))));"installer.verify";"system");
-            <$verificationresult{
-              success:true;
-              modelid:modelid;
-              responsetext:response;
-              latencyms:elapsed;
-              throughputtokpersec:0.0;
-              errormsg:""
-            }
-          }el{
-            let msg=str.concat("model responded but answer does not contain '4': ";response);
-            log.warn(msg;"installer.verify";"system");
-            <$verificationresult{
-              success:false;
-              modelid:modelid;
-              responsetext:response;
-              latencyms:elapsed;
-              throughputtokpersec:0.0;
-              errormsg:msg
-            }
-          }
-      }
+    $unreachable:v verifyfailresult(modelid;"Ollama is not reachable at http://localhost:11434");
+    $stopped:v verifyfailresult(modelid;"Ollama is installed but not running");
+    $running:v verifygenerate(client;modelid)
+  }
+};
+
+f=throughputresult(modelid:str;response:str;elapsed:i64):$verificationresult{
+  let wordcount=str.wordcount(response);
+  let approxtokens=wordcount * 1.3;
+  let elapsedsec=elapsed / 1000.0;
+  let tokpersec=mut.0.0;
+  if(elapsedsec > 0.0){ tokpersec=approxtokens / elapsedsec }el{};
+  <$verificationresult{
+    success:true;
+    modelid:modelid;
+    responsetext:response;
+    latencyms:elapsed;
+    throughputtokpersec:tokpersec;
+    errormsg:""
   }
 };
 
@@ -105,32 +108,15 @@ f=measurethroughput(modelid:str):$verificationresult{
   let elapsed=time.elapsedms(start);
 
   mt genresult {
-    $lokeerr:e
-      let msg=str.concat("throughput measurement failed for ";str.concat(modelid;str.concat(": ";e.message)));
-      log.error(msg;"installer.verify";"system");
-      <$verificationresult{
+    $lokeerr:e $verificationresult{
         success:false;
         modelid:modelid;
         responsetext:"";
         latencyms:elapsed;
         throughputtokpersec:0.0;
-        errormsg:msg
+        errormsg:str.concat("throughput measurement failed for ";str.concat(modelid;str.concat(": ";e.message)))
       };
-    $ok:response
-      let wordcount=str.wordcount(response);
-      let approxtokens=wordcount * 1.3;
-      let elapsedsec=elapsed / 1000.0;
-      let tokpersec=if(elapsedsec > 0.0){ approxtokens / elapsedsec }el{ 0.0 };
-
-      log.info(str.concat("throughput for ";str.concat(modelid;str.concat(": ";str.concat(str.fromfloat(tokpersec);" tok/s"))));"installer.verify";"system");
-      <$verificationresult{
-        success:true;
-        modelid:modelid;
-        responsetext:response;
-        latencyms:elapsed;
-        throughputtokpersec:tokpersec;
-        errormsg:""
-      }
+    $ok:response throughputresult(modelid;response;elapsed)
   }
 };
 

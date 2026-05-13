@@ -30,7 +30,7 @@ f=ensuretable(store:i64):bool{
   status TEXT NOT NULL DEFAULT 'pending'
 )";
   mt db.execparams(store.conn;sql;@()) {
-    $ok: <true;
+    $ok:v true;
     $err:e false
   }
 };
@@ -44,7 +44,7 @@ f=submit(store:i64;kind:str;userid:str):$dsarrequest{
     "INSERT INTO dsar_requests (id,kind,user_id,submitted_at,completed_at,status) VALUES (?,?,?,?,0,'pending')";
     @(id;kind;userid;nows)
   ) {
-    $ok: log.info(
+    $ok:v log.info(
         str.concat(
           str.concat(
             str.concat("DSAR submitted kind=";kind);
@@ -77,9 +77,25 @@ f=setstatus(store:i64;id:str;newstatus:str;completedat:i64):bool{
     "UPDATE dsar_requests SET status=?,completed_at=? WHERE id=?";
     @(newstatus;tss;id)
   ) {
-    $ok: <true;
+    $ok:v true;
     $err:e false
   }
+};
+
+f=rowstojson(rows:i64):str{
+  if(rows.len=0){
+    <"[]"
+  }el{
+    let out=mut."[";
+    let i=mut.0;
+    lp(let ii=0;ii<rows.len;ii=ii+1){ let row=rows.get(ii);
+      let sep=mut.",";
+      if(i=0){ sep="" }el{};
+      out=str.concat(out;str.concat(sep;json.tostr(row)));
+      i=i+1
+    };
+    <str.concat(out;"]")
+  };
 };
 
 f=exporttable(store:i64;table:str;userid:str):str{
@@ -88,22 +104,20 @@ f=exporttable(store:i64;table:str;userid:str):str{
     " WHERE user_id=?"
   );
   mt db.queryparams(store.conn;sql;@(userid)) {
-    $ok:rows {
-      if(rows.len=0){
-        <"[]"
-      }el{
-        let out="[";
-        let i=0;
-        rows.each|row{
-          let sep=if(i=0){ "" }el{ "," };
-          out=str.concat(out;str.concat(sep;json.tostr(row)));
-          i=i+1
-        };
-        <str.concat(out;"]")
-      }
-    };
+    $ok:rows rowstojson(rows);
     $err:e "[]"
   }
+};
+
+f=processaccessok(store:i64;req:$dsarrequest):bool{
+  let now=time.nowunix();
+  let s2=setstatus(store;req.id;statuscompleted();now);
+  <true
+};
+
+f=processaccesserr(store:i64;req:$dsarrequest):bool{
+  let s3=setstatus(store;req.id;statusfailed();0);
+  <false
 };
 
 f=processaccess(store:i64;req:$dsarrequest;outpath:str):bool{
@@ -140,18 +154,11 @@ f=processaccess(store:i64;req:$dsarrequest;outpath:str):bool{
         dsars);
       ",\"quality_signals\":";
     quality);
-  "}")
-  );
+  "}"))
+  )));
   mt fs.writetext(outpath;payload) {
-    $ok: {
-      let now=time.nowunix();
-      let s2=setstatus(store;req.id;statuscompleted();now);
-      <true
-    };
-    $err:e {
-      let s3=setstatus(store;req.id;statusfailed();0);
-      <false
-    }
+    $ok:v processaccessok(store;req);
+    $err:e processaccesserr(store;req)
   }
 };
 
@@ -163,26 +170,18 @@ f=processerasure(store:i64;req:$dsarrequest):bool{
     "audit_events";
     "quality_signals"
   );
-  let allok=true;
-  tables.each|table{
+  let allok=mut.true;
+  lp(let ii=0;ii<tables.len;ii=ii+1){ let table=tables.get(ii);
     let sql=str.concat(
       str.concat("DELETE FROM ";table);
       " WHERE user_id=?"
     );
-    mt db.execparams(store.conn;sql;@(req.userid)) {
-      $ok: log.debug(
-          str.concat(str.concat("erased rows from ";table);str.concat(" for user=";req.userid));
-          "dsar";
-          req.userid
-        );
-      $err:e {
-        log.warn(
-          str.concat(str.concat("failed to erase from ";table);str.concat(" for user=";req.userid));
-          "dsar";
-          req.userid
-        );
-        allok=false
-      }
+    let tableok=mt db.execparams(store.conn;sql;@(req.userid)) {
+      $ok:v true;
+      $err:e false
+    };
+    if(tableok){}el{
+      allok=false
     }
   };
   let now=time.nowunix();
@@ -194,42 +193,41 @@ f=processerasure(store:i64;req:$dsarrequest):bool{
   <allok
 };
 
+f=notfoundrequest(id:str):$dsarrequest{
+  <$dsarrequest{
+    id:id;
+    kind:"";
+    userid:"";
+    submittedat:0;
+    completedat:0;
+    status:"not_found"
+  }
+};
+
+f=parsedsarstatus(rows:i64;id:str):$dsarrequest{
+  if(rows.len=0){
+    <notfoundrequest(id)
+  }el{
+    let row=rows.get(0);
+    <$dsarrequest{
+      id:json.getstr(row;"id");
+      kind:json.getstr(row;"kind");
+      userid:json.getstr(row;"user_id");
+      submittedat:json.getint(row;"submitted_at");
+      completedat:json.getint(row;"completed_at");
+      status:json.getstr(row;"status")
+    }
+  }
+};
+
 f=status(store:i64;id:str):$dsarrequest{
   mt db.queryparams(
     store.conn;
     "SELECT id,kind,user_id,submitted_at,completed_at,status FROM dsar_requests WHERE id=? LIMIT 1";
     @(id)
   ) {
-    $ok:rows {
-      if(rows.len=0){
-        <$dsarrequest{
-          id:id;
-          kind:"";
-          userid:"";
-          submittedat:0;
-          completedat:0;
-          status:"not_found"
-        }
-      }el{
-        let row=rows.get(0);
-        <$dsarrequest{
-          id:json.getstr(row;"id");
-          kind:json.getstr(row;"kind");
-          userid:json.getstr(row;"user_id");
-          submittedat:json.getint(row;"submitted_at");
-          completedat:json.getint(row;"completed_at");
-          status:json.getstr(row;"status")
-        }
-      }
-    };
-    $err:e $dsarrequest{
-        id:id;
-        kind:"";
-        userid:"";
-        submittedat:0;
-        completedat:0;
-        status:"not_found"
-      }
+    $ok:rows parsedsarstatus(rows;id);
+    $err:e notfoundrequest(id)
   }
 };
 
@@ -240,18 +238,20 @@ f=listpending(store:i64):@$dsarrequest{
      WHERE status IN ('pending','processing') ORDER BY submitted_at ASC";
     @()
   ) {
-    $ok:rows {
-      <rows.map|row{
-        $dsarrequest{
-          id:json.getstr(row;"id");
-          kind:json.getstr(row;"kind");
-          userid:json.getstr(row;"user_id");
-          submittedat:json.getint(row;"submitted_at");
-          completedat:json.getint(row;"completed_at");
-          status:json.getstr(row;"status")
-        }
-      }
-    };
+    $ok:rows rows;
     $err:e @()
-  }
+  };
+  let pending=mut.@();
+  lp(let pi=0;pi<rows.len;pi=pi+1){
+    let row=rows.get(pi);
+    pending=pending.push($dsarrequest{
+      id:json.getstr(row;"id");
+      kind:json.getstr(row;"kind");
+      userid:json.getstr(row;"user_id");
+      submittedat:json.getint(row;"submitted_at");
+      completedat:json.getint(row;"completed_at");
+      status:json.getstr(row;"status")
+    })
+  };
+  <pending
 };

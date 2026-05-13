@@ -19,46 +19,62 @@ f=stripprefix(toolname:str;prefix:str):str{
   }
 };
 
+f=proxyrestoreok(cleanresp:str;toolname:str;entry:i64):$proxyresult{
+  log.info(str.concat("proxied ";str.concat(toolname;str.concat(" via ";entry.name)));"proxy";"proxy_call");
+  <$proxyresult{ ok:true; responsebody:cleanresp; upstreamserver:entry.name; privacyapplied:true }
+};
+
+f=proxyrestorefail(e:str;toolname:str;rbody:str;entry:i64):$proxyresult{
+  log.warn(str.concat("privacy restore failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
+  <$proxyresult{ ok:true; responsebody:rbody; upstreamserver:entry.name; privacyapplied:false }
+};
+
+f=proxyhandleresponse(r:i64;toolname:str;entry:i64):$proxyresult{
+  let restored=privacy.restore(r.body);
+  mt restored {
+    $ok:cleanresp proxyrestoreok(cleanresp;toolname;entry);
+    $err:e proxyrestorefail(e;toolname;r.body;entry)
+  }
+};
+
+f=proxyupstreamfail(e:str;toolname:str;entry:i64):$proxyresult{
+  log.warn(str.concat("upstream call failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
+  <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32603;"Upstream error";e); upstreamserver:entry.name; privacyapplied:false }
+};
+
+f=proxysendrequest(cleanargs:str;toolname:str;entry:i64):$proxyresult{
+  let upstreamtool=stripprefix(toolname;entry.toolprefix);
+  let rpcbody=str.concat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"";str.concat(upstreamtool;str.concat("\",\"arguments\":";str.concat(cleanargs;"}}"))));
+  let url=str.concat("http://";str.concat(entry.host;str.concat(":";str.concat(str.fromint(entry.port);"/mcp"))));
+  let resp=http.post(url;rpcbody;"application/json");
+  mt resp {
+    $ok:r proxyhandleresponse(r;toolname;entry);
+    $err:e proxyupstreamfail(e;toolname;entry)
+  }
+};
+
+f=proxyanonymisefail(e:str;toolname:str):$proxyresult{
+  log.warn(str.concat("privacy anonymise failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
+  <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32603;"Privacy pipeline error";e); upstreamserver:""; privacyapplied:false }
+};
+
+f=proxyhandleentry(entry:i64;toolname:str;argsjson:str):$proxyresult{
+  let sanitised=privacy.anonymise(argsjson);
+  mt sanitised {
+    $ok:cleanargs proxysendrequest(cleanargs;toolname;entry);
+    $err:e proxyanonymisefail(e;toolname)
+  }
+};
+
+f=proxynotfound(toolname:str):$proxyresult{
+  log.warn(str.concat("no upstream server for tool: ";toolname);"proxy";"proxy_call");
+  <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32601;"Tool not found";toolname); upstreamserver:""; privacyapplied:false }
+};
+
 f=proxycall(toolname:str;argsjson:str;registry:i64):$proxyresult{
   let found=reg.findfortool(registry;toolname);
   mt found {
-    $none {
-      log.warn(str.concat("no upstream server for tool: ";toolname);"proxy";"proxy_call");
-      <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32601;"Tool not found";toolname); upstreamserver:""; privacyapplied:false }
-    };
-    $some:entry {
-      let sanitised=privacy.anonymise(argsjson);
-      mt sanitised {
-        $ok:cleanargs {
-          let upstreamtool=stripprefix(toolname;entry.toolprefix);
-          let rpcbody=str.concat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"";str.concat(upstreamtool;str.concat("\",\"arguments\":";str.concat(cleanargs;"}}"))));
-          let url=str.concat("http://";str.concat(entry.host;str.concat(":";str.concat(str.fromint(entry.port);"/mcp"))));
-          let resp=http.post(url;rpcbody;"application/json");
-          mt resp {
-            $ok:r {
-              let restored=privacy.restore(r.body);
-              mt restored {
-                $ok:cleanresp {
-                  log.info(str.concat("proxied ";str.concat(toolname;str.concat(" via ";entry.name)));"proxy";"proxy_call");
-                  <$proxyresult{ ok:true; responsebody:cleanresp; upstreamserver:entry.name; privacyapplied:true }
-                };
-                $err:e {
-                  log.warn(str.concat("privacy restore failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
-                  <$proxyresult{ ok:true; responsebody:r.body; upstreamserver:entry.name; privacyapplied:false }
-                }
-              }
-            };
-            $err:e {
-              log.warn(str.concat("upstream call failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
-              <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32603;"Upstream error";e); upstreamserver:entry.name; privacyapplied:false }
-            }
-          }
-        };
-        $err:e {
-          log.warn(str.concat("privacy anonymise failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
-          <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32603;"Privacy pipeline error";e); upstreamserver:""; privacyapplied:false }
-        }
-      }
-    }
+    $none:v proxynotfound(toolname);
+    $some:entry proxyhandleentry(entry;toolname;argsjson)
   }
 };

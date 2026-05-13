@@ -22,66 +22,89 @@ t=$remoteresponse{
   err:str
 };
 
+f=failedresponse(err:str):$remoteresponse{
+  <$remoteresponse{ text:""; tokensused:0; latencyms:0; ok:false; err:err }
+};
+
+f=executerecv(conn:i64):$remoteresponse{
+  let rawopt=ch.recv(conn);
+  ch.close(conn);
+  mt rawopt {
+    $none:v failedresponse("no response");
+    $some:raw parseremoteresponse(raw)
+  }
+};
+
+f=parseremoteresponse(raw:str):$remoteresponse{
+  let parsed=json.decode(raw);
+  let text=json.getstr(parsed;"text");
+  let tokensused=json.getint(parsed;"tokens_used");
+  let latencyms=json.getint(parsed;"latency_ms");
+  <$remoteresponse{ text:text; tokensused:tokensused; latencyms:latencyms; ok:true; err:"" }
+};
+
+f=executeconn(conn:i64;req:$remoterequest):$remoteresponse{
+  let payload=json.encode(json.obj("type";"generate";"model";req.model;"prompt";req.prompt;"maxtokens";str.fromint(req.maxtokens)));
+  let sent=ch.send(conn;payload);
+  if(sent){
+    <executerecv(conn)
+  }el{
+    ch.close(conn);
+    <failedresponse("send failed")
+  }
+};
+
 f=execute(companion:i64;keypair:i64;req:$remoterequest):$remoteresponse{
   let connopt=ch.connect(companion;keypair);
   mt connopt {
-    $none
-      <$remoteresponse{ text:""; tokensused:0; latencyms:0; ok:false; err:"connection failed" };
-    $some:conn
-      let payload=json.encode(json.obj("type";"generate";"model";req.model;"prompt";req.prompt;"maxtokens";str.fromint(req.maxtokens)));
-      let sent=ch.send(conn;payload);
-      if(sent){
-        let rawopt=ch.recv(conn);
-        mt rawopt {
-          $none
-            ch.close(conn);
-            <$remoteresponse{ text:""; tokensused:0; latencyms:0; ok:false; err:"no response" };
-          $some:raw
-            ch.close(conn);
-            let parsed=json.decode(raw);
-            let text=json.getstr(parsed;"text");
-            let tokensused=json.getint(parsed;"tokens_used");
-            let latencyms=json.getint(parsed;"latency_ms");
-            <$remoteresponse{ text:text; tokensused:tokensused; latencyms:latencyms; ok:true; err:"" }
-        }
-      }el{
-        ch.close(conn);
-        <$remoteresponse{ text:""; tokensused:0; latencyms:0; ok:false; err:"send failed" }
-      }
+    $none:v failedresponse("connection failed");
+    $some:conn executeconn(conn;req)
+  }
+};
+
+f=offlinestatus(companionid:str):$companionstatus{
+  <$companionstatus{ companionid:companionid; online:false; models:@(); gpugb:0.0; ramgb:0.0 }
+};
+
+f=statusrecv(conn:i64;companionid:str):$companionstatus{
+  let rawopt=ch.recv(conn);
+  ch.close(conn);
+  mt rawopt {
+    $none:v offlinestatus(companionid);
+    $some:raw parsestatusresponse(raw;companionid)
+  }
+};
+
+f=parsestatusresponse(raw:str;companionid:str):$companionstatus{
+  let parsed=json.decode(raw);
+  let models=json.getstrarr(parsed;"models");
+  let gpugb=json.getf32(parsed;"gpu_gb");
+  let ramgb=json.getf32(parsed;"ram_gb");
+  <$companionstatus{ companionid:companionid; online:true; models:models; gpugb:gpugb; ramgb:ramgb }
+};
+
+f=statusconn(conn:i64;companionid:str):$companionstatus{
+  let payload=json.encode(json.obj("type";"status"));
+  let sent=ch.send(conn;payload);
+  if(sent){
+    <statusrecv(conn;companionid)
+  }el{
+    ch.close(conn);
+    <offlinestatus(companionid)
   }
 };
 
 f=status(companion:i64;keypair:i64):$companionstatus{
   let connopt=ch.connect(companion;keypair);
   mt connopt {
-    $none
-      <$companionstatus{ companionid:companion.id; online:false; models:@(); gpugb:0.0; ramgb:0.0 };
-    $some:conn
-      let payload=json.encode(json.obj("type";"status"));
-      let sent=ch.send(conn;payload);
-      if(sent){
-        let rawopt=ch.recv(conn);
-        mt rawopt {
-          $none
-            ch.close(conn);
-            <$companionstatus{ companionid:companion.id; online:false; models:@(); gpugb:0.0; ramgb:0.0 };
-          $some:raw
-            ch.close(conn);
-            let parsed=json.decode(raw);
-            let models=json.getstrarr(parsed;"models");
-            let gpugb=json.getf32(parsed;"gpu_gb");
-            let ramgb=json.getf32(parsed;"ram_gb");
-            <$companionstatus{ companionid:companion.id; online:true; models:models; gpugb:gpugb; ramgb:ramgb }
-        }
-      }el{
-        ch.close(conn);
-        <$companionstatus{ companionid:companion.id; online:false; models:@(); gpugb:0.0; ramgb:0.0 }
-      }
+    $none:v offlinestatus(companion.id);
+    $some:conn statusconn(conn;companion.id)
   }
 };
 
 f=formatstatus(s:$companionstatus):str{
-  let state=if(s.online){ "online" }el{ "offline" };
+  let state=mut."offline";
+  if(s.online){ state="online" }el{};
   let n=s.models.len;
   <str.concat("Companion ";str.concat(s.companionid;str.concat(": ";str.concat(state;str.concat(" | ";str.concat(str.fromint(n);str.concat(" models | ";str.concat(str.fromf32(s.gpugb);str.concat("GB GPU | ";str.concat(str.fromf32(s.ramgb);"GB RAM"))))))))))
 };

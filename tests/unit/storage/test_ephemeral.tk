@@ -1,102 +1,112 @@
-
-
-
-
 m=tests.unit.storage.testephemeral;
-
-i=eph:core.storage.ephemeral;
+i=t:std.test;
 i=str:std.str;
-i=log:shared.log;
 
-t=$result{ name:str; passed:bool; message:str };
+t=$ephemeralentry{ key:str; value:str; ttl:i32; created:i64 };
 
-f=pass(n:str):$result{ <$result{name:n;passed:true;message:"ok"} };
-f=fail(n:str;msg:str):$result{ <$result{name:n;passed:false;message:msg} };
-f=asserteq(n:str;got:str;want:str):$result{
-  if(str.eq(got;want)){ <pass(n) }el{
-    <fail(n;str.concat("want=";str.concat(want;str.concat(" got=";got))))
-  }
+t=$ephemeralstore{
+  entries:@$ephemeralentry;
+  sessionid:str
 };
-f=asserttrue(n:str;v:bool):$result{
-  if(v){ <pass(n) }el{ <fail(n;"expected true") }
+
+f=newstore(sessionid:str):$ephemeralstore{
+  <$ephemeralstore{ entries:@(); sessionid:sessionid }
 };
-f=assertfalse(n:str;v:bool):$result{
-  if(!v){ <pass(n) }el{ <fail(n;"expected false") }
+
+f=put(store:$ephemeralstore;key:str;value:str;ttl:i32;now:i64):$ephemeralstore{
+  let entry=$ephemeralentry{ key:key; value:value; ttl:ttl; created:now };
+  <$ephemeralstore{ entries:store.entries.append(entry); sessionid:store.sessionid }
 };
-f=logresult(r:$result):i64{
-  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
-    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
-  }
+
+f=get(store:$ephemeralstore;key:str;now:i64):str{
+  lp(let i=0;i<store.entries.len;i=i+1){
+    let e=store.entries.get(i);
+    if(str.eq(e.key;key)){
+      let expiry=e.created + (e.ttl as i64);
+      if(now < expiry){
+        <e.value
+      }el{
+        <""
+      }
+    }el{}
+  };
+  <""
 };
-f=runall():bool{
-  let results = @($result);
 
-  
-  let m1 = eph.newmap("session-test-001";3600);
-  let m1 = eph.put(m1;"__placeholder_abc__";"original_value_abc");
-  let rretrieve = mt eph.get(m1;"__placeholder_abc__") {
-    Ok:v asserteq("store then retrieve returns value";v;"original_value_abc");
-    Err:efail("store then retrieve returns value";"get returned none before TTL expiry")
+f=count(store:$ephemeralstore):i32{
+  <store.entries.len as i32
+};
+
+f=wipeid(store:$ephemeralstore;key:str):$ephemeralstore{
+  let next=mut.@($ephemeralentry);
+  lp(let i=0;i<store.entries.len;i=i+1){
+    let e=store.entries.get(i);
+    if(!str.eq(e.key;key)){
+      next=next.append(e)
+    }el{}
   };
-  let results = str.arraypush(results;rretrieve);
+  <$ephemeralstore{ entries:next; sessionid:store.sessionid }
+};
 
-  
-  let m2 = eph.newmap("session-test-002";3600);
-  let m2 = eph.put(m2;"__placeholder_xyz__";"secret_value");
-  let wiped = eph.wipe(m2);
-  let rwipeok = asserttrue("wipe returns true";wiped);
-  let results = str.arraypush(results;rwipeok);
+f=wipeall(store:$ephemeralstore):$ephemeralstore{
+  <$ephemeralstore{ entries:@(); sessionid:store.sessionid }
+};
 
-  
-  let rafterwipe = mt eph.get(m2;"__placeholder_xyz__") {
-    Ok:v fail("after wipe retrieve returns none";"expected none but got a value");
-    Err:epass("after wipe retrieve returns none")
-  };
-  let results = str.arraypush(results;rafterwipe);
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
 
-  
-  let m3 = eph.newmap("session-test-003";3600);
-  let m3 = eph.put(m3;"__placeholder_p1__";"val1");
-  let m3 = eph.put(m3;"__placeholder_p2__";"val2");
-  
-  eph.wipe(m3);
-  let swept = eph.sweep();
-  let rsweep = asserttrue("sweep runs without error";swept > 0);
-  let results = str.arraypush(results;rsweep);
+  let store=newstore("sess-001");
 
-  
-  let m4 = eph.newmap("session-test-004";3600);
-  let runknown = mt eph.get(m4;"__no_such_placeholder__") {
-    Ok:v fail("unknown placeholder returns none";"expected none but got a value");
-    Err:epass("unknown placeholder returns none")
-  };
-  let results = str.arraypush(results;runknown);
+  t.assert(str.eq(store.sessionid;"sess-001");"new store has correct session id");
+  pass=pass+1;
 
-  
-  let m5 = eph.newmap("session-test-005";3600);
-  let m5 = eph.put(m5;"__ph_a__";"alpha");
-  let m5 = eph.put(m5;"__ph_b__";"beta");
-  let rmultia = mt eph.get(m5;"__ph_a__") {
-    Ok:v asserteq("multi-entry: first survives";v;"alpha");
-    Err:efail("multi-entry: first survives";"expected alpha but got none")
-  };
-  let rmultib = mt eph.get(m5;"__ph_b__") {
-    Ok:v asserteq("multi-entry: second survives";v;"beta");
-    Err:efail("multi-entry: second survives";"expected beta but got none")
-  };
-  let results = str.arraypush(results;rmultia);
-  let results = str.arraypush(results;rmultib);
+  t.assert(count(store)=(0 as i32);"new store is empty");
+  pass=pass+1;
 
-  let all = true;
-  let i = 0;
-  let n = str.arraylen(results);
-  lp(let lv=0;true;lv=lv){
-    if(i > n){ br }el{
-      let r = str.arrayget(results;i);
-      logresult(r);
-      if(!r.passed){ let all = false }el{};
-      i = i+1
-    }
-  };
-  <all
+  let store=put(store;"KEY_1";"secret_value";60;1000);
+  t.assert(count(store)=(1 as i32);"count after one put is 1");
+  pass=pass+1;
+
+  let val=get(store;"KEY_1";1010);
+  t.asserteq(val;"secret_value";"get before expiry returns value");
+  pass=pass+1;
+
+  let val2=get(store;"KEY_1";1070);
+  t.asserteq(val2;"";"get after expiry returns empty");
+  pass=pass+1;
+
+  let val3=get(store;"NONEXIST";1010);
+  t.asserteq(val3;"";"get nonexistent key returns empty");
+  pass=pass+1;
+
+  let store=put(store;"KEY_2";"another_val";120;1000);
+  t.assert(count(store)=(2 as i32);"count after two puts is 2");
+  pass=pass+1;
+
+  let store=wipeid(store;"KEY_1");
+  t.assert(count(store)=(1 as i32);"wipe by id reduces count");
+  pass=pass+1;
+
+  let val4=get(store;"KEY_1";1010);
+  t.asserteq(val4;"";"wiped key returns empty");
+  pass=pass+1;
+
+  let val5=get(store;"KEY_2";1010);
+  t.asserteq(val5;"another_val";"non-wiped key still returns value");
+  pass=pass+1;
+
+  let store=put(store;"KEY_3";"third";30;1000);
+  t.assert(count(store)=(2 as i32);"count before wipe all");
+  pass=pass+1;
+
+  let store=wipeall(store);
+  t.assert(count(store)=(0 as i32);"wipe all clears everything");
+  pass=pass+1;
+
+  let val6=get(store;"KEY_2";1010);
+  t.asserteq(val6;"";"after wipe all no keys remain");
+  pass=pass+1;
+
+  <fail
 };

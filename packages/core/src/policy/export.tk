@@ -5,11 +5,7 @@ i=db:storage.db;
 i=file:std.file;
 i=str:std.str;
 i=log:shared.log;
-
-
-$formatcsv:i32=0;
-$formatjson:i32=1;
-$formatjsonl:i32=2;
+i=std:std;
 
 t=$exportopts{
   format:i32;
@@ -26,195 +22,155 @@ t=$exportresult{
   sizebytes:i32
 };
 
+formatcsv=0:i32;
+formatjson=1:i32;
+formatjsonl=2:i32;
+
 f=formatcsvrow(fields:@str):str{
-  escaped=@();
-  i=0;
-  lp(let lv=0;true;lv=lv) i < arr.len(fields){
-    raw=fields.get(i);
-    needsquote=str.contains(raw; ",") || str.contains(raw; "\"") || str.contains(raw; "
-");
-    cell=(needsquote){
-      inner=str.replaceall(raw; "\""; "\"\"");
-      <str.concat("\""; inner; "\"")
-    }:{
-      <raw
-    };
-    escaped=arr.push(escaped; cell);
-    i=i+1;
+  let escaped=mut.@();
+  let i=mut.0;
+  lp(let lv=0;i<fields.len;lv=lv){
+    let raw=fields.get(i);
+    let needsquote=str.contains(raw;",") || str.contains(raw;"\"");
+    let cell=mut.raw;
+    if(needsquote){
+      let inner=str.replaceall(raw;"\"";  "\"\"");
+      cell=str.concat("\"";str.concat(inner;"\""))
+    }el{};
+    escaped=escaped.push(cell);
+    i=i+1
   };
-  <str.join(escaped; ",")
+  <str.join(escaped;",")
 };
 
-f=formatjsonlrecord(fields:@str; keys:@str):str{
-  pairs=@();
-  i=0;
-  lp(let lv=0;true;lv=lv) i < arr.len(keys){
-    k=keys.get(i);
-    v=(i < arr.len(fields)){ <fields.get(i) }:{ <"" };
-    escapedv=str.replaceall(v; "\""; "\\"");
-    pair=str.concat("\""; k; "\":\""; escapedv; "\"");
-    pairs=arr.push(pairs; pair);
-    i=i+1;
+f=formatjsonlrecord(fields:@str;keys:@str):str{
+  let pairs=mut.@();
+  let i=mut.0;
+  lp(let lv=0;i<keys.len;lv=lv){
+    let k=keys.get(i);
+    let v=mut."";
+    if(i<fields.len){ v=fields.get(i) }el{};
+    let escapedv=str.replaceall(v;"\"";  "\\\"");
+    let pair=str.concat("\"";str.concat(k;str.concat("\":\"";str.concat(escapedv;"\""))));
+    pairs=pairs.push(pair);
+    i=i+1
   };
-  <str.concat("{"; str.join(pairs; ","); "}")
+  <str.concat("{";str.concat(str.join(pairs;",");"}"))
+};
+
+f=maybeanon(opts:$exportopts;raw:str):str{
+  let result=mut.raw;
+  if(opts.anonymiseids){ result=str.sha256prefix(raw;8) }el{};
+  <result
+};
+
+f=buildauditfields(opts:$exportopts;rows:i64;i:i32):@str{
+  let idval=maybeanon(opts;db.rowstr(rows;i;0));
+  let ridval=maybeanon(opts;db.rowstr(rows;i;1));
+  <@(idval;ridval;db.rowstr(rows;i;2);db.rowstr(rows;i;3);str.fromi64(db.rowi64(rows;i;4));db.rowstr(rows;i;5);db.rowstr(rows;i;6))
+};
+
+f=buildrowscontent(opts:$exportopts;rows:i64;rowcount:i32;keys:@str):str{
+  if(opts.format = formatcsv){
+    let header=formatcsvrow(keys);
+    let lines=mut.@(header);
+    let i=mut.0;
+    lp(let lv=0;i<rowcount;lv=lv){
+      let fields=buildauditfields(opts;rows;i);
+      lines=lines.push(formatcsvrow(fields));
+      i=i+1
+    };
+    <str.join(lines;"\n")
+  }el{};
+  if(opts.format = formatjsonl){
+    let lines=mut.@();
+    let i=mut.0;
+    lp(let lv=0;i<rowcount;lv=lv){
+      let fields=buildauditfields(opts;rows;i);
+      lines=lines.push(formatjsonlrecord(fields;keys));
+      i=i+1
+    };
+    <str.join(lines;"\n")
+  }el{};
+  let items=mut.@();
+  let i=mut.0;
+  lp(let lv=0;i<rowcount;lv=lv){
+    let fields=buildauditfields(opts;rows;i);
+    items=items.push(formatjsonlrecord(fields;keys));
+    i=i+1
+  };
+  <str.concat("[";str.concat(str.join(items;",");"]"))
+};
+
+f=extforformat(format:i32):str{
+  if(format = formatcsv){ <"csv" }el{};
+  if(format = formatjsonl){ <"jsonl" }el{};
+  <"json"
+};
+
+f=writeexport(path:str;content:str;opts:$exportopts;rowcount:i32):$exportresult{
+  file.ensuredir(str.concat(std.homedir();"/.loke/exports"));
+  let writeok=mt file.write(path;content) {
+    $ok:v true;
+    $err:v false
+  };
+  if(writeok){
+    <$exportresult{path:path;rows:rowcount;format:opts.format;sizebytes:str.bytelen(content)}
+  }el{};
+  log.warn(str.concat("export: failed to write file: ";path));
+  <$exportresult{path:"";rows:0;format:opts.format;sizebytes:0}
 };
 
 f=exportaudit(opts:$exportopts):$exportresult{
-  ts=std.nowms();
-  ext=(opts.format = $formatcsv){ <"csv" }:{
-    (opts.format = $formatjsonl){ <"jsonl" }:{ <"json" }
-  };
-  path=str.concat(std.homedir(); "/.loke/exports/audit_"; str.fromi64(ts); "."; ext);
-
-  rows=db.query(
+  let ts=std.nowms();
+  let ext=extforformat(opts.format);
+  let path=str.concat(std.homedir();str.concat("/.loke/exports/audit_";str.concat(str.fromi64(ts);str.concat(".";ext))));
+  let rows=db.query(
     "SELECT id, request_id, model_id, action, timestamp, regulation, severity FROM audit_entries WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC";
-    @(db.i64val(opts.fromts); db.i64val(opts.tots))
+    @(db.i64val(opts.fromts);db.i64val(opts.tots))
   );
-
-  rowcount=db.rowslen(rows);
-  keys=@("id";"request_id";"model_id";"action";"timestamp";"regulation";"severity");
-  header=formatcsvrow(keys);
-
-  content=(opts.format = $formatcsv){
-    lines=@($header);
-    i=0;
-    lp(let lv=0;true;lv=lv) i < rowcount{
-      idraw=db.rowstr(rows; i; 0);
-      ridraw=db.rowstr(rows; i; 1);
-      idval=(opts.anonymiseids){ <str.sha256prefix(idraw; 8) }:{ <idraw };
-      ridval=(opts.anonymiseids){ <str.sha256prefix(ridraw; 8) }:{ <ridraw };
-      fields=@(idval; ridval; db.rowstr(rows; i; 2); db.rowstr(rows; i; 3); str.fromi64(db.rowi64(rows; i; 4)); db.rowstr(rows; i; 5); db.rowstr(rows; i; 6));
-      lines=arr.push(lines; formatcsvrow(fields));
-      i=i+1;
-    };
-    <str.join(lines; "
-")
-  }:{
-    (opts.format = $formatjsonl){
-      lines=@();
-      i=0;
-      lp(let lv=0;true;lv=lv) i < rowcount{
-        idraw=db.rowstr(rows; i; 0);
-        ridraw=db.rowstr(rows; i; 1);
-        idval=(opts.anonymiseids){ <str.sha256prefix(idraw; 8) }:{ <idraw };
-        ridval=(opts.anonymiseids){ <str.sha256prefix(ridraw; 8) }:{ <ridraw };
-        fields=@(idval; ridval; db.rowstr(rows; i; 2); db.rowstr(rows; i; 3); str.fromi64(db.rowi64(rows; i; 4)); db.rowstr(rows; i; 5); db.rowstr(rows; i; 6));
-        lines=arr.push(lines; formatjsonlrecord(fields; keys));
-        i=i+1;
-      };
-      <str.join(lines; "
-")
-    }:{
-      
-      items=@();
-      i=0;
-      lp(let lv=0;true;lv=lv) i < rowcount{
-        idraw=db.rowstr(rows; i; 0);
-        ridraw=db.rowstr(rows; i; 1);
-        idval=(opts.anonymiseids){ <str.sha256prefix(idraw; 8) }:{ <idraw };
-        ridval=(opts.anonymiseids){ <str.sha256prefix(ridraw; 8) }:{ <ridraw };
-        fields=@(idval; ridval; db.rowstr(rows; i; 2); db.rowstr(rows; i; 3); str.fromi64(db.rowi64(rows; i; 4)); db.rowstr(rows; i; 5); db.rowstr(rows; i; 6));
-        items=arr.push(items; formatjsonlrecord(fields; keys));
-        i=i+1;
-      };
-      <str.concat("["; str.join(items; ","); "]")
-    }
-  };
-
-  file.ensuredir(str.concat(std.homedir(); "/.loke/exports"));
-  writeresult=file.write(path; content);
-  |writeresult{
-    $ok:
-      <$exportresult{
-        path:path;
-        rows:rowcount;
-        format:opts.format;
-        sizebytes:str.bytelen(content)
-      };
-    $err:e
-      log.warn(str.concat("export: failed to write audit file: "; e));
-      <$exportresult{ path:""; rows:0; format:opts.format; sizebytes:0 }
-  }
+  let rowcount=db.rowslen(rows);
+  let keys=@("id";"request_id";"model_id";"action";"timestamp";"regulation";"severity");
+  let content=buildrowscontent(opts;rows;rowcount;keys);
+  <writeexport(path;content;opts;rowcount)
 };
 
 f=exportcompliance(opts:$exportopts):$exportresult{
-  ts=std.nowms();
-  ext=(opts.format = $formatcsv){ <"csv" }:{
-    (opts.format = $formatjsonl){ <"jsonl" }:{ <"json" }
+  let ts=std.nowms();
+  let ext=extforformat(opts.format);
+  let path=str.concat(std.homedir();str.concat("/.loke/exports/compliance_";str.concat(str.fromi64(ts);str.concat(".";ext))));
+  let events=fb.exportevents(opts.fromts;opts.tots);
+  let keys=@("request_id";"policy_id";"regulation";"violated";"user_override";"timestamp");
+  let filtered=mut.@();
+  let i=mut.0;
+  lp(let lv=0;i<events.len;lv=lv){
+    let ev=events.get(i);
+    let include=mut.true;
+    if(!opts.includeoverrides){
+      if(ev.useroverride){ include=false }el{}
+    }el{};
+    if(include){ filtered=filtered.push(ev) }el{};
+    i=i+1
   };
-  path=str.concat(std.homedir(); "/.loke/exports/audit_"; str.fromi64(ts); "."; ext);
-
-  events=fb.exportevents(opts.fromts; opts.tots);
-  keys=@("request_id";"policy_id";"regulation";"violated";"user_override";"timestamp");
-  header=formatcsvrow(keys);
-
-  filtered=@();
-  i=0;
-  lp(let lv=0;true;lv=lv) i < arr.len(events){
-    ev=events.get(i);
-    include=(opts.includeoverrides){ <true }:{ <!(ev.useroverride) };
-    (include){
-      filtered=arr.push(filtered; ev)
-    };
-    i=i+1;
+  let rowcount=filtered.len;
+  let lines=mut.@();
+  if(opts.format = formatcsv){
+    lines=lines.push(formatcsvrow(keys))
+  }el{};
+  let fi=mut.0;
+  lp(let lv2=0;fi<rowcount;lv2=lv2){
+    let ev=filtered.get(fi);
+    let ridval=maybeanon(opts;ev.requestid);
+    let pidval=maybeanon(opts;ev.policyid);
+    let fields=@(ridval;pidval;ev.regulation;str.frombool(ev.violated);str.frombool(ev.useroverride);str.fromi64(ev.timestamp));
+    let row=mut.formatcsvrow(fields);
+    if(!(opts.format = formatcsv)){ row=formatjsonlrecord(fields;keys) }el{};
+    lines=lines.push(row);
+    fi=fi+1
   };
-
-  rowcount=arr.len(filtered);
-
-  content=(opts.format = $formatcsv){
-    lines=@($header);
-    i=0;
-    lp(let lv=0;true;lv=lv) i < rowcount{
-      ev=filtered.get(i);
-      ridval=(opts.anonymiseids){ <str.sha256prefix(ev.requestid; 8) }:{ <ev.requestid };
-      pidval=(opts.anonymiseids){ <str.sha256prefix(ev.policyid; 8) }:{ <ev.policyid };
-      fields=@(ridval; pidval; ev.regulation; str.frombool(ev.violated); str.frombool(ev.useroverride); str.fromi64(ev.timestamp));
-      lines=arr.push(lines; formatcsvrow(fields));
-      i=i+1;
-    };
-    <str.join(lines; "
-")
-  }:{
-    (opts.format = $formatjsonl){
-      lines=@();
-      i=0;
-      lp(let lv=0;true;lv=lv) i < rowcount{
-        ev=filtered.get(i);
-        ridval=(opts.anonymiseids){ <str.sha256prefix(ev.requestid; 8) }:{ <ev.requestid };
-        pidval=(opts.anonymiseids){ <str.sha256prefix(ev.policyid; 8) }:{ <ev.policyid };
-        fields=@(ridval; pidval; ev.regulation; str.frombool(ev.violated); str.frombool(ev.useroverride); str.fromi64(ev.timestamp));
-        lines=arr.push(lines; formatjsonlrecord(fields; keys));
-        i=i+1;
-      };
-      <str.join(lines; "
-")
-    }:{
-      items=@();
-      i=0;
-      lp(let lv=0;true;lv=lv) i < rowcount{
-        ev=filtered.get(i);
-        ridval=(opts.anonymiseids){ <str.sha256prefix(ev.requestid; 8) }:{ <ev.requestid };
-        pidval=(opts.anonymiseids){ <str.sha256prefix(ev.policyid; 8) }:{ <ev.policyid };
-        fields=@(ridval; pidval; ev.regulation; str.frombool(ev.violated); str.frombool(ev.useroverride); str.fromi64(ev.timestamp));
-        items=arr.push(items; formatjsonlrecord(fields; keys));
-        i=i+1;
-      };
-      <str.concat("["; str.join(items; ","); "]")
-    }
-  };
-
-  file.ensuredir(str.concat(std.homedir(); "/.loke/exports"));
-  writeresult=file.write(path; content);
-  |writeresult{
-    $ok:
-      <$exportresult{
-        path:path;
-        rows:rowcount;
-        format:opts.format;
-        sizebytes:str.bytelen(content)
-      };
-    $err:e
-      log.warn(str.concat("export: failed to write compliance file: "; e));
-      <$exportresult{ path:""; rows:0; format:opts.format; sizebytes:0 }
-  }
+  let content=mut.str.join(lines;"\n");
+  if(opts.format = formatjson){
+    content=str.concat("[";str.concat(str.join(lines;",");"]"))
+  }el{};
+  <writeexport(path;content;opts;rowcount)
 };

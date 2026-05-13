@@ -1,0 +1,180 @@
+
+
+
+m=tests.unit.governance.testrulesengine;
+
+i=re:core.governance.rulesengine;
+i=str:std.str;
+i=log:shared.log;
+
+t=$result{ name:str; passed:bool; message:str };
+
+f=pass(name:str):$result{ <$result{name:name;passed:true;message:"ok"} };
+f=fail(name:str;msg:str):$result{ <$result{name:name;passed:false;message:msg} };
+
+f=asserteq(name:str;got:str;want:str):$result{
+  if(str.eq(got;want)){ <pass(name) }el{
+    <fail(name;str.concat("want=";str.concat(want;str.concat(" got=";got))))
+  }
+};
+
+f=asserttrue(name:str;v:bool):$result{
+  if(v){ <pass(name) }el{ <fail(name;"expected true") }
+};
+
+f=assertfalse(name:str;v:bool):$result{
+  if(!v){ <pass(name) }el{ <fail(name;"expected false") }
+};
+
+f=logresult(r:$result):i64{
+  if(r.passed){ log.info(str.concat("PASS ";r.name)) }el{
+    log.error(str.concat("FAIL ";str.concat(r.name;str.concat(": ";r.message))))
+  }
+};
+
+f=runall():bool{
+  let results=@($result);
+
+  
+  let ctxhigh=$evalcontext{
+    sensitivity:3;
+    modeltier:"cloud-premium";
+    requestcount:50;
+    hourofday:14;
+    scope:"internal"
+  };
+
+  
+  let andrule=$compoundrule{
+    id:"test-and-match";
+    name:"Test AND match";
+    logic:$and;
+    conditions:@(
+      $condition{field:"sensitivity";op:"eq";value:"3"};
+      $condition{field:"model_tier";op:"contains";value:"cloud"}
+    );
+    action:"warn";
+    severity:"high"
+  };
+  let andresult=re.evaluate(andrule;ctxhigh);
+  results=str.arraypush(results;asserttrue("AND rule all-match → matched";andresult.matched));
+  results=str.arraypush(results;asserteq("AND rule action is warn";"warn";andresult.action));
+
+  
+  let ctxlow=$evalcontext{
+    sensitivity:0;
+    modeltier:"local";
+    requestcount:5;
+    hourofday:10;
+    scope:"internal"
+  };
+  let andmissresult=re.evaluate(andrule;ctxlow);
+  results=str.arraypush(results;assertfalse("AND rule partial-miss → not matched";andmissresult.matched));
+  results=str.arraypush(results;asserteq("AND miss action defaults to allow";"allow";andmissresult.action));
+
+  
+  let orrule=$compoundrule{
+    id:"test-or-match";
+    name:"Test OR match";
+    logic:$or;
+    conditions:@(
+      $condition{field:"sensitivity";op:"eq";value:"3"};
+      $condition{field:"model_tier";op:"eq";value:"cloud-economy"}
+    );
+    action:"throttle";
+    severity:"medium"
+  };
+  
+  let orresult=re.evaluate(orrule;ctxhigh);
+  results=str.arraypush(results;asserttrue("OR rule one-match → matched";orresult.matched));
+  results=str.arraypush(results;asserteq("OR rule action is throttle";"throttle";orresult.action));
+
+  
+  let ormissresult=re.evaluate(orrule;ctxlow);
+  results=str.arraypush(results;assertfalse("OR rule no-match → not matched";ormissresult.matched));
+
+  
+  let notrule=$compoundrule{
+    id:"test-not-match";
+    name:"Test NOT match";
+    logic:$not;
+    conditions:@(
+      $condition{field:"sensitivity";op:"eq";value:"99"}
+    );
+    action:"deny";
+    severity:"high"
+  };
+  
+  let notresult=re.evaluate(notrule;ctxhigh);
+  results=str.arraypush(results;asserttrue("NOT rule condition-false → matched";notresult.matched));
+
+  
+  let nothitrule=$compoundrule{
+    id:"test-not-hit";
+    name:"Test NOT miss";
+    logic:$not;
+    conditions:@(
+      $condition{field:"sensitivity";op:"eq";value:"3"}
+    );
+    action:"deny";
+    severity:"high"
+  };
+  let nothitresult=re.evaluate(nothitrule;ctxhigh);
+  results=str.arraypush(results;assertfalse("NOT rule condition-true → not matched";nothitresult.matched));
+
+  
+  let emptyandrule=$compoundrule{
+    id:"test-empty-and";
+    name:"Empty AND";
+    logic:$and;
+    conditions:@();
+    action:"allow";
+    severity:"low"
+  };
+  let emptyandresult=re.evaluate(emptyandrule;ctxhigh);
+  results=str.arraypush(results;asserttrue("empty AND conditions → matched (vacuously true)";emptyandresult.matched));
+
+  
+  let rules=@(andrule;orrule;notrule);
+  let matchedresults=re.evaluateall(rules;ctxhigh);
+  
+  results=str.arraypush(results;asserttrue("evaluate_all returns matched results";str.arraylen(matchedresults)>1));
+
+  
+  let defaults=re.defaultrules();
+  results=str.arraypush(results;asserttrue("default_rules non-empty";str.arraylen(defaults)>0));
+
+  
+  let ctxext=$evalcontext{
+    sensitivity:2;
+    modeltier:"cloud-standard";
+    requestcount:10;
+    hourofday:11;
+    scope:"external-partner"
+  };
+  let extmatches=re.evaluateall(defaults;ctxext);
+  let hasdeny=false;
+  let di=0;
+  let dn=str.arraylen(extmatches);
+  lp(let lv=0;true;lv=lv){
+    if(di>dn){ br }el{
+      let er=str.arrayget(extmatches;di);
+      if(str.eq(er.action;"deny")){ let hasdeny=true }el{};
+      di=di+1
+    }
+  };
+  results=str.arraypush(results;asserttrue("external+confidential scope triggers deny rule";hasdeny));
+
+  let all=true;
+  let i=0;
+  let n=str.arraylen(results);
+  lp(let lv=0;true;lv=lv){
+    if(i>n){ br }el{
+      let r=str.arrayget(results;i);
+      logresult(r);
+      if(!$r.passed){ let all=false }el{};
+      i=i+1;
+    }
+  };
+  <all
+};

@@ -34,49 +34,57 @@ f=extractbytes(line:str):$bytesinfo{
   }
 };
 
+f=handlepullchild(handle:i64;modelid:str;results:@$pullprogress):@$pullprogress{
+  let lines=proc.readlines(handle);
+  lp(let i=0;i<str.arraylen(lines);i=i+1){ let line=str.arrayget(lines;i);
+    let progress=parseprogressline(modelid;line);
+    results.push(progress)
+  };
+  let exitcode=proc.wait(handle);
+  if(exitcode = 0){
+    results.push($pullprogress{
+      modelid:modelid;
+      totalbytes:0;
+      downloadedbytes:0;
+      percent:100.0;
+      etaseconds:0;
+      status:"complete"
+    })
+  }el{
+    log.error(str.concat("ollama pull failed with exit code: ";str.fromint(exitcode));"installer.pull";"system");
+    results.push($pullprogress{
+      modelid:modelid;
+      totalbytes:0;
+      downloadedbytes:0;
+      percent:0.0;
+      etaseconds:0;
+      status:"error"
+    })
+  };
+  <results
+};
+
+f=handlepullerror(e:str;modelid:str;results:@$pullprogress):@$pullprogress{
+  log.error(str.concat("failed to spawn ollama pull: ";e);"installer.pull";"system");
+  results.push($pullprogress{
+    modelid:modelid;
+    totalbytes:0;
+    downloadedbytes:0;
+    percent:0.0;
+    etaseconds:0;
+    status:"error"
+  });
+  <results
+};
+
 f=pullmodel(modelid:str):@$pullprogress{
   log.info(str.concat("pulling model: ";modelid);"installer.pull";"system");
   let results=@($pullprogress);
 
   let child=proc.spawn("ollama";@("pull";modelid));
-  mt child {
-    $ok:handle
-      let lines=proc.readlines(handle);
-      lines.each|line{
-        let progress=parseprogressline(modelid;line);
-        results=@.push(results;progress)
-      };
-      let exitcode=proc.wait(handle);
-      if(exitcode = 0){
-        results=@.push(results;$pullprogress{
-          modelid:modelid;
-          totalbytes:0;
-          downloadedbytes:0;
-          percent:100.0;
-          etaseconds:0;
-          status:"complete"
-        })
-      }el{
-        log.error(str.concat("ollama pull failed with exit code: ";str.fromint(exitcode));"installer.pull";"system");
-        results=@.push(results;$pullprogress{
-          modelid:modelid;
-          totalbytes:0;
-          downloadedbytes:0;
-          percent:0.0;
-          etaseconds:0;
-          status:"error"
-        })
-      };
-    $err:e
-      log.error(str.concat("failed to spawn ollama pull: ";e);"installer.pull";"system");
-      results=@.push(results;$pullprogress{
-        modelid:modelid;
-        totalbytes:0;
-        downloadedbytes:0;
-        percent:0.0;
-        etaseconds:0;
-        status:"error"
-      })
+  results=mt child {
+    $ok:handle handlepullchild(handle;modelid;results);
+    $err:e handlepullerror(e;modelid;results)
   };
   <results
 };
@@ -85,9 +93,10 @@ f=parseprogressline(modelid:str;line:str):$pullprogress{
   let pct=extractpercent(line);
   let bytesinfo=extractbytes(line);
   let eta=extracteta(line);
-  let status=if(str.contains(line;"success")){"complete"}el{
-    if(str.contains(line;"error")){"error"}el{
-      if(pct > 0.0){"downloading"}el{"preparing"}
+  let status=mut."preparing";
+  if(str.contains(line;"success")){status="complete"}el{
+    if(str.contains(line;"error")){status="error"}el{
+      if(pct > 0.0){status="downloading"}el{}
     }
   };
   <$pullprogress{
@@ -207,65 +216,84 @@ f=extracteta(line:str):i64{
   }
 };
 
+f=searchmodelsintags(data:i64;modelid:str):bool{
+  let models=json.getarray(data;"models");
+  let found=mut.false;
+  lp(let ii=0;ii<models.len;ii=ii+1){ let entry=models.get(ii);
+    let name=json.getstr(entry;"name");
+    if(str.contains(name;modelid)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+f=parsemodeltagserr(e:str):bool{
+  log.warn(str.concat("failed to parse tags response: ";e);"installer.pull";"system");
+  <false
+};
+
+f=handlemodeltagsresp(r:i64;modelid:str):bool{
+  if(r.status = 200){
+    let body=r.body;
+    let parsed=json.parse(body);
+    mt parsed {
+      $ok:data searchmodelsintags(data;modelid);
+      $err:e parsemodeltagserr(e)
+    }
+  }el{
+    log.warn(str.concat("ollama tags returned status: ";str.fromint(r.status));"installer.pull";"system");
+    <false
+  }
+};
+
+f=handlemodeltagserr(e:str):bool{
+  log.warn(str.concat("ollama not reachable: ";e);"installer.pull";"system");
+  <false
+};
+
 f=ismodelavailable(modelid:str):bool{
   log.info(str.concat("checking model availability: ";modelid);"installer.pull";"system");
   let resp=http.get("http://localhost:11434/api/tags");
   mt resp {
-    $ok:r
-      if(r.status = 200){
-        let body=r.body;
-        let parsed=json.parse(body);
-        mt parsed {
-          $ok:data
-            let models=json.getarray(data;"models");
-            let found=mut.false;
-            models.each|entry{
-              let name=json.getstr(entry;"name");
-              if(str.contains(name;modelid)){
-                found=true
-              }el{}
-            };
-            <found;
-          $err:e
-            log.warn(str.concat("failed to parse tags response: ";e);"installer.pull";"system");
-            <false
-        }
-      }el{
-        log.warn(str.concat("ollama tags returned status: ";str.fromint(r.status));"installer.pull";"system");
-        <false
-      };
-    $err:e
-      log.warn(str.concat("ollama not reachable: ";e);"installer.pull";"system");
-      <false
+    $ok:r handlemodeltagsresp(r;modelid);
+    $err:e handlemodeltagserr(e)
   }
+};
+
+f=parseinstalledmodels(output:str):@str{
+  let lines=str.split(output;"
+");
+  let models=@(str);
+  let i=0;
+  lp(let ii=0;ii<lines.len;ii=ii+1){ let line=lines.get(ii);
+    if(i > 0){
+      let trimmed=str.trim(line);
+      if(str.len(trimmed) > 0){
+        let name=str.splitfirst(trimmed;" ");
+        let nametab=str.splitfirst(trimmed;"	");
+        let modelname=mut.nametab;
+        if(str.len(name) > 0){modelname=name}el{};
+        if(str.len(modelname) > 0){
+          models.push(modelname)
+        }el{}
+      }el{}
+    }el{};
+    i=i+1
+  };
+  <models
+};
+
+f=listinstalledmodelserr(e:str):@str{
+  log.warn(str.concat("failed to run ollama list: ";e);"installer.pull";"system");
+  <@(str)
 };
 
 f=listinstalledmodels():@str{
   log.info("listing installed models";"installer.pull";"system");
   let result=proc.exec("ollama";@("list"));
   mt result {
-    $ok:output
-      let lines=str.split(output;"
-");
-      let models=@(str);
-      let i=0;
-      lines.each|line{
-        if(i > 0){
-          let trimmed=str.trim(line);
-          if(str.len(trimmed) > 0){
-            let name=str.splitfirst(trimmed;" ");
-            let nametab=str.splitfirst(trimmed;"	");
-            let modelname=if(str.len(name) > 0){name}el{nametab};
-            if(str.len(modelname) > 0){
-              models=@.push(models;modelname)
-            }el{}
-          }el{}
-        }el{};
-        i=i+1
-      };
-      <models;
-    $err:e
-      log.warn(str.concat("failed to run ollama list: ";e);"installer.pull";"system");
-      <@(str)
+    $ok:output parseinstalledmodels(output);
+    $err:e listinstalledmodelserr(e)
   }
 };

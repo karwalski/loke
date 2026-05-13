@@ -46,10 +46,7 @@ f=ensuretable(store:i64):void!$lokeerr{
   updated_at TEXT NOT NULL
 )"
   ) {
-    $ok: {
-      log.debug("sync_queue table ensured";"sync_queue";"init");
-      <$ok(void)
-    };
+    $ok:v $ok(void);
     $err:e $err($storageerr("failed to create sync_queue table"))
   }
 };
@@ -63,15 +60,37 @@ f=enqueue(store:i64;queuename:str;payload:str;maxattempts:u32):str!$lokeerr{
     "INSERT INTO sync_queue (id,queue_name,payload,status,attempts,max_attempts,next_retry_at,error,created_at,updated_at) VALUES (?,?,'pending',0,?,NULL,NULL,datetime('now'),datetime('now'))";
     @(id;queuename;payload;maxstr)
   ) {
-    $ok: {
-      log.debug(str.concat("enqueued item to: ";queuename);"sync_queue";queuename);
-      <$ok(id)
-    };
+    $ok:v $ok(id);
     $err:e $err($storageerr(str.concat("failed to enqueue item to: ";queuename)))
   }
 };
 
 
+
+f=dequeuerow(store:i64;row:i64):$queueitem!$lokeerr{
+  let itemid=json.getstr(row;"id");
+  mt db.execparams(
+    store.conn;
+    "UPDATE sync_queue SET status='processing',updated_at=datetime('now') WHERE id=?";
+    @(itemid)
+  ) {
+    $ok:v void;
+    $err:e $err($storageerr(str.concat("failed to mark item as processing: ";itemid)))
+  };
+  let attemptsint=json.getint(row;"attempts");
+  let maxattemptsint=json.getint(row;"max_attempts");
+  let errorval=json.getstr(row;"error");
+  <$ok($queueitem{
+    id:itemid;
+    queuename:json.getstr(row;"queue_name");
+    payload:json.getstr(row;"payload");
+    status:$processing;
+    attempts:attemptsint;
+    maxattempts:maxattemptsint;
+    error:errorval;
+    createdat:json.getstr(row;"created_at")
+  })
+};
 
 f=dequeue(store:i64;queuename:str):$queueitem!$lokeerr{
   mt db.queryoneparams(
@@ -79,30 +98,7 @@ f=dequeue(store:i64;queuename:str):$queueitem!$lokeerr{
     "SELECT id,queue_name,payload,status,attempts,max_attempts,error,created_at FROM sync_queue WHERE queue_name=? AND status='pending' AND (next_retry_at IS NULL OR next_retry_at <= datetime('now')) ORDER BY created_at ASC LIMIT 1";
     @(queuename)
   ) {
-    $ok:row {
-      let itemid=json.getstr(row;"id");
-      mt db.execparams(
-        store.conn;
-        "UPDATE sync_queue SET status='processing',updated_at=datetime('now') WHERE id=?";
-        @(itemid)
-      ) {
-        $ok: {};
-        $err:e $err($storageerr(str.concat("failed to mark item as processing: ";itemid)))
-      };
-      let attemptsint=json.getint(row;"attempts");
-      let maxattemptsint=json.getint(row;"max_attempts");
-      let errorval=json.getstr(row;"error");
-      <$ok($queueitem{
-        id:itemid;
-        queuename:json.getstr(row;"queue_name");
-        payload:json.getstr(row;"payload");
-        status:$processing;
-        attempts:attemptsint;
-        maxattempts:maxattemptsint;
-        error:errorval;
-        createdat:json.getstr(row;"created_at")
-      })
-    };
+    $ok:row dequeuerow(store;row);
     $err:e $err($notfounderr(str.concat("no pending items in queue: ";queuename)))
   }
 };
@@ -114,10 +110,7 @@ f=ack(store:i64;itemid:str):void!$lokeerr{
     "UPDATE sync_queue SET status='completed',updated_at=datetime('now') WHERE id=?";
     @(itemid)
   ) {
-    $ok: {
-      log.debug(str.concat("acked item: ";itemid);"sync_queue";itemid);
-      <$ok(void)
-    };
+    $ok:v $ok(void);
     $err:e $err($storageerr(str.concat("failed to ack item: ";itemid)))
   }
 };
@@ -131,69 +124,53 @@ f=ack(store:i64;itemid:str):void!$lokeerr{
 
 
 
+f=nackinner(store:i64;itemid:str;error:str;row:i64):void!$lokeerr{
+  let currentattempts=json.getint(row;"attempts");
+  let maxattempts=json.getint(row;"max_attempts");
+  let newattempts=currentattempts+1;
+  let newattemptsstr=str.fromint(newattempts);
+
+  if(newattempts>maxattempts){
+    mt db.execparams(
+      store.conn;
+      "UPDATE sync_queue SET status='dead_letter',attempts=?,error=?,updated_at=datetime('now') WHERE id=?";
+      @(newattemptsstr;error;itemid)
+    ) {
+      $ok:v $ok(void);
+      $err:e $err($storageerr(str.concat("failed to dead-letter item: ";itemid)))
+    }
+  }el{
+    let updatesql=str.concat(
+      "UPDATE sync_queue SET status='pending',attempts=";
+      str.concat(
+        newattemptsstr;
+        str.concat(
+          ",error=?,next_retry_at=datetime('now','+' || MIN(CAST(ROUND(POWER(2,";
+          str.concat(
+            newattemptsstr;
+            " - 1)) AS INTEGER),60) || ' minutes'),updated_at=datetime('now') WHERE id=?"
+          )
+        )
+      )
+    );
+    mt db.execparams(
+      store.conn;
+      updatesql;
+      @(error;itemid)
+    ) {
+      $ok:v $ok(void);
+      $err:e $err($storageerr(str.concat("failed to nack item: ";itemid)))
+    }
+  }
+};
+
 f=nack(store:i64;itemid:str;error:str):void!$lokeerr{
-  
   mt db.queryoneparams(
     store.conn;
     "SELECT attempts,max_attempts FROM sync_queue WHERE id=?";
     @(itemid)
   ) {
-    $ok:row {
-      let currentattempts=json.getint(row;"attempts");
-      let maxattempts=json.getint(row;"max_attempts");
-      let newattempts=currentattempts+1;
-      let newattemptsstr=str.fromint(newattempts);
-
-      if(newattempts>maxattempts){
-        
-        mt db.execparams(
-          store.conn;
-          "UPDATE sync_queue SET status='dead_letter',attempts=?,error=?,updated_at=datetime('now') WHERE id=?";
-          @(newattemptsstr;error;itemid)
-        ) {
-          $ok: {
-            log.warn(str.concat("item moved to dead_letter: ";itemid);"sync_queue";itemid);
-            <$ok(void)
-          };
-          $err:e $err($storageerr(str.concat("failed to dead-letter item: ";itemid)))
-        }
-      }el{
-        
-        
-        let backoffexpr=str.concat(
-          "datetime('now', '+' || MIN(CAST(ROUND(POWER(2,";
-          str.concat(
-            newattemptsstr;
-            str.concat(" - 1)) AS INTEGER),60)";",' minutes')")
-          )
-        );
-        
-        let updatesql=str.concat(
-          "UPDATE sync_queue SET status='pending',attempts=";
-          str.concat(
-            newattemptsstr;
-            str.concat(
-              ",error=?,next_retry_at=datetime('now','+' || MIN(CAST(ROUND(POWER(2,";
-              str.concat(
-                newattemptsstr;
-                " - 1)) AS INTEGER),60) || ' minutes'),updated_at=datetime('now') WHERE id=?"
-              )
-            )
-          )
-        );
-        mt db.execparams(
-          store.conn;
-          updatesql;
-          @(error;itemid)
-        ) {
-          $ok: {
-            log.debug(str.concat("nacked item, will retry: ";itemid);"sync_queue";itemid);
-            <$ok(void)
-          };
-          $err:e $err($storageerr(str.concat("failed to nack item: ";itemid)))
-        }
-      }
-    };
+    $ok:row nackinner(store;itemid;error;row);
     $err:e $err($storageerr(str.concat("item not found for nack: ";itemid)))
   }
 };
@@ -205,10 +182,7 @@ f=queuedepth(store:i64;queuename:str):u32!$lokeerr{
     "SELECT COUNT(*) as cnt FROM sync_queue WHERE queue_name=? AND status='pending'";
     @(queuename)
   ) {
-    $ok:row {
-      let n=json.getint(row;"cnt");
-      <$ok(n)
-    };
+    $ok:row $ok(json.getint(row;"cnt"));
     $err:e $err($storageerr(str.concat("failed to count queue depth for: ";queuename)))
   }
 };
@@ -220,10 +194,7 @@ f=deadlettercount(store:i64;queuename:str):u32!$lokeerr{
     "SELECT COUNT(*) as cnt FROM sync_queue WHERE queue_name=? AND status='dead_letter'";
     @(queuename)
   ) {
-    $ok:row {
-      let n=json.getint(row;"cnt");
-      <$ok(n)
-    };
+    $ok:row $ok(json.getint(row;"cnt"));
     $err:e $err($storageerr(str.concat("failed to count dead-letter items for: ";queuename)))
   }
 };
