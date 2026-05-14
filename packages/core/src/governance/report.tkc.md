@@ -1,1 +1,1 @@
-Generates periodic governance reports with request counts, policy violations, quota breaches, and top triggered rules. Formats as markdown and writes to filesystem. Depends on std.db, std.str, std.fs, shared.log, and std.time.
+Generates periodic governance reports with request counts, policy violations, quota breaches, and top triggered rules. Formats as markdown and writes to filesystem. Depends on std.db, std.str, std.fs, shared.log, and time.

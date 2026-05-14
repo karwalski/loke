@@ -19,6 +19,23 @@ IFACE_DIR="$PROJECT/build/interfaces"
 
 mkdir -p "$IFACE_DIR"
 
+# Copy stdlib .tki files
+if [ -d "$TOKE_DIR/stdlib" ]; then
+  mkdir -p "$IFACE_DIR/std"
+  for f in "$TOKE_DIR/stdlib"/*.tki; do
+    [ -f "$f" ] && cp "$f" "$IFACE_DIR/std/$(basename "$f")"
+  done
+fi
+
+# Copy ooke .tki files
+OOKE_DIR="${OOKE_DIR:-/Users/matthew.watt/tk/toke-ooke}"
+if [ -d "$OOKE_DIR/src/ooke" ]; then
+  mkdir -p "$IFACE_DIR/ooke"
+  for f in "$OOKE_DIR/src/ooke"/*.tki; do
+    [ -f "$f" ] && cp "$f" "$IFACE_DIR/ooke/$(basename "$f")"
+  done
+fi
+
 # Collect all .tk source files from project packages
 SOURCES=""
 for dir in \
