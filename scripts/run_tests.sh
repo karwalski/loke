@@ -7,6 +7,9 @@ TOKEDIR=/Users/matthew.watt/tk/toke
 TOKE=$TOKEDIR/toke
 STDLIB=$TOKEDIR/src/stdlib
 BUILDDIR="/tmp/loke-tests"
+SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECTDIR="$(cd "$SCRIPTDIR/.." && pwd)"
+IFACE_DIR="$PROJECTDIR/build/interfaces"
 mkdir -p "$BUILDDIR"
 
 PASS=0
@@ -18,7 +21,6 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   ORIGDIR=$(pwd)
 
   # Step 1: emit LLVM IR
-  IFACE_DIR="$(cd "$(dirname "$0")/.." && pwd)/build/interfaces"
   if ! $TOKE -I "$IFACE_DIR" --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null; then
     echo "COMPILE_ERROR $SRC"
     FAIL=$((FAIL+1))
