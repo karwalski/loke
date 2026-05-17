@@ -712,18 +712,33 @@
     historyEl.scrollTop = historyEl.scrollHeight;
   }
 
-  function addAssistantMessage(text, traceLines) {
+  function addAssistantMessage(text, traceLines, debugData) {
     var id = 'msg-' + (++msgCount);
     var traceId = 'trace-' + msgCount;
+    var debugId = 'debug-' + msgCount;
     var msg = document.createElement('div');
     msg.className = 'msg msg-assistant';
+    var debugHtml = '';
+    if (debugData) {
+      debugHtml =
+        '<div class="debug-panel" id="' + debugId + '" style="display:none;max-height:400px;overflow-y:auto;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:12px;margin-top:8px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:#8b949e;">' +
+          '<div style="color:#58a6ff;margin-bottom:8px;font-weight:600;">Request</div>' +
+          '<div style="color:#e6edf3;">' + escHtml(JSON.stringify(debugData.request, null, 2)) + '</div>' +
+          '<div style="color:#58a6ff;margin:8px 0;font-weight:600;">Response (raw)</div>' +
+          '<div style="color:#e6edf3;">' + escHtml(JSON.stringify(debugData.response, null, 2)) + '</div>' +
+          (debugData.error ? '<div style="color:#f85149;margin-top:8px;">Error: ' + escHtml(debugData.error) + '</div>' : '') +
+          '<div style="color:#3fb950;margin-top:8px;">Provider: ' + escHtml(debugData.provider || 'unknown') + ' | Model: ' + escHtml(debugData.model || 'unknown') + ' | Time: ' + (debugData.durationMs || 0) + 'ms</div>' +
+        '</div>';
+    }
     msg.innerHTML =
       '<div class="bubble bubble-assistant" id="' + id + '">' + escHtml(text) + '</div>' +
       '<div class="trace-panel" id="' + traceId + '">' +
         (traceLines || []).map(function(l) { return escHtml(l); }).join('<br>') +
       '</div>' +
+      debugHtml +
       '<div class="msg-actions">' +
         '<button class="msg-btn" onclick="toggleTrace(\'' + traceId + '\', this)">View pipeline trace</button>' +
+        '<button class="msg-btn" onclick="toggleDebug(\'' + debugId + '\', this)">Debug</button>' +
         '<div class="thumbs">' +
           '<button class="thumb-btn" title="Helpful" onclick="vote(this, \'up\')">👍</button>' +
           '<button class="thumb-btn" title="Not helpful" onclick="vote(this, \'down\')">👎</button>' +
@@ -733,6 +748,14 @@
     historyEl.appendChild(msg);
     historyEl.scrollTop = historyEl.scrollHeight;
   }
+
+  window.toggleDebug = function(id, btn) {
+    var panel = document.getElementById(id);
+    if (!panel) return;
+    var open = panel.style.display !== 'none';
+    panel.style.display = open ? 'none' : 'block';
+    btn.textContent = open ? 'Debug' : 'Hide debug';
+  };
 
   function addTypingIndicator() {
     var el = document.createElement('div');
@@ -925,6 +948,7 @@
       lokeBody.model = model;
     }
 
+    var t0 = Date.now();
     try {
       var resp = await fetch('http://127.0.0.1:11430/api/pipeline', {
         method: 'POST',
@@ -932,37 +956,51 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(lokeBody)
       });
+      var elapsed = Date.now() - t0;
 
       removeTypingIndicator();
 
-      var json = await resp.json().catch(function() { return null; });
+      var rawText = await resp.text().catch(function() { return ''; });
+      var json = null;
+      try { json = JSON.parse(rawText); } catch(e) { /* not JSON */ }
       var responseText = (json && json.response) ? json.response
         : (json && json.error) ? 'loke error: ' + json.error
-        : 'No response — check loke is running on port 11430.';
+        : rawText || 'No response — check loke is running on port 11430.';
 
-      // Build trace from real response data
       var traceLines = [
         '→ request_id      : ' + (json && json.request_id ? json.request_id : 'n/a'),
         '→ sensitivity      : ' + (json && json.sensitivity ? json.sensitivity : 'unknown'),
         '→ entities_found   : ' + (json && json.entities_found != null ? json.entities_found : 'n/a'),
-        '→ model            : ' + (json && json.model_id ? json.model_id : model),
-        '→ provider         : ' + (json && json.provider ? JSON.stringify(json.provider) : 'n/a'),
+        '→ model            : ' + (json && json.model ? json.model : model),
+        '→ provider         : ' + (json && json.provider ? json.provider : 'n/a'),
         '→ tokens_in        : ' + (json && json.tokens_in != null ? json.tokens_in : 'n/a'),
         '→ tokens_out       : ' + (json && json.tokens_out != null ? json.tokens_out : 'n/a'),
         '→ cost_usd         : $' + (json && json.cost_usd != null ? json.cost_usd.toFixed(6) : '0.000000'),
-        '→ restore          : complete',
+        '→ duration         : ' + elapsed + 'ms',
       ];
-      addAssistantMessage(responseText, traceLines);
 
-      // Real console logs from response
+      var debugData = {
+        request: lokeBody,
+        response: json || rawText,
+        provider: json ? json.provider : 'unknown',
+        model: json ? json.model : model,
+        durationMs: elapsed,
+        httpStatus: resp.status,
+        error: (json && json.error) ? json.error : null
+      };
+
+      addAssistantMessage(responseText, traceLines, debugData);
+
       consoleLog('Anonymise', 'Entities found: ' + (json && json.entities_found != null ? json.entities_found : 0) + ' · ' + (json && json.sensitivity ? json.sensitivity : 'PUBLIC'), 'stage-anonymise');
-      consoleLog('LLM Call', 'Model: ' + (json && json.model_id ? json.model_id : model) + ' · ' + (json && json.tokens_in ? json.tokens_in : 0) + ' tokens in, ' + (json && json.tokens_out ? json.tokens_out : 0) + ' out', 'stage-llm');
+      consoleLog('LLM Call', 'Model: ' + (json && json.model ? json.model : model) + ' · Provider: ' + (json && json.provider ? json.provider : 'n/a') + ' · ' + elapsed + 'ms', 'stage-llm');
       consoleLog('Restore', 'Response verified · cost $' + (json && json.cost_usd != null ? json.cost_usd.toFixed(6) : '0.000000'), 'stage-restore');
 
     } catch(err) {
+      var elapsed = Date.now() - t0;
       removeTypingIndicator();
-      var traceLines = ['→ error: ' + err.message];
-      addAssistantMessage('Could not reach loke pipeline (' + err.message + '). Check that loke is running on port 11430.', traceLines);
+      var traceLines = ['→ error: ' + err.message, '→ duration: ' + elapsed + 'ms'];
+      var debugData = { request: lokeBody, response: null, error: err.message, durationMs: elapsed };
+      addAssistantMessage('Could not reach loke pipeline (' + err.message + '). Check that loke is running on port 11430.', traceLines, debugData);
       consoleLog('Error', err.message, 'stage-restore');
     }
 
