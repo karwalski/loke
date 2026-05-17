@@ -41,7 +41,7 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
     -x c $CMARK_C $TOML_C \
     -o "$BUILDDIR/$NAME" -lm -lz -lsqlite3 -lssl -lcrypto \
     -framework Security -framework CoreFoundation -lobjc \
-    -Wl,-undefined,dynamic_lookup 2>/dev/null; then
+    2>/dev/null; then
     echo "LINK_ERROR   $SRC"
     FAIL=$((FAIL+1))
     ERRORS="$ERRORS\n  $SRC (link)"
