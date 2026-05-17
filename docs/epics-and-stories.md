@@ -528,6 +528,29 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 | X4a.5.7 | S | | **Fix `mut` parse errors** — 2 modules have `mut` in expression position where it's not valid: `core.extensions.providerregistry`, `core.installer.pull`. Likely double-mutation from prior automated fix — clean up. |
 | X4a.5.8 | S | | **Suppress warnings / minor fixes** — Handle: `core.agents.overnight` (Python keyword `class`), `core.memory.search` / `core.router.examples` / `loke.browser.workspace.tabs` (value escapes scope — move binding). These are warnings, not errors, but should be cleaned up. |
 
+## Epic X4a.6: Live API Handler Implementations
+
+*loke builds and serves a native binary (X4a.1–X4a.5 complete). All 172 modules compile, 19/19 tests pass. But the API handlers return stub/placeholder data because the core module functions (`browser.extensions.core`, `core.models.ollama`) have placeholder implementations. This epic implements the real business logic so API endpoints return live data.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| X4a.6.1 | M | | **Implement `browser.extensions.core` state management** — Replace stub getters (`getconfig`, `getrouter`, `getdispatcher`, etc.) with real state. On init: load `ooke.toml` config, create Ollama client, initialise privacy pipeline config with default entity types and detection layers. Store state in a module-level struct initialised once at startup. `getconfig()` returns a struct with `.ollamaurl` (default `http://127.0.0.1:11434`), `.port` (11430), `.datadir`, `.loglevel`. |
+| X4a.6.2 | M | | **Implement `/api/health` — live Ollama check** — The health handler calls `ollama.healthcheck(client)` which should HTTP GET `http://127.0.0.1:11434/api/tags`. Return `{"ok":true,"loke":"0.2.0","ollama":"running"/"stopped","port":11430}`. Use `std.http` GET with timeout. |
+| X4a.6.3 | M | | **Implement `/api/models` — list from Ollama** — GET `http://127.0.0.1:11434/api/tags`, parse JSON response, return model list with name/size. Use `std.http` and `std.json`. |
+| X4a.6.4 | L | | **Implement `/api/pipeline` — proxy to Ollama** — Accept `{text, system_prompt, model}`, POST to `http://127.0.0.1:11434/api/generate` with model and prompt, return response. Privacy pipeline runs first (placeholder pass-through for now). |
+| X4a.6.5 | S | | **Wire moke → loke pipeline** — moke's chat sends to loke's `/api/pipeline`, loke proxies to Ollama, response flows back. Verify end-to-end from moke UI. |
+
+## Epic X4a.7: CORS Architecture Resolution
+
+*Cross-origin issues between moke (:11432) and loke (:11430) have been a recurring problem. The `ooke.toml` `corsorigins = "*"` setting works for preflight (OPTIONS) and actual requests when the Origin header is present, but the browser-side JS health polling still shows connectivity issues. This epic proposes an architectural change to eliminate CORS as a concern.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| X4a.7.1 | S | | **Audit current CORS state** — Document exactly where CORS is configured (ooke.toml, ooke http.c headers), what the browser sees (inspect Network tab), and whether the issue is CORS headers missing on specific routes or a different connectivity problem (e.g. moke's JS fetching wrong URL, health endpoint returning non-JSON). |
+| X4a.7.2 | M | | **Architectural option: reverse proxy** — Instead of moke fetching cross-origin to loke directly, moke proxies `/api/loke/*` through its own server to `127.0.0.1:11430`. All browser requests stay same-origin. Eliminates CORS entirely. Implement in ooke as a `[proxy]` config section: `proxy = [{path="/api/loke", target="http://127.0.0.1:11430"}]`. |
+| X4a.7.3 | S | | **Architectural option: single-origin deployment** — Run loke and moke on the same port with path-based routing (`/moke/*` → moke handlers, everything else → loke). Eliminates the multi-port setup entirely. Evaluate feasibility with ooke's routing. |
+| X4a.7.4 | S | | **Decision and implementation** — Pick one approach (proxy or single-origin), implement it, verify moke→loke calls work without CORS, remove `corsorigins` config as it's no longer needed. |
+
 ## Epic X4b: Archive Legacy Tests & Create New Test Suites
 
 *The v3 migration converted all 562 source files to valid toke v3 syntax. The 170 existing test files (156 loke + 14 moke) were written against the pre-ooke architecture using patterns that no longer compile (v2 test framework references, unresolvable module imports, pre-migration assertion patterns). These tests need to be archived and replaced with clean test suites for loke and moke separately.*
