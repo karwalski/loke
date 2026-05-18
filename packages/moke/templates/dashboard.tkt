@@ -40,6 +40,22 @@
   .refine-row { display: none; }
   .refine-row.visible { display: flex; }
 
+  /* ── Prompt suggestion chips ───────────────────────────────────────────── */
+  .dash-chips {
+    display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 0;
+  }
+  .dash-chips-label {
+    width: 100%; font-size: 0.72em; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); margin-bottom: 2px;
+  }
+  .dash-chip {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 20px; padding: 6px 14px;
+    font-size: 0.8em; color: var(--muted);
+    cursor: pointer; transition: border-color 0.15s, color 0.15s;
+  }
+  .dash-chip:hover { border-color: var(--accent); color: var(--accent); }
+
   /* ── Phase loading indicator ────────────────────────────────────────────── */
   .phase-bar {
     display: none; align-items: center; gap: 0; padding: 12px 0; margin-bottom: 16px;
@@ -197,6 +213,9 @@
       onkeydown="if(event.key==='Enter')refineDashboard()" />
     <button class="btn" id="btn-refine" onclick="refineDashboard()">Refine</button>
   </div>
+  <div class="dash-chips" id="dash-chips" style="display:none">
+    <div class="dash-chips-label">Suggested prompts</div>
+  </div>
 </div>
 
 <!-- ── Template bar (MK3.4) ──────────────────────────────────────────────────── -->
@@ -254,6 +273,15 @@ const PALETTE = [
   'rgba(132,204,22,0.8)'
 ];
 const PALETTE_BORDER = PALETTE.map(c => c.replace('0.8','1'));
+
+// ── Dataset-specific prompt suggestions ────────────────────────────────────
+var DASH_PROMPTS = {
+  'au.medicare': ['Claims by specialty and month', 'Cost distribution by state', 'Top providers by total benefit', 'Bulk billing rate over time'],
+  'au.water': ['pH trends by location', 'Turbidity alerts by suburb', 'Chemical levels comparison', 'Sensor reading frequency'],
+  'au.opal': ['Tap-on volume by station and hour', 'Journey time distribution', 'Fare revenue by route type', 'Peak vs off-peak usage'],
+  'it_hardware.server_inventory': ['Server count by manufacturer', 'CPU utilisation distribution', 'Warranty expiry timeline', 'Storage capacity by data centre'],
+  'customer_intelligence': ['Customer segments by spend', 'Churn risk distribution', 'LTV by acquisition channel', 'NPS score trends']
+};
 
 // ── State ──────────────────────────────────────────────────────────────────
 let currentDDL = null;      // parsed DDL object (JS)
@@ -338,6 +366,58 @@ function extractJSON(text) {
   }
   if (end === -1) return null;
   try { return JSON.parse(text.slice(start, end+1)); } catch(_) { return null; }
+}
+
+// ── Normalise LLM response to internal DDL format ─────────────────────────
+// The system prompt asks for { charts: [...] } with xKey/yKey/data fields.
+// The renderer expects { cards: [...] } with card.kind/chart.chart_type etc.
+// This function bridges the two formats.
+function normaliseDDL(obj) {
+  // If it already has cards, keep it (old format or refined DDL)
+  if (obj.cards && Array.isArray(obj.cards) && obj.cards.length > 0) return obj;
+
+  // Convert { charts: [...] } to { cards: [...] }
+  if (obj.charts && Array.isArray(obj.charts)) {
+    var cards = obj.charts.map(function(ch, i) {
+      var chartType = (ch.type || 'bar').toLowerCase();
+      var xKey = ch.xKey || ch.x_key || ch.x_col || 'category';
+      var yKey = ch.yKey || ch.y_key || ch.y_col || 'value';
+      var chartData = ch.data || [];
+
+      // Build resolved_data from the LLM's sample data array
+      var labels = [], values = [];
+      if (Array.isArray(chartData) && chartData.length > 0) {
+        chartData.forEach(function(row) {
+          labels.push(String(row[xKey] || row.label || row.name || ''));
+          var v = row[yKey] || row.value || row.count || 0;
+          values.push(typeof v === 'number' ? v : parseFloat(v) || 0);
+        });
+      }
+
+      return {
+        id: ch.id || ('chart-' + i),
+        kind: 'chart',
+        title: ch.title || ('Chart ' + (i + 1)),
+        col_span: ch.col_span || (i < 2 ? 2 : 1),
+        chart: {
+          chart_type: chartType,
+          x_col: xKey,
+          y_col: yKey,
+          query_op: 'sum_by_group',
+          resolved_data: labels.length > 0 ? { labels: labels, values: values } : null
+        }
+      };
+    });
+
+    return {
+      title: obj.title || 'Dashboard',
+      summary: obj.summary || '',
+      cards: cards
+    };
+  }
+
+  // Fallback: return as-is
+  return obj;
 }
 
 // ── Phase 2: local query resolution ───────────────────────────────────────
@@ -838,7 +918,7 @@ async function generateDashboard() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: buildPhase1Prompt(question),
-        system_prompt: 'You are a dashboard design assistant. Output only valid JSON.',
+        system_prompt: 'You are a dashboard design assistant. Return ONLY a valid JSON object (no markdown, no explanation). The JSON must have a "charts" array where each chart has: "title" (string), "type" ("bar"|"line"|"pie"|"doughnut"), "xKey" (column name from the dataset), "yKey" (column name or "count"), and "data" (array of objects with values for xKey and yKey). Include 4-6 charts. Use realistic sample values that match the dataset schema.',
         tolerance: 'patient',
         mode: 'dashboard',
         request_id: rid,
@@ -862,12 +942,19 @@ async function generateDashboard() {
       phaseReset(); setBusy(false); return;
     }
 
+    // Normalise: if LLM returned { charts: [...] } convert to { cards: [...] }
+    ddlObj = normaliseDDL(ddlObj);
+
     // Phase 2 — local compute
     phaseRun('ph2');
     let mokeDataset = null;
     try { mokeDataset = JSON.parse(sessionStorage.getItem('moke_dataset')); } catch(_) {}
     if (mokeDataset && mokeDataset.rows && mokeDataset.rows.length > 0) {
-      ddlObj = resolveQueries(ddlObj, mokeDataset);
+      try {
+        ddlObj = resolveQueries(ddlObj, mokeDataset);
+      } catch (resolveErr) {
+        console.warn('[moke] Phase 2 resolveQueries failed, using LLM sample data:', resolveErr);
+      }
     } else {
       console.info('[moke] Phase 2: local data not loaded — showing LLM estimates');
     }
@@ -907,7 +994,7 @@ async function refineDashboard() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: prompt,
-        system_prompt: 'You are a dashboard design assistant. Output only valid JSON.',
+        system_prompt: 'You are a dashboard design assistant. Return ONLY a valid JSON object (no markdown, no explanation). The JSON must have a "charts" array where each chart has: "title" (string), "type" ("bar"|"line"|"pie"|"doughnut"), "xKey" (column name from the dataset), "yKey" (column name or "count"), and "data" (array of objects with values for xKey and yKey). Include 4-6 charts. Use realistic sample values that match the dataset schema.',
         tolerance: 'patient',
         mode: 'dashboard',
       }),
@@ -916,14 +1003,27 @@ async function refineDashboard() {
     phaseDone('ph1');
     if (!data.ok) { showError('Refine error: ' + (data.error || 'unknown')); phaseReset(); setBusy(false); return; }
 
-    const ddlObj = extractJSON(data.response || '');
+    // Extract response text — handle Anthropic raw format
+    var refineLlmText = data.response || '';
+    if (data.anthropic_raw && data.anthropic_raw.content) {
+      refineLlmText = data.anthropic_raw.content.map(function(c) { return c.text || ''; }).join('');
+    }
+
+    let ddlObj = extractJSON(refineLlmText);
     if (!ddlObj) { showError('Refine: LLM did not return valid JSON. Try a different instruction.'); phaseReset(); setBusy(false); return; }
+
+    // Normalise: if LLM returned { charts: [...] } convert to { cards: [...] }
+    ddlObj = normaliseDDL(ddlObj);
 
     phaseRun('ph2');
     let mokeDataset2 = null;
     try { mokeDataset2 = JSON.parse(sessionStorage.getItem('moke_dataset')); } catch(_) {}
     if (mokeDataset2 && mokeDataset2.rows && mokeDataset2.rows.length > 0) {
-      ddlObj = resolveQueries(ddlObj, mokeDataset2);
+      try {
+        ddlObj = resolveQueries(ddlObj, mokeDataset2);
+      } catch (resolveErr) {
+        console.warn('[moke] Phase 2 (refine) resolveQueries failed, using LLM sample data:', resolveErr);
+      }
     } else {
       console.info('[moke] Phase 2 (refine): local data not loaded — showing LLM estimates');
     }
@@ -1121,8 +1221,47 @@ window.deleteTemplate = function() {
   renderTemplateSelect();
 };
 
-// Init — populate template selector on load
+// ── Populate dataset-specific prompt chips ──────────────────────────────────
+function populateDashChips() {
+  var chipsContainer = document.getElementById('dash-chips');
+  if (!chipsContainer) return;
+  var dataset = null;
+  try { dataset = JSON.parse(sessionStorage.getItem('moke_dataset')); } catch(_) {}
+  var dsId = dataset ? (dataset.id || '') : '';
+  var prompts = DASH_PROMPTS[dsId];
+  if (!prompts) {
+    // Try partial match on dataset id
+    var keys = Object.keys(DASH_PROMPTS);
+    for (var i = 0; i < keys.length; i++) {
+      if (dsId.indexOf(keys[i]) !== -1 || keys[i].indexOf(dsId) !== -1) {
+        prompts = DASH_PROMPTS[keys[i]]; break;
+      }
+    }
+  }
+  if (!prompts || !prompts.length) { chipsContainer.style.display = 'none'; return; }
+  // Remove old chip buttons
+  var old = chipsContainer.querySelectorAll('.dash-chip');
+  for (var j = 0; j < old.length; j++) old[j].remove();
+  // Add new chips
+  prompts.forEach(function(text) {
+    var btn = document.createElement('button');
+    btn.className = 'dash-chip';
+    btn.textContent = text;
+    btn.onclick = function() { useDashPrompt(text); };
+    chipsContainer.appendChild(btn);
+  });
+  chipsContainer.style.display = 'flex';
+}
+
+function useDashPrompt(text) {
+  var input = document.getElementById('dash-prompt');
+  if (input) { input.value = text; input.focus(); }
+}
+window.useDashPrompt = useDashPrompt;
+
+// Init — populate template selector and prompt chips on load
 renderTemplateSelect();
+populateDashChips();
 
 // ── Expose to global scope for inline onkeydown/onclick handlers ──────────
 window.generateDashboard = generateDashboard;
