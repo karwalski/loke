@@ -710,6 +710,21 @@ loke is local-first and single-user by design. The companion device support (F8)
 | MK4.4 | M | **Done** | Customer Intelligence dataset (392 synthetic customers, 4 natural clusters: budget shoppers / loyal mid-tier / occasional big spenders / inactive; 22 deliberate anomalies: 5 whale accounts, 7 suspected fraudsters, 4 ghost accounts, 6 luxury category buyers; 18 columns: customer_id, age, region, tenure_days, ltv, orders_ytd, avg_order_value, category_affinity, nps_score, churn_risk, last_purchase_days, support_tickets, email_domain, payment_method, referral_source, pii_name, pii_email, pii_phone) |
 | MK4.5 | S | **Done** | Dataset selector UI (landing screen lists all built-in datasets with description, row count, column count, sensitivity level, and demo scenario; or upload own CSV/Excel/paste; grouped by type: Government Open Data / IT Operations / Customer Intelligence / Your Data) |
 
+## Epic MK4.6: UX Overhaul — Workspace, Navigation, and Demo Experience
+
+*The moke UI needs a significant UX improvement to feel like a professional data analysis platform. Analysis view shows raw CSV instead of tables, navigation loses state between views, Insight Lab shows meaningless clusters, and there's no project/workspace concept for managing multiple datasets and artefacts.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK4.6.1 | M | | **Analysis view: data table instead of raw CSV** — Replace the raw CSV/text display with a proper HTML table. Show schema panel (collapsible) with column names, types, sensitivity tags. Show active dataset info (name, row count, columns). Make pipeline trace collapsible. Make sidebar menu collapsible on mobile. |
+| MK4.6.2 | M | | **Preserve chat history across view switches** — When navigating Analysis → Dashboard → Analysis, restore the chat history. Store messages in sessionStorage. On view load, re-render stored messages including any rendered charts. |
+| MK4.6.3 | L | | **Project workspace with asset directory** — Add a workspace/project concept: user can upload/select multiple datasets into a project. All artefacts (chats, dashboards, insight results, reports, generated datasets) are stored in a project asset directory. Sidebar shows project assets tree. Assets persist in sessionStorage/localStorage. |
+| MK4.6.4 | L | | **Rich demo datasets with guided prompts** — For each built-in dataset, provide 3-5 suggested prompts per screen (Analysis, Dashboard, Insight). Dataset selector shows preview of what each demo produces. Prompts are dataset-specific (e.g., Medicare: "Show top 10 specialties by cost", Water Quality: "Alert on pH below 6.5"). No canned results — all go through loke pipeline. |
+| MK4.6.5 | M | | **Richer dataset schemas** — Expand demo datasets with more columns, derived fields, and relationships. Add data types (numeric, categorical, date, boolean, pii). Add column descriptions. Schema display groups columns by type with icons. |
+| MK4.6.6 | M | | **Insight Lab improvements** — Replace generic "Cluster 1/2/3" with meaningful cluster labels derived from the data (e.g., "High-value loyal customers", "Budget occasional shoppers"). Show cluster characteristics, outlier details, and statistical summaries. Use the LLM to generate human-readable insight narratives. |
+| MK4.6.7 | S | | **Collapsible UI panels** — Schema, pipeline trace, sidebar nav, debug panel all collapsible with smooth animation. Remember collapse state in sessionStorage. Default: schema collapsed, pipeline collapsed, sidebar expanded. |
+| MK4.6.8 | S | | **Dataset directory and multi-select** — Allow selecting multiple datasets in a project. Show a dataset directory panel listing all loaded datasets with status (loaded/not loaded). Click to switch active dataset. Upload adds to directory. |
+
 ## Epic MK5: Upload and Workspace
 
 *User-supplied data and multi-dataset project workspace.*
