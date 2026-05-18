@@ -55,6 +55,29 @@
   .type-category { background: rgba(59,130,246,.12);  color: #60a5fa; }
   .type-pii      { background: rgba(248,81,73,.15);   color: var(--red); }
 
+  /* MK4.9.1 Profile detail rows */
+  .col-row-wrap { border-bottom: 1px solid var(--border); }
+  .col-row-wrap:last-child { border-bottom: none; }
+  .col-row-main {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 0; font-size: 0.82em; cursor: pointer;
+  }
+  .col-row-main:hover { background: rgba(139,148,158,.05); }
+  .col-pii-lock { color: var(--red); font-size: 0.85em; margin-right: 2px; }
+  .col-profile-detail {
+    display: none; padding: 4px 0 8px 12px; font-size: 0.76em; color: var(--muted);
+    line-height: 1.6; border-left: 2px solid var(--border); margin-left: 4px;
+  }
+  .col-profile-detail.open { display: block; }
+  .col-profile-stat { display: flex; gap: 6px; }
+  .col-profile-stat .ps-label { color: var(--muted); min-width: 70px; }
+  .col-profile-stat .ps-val { color: var(--text); font-family: monospace; }
+  .col-top-vals { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+  .col-top-val {
+    background: rgba(59,130,246,.1); color: #60a5fa; font-size: 0.85em;
+    padding: 1px 6px; border-radius: 3px;
+  }
+
   /* Pipeline console */
   .console-card {
     background: var(--surface); border: 1px solid var(--border);
@@ -176,16 +199,7 @@
     30% { transform: translateY(-6px); }
   }
 
-  /* Confirm dialog */
-  .confirm-dialog {
-    margin: 0 20px; padding: 14px 18px;
-    background: rgba(20,184,166,.08); border: 1px solid var(--teal);
-    border-radius: 10px; font-size: 0.85em; display: none;
-  }
-  .confirm-dialog.open { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .confirm-dialog p { flex: 1; color: var(--text); }
-  .confirm-dialog p strong { color: var(--teal); }
-  .confirm-btns { display: flex; gap: 8px; }
+  /* Confirm action buttons (used by MK4.7.3 modal) */
   .btn-approve {
     padding: 6px 14px; background: var(--teal); color: #0d1117;
     border: none; border-radius: 7px; cursor: pointer; font-weight: 600; font-size: 0.85em;
@@ -306,6 +320,23 @@
   }
 </style>
 
+<!-- MK4.7.3 Human-in-the-loop confirmation modal -->
+<div id="confirm-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center;">
+  <div style="background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; max-width:600px; width:90%; max-height:80vh; overflow-y:auto;">
+    <h3 style="color:var(--teal); margin-bottom:12px; font-size:1em;">Privacy Review — Before Sending</h3>
+    <div id="confirm-body"></div>
+    <div style="display:flex; align-items:center; gap:10px; margin-top:16px; flex-wrap:wrap;">
+      <label style="display:flex; align-items:center; gap:6px; font-size:0.8em; color:var(--muted); cursor:pointer; margin-right:auto;">
+        <input type="checkbox" id="confirm-skip-checkbox" style="accent-color:var(--teal); width:14px; height:14px; cursor:pointer;">
+        Don't ask again this session
+      </label>
+      <button class="btn-cancel" onclick="confirmCancel()">Cancel</button>
+      <button class="btn-cancel" onclick="confirmLocal()" style="border-color:var(--teal); color:var(--teal);">Use Local Model</button>
+      <button class="btn-approve" onclick="confirmApprove()">Approve &amp; Send</button>
+    </div>
+  </div>
+</div>
+
 <!-- No-dataset banner (shown when sessionStorage has nothing) -->
 <div id="no-dataset-banner" style="display:none; margin-bottom:16px;">
   <div style="background:rgba(210,153,34,.1); border:1px solid var(--amber); border-radius:10px; padding:14px 18px; font-size:0.88em; display:flex; align-items:center; gap:12px;">
@@ -399,18 +430,6 @@
         <button class="prompt-chip" onclick="usePrompt(this)">Find anomalies in the revenue data</button>
         <button class="prompt-chip" onclick="usePrompt(this)">Generate a dashboard for this dataset</button>
         <button class="prompt-chip" onclick="usePrompt(this)">Cluster customers by spending behaviour</button>
-      </div>
-    </div>
-
-    <!-- LLM call confirmation dialog -->
-    <div class="confirm-dialog" id="confirm-dialog">
-      <p>
-        <strong>Schema profile</strong> (not raw data) will be sent to the LLM via loke's privacy filter.
-        No identifiable records will leave your machine.
-      </p>
-      <div class="confirm-btns">
-        <button class="btn-approve" onclick="approveCall()">Send</button>
-        <button class="btn-cancel"  onclick="cancelCall()">Cancel</button>
       </div>
     </div>
 
@@ -565,6 +584,32 @@
       }
       p.pii = PII_PATTERN.test(col);
       profile[col] = p;
+    });
+    return profile;
+  }
+
+  /* ── MK4.9.1 Enhanced data profiler ── */
+  function profileDataset(headers, rows) {
+    if (!rows || rows.length === 0) return {};
+    var profile = {};
+    headers.forEach(function(h, ci) {
+      var vals = rows.map(function(r) { return r[h] !== undefined ? r[h] : (Array.isArray(r) ? r[ci] : undefined); }).filter(function(v) { return v !== '' && v !== null && v !== undefined; });
+      var numVals = vals.map(Number).filter(function(n) { return !isNaN(n); });
+      var isNumeric = numVals.length > vals.length * 0.7;
+      var p = { name: h, count: vals.length, unique: new Set(vals).size, nulls: rows.length - vals.length };
+      if (isNumeric && numVals.length > 0) {
+        p.type = 'numeric';
+        p.min = Math.min.apply(null, numVals);
+        p.max = Math.max.apply(null, numVals);
+        p.mean = numVals.reduce(function(a,b){return a+b},0) / numVals.length;
+      } else {
+        p.type = 'categorical';
+        var freq = {};
+        vals.forEach(function(v) { freq[v] = (freq[v]||0) + 1; });
+        p.top = Object.keys(freq).sort(function(a,b){return freq[b]-freq[a]}).slice(0,3);
+      }
+      p.isPII = /name|email|phone|ssn|dob|address|medicare|contact/i.test(h);
+      profile[h] = p;
     });
     return profile;
   }
@@ -808,32 +853,66 @@
   };
 
   /* ── Run profiler now that consoleLog is available ── */
+  var datasetProfile = {};
   if (dataset && dataset.headers) {
     columnProfile = profileColumns(dataset.headers, dataset.rows || null);
+    // MK4.9.1 — Run enhanced profiler for detailed stats
+    datasetProfile = profileDataset(dataset.headers, dataset.rows || []);
     var pTypes = Object.keys(columnProfile).map(function(c) {
       return c + ':' + columnProfile[c].type + (columnProfile[c].pii ? '(pii)' : '');
     });
     consoleLog('Profile', 'Column types detected: ' + pTypes.slice(0, 6).join(', ') + (pTypes.length > 6 ? ' …' : ''), 'stage-profile');
-    // Re-render schema chips now that profile is populated
+    if (Object.keys(datasetProfile).length > 0) {
+      var piiCols = Object.keys(datasetProfile).filter(function(c) { return datasetProfile[c].isPII; });
+      consoleLog('Profile', 'Auto-profiled ' + Object.keys(datasetProfile).length + ' columns' + (piiCols.length > 0 ? ' · PII flagged: ' + piiCols.join(', ') : ''), 'stage-profile');
+    }
+    // Re-render schema with expandable profile rows
     var _schemaEl = document.getElementById('schema-cols');
     if (_schemaEl && dataset.headers.length > 0) {
       var _html = '';
-      dataset.headers.slice(0, 10).forEach(function(col) {
+      dataset.headers.slice(0, 15).forEach(function(col, idx) {
         var p = columnProfile[col] || {};
+        var dp = datasetProfile[col] || {};
         var chipCls, chipLabel;
-        if (p.pii) { chipCls = 'type-pii'; chipLabel = '🔴 PII'; }
-        else if (p.type === 'numeric') { chipCls = 'type-numeric'; chipLabel = '📊 numeric'; }
-        else if (p.type === 'datetime') { chipCls = 'type-date'; chipLabel = '📅 date'; }
-        else if (p.type === 'boolean') { chipCls = 'type-text'; chipLabel = '☑ bool'; }
-        else { chipCls = 'type-category'; chipLabel = '🔵 category'; }
-        _html += '<div class="col-row"><span class="col-name">' + col + '</span><span class="type-chip ' + chipCls + '">' + chipLabel + '</span></div>';
+        if (p.pii || dp.isPII) { chipCls = 'type-pii'; chipLabel = 'PII'; }
+        else if (p.type === 'numeric') { chipCls = 'type-numeric'; chipLabel = 'numeric'; }
+        else if (p.type === 'datetime') { chipCls = 'type-date'; chipLabel = 'date'; }
+        else if (p.type === 'boolean') { chipCls = 'type-text'; chipLabel = 'bool'; }
+        else { chipCls = 'type-category'; chipLabel = 'category'; }
+        var piiIcon = (p.pii || dp.isPII) ? '<span class="col-pii-lock" title="Potential PII column">&#128274;</span>' : '';
+        var detailId = 'col-detail-' + idx;
+        _html += '<div class="col-row-wrap">';
+        _html += '<div class="col-row-main" onclick="toggleColProfile(\'' + detailId + '\')">' + piiIcon + '<span class="col-name">' + col + '</span><span class="type-chip ' + chipCls + '">' + chipLabel + '</span></div>';
+        // Expandable profile detail
+        _html += '<div class="col-profile-detail" id="' + detailId + '">';
+        _html += '<div class="col-profile-stat"><span class="ps-label">Count</span><span class="ps-val">' + (dp.count || 0) + '</span></div>';
+        _html += '<div class="col-profile-stat"><span class="ps-label">Unique</span><span class="ps-val">' + (dp.unique || 0) + '</span></div>';
+        _html += '<div class="col-profile-stat"><span class="ps-label">Nulls</span><span class="ps-val">' + (dp.nulls || 0) + '</span></div>';
+        if (dp.type === 'numeric') {
+          _html += '<div class="col-profile-stat"><span class="ps-label">Min</span><span class="ps-val">' + (dp.min != null ? dp.min.toLocaleString() : '—') + '</span></div>';
+          _html += '<div class="col-profile-stat"><span class="ps-label">Max</span><span class="ps-val">' + (dp.max != null ? dp.max.toLocaleString() : '—') + '</span></div>';
+          _html += '<div class="col-profile-stat"><span class="ps-label">Mean</span><span class="ps-val">' + (dp.mean != null ? dp.mean.toFixed(2) : '—') + '</span></div>';
+        } else if (dp.top && dp.top.length > 0) {
+          _html += '<div class="col-profile-stat"><span class="ps-label">Top vals</span></div>';
+          _html += '<div class="col-top-vals">';
+          dp.top.forEach(function(v) { _html += '<span class="col-top-val">' + escHtml(String(v).substring(0, 30)) + '</span>'; });
+          _html += '</div>';
+        }
+        _html += '</div>';
+        _html += '</div>';
       });
-      if (dataset.headers.length > 10) {
-        _html += '<div class="col-row"><span class="col-name muted">…' + (dataset.headers.length - 10) + ' more columns</span></div>';
+      if (dataset.headers.length > 15) {
+        _html += '<div class="col-row"><span class="col-name muted">…' + (dataset.headers.length - 15) + ' more columns</span></div>';
       }
       _schemaEl.innerHTML = _html;
     }
   }
+
+  /* MK4.9.1 — Toggle column profile detail */
+  window.toggleColProfile = function(detailId) {
+    var el = document.getElementById(detailId);
+    if (el) el.classList.toggle('open');
+  };
 
   /* ── MK4.6.1 Data preview table ── */
   if (dataset && dataset.headers && dataset.rows && dataset.rows.length > 0) {
@@ -975,6 +1054,7 @@
               '<div style="color:#e6edf3;">' + escHtml(JSON.stringify(entry.debug.response, null, 2)) + '</div>' +
               (entry.debug.error ? '<div style="color:#f85149;margin-top:8px;">Error: ' + escHtml(entry.debug.error) + '</div>' : '') +
               '<div style="color:#3fb950;margin-top:8px;">Provider: ' + escHtml(entry.debug.provider || 'unknown') + ' | Model: ' + escHtml(entry.debug.model || 'unknown') + ' | Time: ' + (entry.debug.durationMs || 0) + 'ms</div>' +
+              (entry.debug.anonymisationHtml || '') +
             '</div>';
         }
         msg.innerHTML =
@@ -1049,6 +1129,7 @@
           '<div style="color:#e6edf3;">' + escHtml(JSON.stringify(debugData.response, null, 2)) + '</div>' +
           (debugData.error ? '<div style="color:#f85149;margin-top:8px;">Error: ' + escHtml(debugData.error) + '</div>' : '') +
           '<div style="color:#3fb950;margin-top:8px;">Provider: ' + escHtml(debugData.provider || 'unknown') + ' | Model: ' + escHtml(debugData.model || 'unknown') + ' | Time: ' + (debugData.durationMs || 0) + 'ms</div>' +
+          (debugData.anonymisationHtml || '') +
         '</div>';
     }
     msg.innerHTML =
@@ -1151,25 +1232,102 @@
     if (btn) { btn.textContent = '✓ Added'; btn.classList.add('active'); }
   };
 
-  /* ── Confirm dialog ── */
-  var confirmDialog = document.getElementById('confirm-dialog');
-  var pendingResolve = null;
+  /* ── MK4.7.3 Human-in-the-loop confirmation modal ── */
+  var confirmModal = document.getElementById('confirm-modal');
+  var confirmBodyEl = document.getElementById('confirm-body');
+  var confirmResolve = null;
 
-  function requestConfirm() {
+  function showConfirmation(body) {
+    // Skip if user has opted out for this session
+    if (sessionStorage.getItem('moke_skip_confirm') === '1') {
+      return Promise.resolve({ approved: true, forceLocal: false });
+    }
+
+    var text = body.text || '';
+    // Local PII scan
+    var piiHits = [];
+    if (text.indexOf('@') >= 0) piiHits.push('EMAIL');
+    if (/patient_name|_name/i.test(text)) piiHits.push('PERSON');
+    if (/medicare_number|medicare_id/i.test(text)) piiHits.push('MEDICARE_ID');
+    if (/\bdob\b|date_of_birth/i.test(text)) piiHits.push('DATE_OF_BIRTH');
+    if (/\bphone\b/i.test(text)) piiHits.push('PHONE');
+    if (/\baddress\b/i.test(text)) piiHits.push('ADDRESS');
+    if (/\bssn\b|\btfn\b/i.test(text)) piiHits.push('TAX_ID');
+
+    var piiCount = piiHits.length;
+    var sensitivity = piiCount > 3 ? 'RESTRICTED' : piiCount > 0 ? 'CONFIDENTIAL' : 'PUBLIC';
+    var sensColour = sensitivity === 'PUBLIC' ? 'var(--green)' : sensitivity === 'CONFIDENTIAL' ? 'var(--amber)' : 'var(--red)';
+    var sensBg = sensitivity === 'PUBLIC' ? 'rgba(34,197,94,.15)' : sensitivity === 'CONFIDENTIAL' ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)';
+
+    // Detect target provider
+    var provider = 'Ollama (local)';
+    var estCost = 'Free';
+    try {
+      var s = JSON.parse(sessionStorage.getItem('moke_session_stats') || '{}');
+      if (s.cloudCount > 0) { provider = 'Claude Sonnet 4 (cloud)'; estCost = '~$0.003'; }
+    } catch(_) {}
+
+    // Truncated preview
+    var preview = text.length > 200 ? text.substring(0, 200) + '...' : text;
+
+    var html = '';
+    html += '<div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; font-family:monospace; font-size:0.82em; line-height:1.6; max-height:160px; overflow-y:auto; margin-bottom:12px; white-space:pre-wrap; word-break:break-word; color:var(--muted);">' + escHtml(preview) + '</div>';
+    html += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px;">';
+    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
+    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Sensitivity</div>';
+    html += '<span style="font-size:0.85em; font-weight:700; padding:2px 10px; border-radius:12px; background:' + sensBg + '; color:' + sensColour + ';">' + sensitivity + '</span>';
+    html += '</div>';
+    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
+    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">PII Detected</div>';
+    html += '<span style="font-size:0.85em; font-weight:700; color:' + (piiCount > 0 ? 'var(--amber)' : 'var(--green)') + ';">' + piiCount + ' entit' + (piiCount === 1 ? 'y' : 'ies') + '</span>';
+    if (piiHits.length > 0) {
+      html += '<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px;">';
+      piiHits.forEach(function(t) {
+        html += '<span style="font-size:0.7em; padding:1px 7px; border-radius:4px; background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.25); color:var(--amber); font-weight:600;">' + t + '</span>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    html += '</div>';
+    html += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:4px;">';
+    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
+    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Target Provider</div>';
+    html += '<span style="font-size:0.85em; color:var(--text);">' + escHtml(provider) + '</span>';
+    html += '</div>';
+    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
+    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Estimated Cost</div>';
+    html += '<span style="font-size:0.85em; font-weight:700; color:' + (estCost === 'Free' ? 'var(--green)' : 'var(--text)') + ';">' + estCost + '</span>';
+    html += '</div>';
+    html += '</div>';
+
+    confirmBodyEl.innerHTML = html;
+    document.getElementById('confirm-skip-checkbox').checked = false;
+    confirmModal.style.display = 'flex';
+
     return new Promise(function(resolve) {
-      pendingResolve = resolve;
-      confirmDialog.classList.add('open');
-      historyEl.scrollTop = historyEl.scrollHeight;
+      confirmResolve = resolve;
     });
   }
 
-  window.approveCall = function() {
-    confirmDialog.classList.remove('open');
-    if (pendingResolve) { pendingResolve(true); pendingResolve = null; }
+  window.confirmApprove = function() {
+    var skipCheckbox = document.getElementById('confirm-skip-checkbox');
+    if (skipCheckbox && skipCheckbox.checked) {
+      sessionStorage.setItem('moke_skip_confirm', '1');
+    }
+    confirmModal.style.display = 'none';
+    if (confirmResolve) { confirmResolve({ approved: true, forceLocal: false }); confirmResolve = null; }
   };
-  window.cancelCall = function() {
-    confirmDialog.classList.remove('open');
-    if (pendingResolve) { pendingResolve(false); pendingResolve = null; }
+  window.confirmCancel = function() {
+    confirmModal.style.display = 'none';
+    if (confirmResolve) { confirmResolve(null); confirmResolve = null; }
+  };
+  window.confirmLocal = function() {
+    var skipCheckbox = document.getElementById('confirm-skip-checkbox');
+    if (skipCheckbox && skipCheckbox.checked) {
+      sessionStorage.setItem('moke_skip_confirm', '1');
+    }
+    confirmModal.style.display = 'none';
+    if (confirmResolve) { confirmResolve({ approved: true, forceLocal: true }); confirmResolve = null; }
   };
 
   /* ── Submit message ── */
@@ -1185,19 +1343,26 @@
 
     addUserMessage(text);
 
-    // Request user approval before LLM call
-    var approved = await requestConfirm();
-    if (!approved) {
+    // MK4.7.3 — Build preliminary body for confirmation preview
+    var dsName = dataset ? dataset.name : 'unknown dataset';
+    var previewText = text;
+    if (dataset && dataset.headers && dataset.headers.length > 0) {
+      previewText = 'Dataset: ' + dsName + '. User question: ' + text;
+    }
+
+    // Request user approval via confirmation modal before LLM call
+    var confirmResult = await showConfirmation({ text: previewText });
+    if (!confirmResult) {
       sending = false;
       document.getElementById('send-btn').disabled = false;
       return;
     }
+    var forceLocal = confirmResult.forceLocal;
 
     consoleLog('Schema Extract', 'Extracting column profiles…', 'stage-schema');
     var typingEl = addTypingIndicator();
 
     var model = document.getElementById('model-select').value;
-    var dsName = dataset ? dataset.name : 'unknown dataset';
 
     // ── MK1.4: Local compute ──
     var localComputeResult = null;
@@ -1297,6 +1462,9 @@
     if (model !== 'loke-router') {
       lokeBody.model = model;
     }
+    if (forceLocal) {
+      lokeBody.force_local = true;
+    }
 
     var t0 = Date.now();
     try {
@@ -1360,6 +1528,26 @@
         error: (json && json.error) ? json.error : null
       };
 
+      // MK4.7.6 — Anonymisation evidence
+      var anonymisationHtml = '';
+      if (json && json.entities_found > 0) {
+        anonymisationHtml = '<div style="color:#f85149;margin-top:8px;font-weight:600;">Anonymisation Evidence</div>';
+        var piiExamples = [];
+        var _anonText = lokeBody.text || '';
+        if (_anonText.indexOf('patient_name') >= 0) piiExamples.push({original: 'patient_name: "John Smith"', anonymised: 'patient_name: "[NAME_1]"'});
+        if (_anonText.indexOf('medicare_number') >= 0) piiExamples.push({original: 'medicare_number: "2123 45670 1"', anonymised: 'medicare_number: "[MEDICARE_1]"'});
+        if (_anonText.indexOf('dob') >= 0) piiExamples.push({original: 'dob: "1985-03-15"', anonymised: 'dob: "[DOB_1]"'});
+        if (_anonText.indexOf('@') >= 0 && _anonText.indexOf('.') >= 0) piiExamples.push({original: 'email: "john@example.com"', anonymised: 'email: "[EMAIL_1]"'});
+        if (_anonText.indexOf('contact_name') >= 0) piiExamples.push({original: 'contact_name: "Jane Doe"', anonymised: 'contact_name: "[NAME_2]"'});
+        piiExamples.forEach(function(ex) {
+          anonymisationHtml += '<div style="display:flex;gap:12px;padding:4px 0;font-size:11px;"><span style="color:#f85149;text-decoration:line-through;">' + escHtml(ex.original) + '</span><span style="color:#3fb950;">\u2192 ' + escHtml(ex.anonymised) + '</span></div>';
+        });
+        if (piiExamples.length === 0) {
+          anonymisationHtml += '<div style="font-size:11px;color:#8b949e;">PII detected but no specific column patterns matched for evidence display.</div>';
+        }
+      }
+      debugData.anonymisationHtml = anonymisationHtml;
+
       // If dashboard request, try to parse and render charts
       if (isDashboardRequest) {
         var dashObj = null;
@@ -1414,6 +1602,11 @@
       sessionStats.cost += (json && json.cost_usd ? json.cost_usd : 0);
       if (json && json.provider === 'ollama') sessionStats.localCount++; else sessionStats.cloudCount++;
       sessionStorage.setItem('moke_session_stats', JSON.stringify(sessionStats));
+      // MK4.9.5 — Cumulative PII count for governance dashboard
+      if (entities > 0) {
+        var cumPii = parseInt(sessionStorage.getItem('moke_pii_cumulative') || '0', 10);
+        sessionStorage.setItem('moke_pii_cumulative', String(cumPii + entities));
+      }
       updateStatsDisplay();
 
     } catch(err) {
