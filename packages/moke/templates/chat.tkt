@@ -731,7 +731,7 @@
         '</div>';
     }
     msg.innerHTML =
-      '<div class="bubble bubble-assistant" id="' + id + '">' + escHtml(text) + '</div>' +
+      '<div class="bubble bubble-assistant" id="' + id + '">' + (text.indexOf('<') === 0 ? text : escHtml(text)) + '</div>' +
       '<div class="trace-panel" id="' + traceId + '">' +
         (traceLines || []).map(function(l) { return escHtml(l); }).join('<br>') +
       '</div>' +
@@ -938,11 +938,16 @@
       fullText = schemaCtx + (rows ? ' Dataset has ' + rows.length + ' rows.' : ' Row data not loaded — schema only.') + ' User question: ' + text;
     }
 
+    var isDashboardRequest = /dashboard|chart|graph|visuali/i.test(text);
+    var sysPrompt = isDashboardRequest
+      ? 'You are a dashboard design assistant. When asked to generate a dashboard, return ONLY a valid JSON object with a "charts" array. Each chart must have: title (string), type ("bar","line","pie","doughnut"), xKey (column name), yKey (column name or "count"), and a data array with sample values matching the schema. Do not include markdown fences, explanations, or any text outside the JSON object.'
+      : 'You are a concise data analysis assistant. Answer specifically based on the dataset schema provided. Do not fabricate data values.';
+
     var lokeBody = {
       text: fullText,
-      system_prompt: 'You are a concise data analysis assistant. Answer specifically based on the dataset schema provided. Do not fabricate data values.',
-      tolerance: 'instant',
-      mode: 'chat'
+      system_prompt: sysPrompt,
+      tolerance: isDashboardRequest ? 'patient' : 'instant',
+      mode: isDashboardRequest ? 'dashboard' : 'chat'
     };
     if (model !== 'loke-router') {
       lokeBody.model = model;
@@ -996,6 +1001,42 @@
         httpStatus: resp.status,
         error: (json && json.error) ? json.error : null
       };
+
+      // If dashboard request, try to parse and render charts
+      if (isDashboardRequest) {
+        var dashObj = null;
+        try {
+          var fenceMatch = responseText.match(/```json\s*([\s\S]*?)```/);
+          dashObj = JSON.parse(fenceMatch ? fenceMatch[1].trim() : responseText);
+        } catch(_) {
+          var jstart = responseText.indexOf('{');
+          if (jstart >= 0) { try { dashObj = JSON.parse(responseText.substring(jstart)); } catch(_2) {} }
+        }
+        if (dashObj && dashObj.charts) {
+          var chartHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin:12px 0;">';
+          dashObj.charts.forEach(function(c, i) {
+            var cid = 'dashchart-' + msgCount + '-' + i;
+            chartHtml += '<div class="card" style="padding:16px;"><h3 style="margin-bottom:8px;font-size:0.9em;color:var(--teal);">' + escHtml(c.title || 'Chart') + '</h3><canvas id="' + cid + '" height="200"></canvas></div>';
+          });
+          chartHtml += '</div>';
+          responseText = chartHtml;
+          // Render after DOM insert
+          setTimeout(function() {
+            dashObj.charts.forEach(function(c, i) {
+              var cid = 'dashchart-' + msgCount + '-' + i;
+              var canvas = document.getElementById(cid);
+              if (!canvas || !c.data) return;
+              var labels = c.data.map(function(d) { return d[c.xKey] || d[Object.keys(d)[0]] || ''; });
+              var values = c.data.map(function(d) { return d[c.yKey] || d[Object.keys(d)[1]] || 0; });
+              new Chart(canvas, {
+                type: c.type || 'bar',
+                data: { labels: labels, datasets: [{ label: c.title || '', data: values, backgroundColor: ['#14b8a6','#3fb950','#d29922','#f85149','#58a6ff','#bc8cff','#ff7b72','#79c0ff'] }] },
+                options: { responsive: true, plugins: { legend: { display: false } } }
+              });
+            });
+          }, 100);
+        }
+      }
 
       addAssistantMessage(responseText, traceLines, debugData);
 
