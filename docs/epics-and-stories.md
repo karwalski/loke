@@ -725,6 +725,48 @@ loke is local-first and single-user by design. The companion device support (F8)
 | MK4.6.7 | S | | **Collapsible UI panels** — Schema, pipeline trace, sidebar nav, debug panel all collapsible with smooth animation. Remember collapse state in sessionStorage. Default: schema collapsed, pipeline collapsed, sidebar expanded. |
 | MK4.6.8 | S | | **Dataset directory and multi-select** — Allow selecting multiple datasets in a project. Show a dataset directory panel listing all loaded datasets with status (loaded/not loaded). Click to switch active dataset. Upload adds to directory. |
 
+## Epic MK4.7: Privacy Pipeline Visibility & Governance Demo
+
+*loke's core value proposition — privacy, governance, and transparency — is invisible in the current moke demo. Users see text responses but not what loke did to protect them. This epic makes the pipeline tangible: PII detection counts, anonymisation evidence, sensitivity classification, routing decisions, cost awareness, and human-in-the-loop confirmation.*
+
+**Why this matters:** Without visible privacy features, moke is just another chat-with-data UI. With them, it demonstrates what makes loke unique — the user sees their data being protected in real time.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK4.7.1 | L | | **Privacy detection display in pipeline trace** — When loke returns a response, show PII detection results in the pipeline trace: entity count by type (names, emails, phones, etc.), which privacy layers detected them (regex, NER, SLM), confidence scores. Requires loke's `/api/pipeline` response to include `entities_found`, `entity_types`, `sensitivity`, `detection_layers` fields. Update pipeline handler to populate these from the privacy filter run. Display in the collapsible pipeline trace panel with colour-coded entity badges. |
+| MK4.7.2 | M | | **Sensitivity classification badge and routing explanation** — Prominent sensitivity badge (PUBLIC green / INTERNAL amber / CONFIDENTIAL orange / RESTRICTED red) on every response. Below the badge, one-line routing explanation: "CONFIDENTIAL → routed to local Ollama (data stays on device)" or "PUBLIC → routed to Claude Sonnet 4 (fastest, $0.003)". Show "Could run locally?" advisor when cloud model was used. |
+| MK4.7.3 | L | | **Human-in-the-loop confirmation modal** — Before each LLM call, show the confirmation modal (confirm.tkt already exists). Display: schema profile being sent (not raw data), PII summary from pipeline, entity count, sensitivity classification, target model/provider, estimated cost. Buttons: Approve / Edit prompt / Use local model / Cancel. Configurable: can be disabled in settings for trusted workflows. |
+| MK4.7.4 | M | | **Real pipeline stages in console** — Replace simulated `setTimeout` stages with actual pipeline timing from loke's response. Show real stages: Schema Extract → Privacy Filter (N entities, Xms) → Token Optimise (Y% saved) → Route (model, reason) → LLM Call (provider, Xms) → Restore (placeholders replaced). Each stage shows duration and outcome. Failed stages show red with error detail. |
+| MK4.7.5 | M | | **Cost and token tracking** — Show token counts (in/out) and cost per request in the pipeline trace. Running session totals in the sidebar: "Session: 12 requests · 4,230 tokens · $0.0127". Compare local vs cloud cost: "This request: $0.003 (Claude) — would be free locally". Monthly savings estimate visible in governance dashboard. |
+| MK4.7.6 | S | | **Anonymisation evidence view** — In the detail/debug panel, show before/after: "Original: john.smith@example.com → Sent: [EMAIL_1]". Show each entity with its placeholder. For demo: use the dataset's PII columns (patient_name, medicare_number etc.) to demonstrate real anonymisation. Never show the mapping in the audit trail — only in the user's local session. |
+| MK4.7.7 | S | | **Feedback capture** — Thumbs up/down on every response stores to localStorage: `{timestamp, requestId, vote, comment, model, provider}`. Thumbs-down opens lightweight comment box. Show feedback count in settings. Export as JSON for development review. |
+
+## Epic MK4.8: Dashboard & Insight Lab End-to-End
+
+*The Dashboard tab and Insight Lab need to work as complete demo flows — from dataset selection through LLM-guided design to rendered interactive output.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK4.8.1 | M | | **Dashboard tab Phase 1-2-3 pipeline working** — Dashboard tab's generate flow: Phase 1 (LLM designs dashboard via loke pipeline — handle `anthropic_raw` response format), Phase 2 (local compute resolves queries against loaded dataset rows), Phase 3 (render Chart.js charts). Fix the `extractJSON` → `resolveQueries` → render pipeline end-to-end. Test with each built-in dataset. |
+| MK4.8.2 | M | | **Dashboard demo prompts per dataset** — On the Dashboard tab, show dataset-specific dashboard suggestions. Medicare: "Claims by specialty and month", "Cost distribution by state". Water Quality: "pH trends by location", "Alert frequency heatmap". Clicking a suggestion auto-fills and generates. |
+| MK4.8.3 | L | | **Insight Lab meaningful results** — Replace generic "Cluster 1/2" labels with LLM-generated descriptions. Flow: (1) Auto-profile dataset columns, (2) Send schema to LLM asking "propose 3 analyses", (3) Run local ML (k-means, z-score, correlation), (4) Send results back to LLM for narrative interpretation, (5) Display with human-readable labels and visualisations. Each cluster shows: label, size, key characteristics, representative rows. |
+| MK4.8.4 | S | | **Insight Lab demo configs per dataset** — Pre-configured analysis settings per dataset: Customer Intelligence → k=4 clustering on spend/frequency, Medicare → anomaly detection on benefit_paid, Water Quality → correlation matrix on chemical readings. One-click to run with sensible defaults. |
+| MK4.8.5 | M | | **Dashboard export** — Export rendered dashboard as PNG (html2canvas already loaded), JSON DDL (the chart definition), or shareable link (encode DDL in URL hash). Export button on dashboard header. |
+| MK4.8.6 | S | | **Dashboard templates** — Save/load dashboard configurations. Store DDL in localStorage with name. Template selector dropdown on dashboard page. Share templates between datasets. |
+
+## Epic MK4.9: Data Experience & Multi-Dataset Workspace
+
+*Transform moke from a single-dataset tool into a project workspace where multiple datasets, analyses, dashboards and conversations are managed as a collection of assets.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK4.9.1 | M | | **Data profiler on load** — When a dataset is loaded, automatically profile all columns: detect type (numeric/categorical/date/boolean/text), compute stats (min/max/mean/median/stddev for numeric; cardinality/top-5 for categorical; date range for dates), identify PII columns by name pattern (name, email, phone, ssn, dob, address). Display as a rich schema card with sparklines for numeric distributions. |
+| MK4.9.2 | L | | **Project workspace** — Sidebar shows a project asset tree: Datasets (loaded CSVs), Conversations (saved chats), Dashboards (saved DDLs), Insights (saved analysis results), Reports (exported summaries). Click any asset to open it. Assets persist in localStorage. New project / open project / rename. Default project created on first visit. |
+| MK4.9.3 | M | | **Multi-dataset directory** — Load multiple datasets into the same project. Dataset directory panel in sidebar shows all loaded datasets with row count, column count, sensitivity badge. Click to switch active dataset. Cross-dataset references in chat: "Compare Medicare claims with Water Quality readings". Upload adds to the directory. |
+| MK4.9.4 | S | | **Richer dataset schemas** — Add column descriptions to built-in datasets (e.g., `benefit_paid: "Amount reimbursed by Medicare for this service"`). Show descriptions in schema preview tooltip. Add relationships between datasets in multi-dataset projects (e.g., server_inventory.rack_id links to network_topology.rack_id). |
+| MK4.9.5 | M | | **Governance dashboard page** — Wire the governance.tkt page with real data from loke. Show: total requests today, PII entities detected, local vs cloud ratio, cost this session, top triggered privacy rules, model usage breakdown. Pull from `/api/savings` and session-local counters. Refresh on interval. |
+| MK4.9.6 | S | | **Settings page improvements** — Show masked API key status (configured/not set with last-4 chars). Test connection button for each provider. Show current routing preference. Session memory toggle. Export/import settings. |
+
 ## Epic MK5: Upload and Workspace
 
 *User-supplied data and multi-dataset project workspace.*
