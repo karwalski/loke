@@ -282,6 +282,23 @@
     background: rgba(248,81,73,.15); color: var(--red);
   }
 
+  /* Session stats card */
+  .stats-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; flex-shrink: 0;
+  }
+  .stats-card .card-label {
+    font-size: 0.72em; font-weight: 700; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+  }
+  .stat-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 0.82em;
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-label { color: var(--muted); }
+  .stat-value { color: var(--muted); font-family: monospace; font-size: 0.9em; }
+
   @media (max-width: 900px) {
     .chat-layout { flex-direction: column; height: auto; }
     .left-panel { width: 100%; }
@@ -352,6 +369,18 @@
             <span class="log-msg">Ready — awaiting input</span>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Session stats -->
+    <div class="stats-card">
+      <div class="card-label" onclick="togglePanel('stats-body', this)">Session Stats <span class="card-toggle" id="toggle-stats-body">▶</span></div>
+      <div class="collapsible-body collapsed" id="stats-body">
+        <div class="stat-row"><span class="stat-label">Requests</span><span class="stat-value" id="stat-requests">0</span></div>
+        <div class="stat-row"><span class="stat-label">Tokens (in/out)</span><span class="stat-value" id="stat-tokens">0 / 0</span></div>
+        <div class="stat-row"><span class="stat-label">Cost</span><span class="stat-value" id="stat-cost">$0.000000</span></div>
+        <div class="stat-row"><span class="stat-label">Local ratio</span><span class="stat-value" id="stat-local">&mdash;</span></div>
+        <div class="stat-row"><span class="stat-label">Saved vs cloud</span><span class="stat-value" id="stat-saved">$0.00</span></div>
       </div>
     </div>
 
@@ -455,6 +484,27 @@
       }
     });
   })();
+
+  /* ── MK4.7.5 Session stats ── */
+  var sessionStats = JSON.parse(sessionStorage.getItem('moke_session_stats') || '{"requests":0,"tokensIn":0,"tokensOut":0,"cost":0,"localCount":0,"cloudCount":0}');
+
+  function updateStatsDisplay() {
+    var el;
+    el = document.getElementById('stat-requests');
+    if (el) el.textContent = sessionStats.requests;
+    el = document.getElementById('stat-tokens');
+    if (el) el.textContent = sessionStats.tokensIn + ' / ' + sessionStats.tokensOut;
+    el = document.getElementById('stat-cost');
+    if (el) el.textContent = '$' + sessionStats.cost.toFixed(6);
+    el = document.getElementById('stat-local');
+    var total = sessionStats.localCount + sessionStats.cloudCount;
+    if (el) el.textContent = total > 0 ? Math.round((sessionStats.localCount / total) * 100) + '%' : '\u2014';
+    el = document.getElementById('stat-saved');
+    // Estimate: cloud cost ~$0.01 per request, local is free
+    var estimated = sessionStats.localCount * 0.01;
+    if (el) el.textContent = '$' + estimated.toFixed(2);
+  }
+  updateStatsDisplay();
 
   /* ── MK4.6.4 Demo prompt chips ── */
   var DEMO_PROMPTS = {
@@ -985,6 +1035,10 @@
     var debugId = 'debug-' + msgCount;
     var msg = document.createElement('div');
     msg.className = 'msg msg-assistant';
+    if (debugData) {
+      msg.dataset.model = debugData.model || 'unknown';
+      msg.dataset.provider = debugData.provider || 'unknown';
+    }
     var debugHtml = '';
     if (debugData) {
       debugHtml =
@@ -1055,11 +1109,34 @@
     btn.classList.toggle('active', panel.classList.contains('open'));
   };
 
-  /* ── Thumbs voting ── */
+  /* ── MK4.7.7 Thumbs voting with feedback capture ── */
   window.vote = function(btn, direction) {
-    var siblings = btn.parentElement.querySelectorAll('.thumb-btn');
-    siblings.forEach(function(b) { b.classList.remove('voted'); });
-    btn.classList.add('voted');
+    var msg = btn.closest('.msg');
+    var bubble = msg.querySelector('.bubble-assistant');
+    var text = bubble ? bubble.textContent.substring(0, 100) : '';
+
+    var feedback = JSON.parse(localStorage.getItem('moke_feedback') || '[]');
+    var entry = {
+      timestamp: new Date().toISOString(),
+      direction: direction,
+      responsePreview: text,
+      model: msg.dataset.model || 'unknown',
+      provider: msg.dataset.provider || 'unknown'
+    };
+
+    if (direction === 'down') {
+      var comment = prompt('What went wrong? (optional)');
+      if (comment) entry.comment = comment;
+    }
+
+    feedback.push(entry);
+    localStorage.setItem('moke_feedback', JSON.stringify(feedback));
+
+    // Visual feedback
+    btn.style.opacity = '1';
+    btn.style.transform = 'scale(1.2)';
+    var sibling = btn.parentElement.querySelector('.thumb-btn:not([title="' + (direction === 'up' ? 'Helpful' : 'Not helpful') + '"])');
+    if (sibling) sibling.style.opacity = '0.3';
   };
 
   /* ── Add to Dashboard ── */
@@ -1316,6 +1393,15 @@
       consoleLog('Anonymise', 'Entities found: ' + (json && json.entities_found != null ? json.entities_found : 0) + ' · ' + (json && json.sensitivity ? json.sensitivity : 'PUBLIC'), 'stage-anonymise');
       consoleLog('LLM Call', 'Model: ' + (json && json.model ? json.model : model) + ' · Provider: ' + (json && json.provider ? json.provider : 'n/a') + ' · ' + elapsed + 'ms', 'stage-llm');
       consoleLog('Restore', 'Response verified · cost $' + (json && json.cost_usd != null ? json.cost_usd.toFixed(6) : '0.000000'), 'stage-restore');
+
+      // MK4.7.5 — Update session stats
+      sessionStats.requests++;
+      sessionStats.tokensIn += (json && json.tokens_in ? json.tokens_in : 0);
+      sessionStats.tokensOut += (json && json.tokens_out ? json.tokens_out : 0);
+      sessionStats.cost += (json && json.cost_usd ? json.cost_usd : 0);
+      if (json && json.provider === 'ollama') sessionStats.localCount++; else sessionStats.cloudCount++;
+      sessionStorage.setItem('moke_session_stats', JSON.stringify(sessionStats));
+      updateStatsDisplay();
 
     } catch(err) {
       var elapsed = Date.now() - t0;
