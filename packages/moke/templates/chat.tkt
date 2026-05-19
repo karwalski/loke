@@ -1245,18 +1245,30 @@
     }
 
     var text = body.text || '';
-    // Local PII scan
+    // Use real pipeline pre-scan results if available, otherwise fall back to local heuristic
     var piiHits = [];
-    if (text.indexOf('@') >= 0) piiHits.push('EMAIL');
-    if (/patient_name|_name/i.test(text)) piiHits.push('PERSON');
-    if (/medicare_number|medicare_id/i.test(text)) piiHits.push('MEDICARE_ID');
-    if (/\bdob\b|date_of_birth/i.test(text)) piiHits.push('DATE_OF_BIRTH');
-    if (/\bphone\b/i.test(text)) piiHits.push('PHONE');
-    if (/\baddress\b/i.test(text)) piiHits.push('ADDRESS');
-    if (/\bssn\b|\btfn\b/i.test(text)) piiHits.push('TAX_ID');
-
-    var piiCount = piiHits.length;
-    var sensitivity = piiCount > 3 ? 'RESTRICTED' : piiCount > 0 ? 'CONFIDENTIAL' : 'PUBLIC';
+    var piiCount = 0;
+    var sensitivity = 'PUBLIC';
+    if (body.prescan) {
+      // Real results from privacy filter sidecar
+      piiCount = body.prescan.entities_found || 0;
+      sensitivity = body.prescan.sensitivity || 'PUBLIC';
+      if (body.prescan.pii_types) {
+        var typeMap = {private_person:'Names',private_email:'Emails',private_phone:'Phones',private_address:'Addresses',private_url:'URLs',private_date:'Dates',account_number:'Accounts',secret:'Secrets'};
+        piiHits = body.prescan.pii_types.split(',').map(function(t) { return typeMap[t.trim()] || t.trim(); });
+      }
+    } else {
+      // Local PII scan (fallback)
+      if (text.indexOf('@') >= 0) piiHits.push('EMAIL');
+      if (/patient_name|_name/i.test(text)) piiHits.push('PERSON');
+      if (/medicare_number|medicare_id/i.test(text)) piiHits.push('MEDICARE_ID');
+      if (/\bdob\b|date_of_birth/i.test(text)) piiHits.push('DATE_OF_BIRTH');
+      if (/\bphone\b/i.test(text)) piiHits.push('PHONE');
+      if (/\baddress\b/i.test(text)) piiHits.push('ADDRESS');
+      if (/\bssn\b|\btfn\b/i.test(text)) piiHits.push('TAX_ID');
+      piiCount = piiHits.length;
+      sensitivity = piiCount > 3 ? 'RESTRICTED' : piiCount > 0 ? 'CONFIDENTIAL' : 'PUBLIC';
+    }
     var sensColour = sensitivity === 'PUBLIC' ? 'var(--green)' : sensitivity === 'CONFIDENTIAL' ? 'var(--amber)' : 'var(--red)';
     var sensBg = sensitivity === 'PUBLIC' ? 'rgba(34,197,94,.15)' : sensitivity === 'CONFIDENTIAL' ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)';
 
@@ -1290,6 +1302,13 @@
     }
     html += '</div>';
     html += '</div>';
+    // Show real anonymised preview if available from pre-scan
+    if (body.prescan && body.prescan.anonymised_preview) {
+      html += '<div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:10px;">';
+      html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Anonymised Preview</div>';
+      html += '<div style="font-size:0.82em; color:#3fb950; font-family:monospace; white-space:pre-wrap; word-break:break-word;">' + escHtml(body.prescan.anonymised_preview) + '</div>';
+      html += '</div>';
+    }
     html += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:4px;">';
     html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
     html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Target Provider</div>';
@@ -1469,6 +1488,27 @@
 
     var t0 = Date.now();
     try {
+      // Pre-scan with privacy filter sidecar
+      var PRIVACY_URL = window.PRIVACY_URL || 'http://127.0.0.1:11435';
+      try {
+        var scanResp = await fetch(PRIVACY_URL + '/anonymise', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: lokeBody.text })
+        });
+        var scanData = await scanResp.json();
+        if (scanData && scanData.anonymised) {
+          lokeBody.anonymised_text = scanData.anonymised;
+          lokeBody.entities_found = scanData.count || 0;
+          lokeBody.sensitivity = scanData.count > 5 ? 'RESTRICTED' : scanData.count > 0 ? 'CONFIDENTIAL' : 'PUBLIC';
+          lokeBody.anonymised_preview = scanData.anonymised.substring(0, 200);
+          lokeBody.pii_types = (scanData.mappings || []).map(function(m) { return m.type; }).filter(function(v,i,a) { return a.indexOf(v) === i; }).join(',');
+          consoleLog('Privacy', 'OpenAI Privacy Filter: ' + scanData.count + ' entities detected → ' + lokeBody.sensitivity, 'stage-anonymise');
+        }
+      } catch(privErr) {
+        consoleLog('Privacy', 'Sidecar unavailable — sending without anonymisation', 'stage-anonymise');
+      }
+
       var LOKE_URL = window.LOKE_URL || 'http://127.0.0.1:11430';
       var resp = await fetch(LOKE_URL + '/api/pipeline', {
         method: 'POST',
@@ -1510,7 +1550,7 @@
         '→ request_id      : ' + (json && json.request_id ? json.request_id : 'n/a'),
         '→ sensitivity      : [' + sensitivity + ']',
         '→ entities_found   : ' + entities,
-        '→ pii_types        : ' + (piiTypes.length > 0 ? piiTypes.join(', ') : 'none'),
+        '→ pii_types        : ' + (function() { var typeMap = {private_person:'Names',private_email:'Emails',private_phone:'Phones',private_address:'Addresses',private_url:'URLs',private_date:'Dates',account_number:'Accounts',secret:'Secrets'}; return piiTypes.length > 0 ? piiTypes.map(function(t) { return typeMap[t.trim()] || t; }).join(', ') : 'none'; })(),
         '→ model            : ' + (json && json.model ? json.model : model),
         '→ provider         : ' + (json && json.provider ? json.provider : 'n/a'),
         '→ tokens_in        : ' + (json && json.tokens_in != null ? json.tokens_in : 'n/a'),
@@ -1529,22 +1569,21 @@
         error: (json && json.error) ? json.error : null
       };
 
-      // MK4.7.6 — Anonymisation evidence
+      // MK4.7.6 — Anonymisation evidence (real pipeline results)
       var anonymisationHtml = '';
       if (json && json.entities_found > 0) {
         anonymisationHtml = '<div style="color:#f85149;margin-top:8px;font-weight:600;">Anonymisation Evidence</div>';
-        var piiExamples = [];
-        var _anonText = lokeBody.text || '';
-        if (_anonText.indexOf('patient_name') >= 0) piiExamples.push({original: 'patient_name: "John Smith"', anonymised: 'patient_name: "[NAME_1]"'});
-        if (_anonText.indexOf('medicare_number') >= 0) piiExamples.push({original: 'medicare_number: "2123 45670 1"', anonymised: 'medicare_number: "[MEDICARE_1]"'});
-        if (_anonText.indexOf('dob') >= 0) piiExamples.push({original: 'dob: "1985-03-15"', anonymised: 'dob: "[DOB_1]"'});
-        if (_anonText.indexOf('@') >= 0 && _anonText.indexOf('.') >= 0) piiExamples.push({original: 'email: "john@example.com"', anonymised: 'email: "[EMAIL_1]"'});
-        if (_anonText.indexOf('contact_name') >= 0) piiExamples.push({original: 'contact_name: "Jane Doe"', anonymised: 'contact_name: "[NAME_2]"'});
-        piiExamples.forEach(function(ex) {
-          anonymisationHtml += '<div style="display:flex;gap:12px;padding:4px 0;font-size:11px;"><span style="color:#f85149;text-decoration:line-through;">' + escHtml(ex.original) + '</span><span style="color:#3fb950;">\u2192 ' + escHtml(ex.anonymised) + '</span></div>';
-        });
-        if (piiExamples.length === 0) {
-          anonymisationHtml += '<div style="font-size:11px;color:#8b949e;">PII detected but no specific column patterns matched for evidence display.</div>';
+        var typeMap = {private_person:'Names',private_email:'Emails',private_phone:'Phones',private_address:'Addresses',private_url:'URLs',private_date:'Dates',account_number:'Accounts',secret:'Secrets'};
+        if (json.pii_types) {
+          var detectedLabels = json.pii_types.split(',').map(function(t) { return typeMap[t.trim()] || t.trim(); });
+          anonymisationHtml += '<div style="font-size:11px;color:#8b949e;padding:4px 0;">Detected: ' + detectedLabels.join(', ') + ' (' + json.entities_found + ' entities)</div>';
+        }
+        if (json.anonymised_preview) {
+          anonymisationHtml += '<div style="color:#58a6ff;margin-top:8px;font-weight:600;">Anonymised Text (preview)</div>';
+          anonymisationHtml += '<div style="font-size:11px;color:#3fb950;font-family:monospace;padding:4px 0;">' + escHtml(json.anonymised_preview) + '</div>';
+        }
+        if (!json.pii_types && !json.anonymised_preview) {
+          anonymisationHtml += '<div style="font-size:11px;color:#8b949e;">PII detected but no detailed evidence available from the privacy filter.</div>';
         }
       }
       debugData.anonymisationHtml = anonymisationHtml;
@@ -1592,7 +1631,14 @@
 
       addAssistantMessage(responseText, traceLines, debugData, dashObj || null);
 
-      consoleLog('Privacy', 'Detected ' + entities + ' PII entities (' + (piiTypes.length > 0 ? piiTypes.join(', ') : 'none') + ') → sensitivity: ' + sensitivity, 'stage-anonymise');
+      var piiLabel = '';
+      if (json && json.pii_types) {
+        var typeMap2 = {private_person:'Names',private_email:'Emails',private_phone:'Phones',private_address:'Addresses',private_url:'URLs',private_date:'Dates',account_number:'Accounts',secret:'Secrets'};
+        piiLabel = json.pii_types.split(',').map(function(t) { return typeMap2[t.trim()] || t; }).join(', ');
+      } else {
+        piiLabel = piiTypes.length > 0 ? piiTypes.join(', ') : 'none';
+      }
+      consoleLog('Privacy', 'Detected ' + entities + ' PII entities (' + piiLabel + ') → sensitivity: ' + sensitivity, 'stage-anonymise');
       consoleLog('LLM Call', 'Model: ' + (json && json.model ? json.model : model) + ' · Provider: ' + (json && json.provider ? json.provider : 'n/a') + ' · ' + elapsed + 'ms', 'stage-llm');
       consoleLog('Restore', 'Response verified · cost $' + (json && json.cost_usd != null ? json.cost_usd.toFixed(6) : '0.000000'), 'stage-restore');
 
