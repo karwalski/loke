@@ -327,9 +327,38 @@
 
 <!-- MK4.7.3 Human-in-the-loop confirmation modal -->
 <div id="confirm-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center;">
-  <div style="background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; max-width:600px; width:90%; max-height:80vh; overflow-y:auto;">
-    <h3 style="color:var(--teal); margin-bottom:12px; font-size:1em;">Privacy Review — Before Sending</h3>
-    <div id="confirm-body"></div>
+  <div style="background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; max-width:750px; width:95%; max-height:85vh; overflow-y:auto;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+      <h3 style="color:var(--teal); font-size:1em; margin:0;">Privacy Review — Before Sending</h3>
+      <div id="confirm-sensitivity-badge" style="padding:2px 10px; border-radius:12px; font-size:0.8em; font-weight:700;"></div>
+    </div>
+
+    <!-- Prompt editor -->
+    <div style="margin-bottom:12px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+        <span style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted);">Prompt being sent</span>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-sm" id="confirm-toggle-full" onclick="toggleConfirmFull()" style="font-size:0.72em; padding:2px 8px; background:transparent; border:1px solid var(--border); color:var(--muted); border-radius:4px; cursor:pointer;">Show full</button>
+          <button class="btn-sm" id="confirm-toggle-edit" onclick="toggleConfirmEdit()" style="font-size:0.72em; padding:2px 8px; background:transparent; border:1px solid var(--border); color:var(--muted); border-radius:4px; cursor:pointer;">Edit</button>
+        </div>
+      </div>
+      <div id="confirm-prompt-preview" style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; font-family:monospace; font-size:0.82em; line-height:1.7; max-height:200px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; color:var(--text); cursor:text;" onclick="handleWordClick(event)"></div>
+      <textarea id="confirm-prompt-editor" style="display:none; width:100%; min-height:150px; max-height:300px; background:var(--bg); border:1px solid var(--teal); border-radius:8px; padding:12px 14px; font-family:monospace; font-size:0.82em; line-height:1.7; color:var(--text); resize:vertical;"></textarea>
+    </div>
+
+    <!-- PII detections -->
+    <div id="confirm-pii-section" style="margin-bottom:12px;"></div>
+
+    <!-- Redacted preview -->
+    <div id="confirm-redacted-section" style="display:none; margin-bottom:12px;">
+      <div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:6px;">After anonymisation</div>
+      <div id="confirm-redacted-text" style="background:var(--bg); border:1px solid rgba(63,185,80,.3); border-radius:8px; padding:12px 14px; font-family:monospace; font-size:0.82em; line-height:1.7; max-height:200px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; color:#3fb950;"></div>
+    </div>
+
+    <!-- Stats row -->
+    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;" id="confirm-stats-row"></div>
+
+    <!-- Actions -->
     <div style="display:flex; align-items:center; gap:10px; margin-top:16px; flex-wrap:wrap;">
       <label style="display:flex; align-items:center; gap:6px; font-size:0.8em; color:var(--muted); cursor:pointer; margin-right:auto;">
         <input type="checkbox" id="confirm-skip-checkbox" style="accent-color:var(--teal); width:14px; height:14px; cursor:pointer;">
@@ -1583,104 +1612,206 @@
   var confirmBodyEl = document.getElementById('confirm-body');
   var confirmResolve = null;
 
+  var confirmFullText = '';
+  var confirmMaskedWords = {};
+  var confirmShowFull = false;
+  var confirmEditing = false;
+  var confirmMappings = [];
+
   function showConfirmation(body) {
-    // Skip if user has opted out for this session
     if (sessionStorage.getItem('moke_skip_confirm') === '1') {
       return Promise.resolve({ approved: true, forceLocal: false });
     }
 
     var text = body.text || '';
-    // Use real pipeline pre-scan results if available, otherwise fall back to local heuristic
-    var piiHits = [];
-    var piiCount = 0;
-    var sensitivity = 'PUBLIC';
+    confirmFullText = text;
+    confirmMaskedWords = {};
+    confirmShowFull = false;
+    confirmEditing = false;
+    confirmMappings = body.prescan && body.prescan.mappings ? body.prescan.mappings : [];
+
+    // PII detection
+    var piiCount = 0, sensitivity = 'PUBLIC', piiHits = [], anonPreview = '';
     if (body.prescan) {
-      // Real results from privacy filter sidecar
       piiCount = body.prescan.entities_found || 0;
       sensitivity = body.prescan.sensitivity || 'PUBLIC';
+      anonPreview = body.prescan.anonymised_preview || '';
       if (body.prescan.pii_types) {
         var typeMap = {private_person:'Names',private_email:'Emails',private_phone:'Phones',private_address:'Addresses',private_url:'URLs',private_date:'Dates',account_number:'Accounts',secret:'Secrets'};
-        piiHits = body.prescan.pii_types.split(',').map(function(t) { return typeMap[t.trim()] || t.trim(); });
+        piiHits = body.prescan.pii_types.split(',').map(function(t) { return typeMap[t.trim()] || t.trim(); }).filter(function(v,i,a) { return a.indexOf(v)===i; });
       }
     } else {
-      // Local PII scan (fallback)
-      if (text.indexOf('@') >= 0) piiHits.push('EMAIL');
-      if (/patient_name|_name/i.test(text)) piiHits.push('PERSON');
-      if (/medicare_number|medicare_id/i.test(text)) piiHits.push('MEDICARE_ID');
-      if (/\bdob\b|date_of_birth/i.test(text)) piiHits.push('DATE_OF_BIRTH');
-      if (/\bphone\b/i.test(text)) piiHits.push('PHONE');
-      if (/\baddress\b/i.test(text)) piiHits.push('ADDRESS');
-      if (/\bssn\b|\btfn\b/i.test(text)) piiHits.push('TAX_ID');
+      if (text.indexOf('@') >= 0) piiHits.push('Email');
+      if (/patient_name|_name|contact_name|provider_name/i.test(text)) piiHits.push('Names');
+      if (/medicare|tfn|abn|ssn/i.test(text)) piiHits.push('Gov ID');
+      if (/\bdob\b|birth/i.test(text)) piiHits.push('DOB');
+      if (/phone|mobile/i.test(text)) piiHits.push('Phone');
+      if (/address|street|postcode/i.test(text)) piiHits.push('Address');
       piiCount = piiHits.length;
       sensitivity = piiCount > 3 ? 'RESTRICTED' : piiCount > 0 ? 'CONFIDENTIAL' : 'PUBLIC';
     }
-    var sensColour = sensitivity === 'PUBLIC' ? 'var(--green)' : sensitivity === 'CONFIDENTIAL' ? 'var(--amber)' : 'var(--red)';
-    var sensBg = sensitivity === 'PUBLIC' ? 'rgba(34,197,94,.15)' : sensitivity === 'CONFIDENTIAL' ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)';
 
-    // Detect target provider
-    var provider = 'Ollama (local)';
-    var estCost = 'Free';
-    try {
-      var s = JSON.parse(sessionStorage.getItem('moke_session_stats') || '{}');
-      if (s.cloudCount > 0) { provider = 'Claude Sonnet 4 (cloud)'; estCost = '~$0.003'; }
-    } catch(_) {}
+    // Provider
+    var provider = 'Ollama (local)', estCost = 'Free', isCloud = false;
+    try { var s = JSON.parse(sessionStorage.getItem('moke_session_stats')||'{}'); if (s.cloudCount>0) { provider='Claude Sonnet 4 (cloud)'; estCost='~$0.003'; isCloud=true; } } catch(_) {}
+    try { var settings = JSON.parse(localStorage.getItem('moke_session_stats')||'{}'); } catch(_){}
+    // Check if anthropic key is configured
+    try { var sk = JSON.parse(sessionStorage.getItem('moke_session_stats')||'{}'); } catch(_){}
 
-    // Truncated preview
-    var preview = text.length > 200 ? text.substring(0, 200) + '...' : text;
+    // Sensitivity badge
+    var sensColour = sensitivity==='PUBLIC'?'var(--green)':sensitivity==='CONFIDENTIAL'?'var(--amber)':'var(--red)';
+    var sensBg = sensitivity==='PUBLIC'?'rgba(34,197,94,.15)':sensitivity==='CONFIDENTIAL'?'rgba(245,158,11,.15)':'rgba(239,68,68,.15)';
+    var badge = document.getElementById('confirm-sensitivity-badge');
+    if (badge) { badge.textContent = sensitivity; badge.style.background = sensBg; badge.style.color = sensColour; }
 
-    var html = '';
-    html += '<div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; font-family:monospace; font-size:0.82em; line-height:1.6; max-height:160px; overflow-y:auto; margin-bottom:12px; white-space:pre-wrap; word-break:break-word; color:var(--muted);">' + escHtml(preview) + '</div>';
-    html += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px;">';
-    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
-    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Sensitivity</div>';
-    html += '<span style="font-size:0.85em; font-weight:700; padding:2px 10px; border-radius:12px; background:' + sensBg + '; color:' + sensColour + ';">' + sensitivity + '</span>';
-    html += '</div>';
-    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
-    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">PII Detected</div>';
-    html += '<span style="font-size:0.85em; font-weight:700; color:' + (piiCount > 0 ? 'var(--amber)' : 'var(--green)') + ';">' + piiCount + ' entit' + (piiCount === 1 ? 'y' : 'ies') + '</span>';
-    if (piiHits.length > 0) {
-      html += '<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px;">';
-      piiHits.forEach(function(t) {
-        html += '<span style="font-size:0.7em; padding:1px 7px; border-radius:4px; background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.25); color:var(--amber); font-weight:600;">' + t + '</span>';
-      });
-      html += '</div>';
+    // Render prompt with clickable words
+    renderConfirmPrompt();
+
+    // PII section
+    var piiEl = document.getElementById('confirm-pii-section');
+    if (piiEl) {
+      var ph = '<div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px;">';
+      ph += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); width:100%;">PII Detected: <strong style="color:' + (piiCount>0?'var(--amber)':'var(--green)') + '">' + piiCount + '</strong></div>';
+      if (piiHits.length > 0) {
+        piiHits.forEach(function(t) {
+          ph += '<span style="font-size:0.72em; padding:2px 8px; border-radius:4px; background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.25); color:var(--amber); font-weight:600;">' + t + '</span>';
+        });
+      }
+      // Show individual detections from mappings
+      if (confirmMappings.length > 0) {
+        ph += '<div style="width:100%; margin-top:6px; font-size:0.78em;">';
+        confirmMappings.forEach(function(m) {
+          ph += '<div style="display:flex; gap:8px; padding:2px 0; align-items:center;">';
+          ph += '<span style="color:var(--red); text-decoration:line-through; font-family:monospace;">' + escHtml(m.original) + '</span>';
+          ph += '<span style="color:var(--muted);">→</span>';
+          ph += '<span style="color:var(--green); font-family:monospace;">' + escHtml(m.placeholder) + '</span>';
+          ph += '<span style="font-size:0.85em; color:var(--muted);">' + (m.type||'') + '</span>';
+          ph += '</div>';
+        });
+        ph += '</div>';
+      }
+      ph += '</div>';
+      piiEl.innerHTML = ph;
     }
-    html += '</div>';
-    html += '</div>';
-    // Show real anonymised preview if available from pre-scan
-    if (body.prescan && body.prescan.anonymised_preview) {
-      html += '<div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:10px;">';
-      html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Anonymised Preview</div>';
-      html += '<div style="font-size:0.82em; color:#3fb950; font-family:monospace; white-space:pre-wrap; word-break:break-word;">' + escHtml(body.prescan.anonymised_preview) + '</div>';
-      html += '</div>';
-    }
-    html += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:4px;">';
-    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
-    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Target Provider</div>';
-    html += '<span style="font-size:0.85em; color:var(--text);">' + escHtml(provider) + '</span>';
-    html += '</div>';
-    html += '<div style="flex:1; min-width:140px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px;">';
-    html += '<div style="font-size:0.72em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:4px;">Estimated Cost</div>';
-    html += '<span style="font-size:0.85em; font-weight:700; color:' + (estCost === 'Free' ? 'var(--green)' : 'var(--text)') + ';">' + estCost + '</span>';
-    html += '</div>';
-    html += '</div>';
 
-    confirmBodyEl.innerHTML = html;
+    // Anonymised preview
+    var redEl = document.getElementById('confirm-redacted-section');
+    var redText = document.getElementById('confirm-redacted-text');
+    if (anonPreview && redEl && redText) {
+      redEl.style.display = 'block';
+      redText.textContent = anonPreview;
+    } else if (redEl) {
+      redEl.style.display = 'none';
+    }
+
+    // Stats row
+    var statsEl = document.getElementById('confirm-stats-row');
+    if (statsEl) {
+      var sh = '';
+      sh += '<div style="flex:1; min-width:120px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">';
+      sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Provider</div>';
+      sh += '<span style="font-size:0.82em; color:var(--text);">' + escHtml(provider) + '</span></div>';
+      sh += '<div style="flex:1; min-width:120px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">';
+      sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Est. Cost</div>';
+      sh += '<span style="font-size:0.82em; font-weight:700; color:' + (estCost==='Free'?'var(--green)':'var(--text)') + ';">' + estCost + '</span></div>';
+      sh += '<div style="flex:1; min-width:120px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">';
+      sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Prompt length</div>';
+      sh += '<span style="font-size:0.82em; color:var(--text);">' + text.length.toLocaleString() + ' chars</span></div>';
+      statsEl.innerHTML = sh;
+    }
+
+    // Editor
+    var editor = document.getElementById('confirm-prompt-editor');
+    if (editor) { editor.value = text; editor.style.display = 'none'; }
+
     document.getElementById('confirm-skip-checkbox').checked = false;
     confirmModal.style.display = 'flex';
 
-    return new Promise(function(resolve) {
-      confirmResolve = resolve;
-    });
+    return new Promise(function(resolve) { confirmResolve = resolve; });
   }
+
+  function renderConfirmPrompt() {
+    var el = document.getElementById('confirm-prompt-preview');
+    if (!el) return;
+    var text = confirmShowFull ? confirmFullText : (confirmFullText.length > 500 ? confirmFullText.substring(0, 500) + '\n\n[... ' + (confirmFullText.length - 500) + ' more chars — click "Show full" to expand]' : confirmFullText);
+
+    // Highlight PII detections and masked words
+    var html = escHtml(text);
+
+    // Highlight detected PII from mappings
+    if (confirmMappings.length > 0) {
+      confirmMappings.forEach(function(m) {
+        var escaped = escHtml(m.original).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        html = html.replace(new RegExp(escaped, 'g'), '<span style="background:rgba(248,81,73,.2);color:var(--red);padding:0 2px;border-radius:2px;cursor:pointer;text-decoration:underline dotted;" title="Detected: ' + (m.type||'PII') + '. Click to mask." data-pii-word="' + escHtml(m.original) + '">' + escHtml(m.original) + '</span>');
+      });
+    }
+
+    // Highlight manually masked words
+    Object.keys(confirmMaskedWords).forEach(function(w) {
+      var escaped = escHtml(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      html = html.replace(new RegExp(escaped, 'g'), '<span style="background:rgba(63,185,80,.2);color:var(--green);padding:0 2px;border-radius:2px;">[MASKED]</span>');
+    });
+
+    el.innerHTML = html;
+  }
+
+  window.handleWordClick = function(event) {
+    var target = event.target;
+    if (target.dataset && target.dataset.piiWord) {
+      // Already detected PII — mask it
+      var word = target.dataset.piiWord;
+      confirmMaskedWords[word] = true;
+      // Apply to full text
+      confirmFullText = confirmFullText.split(word).join('[MASKED]');
+      renderConfirmPrompt();
+      return;
+    }
+    // Click on any word — offer to mask it
+    var sel = window.getSelection();
+    if (sel && sel.toString().trim().length > 0) {
+      var selected = sel.toString().trim();
+      if (confirm('Mask "' + selected + '" and all occurrences?')) {
+        confirmMaskedWords[selected] = true;
+        confirmFullText = confirmFullText.split(selected).join('[MASKED]');
+        renderConfirmPrompt();
+      }
+    }
+  };
+
+  window.toggleConfirmFull = function() {
+    confirmShowFull = !confirmShowFull;
+    var btn = document.getElementById('confirm-toggle-full');
+    if (btn) btn.textContent = confirmShowFull ? 'Truncate' : 'Show full';
+    renderConfirmPrompt();
+  };
+
+  window.toggleConfirmEdit = function() {
+    confirmEditing = !confirmEditing;
+    var preview = document.getElementById('confirm-prompt-preview');
+    var editor = document.getElementById('confirm-prompt-editor');
+    var btn = document.getElementById('confirm-toggle-edit');
+    if (confirmEditing) {
+      if (preview) preview.style.display = 'none';
+      if (editor) { editor.style.display = 'block'; editor.value = confirmFullText; editor.focus(); }
+      if (btn) btn.textContent = 'Preview';
+    } else {
+      if (editor) { confirmFullText = editor.value; editor.style.display = 'none'; }
+      if (preview) preview.style.display = 'block';
+      if (btn) btn.textContent = 'Edit';
+      renderConfirmPrompt();
+    }
+  };
 
   window.confirmApprove = function() {
     var skipCheckbox = document.getElementById('confirm-skip-checkbox');
     if (skipCheckbox && skipCheckbox.checked) {
       sessionStorage.setItem('moke_skip_confirm', '1');
     }
+    // If editing, grab latest text
+    var editor = document.getElementById('confirm-prompt-editor');
+    if (confirmEditing && editor) { confirmFullText = editor.value; }
     confirmModal.style.display = 'none';
-    if (confirmResolve) { confirmResolve({ approved: true, forceLocal: false }); confirmResolve = null; }
+    if (confirmResolve) { confirmResolve({ approved: true, forceLocal: false, editedText: confirmFullText }); confirmResolve = null; }
   };
   window.confirmCancel = function() {
     confirmModal.style.display = 'none';
@@ -1723,6 +1854,10 @@
       return;
     }
     var forceLocal = confirmResult.forceLocal;
+    // Apply any edits from the confirmation modal
+    if (confirmResult.editedText && confirmResult.editedText !== previewText) {
+      fullText = confirmResult.editedText;
+    }
 
     consoleLog('Schema Extract', 'Extracting column profiles…', 'stage-schema');
     var typingEl = addTypingIndicator();
