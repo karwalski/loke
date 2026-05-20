@@ -1,1 +1,1 @@
-Regex pattern library for detecting common PII types including email addresses, phone numbers (AU and US), credit cards, IP addresses, tax file numbers, ABNs, SSNs, URLs, and API keys. Each pattern is exposed as a function returning the regex string.
+Regex pattern library for detecting common PII types including email addresses, phone numbers (AU and US), credit cards, IP addresses, tax file numbers, ABNs, SSNs, URLs, and API keys. Each pattern is exposed as a function returning the regex string. No imports.

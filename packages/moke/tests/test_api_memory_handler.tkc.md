@@ -1,0 +1,1 @@
+Tests the moke API memory handler structure. Verifies module declaration is `page.moke.api.memory`, GET and POST handlers exist, imports (std.http, std.json) are present, and action validation logic correctly handles store (with required content), aaak, and unknown actions. Depends on `std.test` and `std.str`.

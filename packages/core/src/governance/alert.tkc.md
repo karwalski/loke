@@ -1,0 +1,1 @@
+Governance alerting system. Creates and dispatches alerts for quota warnings, quota exceeded events, and policy violations. Supports log-only mode or webhook delivery, with severity-based logging (info, warn, critical). Exports defaultconfig, makealert, alerttojson, send, quotaalert, and policyalert. Depends on std.str, shared.log, std.http, and std.time.

@@ -1,0 +1,1 @@
+Tests the moke index page handler structure. Verifies module declaration is `page.moke.index`, template path is `templates/index.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

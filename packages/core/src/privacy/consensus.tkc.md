@@ -1,0 +1,1 @@
+Multi-layer detection consensus resolution. Merges PII detections from multiple privacy filter layers into resolved entities, resolving overlapping detections based on a configurable strategy (most-restrictive, first-match, unanimous, majority). Exports resolveoverlaps and strategyname. Depends on std.str.

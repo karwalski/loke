@@ -1,1 +1,3 @@
-Core database initialisation module. Opens the SQLite database at the configured data directory, runs all pending schema migrations, and exposes a $store handle. Depends on std.db, std.str, shared.types, and core.storage.migrations.
+Core database initialisation module. Opens the SQLite database at the configured data directory, applies SQLCipher encryption via PRAGMA key (GA2.2), runs all pending schema migrations, and exposes a $store handle. The encryption key is a 32-byte random hex string stored in the OS keychain via core.storage.keychain; generated on first open, retrieved on subsequent opens. Depends on std.db, std.str, std.crypto, shared.log, shared.types, core.storage.keychain, and core.storage.migrations.
+
+Migration note: existing unencrypted databases require manual migration via sqlcipher_export to convert to encrypted format. This is documented as future work; new databases are encrypted from first creation.

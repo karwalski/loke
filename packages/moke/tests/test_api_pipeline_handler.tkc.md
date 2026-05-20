@@ -1,0 +1,1 @@
+Tests the moke API pipeline handler structure. Verifies module declaration is `page.moke.api.pipeline`, POST handler exists, imports (std.http, std.json, moke.hooks, moke.consolelog) are present, upstream URL is correct, and prompt validation rejects empty values. Depends on `std.test` and `std.str`.

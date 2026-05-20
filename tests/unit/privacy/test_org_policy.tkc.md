@@ -1,0 +1,1 @@
+Tests organisation-level privacy policy enforcement. Verifies default policy creation, minimum layer requirements, required and banned layer validation, locked consensus strategy enforcement, and confidence threshold constraints. Uses stubbed types mirroring `core.privacy.org_policy`. Depends on `std.test` and `std.str`.

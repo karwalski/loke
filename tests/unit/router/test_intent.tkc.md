@@ -1,0 +1,1 @@
+Unit tests for core.router.intent: keyword-based intent classification covering all task categories (embedding, summarisation, classification, code review, code generation, data analysis, NER) and fallback to chat.

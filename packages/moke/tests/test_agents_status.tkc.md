@@ -1,0 +1,1 @@
+Tests moke's agent status display. Verifies agent status construction with id, name, state, task count, and error count, state classification (idle, running, error, paused), health indicator derivation from error counts, and correct rendering data for the agents management UI. Depends on `std.test` and `std.str`.

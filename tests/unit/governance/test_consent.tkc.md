@@ -1,0 +1,1 @@
+Tests the consent management system. Verifies consent status codes (granted, denied, pending), per-user per-category consent checks, correct differentiation between known users with explicit consent and unknown users defaulting to pending, and consent grant/deny recording. Uses stubs mirroring `core.governance.consent`. Depends on `std.test` and `std.str`.

@@ -1,1 +1,1 @@
-Client for the Microsoft Presidio PII detection sidecar. Sends text to the Presidio /analyze endpoint, parses entity results, maps entity types to sensitivity levels and confidence scores, and converts them to the internal PII entity format.
+Client for the Microsoft Presidio PII detection sidecar. Sends text to the Presidio /analyze endpoint, parses entity results, maps entity types to sensitivity levels and confidence scores, and converts them to the internal PII entity format. Depends on shared.types, std.http, std.json, std.str, and core.privacy.placeholder.

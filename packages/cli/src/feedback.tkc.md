@@ -1,1 +1,1 @@
-CLI feedback subcommand that lets users file bug reports (via core.feedback.reporter) and check for version updates. Uses the i18n translator for all user-facing strings.
+CLI feedback subcommand that lets users file bug reports via the core feedback reporter and check for version updates. Uses the i18n translator for all user-facing strings. Exports run, printusage, runreport, and runversioncheck functions. Depends on core.feedback.reporter, std.str, shared.log, and loke.platform.i18n.translator.

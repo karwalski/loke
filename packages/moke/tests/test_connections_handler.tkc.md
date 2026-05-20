@@ -1,0 +1,1 @@
+Tests the moke connections page handler structure (MK9.1). Verifies module declaration is `page.moke.connections`, template path is `templates/connections.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

@@ -1,0 +1,1 @@
+Tests the SQLCipher database encryption key lifecycle. Verifies that encryption keys are generated, stored in the OS keychain, and retrieved correctly using stub functions that mirror the `ensuredbkey` logic. Covers first-run key creation and subsequent retrieval scenarios introduced in GA2.2. Depends on `std.test`, `std.str`, and `std.crypto`.

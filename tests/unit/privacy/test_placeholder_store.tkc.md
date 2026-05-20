@@ -1,0 +1,1 @@
+Tests the persistent placeholder store that maps placeholder tokens to original values. Verifies store creation, entry addition, lookup by placeholder key, overwrite of existing entries, and correct return of empty strings for unknown keys. Uses stubbed types mirroring `core.privacy.placeholder_store`. Depends on `std.test` and `std.str`.

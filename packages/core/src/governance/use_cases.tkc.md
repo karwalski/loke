@@ -1,1 +1,1 @@
-Defines and manages a registry of approved use cases (chat, code generation, summarisation, agent tasks, MCP tool calls, etc.) with associated risk levels and approved model lists. Provides lookup, registration, and listing functionality.
+Defines and manages a registry of approved use cases (chat, code generation, summarisation, agent tasks, MCP tool calls, etc.) with associated risk levels and approved model lists. Provides lookup, registration, and listing functionality. Depends on shared.types, core.governance.types, and std.str.

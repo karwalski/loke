@@ -1,0 +1,1 @@
+Tests the log output sanitiser that auto-redacts PII from all log messages (GA2.4). Verifies that emails, phone numbers, API keys, authorization tokens, passwords, and other sensitive key-value pairs are replaced with `[REDACTED]` before reaching log output. Imports `core.privacy.logsanitiser` directly. Depends on `std.test` and `std.str`.

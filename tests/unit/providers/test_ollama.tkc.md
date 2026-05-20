@@ -1,0 +1,1 @@
+Tests the Ollama provider integration. Verifies health check response parsing, generate endpoint response extraction, correct endpoint URL construction, and handling of malformed responses. Uses stubs mirroring `core.providers.ollama_provider` for the localhost:11434 REST API. Depends on `std.test` and `std.str`.

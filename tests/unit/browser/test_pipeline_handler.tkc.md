@@ -1,0 +1,1 @@
+Unit tests for the browser pipeline API handler. Verifies get/post signatures, input validation (empty text, missing text), helper functions (sensitivitylabel, parsetolerance, risktierstr, isdeny, getpolicymessage), and error response format.

@@ -1,0 +1,1 @@
+Tests the moke API MCP handler structure. Verifies module declaration is `page.moke.api.mcp`, all five endpoints (gettools, postinvoke, getbroker, getmemory, postmemory) exist, imports (std.http, std.json, moke.mcp.toolpanel, moke.mcp.brokerstatus, moke.mcp.memorydemo) are present, and tool name validation rejects empty values. Depends on `std.test` and `std.str`.

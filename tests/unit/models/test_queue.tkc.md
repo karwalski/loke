@@ -1,0 +1,1 @@
+Tests the background inference job queue. Verifies queue creation with max concurrency setting, job submission with model ID, prompt, and priority, job status transitions (pending, running, completed, failed), priority ordering, job cancellation, and queue capacity enforcement. Uses stubbed types mirroring `core.models.queue`. Depends on `std.test` and `std.str`.

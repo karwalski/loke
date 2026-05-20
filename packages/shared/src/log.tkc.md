@@ -1,1 +1,1 @@
-Structured logging module for loke. Provides debug/info/warn/error log functions that write timestamped, correlated entries to ~/.loke/loke.log. Depends on std.str and std.file.
+Structured logging module for loke. Provides debug, info, warn, and error log functions that write timestamped, correlation-ID-tagged entries to ~/.loke/loke.log. Exports $loglevel and $logentry types plus newcorrelationid, debug, info, warn, and error functions. Depends on std.str and std.file.

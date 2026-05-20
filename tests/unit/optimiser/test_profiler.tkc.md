@@ -1,0 +1,1 @@
+Unit tests for core.optimiser.profiler: PII column name detection, column type inference (bool, date, int, float, str, unknown), min/max string comparison, percentage formatting, and unique value counting.

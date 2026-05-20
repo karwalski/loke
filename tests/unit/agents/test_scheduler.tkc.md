@@ -1,0 +1,1 @@
+Tests the agent scheduler that determines when agents should trigger. Verifies hourly (always triggers), daily (matches target hour), manual (never auto-triggers), and webhook trigger types. Validates trigger type classification into time-based, user-initiated, and event-driven categories. Uses stubs mirroring `core.agents.scheduler`. Depends on `std.test` and `std.str`.

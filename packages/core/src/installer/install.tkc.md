@@ -1,1 +1,1 @@
-Handles cross-platform Ollama installation (macOS zip download, Windows silent installer, Linux shell script). Downloads, extracts, sets permissions, and verifies the installed binary reports a valid version.
+Handles cross-platform Ollama installation (macOS zip download, Windows silent installer, Linux shell script). Downloads, extracts, sets permissions, and verifies the installed binary reports a valid version. Depends on std.str, shared.log, std.sys, std.process, std.http, and core.installer.detect.

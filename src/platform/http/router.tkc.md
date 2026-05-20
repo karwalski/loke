@@ -1,0 +1,1 @@
+HTTP route registry for the platform API. Registers routes by method, path, namespace, and handler key under the /api/v1/ prefix, supports exact and prefix matching for route lookup, and lists all registered routes. Exports route and routeregistry types, plus newregistry, register, find, and listroutes. Depends on std.str.

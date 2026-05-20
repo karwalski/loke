@@ -1,0 +1,1 @@
+Tests the regex-based PII detection layer. Verifies detection of emails (@ and . presence), Australian phone numbers (10-digit and +61 prefix), credit card numbers (15-16 digit length), IPv4 addresses (dot-separated octets), and negative cases for each pattern. Covers the 10 deterministic patterns defined in `core.privacy.regex`. Depends on `std.test` and `std.str`.

@@ -1,1 +1,1 @@
-In-memory placeholder map that tracks original-to-placeholder mappings for PII entities. Provides functions to generate placeholder tokens (e.g. [EMAIL_1]), add entries, and restore original values from anonymised text.
+In-memory placeholder map that tracks original-to-placeholder mappings for PII entities. Provides functions to generate placeholder tokens (e.g. [EMAIL_1]), add entries, and restore original values from anonymised text. Depends on std.str.

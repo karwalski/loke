@@ -1,1 +1,1 @@
-Index page handler providing both a template-rendered status page and a full single-page application (SPA) with embedded HTML/CSS/JS for the loke browser UI including chat, dashboard, pipeline console, models list, and settings panels.
+Landing page. Exports a get handler that returns an inline HTML page showing the loke version and a link to the API health endpoint. Depends on std.http and std.str.

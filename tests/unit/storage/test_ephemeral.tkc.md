@@ -1,0 +1,1 @@
+Tests the in-memory ephemeral key-value store with auto-expiry. Verifies store creation scoped to a session ID, put/get operations with TTL, automatic expiry of entries past their TTL, correct return of empty strings for expired or missing keys, and session isolation. Uses stubbed types mirroring `core.storage.ephemeral`. Depends on `std.test` and `std.str`.

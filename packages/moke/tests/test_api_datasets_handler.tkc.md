@@ -1,0 +1,1 @@
+Tests the moke API datasets handler structure. Verifies module declaration is `page.moke.api.datasets`, POST handler exists, imports (std.http, std.json, moke.data.registry, moke.profiler) are present, and id validation rejects empty/whitespace-only values while accepting valid ids. Depends on `std.test` and `std.str`.

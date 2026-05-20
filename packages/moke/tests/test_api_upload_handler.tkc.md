@@ -1,0 +1,1 @@
+Tests the moke API upload handler structure. Verifies module declaration is `page.moke.api.upload`, POST handler exists, imports (std.http, std.json, moke.upload) are present, and body validation rejects empty/whitespace-only payloads while accepting valid CSV content. Depends on `std.test` and `std.str`.

@@ -1,0 +1,1 @@
+Entity-type-to-layer routing configuration. Maps each PII entity type (email, phone, person, credit card, address) to preferred and fallback detection layers (regex, NER, Presidio). Provides a default routing config and functions to look up the route for a given entity type. Exports defaultrouting, getroute, and hasroute. Depends on std.str.

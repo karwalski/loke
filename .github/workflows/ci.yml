@@ -6,52 +6,127 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  TOKE_DIR: ${{ github.workspace }}/../toke
+  OOKE_DIR: ${{ github.workspace }}/../toke-ooke
+
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
+  build-and-test:
+    name: Build & Test
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install toke compiler
-        run: |
-          # toke compiler installation (placeholder until release artifacts published)
-          echo "tkc installation pending toke release"
-          # curl -sSL https://tokelang.dev/install.sh | sh
-      - name: Run toke lint
-        run: tkc lint ./packages --profile2
-        continue-on-error: true  # Until tkc is available in CI
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install toke + ooke
-        run: |
-          echo "tkc + ooke installation pending release"
-      - name: Build browser binary
-        run: ooke build --config packages/browser/ooke.toml
-        continue-on-error: true
-      - name: Build CLI binary
-        run: tkc packages/cli/src/main.tk -o dist/loke --profile2
-        continue-on-error: true
-      - name: Build MCP server binary
-        run: tkc packages/mcp-toke/src/main.tk -o dist/loke-mcp --profile2
-        continue-on-error: true
+      # ------------------------------------------------------------------
+      # Dependencies: toke and ooke are custom compilers not available via
+      # package managers. We clone and build them from source. Built
+      # binaries are cached between runs keyed on the latest commit SHA
+      # of each repo's main branch.
+      # ------------------------------------------------------------------
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run privacy pipeline tests
-        run: tkc test tests/unit/privacy/ --profile2
-        continue-on-error: true
-      - name: Run integration tests
-        run: tkc test tests/integration/ --profile2
-        continue-on-error: true
+      - name: Get toke/ooke latest commit SHAs (for cache key)
+        id: dep-versions
+        run: |
+          TOKE_SHA=$(git ls-remote https://github.com/karwalski/toke.git HEAD | cut -f1)
+          OOKE_SHA=$(git ls-remote https://github.com/karwalski/ooke.git HEAD | cut -f1)
+          echo "toke_sha=${TOKE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "ooke_sha=${OOKE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache toke compiler
+        id: cache-toke
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOKE_DIR }}
+          key: toke-${{ runner.os }}-${{ steps.dep-versions.outputs.toke_sha }}
+
+      - name: Cache ooke framework
+        id: cache-ooke
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OOKE_DIR }}
+          key: ooke-${{ runner.os }}-${{ steps.dep-versions.outputs.ooke_sha }}
+
+      - name: Build toke compiler
+        if: steps.cache-toke.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/karwalski/toke.git "$TOKE_DIR"
+          cd "$TOKE_DIR"
+          make || { echo "::error::Failed to build toke compiler"; exit 1; }
+
+      - name: Build ooke framework
+        if: steps.cache-ooke.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/karwalski/ooke.git "$OOKE_DIR"
+          cd "$OOKE_DIR"
+          make || { echo "::error::Failed to build ooke framework"; exit 1; }
+
+      - name: Install system dependencies
+        run: |
+          brew install openssl@3 sqlite3
+
+      - name: Build loke
+        run: |
+          export TOKE_DIR="$TOKE_DIR"
+          export OOKE_DIR="$OOKE_DIR"
+          chmod +x ./scripts/build_loke.sh
+          ./scripts/build_loke.sh
+
+      - name: Run tests
+        id: tests
+        run: |
+          export PATH="$TOKE_DIR:$PATH"
+          chmod +x ./scripts/run_tests.sh
+          # Capture output for JSON artefact; allow non-zero exit so we
+          # can still upload the artefact before failing the job.
+          set +e
+          ./scripts/run_tests.sh . 2>&1 | tee /tmp/test_output.txt
+          TEST_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          # Parse results into structured JSON
+          PASS=$(grep '^Pass:' /tmp/test_output.txt | awk '{print $2}')
+          FAIL=$(grep '^Fail:' /tmp/test_output.txt | awk '{print $2}')
+          TOTAL=$(grep '^Total:' /tmp/test_output.txt | awk '{print $2}')
+
+          # Build per-test detail array
+          DETAILS=$(grep -E '^(PASS|FAIL|COMPILE_ERROR|LINK_ERROR)' /tmp/test_output.txt | \
+            awk '{
+              status=$1; file=$2; extra="";
+              for(i=3;i<=NF;i++) extra=extra" "$i;
+              gsub(/^ /,"",extra);
+              printf "{\"status\":\"%s\",\"file\":\"%s\",\"detail\":\"%s\"},", status, file, extra
+            }')
+          # Remove trailing comma
+          DETAILS=$(echo "$DETAILS" | sed 's/,$//')
+
+          cat > /tmp/test_results.json <<ENDJSON
+          {
+            "run_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "passed": ${PASS:-0},
+            "failed": ${FAIL:-0},
+            "total": ${TOTAL:-0},
+            "exit_code": $TEST_EXIT,
+            "tests": [${DETAILS}]
+          }
+          ENDJSON
+
+          echo "test_exit=$TEST_EXIT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: /tmp/test_results.json
+          retention-days: 30
+
+      - name: Fail on test failures
+        if: steps.tests.outputs.test_exit != '0'
+        run: |
+          echo "::error::Tests failed with exit code ${{ steps.tests.outputs.test_exit }}"
+          exit ${{ steps.tests.outputs.test_exit }}
 
   licence-check:
     name: Licence Check

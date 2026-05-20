@@ -1,0 +1,1 @@
+TTL-based ephemeral storage with secure wipe. Stores key-value entries with expiration timestamps and an optional auto-wipe flag, retrieves values only if not expired, and performs secure erasure by zeroing data before deletion. Exports ephemeralentry and ephemeralstore types, plus store, get, wipe, wipeexpired, wipeall, and count functions. Depends on std.log and std.str.

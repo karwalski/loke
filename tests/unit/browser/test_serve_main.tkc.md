@@ -1,0 +1,1 @@
+Unit tests for the browser serve_main entry point. Verifies the handler registration contract (registerall provides routes for the server), minimum route count, all API paths are available, and handler delegation works end-to-end for both GET and POST.

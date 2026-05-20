@@ -1,0 +1,1 @@
+Health check HTTP endpoint. Runs database and settings probes via the health checker, includes Ollama status, builds a health report for version 0.1.0, and returns it as a JSON HTTP response. Depends on loke.core.health.checker and std.http.

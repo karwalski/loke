@@ -1,1 +1,1 @@
-Output formatting utilities for the CLI: printline, printerror, printsection, printpipelinestage, printtable, and sensitivitybadge. Provides consistent terminal output with table rendering and sensitivity-level formatting.
+Output formatting utilities for the CLI. Provides printline, printerror, printsection, printpipelinestage for pipeline stage display, printtable for dynamic-width tabular output, and sensitivitybadge for mapping sensitivity levels to display labels. Exports the $outputstyle sum type and all formatting functions. Depends on std.str and std.io.

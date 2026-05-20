@@ -1,0 +1,1 @@
+Tests the OpenAI provider integration. Verifies request body construction with model, max_tokens, and messages array, response parsing to extract `choices[0].message.content`, correct JSON structure generation, and handling of empty or malformed responses. Uses stubs mirroring `core.providers.openai`. Depends on `std.test` and `std.str`.

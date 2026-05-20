@@ -1,0 +1,1 @@
+Tests moke's tier visualiser that displays inference tier usage. Verifies tier stats construction for Interactive, Considered, and Background tiers with request counts, percentages, models used, and active status, tier report aggregation, and correct percentage calculation across all tiers. Depends on `std.test`, `std.str`, and `std.io`.

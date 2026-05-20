@@ -1,0 +1,1 @@
+Tests the memory decay scoring system that determines when memories should be swept. Verifies decay score calculation (loses 1 point per day from a max of 1000), sweep threshold comparison, correct identification of old memories for eviction, and preservation of recent memories above the threshold. Uses stubs mirroring `core.memory.decay`. Depends on `std.test` and `std.str`.

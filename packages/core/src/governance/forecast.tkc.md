@@ -1,0 +1,1 @@
+Cost and usage forecasting. Projects future cost, token usage, and request volume over a configurable number of days based on historical daily rates, with a confidence level (low/medium/high) determined by the length of available history. Exports forecast and formatforecast. Depends on std.time and std.str.

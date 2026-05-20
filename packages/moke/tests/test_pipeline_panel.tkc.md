@@ -1,0 +1,1 @@
+Tests the moke pipeline console panel that displays processing stages. Verifies pipeline stage construction with id, label, and order, stage status tracking with symbol and state indicators, correct stage ordering, and status transitions through the anonymise/route/compute/restore pipeline. Depends on `std.test` and `std.str`.

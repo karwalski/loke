@@ -1,1 +1,1 @@
-RouteLLM integration client that queries the local RouteLLM service to get a weak/strong routing signal and confidence score for a given prompt. Falls back gracefully when the service is unavailable.
+RouteLLM integration client that queries the local RouteLLM service to get a weak/strong routing signal and confidence score for a given prompt. Falls back gracefully when the service is unavailable. Depends on shared.types, std.http, std.json, std.str, and shared.log.

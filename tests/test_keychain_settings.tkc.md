@@ -1,0 +1,1 @@
+Tests the OS keychain integration for API key storage. Verifies that API keys (Anthropic, OpenAI) can be stored and retrieved via stub keychain functions, validates roundtrip correctness, and confirms that unknown providers return empty strings. Exercises the keychain-backed settings workflow introduced in GA2.1. Depends on `std.test` and `std.str`.

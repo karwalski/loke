@@ -1,1 +1,1 @@
-Renders accessible HTML button elements with variant (primary, secondary, danger, ghost), size, loading, and disabled states. Provides a full CSS stylesheet for button styling including focus, hover, and reduced-motion support.
+Button UI component. Provides a configurable HTML button renderer supporting four variants (primary, secondary, danger, ghost), three sizes (sm, md, lg), disabled and loading states, and ARIA attributes. Exports types $variant, $size, $buttonconfig, and functions defaultconfig, variantclass, sizeclass, render, and styles. Depends on std.str.

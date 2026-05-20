@@ -1,0 +1,1 @@
+Tests the quality monitoring system. Verifies quality trend computation from aggregated signals, degradation detection thresholds (rate below 70% with more than 10 signals), thumbs-down rate derivation, signal field validation, and percentage formatting. Uses stubs mirroring `core.governance.monitoring`. Depends on `std.test` and `std.str`.

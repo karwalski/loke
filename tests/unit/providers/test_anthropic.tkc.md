@@ -1,0 +1,1 @@
+Tests the Anthropic provider integration. Verifies request body construction with model, system prompt, max_tokens, and messages array, response parsing to extract `content[0].text`, inclusion of the system prompt field, and handling of empty or malformed responses. Uses stubs mirroring `core.providers.anthropic`. Depends on `std.test` and `std.str`.

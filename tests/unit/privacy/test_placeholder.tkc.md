@@ -1,0 +1,1 @@
+Tests the placeholder mapping system used by the privacy pipeline. Verifies creation of placeholder maps, addition of entity entries (email, phone, person), lookup by placeholder token, and restoration of original values from `[ENTITY_TYPE_N]` tokens. Uses stubbed types mirroring `core.privacy.placeholder`. Depends on `std.test` and `std.str`.

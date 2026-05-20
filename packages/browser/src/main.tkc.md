@@ -1,1 +1,1 @@
-Entry point for loke browser mode. Starts the background HTTP server, waits for it to become ready on port 11430, then launches the native web view shell.
+Browser mode entry point. Starts the background HTTP server, waits for it to become ready on port 11430, then launches the native web-view shell window. Exports main which returns 0 on success or 1 on failure. Depends on browser.shell, browser.server, and shared.log.

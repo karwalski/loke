@@ -1,0 +1,1 @@
+Tests the OS keychain credential storage interface. Verifies credential store operations (store, retrieve, delete) with service and key parameters, correct retrieval of known test credentials, empty string return for unknown keys, and input validation rejecting empty service/key/value. Uses stubs mirroring `core.storage.keychain`. Depends on `std.test` and `std.str`.

@@ -1,0 +1,1 @@
+Tests the append-only audit trail with tamper-proof hash chain. Verifies audit entry creation with action, user, and detail fields, sequential ID assignment, input validation (rejects empty action or user), and query-by-action filtering. Covers the audit logging wired into the request path by GA1.4. Uses stubs mirroring `core.storage.audit`. Depends on `std.test` and `std.str`.

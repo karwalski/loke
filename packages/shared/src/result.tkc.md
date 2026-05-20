@@ -1,0 +1,1 @@
+Error constructor and sensitivity helper module. Provides convenience functions for creating typed $lokeerr variants (errconfig, errmodel, errprivacy, errnetwork) and an issensitive function that returns true for confidential and restricted sensitivity levels. Depends on shared.types.

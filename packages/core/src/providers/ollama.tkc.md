@@ -1,1 +1,1 @@
-Ollama local model provider client. This file was expected in the batch but does not exist on disk; the dispatcher references it as core.providers.ollamaprovider.
+Ollama REST API client for model management and chat. Provides health checking, model listing, model pulling with progress callbacks, and chat completion via the Ollama /api endpoints. Depends on shared.types, std.http, std.json, std.str, and shared.log.

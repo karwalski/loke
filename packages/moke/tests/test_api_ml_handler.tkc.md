@@ -1,0 +1,1 @@
+Tests the moke API ML handler structure. Verifies module declaration is `page.moke.api.ml`, postrun and postpropose handlers exist, imports (std.http, std.json, moke.ml.engine, moke.ml.proposal) are present, and kind validation accepts kmeans/zscore/iqr/correlation while rejecting empty and unknown kinds. Depends on `std.test` and `std.str`.

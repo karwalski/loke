@@ -1,0 +1,1 @@
+Privacy filter evaluation and benchmarking. Computes precision, recall, and F1 scores for each detection layer by comparing detected entities against labelled ground truth, and formats results as summary strings. Exports computeprecision, computerecall, computef1, evaluatelayer, and formatresult. Depends on std.str.

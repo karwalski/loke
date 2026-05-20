@@ -1,1 +1,1 @@
-Stub module for the browser-mode HTTP server. Exposes a startbackground function that will launch the web server in a background thread; currently returns true as a placeholder.
+Browser server stub. Exports a startbackground function that returns true, serving as a placeholder for the background HTTP server startup logic. No dependencies.

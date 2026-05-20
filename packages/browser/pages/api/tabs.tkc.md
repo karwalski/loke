@@ -1,1 +1,1 @@
-Tab management API supporting listing, opening, switching, pinning, reordering, and closing browser workspace tabs. Maintains tab state through the core tab store.
+Tabs API endpoint. Exports get and post stub handlers that return placeholder JSON responses for tab listing and tab operations. Depends on std.http and std.str.

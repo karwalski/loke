@@ -1,1 +1,1 @@
-Model selector that chooses the best model for a request based on task type, sensitivity level, latency tolerance, and cost constraints. Enforces local-only routing for RESTRICTED data and falls back to cloud models when no local option is available.
+Model selector that chooses the best model for a request based on task type, sensitivity level, latency tolerance, and cost constraints. Enforces local-only routing for RESTRICTED data and falls back to cloud models when no local option is available. Depends on shared.types, core.models.registry, std.str, and shared.log.

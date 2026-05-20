@@ -1,0 +1,1 @@
+Tests the regulatory compliance framework. Verifies overall status computation (PASS/WARN/FAIL precedence), GDPR and HIPAA preset configurations including check counts and expected statuses, and report formatting with framework name and overall result. Uses stubs mirroring `core.governance.compliance`. Depends on `std.test` and `std.str`.

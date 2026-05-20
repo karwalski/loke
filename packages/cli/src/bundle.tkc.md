@@ -1,1 +1,1 @@
-Build and packaging configuration for loke binaries. Defines build targets (macOS ARM/x86, Windows), DMG installer layout, and NSIS Windows installer settings. Provides a buildinfo summary function.
+Build and packaging configuration for loke binaries. Defines build targets for macOS (arm64, x86_64) and Windows, DMG installer layout settings, and NSIS Windows installer settings. Exports $buildtarget, $bundleconfig, $dmgconfig, and $nsisconfig types plus version, bundleid, defaultconfig, getdmgconfig, getnsisconfig, and buildinfo functions. Depends on std.str.

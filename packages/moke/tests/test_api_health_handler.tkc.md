@@ -1,0 +1,1 @@
+Tests the moke API health handler structure. Verifies module declaration is `page.moke.api.health`, loke health URL is correct, GET handler exists, imports (std.http, std.log) are present, and fallback 503 response contains moke version, loke unreachable status, and ollama unknown status. Depends on `std.test` and `std.str`.

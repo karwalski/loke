@@ -1,1 +1,1 @@
-Manages user consent records with grant/revoke/check operations, supports expiry timestamps, and provides a preferences loader for the four consent purposes (telemetry, improvement, cloud routing, companion sync). Persists to SQLite via std.db.
+Manages user consent records with grant/revoke/check operations, supports expiry timestamps, and provides a preferences loader for the four consent purposes (telemetry, improvement, cloud routing, companion sync). Depends on std.db, std.str, shared.log, std.time, and std.json.

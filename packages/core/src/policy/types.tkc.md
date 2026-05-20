@@ -1,0 +1,1 @@
+Core policy type definitions. Defines policyrule struct (id, description, action, severity), regulation struct (name, jurisdiction, version, rules), policyset struct (name, source, regulations, loaded timestamp, hash), and policyviolation struct (rule id, description, action, severity, context). No imports.

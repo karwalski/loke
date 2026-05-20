@@ -1,1 +1,1 @@
-Defines MCP JSON-RPC wire format types and provides request parsing, response serialisation (ok/error), tool result formatting, tools list encoding, and server initialization response construction. Pure data transformation with no I/O.
+Defines MCP JSON-RPC wire format types and provides request parsing, response serialisation (ok/error), tool result formatting, tools list encoding, and server initialization response construction. Pure data transformation with no I/O. Depends on std.json, std.str, and shared.types.

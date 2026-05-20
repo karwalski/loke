@@ -1,1 +1,1 @@
-Discovers MCP servers on localhost by probing well-known ports (11434-11437, 3000, 8080, 8000, 5000) and a configurable port range. Performs health checks, MCP initialization, and tool listing to identify available servers and their capabilities.
+Discovers MCP servers on localhost by probing well-known ports (11434-11437, 3000, 8080, 8000, 5000) and a configurable port range. Performs health checks, MCP initialization, and tool listing to identify available servers and their capabilities. Depends on shared.types, std.http, std.json, std.str, shared.log, and std.time.

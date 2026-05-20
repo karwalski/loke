@@ -1,0 +1,1 @@
+Tests the moke chat page handler structure. Verifies module declaration is `page.moke.chat`, template path is `templates/chat.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

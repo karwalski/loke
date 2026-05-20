@@ -1,0 +1,1 @@
+Tests the moke memory page handler structure. Verifies module declaration is `page.moke.memory`, template path is `templates/memory.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

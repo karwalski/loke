@@ -1,25 +1,81 @@
+// Copyright 2026 loke contributors
+// SPDX-License-Identifier: Apache-2.0
+
 m=browser.pages.api.settings;
 i=http:std.http;
 i=str:std.str;
 i=json:std.json;
 i=file:std.file;
+i=kc:core.storage.keychain;
 
 f=settingspath():str{
   <"/Users/matthew.watt/.loke/settings.json"
 };
 
-f=get(req:i64):i64{
+(* mask an API key for display: show first 4 chars then **** *)
+f=maskkey(key:str):str{
+  if(str.len(key)<5){<""}el{};
+  <str.concat(str.slice(key;0;4);"****")
+};
+
+(* remove an API key field from the JSON settings file *)
+f=removekeyfromjson(field:str):bool{
   let content=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
   let parsed=json.dec(content);
-  let ak=mut.json.str(parsed;"anthropic_api_key");
-  let ok=mut.json.str(parsed;"openai_api_key");
-  let hasak=str.len(ak)>5;
-  let hasok=str.len(ok)>5;
-  let akstatus=mut."not set";
-  if(hasak){ akstatus="configured" }el{};
-  let okstatus=mut."not set";
-  if(hasok){ okstatus="configured" }el{};
-  <http.res(200;str.concat("{\"anthropic\":\"";str.concat(akstatus;str.concat("\",\"openai\":\"";str.concat(okstatus;"\",\"port\":11430,\"ollama_url\":\"http://127.0.0.1:11434\"}")))))
+  let ak=json.str(parsed;"anthropic_api_key");
+  let ok=json.str(parsed;"openai_api_key");
+  let port=json.str(parsed;"port");
+  let ollamaurl=json.str(parsed;"ollama_url");
+  (* rebuild JSON without the specified field *)
+  let out=mut."{";
+  let needcomma=mut.false;
+  if(!str.eq(field;"anthropic_api_key")){
+    if(str.len(ak)>0){
+      out=str.concat(out;str.concat("\"anthropic_api_key\":";json.enc(ak)));
+      needcomma=true
+    }el{}
+  }el{};
+  if(!str.eq(field;"openai_api_key")){
+    if(str.len(ok)>0){
+      if(needcomma){out=str.concat(out;",")}el{};
+      out=str.concat(out;str.concat("\"openai_api_key\":";json.enc(ok)));
+      needcomma=true
+    }el{}
+  }el{};
+  if(str.len(port)>0){
+    if(needcomma){out=str.concat(out;",")}el{};
+    out=str.concat(out;str.concat("\"port\":";port));
+    needcomma=true
+  }el{};
+  if(str.len(ollamaurl)>0){
+    if(needcomma){out=str.concat(out;",")}el{};
+    out=str.concat(out;str.concat("\"ollama_url\":";json.enc(ollamaurl)))
+  }el{};
+  out=str.concat(out;"}");
+  mt file.write(settingspath();out) {$ok:v true; $err:e false}
+};
+
+f=get(req:i64):i64{
+  (* try keychain first for API keys *)
+  let ak=mut.kc.getapikey("anthropic");
+  let ok=mut.kc.getapikey("openai");
+  (* fall back to JSON if keychain returns empty (migration path) *)
+  if(str.len(ak)<1){
+    let content=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
+    let parsed=json.dec(content);
+    ak=json.str(parsed;"anthropic_api_key")
+  }el{};
+  if(str.len(ok)<1){
+    let content=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
+    let parsed=json.dec(content);
+    ok=json.str(parsed;"openai_api_key")
+  }el{};
+  (* mask keys for display *)
+  let akdisplay=mut."not set";
+  if(str.len(ak)>4){ akdisplay=maskkey(ak) }el{};
+  let okdisplay=mut."not set";
+  if(str.len(ok)>4){ okdisplay=maskkey(ok) }el{};
+  <http.res(200;str.concat("{\"anthropic\":\"";str.concat(akdisplay;str.concat("\",\"openai\":\"";str.concat(okdisplay;"\",\"port\":11430,\"ollama_url\":\"http://127.0.0.1:11434\"}")))))
 };
 
 f=post(req:i64):i64{
@@ -27,13 +83,21 @@ f=post(req:i64):i64{
   let pbody=json.dec(rawbody);
   let key=json.str(pbody;"key");
   let value=json.str(pbody;"value");
+  (* store API keys in OS keychain, not in JSON *)
+  if(str.eq(key;"anthropic_api_key")){
+    kc.setapikey("anthropic";value);
+    removekeyfromjson("anthropic_api_key");
+    <http.res(200;"{\"ok\":true}")
+  }el{};
+  if(str.eq(key;"openai_api_key")){
+    kc.setapikey("openai";value);
+    removekeyfromjson("openai_api_key");
+    <http.res(200;"{\"ok\":true}")
+  }el{};
+  (* non-secret settings still go to JSON *)
   let existing=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
   let eparsed=json.dec(existing);
-  let ak=mut.json.str(eparsed;"anthropic_api_key");
-  let ok=mut.json.str(eparsed;"openai_api_key");
-  if(str.eq(key;"anthropic_api_key")){ ak=value }el{};
-  if(str.eq(key;"openai_api_key")){ ok=value }el{};
-  let out=str.concat("{\"anthropic_api_key\":";str.concat(json.enc(ak);str.concat(",\"openai_api_key\":";str.concat(json.enc(ok);"}"))));
+  let out=str.concat("{";str.concat(json.enc(key);str.concat(":");str.concat(json.enc(value);"}"))));
   mt file.write(settingspath();out) {$ok:v v; $err:e ""};
   <http.res(200;"{\"ok\":true}")
 };

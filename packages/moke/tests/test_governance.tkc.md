@@ -1,0 +1,1 @@
+Tests moke's governance dashboard functionality. Verifies regulatory preset construction (GDPR, AU Privacy Act, HIPAA, CCPA) with jurisdiction, data residency, and retention settings, risk classification levels (low/medium/high), compliance report generation, and consent requirement flags. Depends on `std.test` and `std.str`.

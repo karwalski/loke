@@ -1,0 +1,1 @@
+Type definitions for the toon (token optimisation notation) system. Defines toonopts struct with string length limits, key abbreviation, and null omission settings, toonvalue enum representing JSON-like value types (null, bool, int, float, str, arr, obj), and toonfield struct pairing a key with a toonvalue. No imports.

@@ -1,1 +1,1 @@
-Page handler that renders the initial setup/onboarding template for configuring loke.
+Setup wizard page. Exports a get handler that renders the setup.tkt template for initial loke configuration. Depends on std.http and ooke.template.

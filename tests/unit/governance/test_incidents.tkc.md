@@ -1,0 +1,1 @@
+Tests the governance incident management system. Verifies incident creation with type, severity, title, and description, incident store operations, auto-created vs manual incidents, resolution workflow with notes and timestamps, and related request ID tracking. Uses stubbed types mirroring `core.governance.incidents`. Depends on `std.test` and `std.str`.

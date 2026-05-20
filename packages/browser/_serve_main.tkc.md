@@ -1,1 +1,1 @@
-Application entry point that parses CLI arguments, loads ooke configuration, registers all route handlers, and starts the HTTP server. Depends on std.args, ooke.config, ooke.serve, and the handlers module.
+Application entry point for the ooke-based browser server. Parses command-line arguments for the project directory, loads ooke.toml configuration (falling back to defaults), registers all HTTP handler routes via ooke.handlers, and starts the ooke web server. Exports main. Depends on std.http, std.log, std.str, std.path, std.args, ooke.config, ooke.serve, and ooke.handlers.

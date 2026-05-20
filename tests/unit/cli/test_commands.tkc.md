@@ -1,0 +1,1 @@
+Tests CLI command parsing and argument extraction. Verifies recognition of commands (chat, config, status, help, session, version), flag extraction (--model, --provider, --output), and correct handling of unknown commands returning empty strings. Covers the `loke` CLI command dispatch logic. Uses stubs mirroring `cli.commands`. Depends on `std.test` and `std.str`.

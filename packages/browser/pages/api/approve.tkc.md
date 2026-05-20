@@ -1,1 +1,1 @@
-API endpoint handling user approval or rejection of anonymised prompts. On approval, routes the prompt through the LLM dispatcher and returns the response with token usage metadata.
+API endpoint for prompt approval actions. Exports a post handler that returns a JSON success response with action "approved". Depends on std.http and std.str.

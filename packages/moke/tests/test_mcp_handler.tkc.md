@@ -1,0 +1,1 @@
+Tests the moke MCP page handler structure. Verifies module declaration is `page.moke.mcp`, template path is `templates/mcp.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

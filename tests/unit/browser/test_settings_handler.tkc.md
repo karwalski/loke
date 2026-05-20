@@ -1,0 +1,1 @@
+Unit tests for the browser settings API handler. Verifies get/post signatures, JSON response structure, API key masking via maskkey helper, presence of expected fields (anthropic, openai, port, ollama_url), and no full API key leaks.

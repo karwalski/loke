@@ -1,1 +1,1 @@
-CLI argument parser that maps subcommands (ask, pipeline, queue, models, memory, agents, overnight, doctor, help, version) to a typed command enum. Also provides the top-level usage/help text.
+CLI argument parser that maps subcommands (ask, pipeline, queue list/cancel, models list/recommend, memory search, agents list, overnight status, doctor, help, version) to a typed $command record with kind and arg fields. Also provides the top-level usage text. Exports the $command type and the parse and usage functions. Depends on std.str.

@@ -1,1 +1,1 @@
-Anthropic Claude API provider client. Sends completion requests to the Anthropic Messages API with proper authentication headers, parses responses including token usage, and calculates per-request cost based on model pricing.
+Anthropic Claude API provider client. Sends completion requests to the Anthropic Messages API with proper authentication headers, parses responses including token usage, and calculates per-request cost based on model pricing. Depends on shared.types, core.providers.types, std.http, std.json, std.str, and shared.log.

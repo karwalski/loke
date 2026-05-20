@@ -1,0 +1,1 @@
+End-to-end integration tests for the audit trail subsystem. Tests: successful event logging, querying recent events, preservation of event type, model ID, correlation ID, and sensitivity fields, multiple event logging and retrieval, and limit parameter enforcement. Uses in-memory store. Depends on std.test, std.str, core.storage.audit, and core.storage.db.

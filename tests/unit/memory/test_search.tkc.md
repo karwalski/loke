@@ -1,0 +1,1 @@
+Tests the memory palace semantic search system. Verifies search index creation, entry addition, keyword-based lookup with relevance scoring, result ordering by score, empty query handling, and scoped search within specific wings or halls. Uses stubbed types mirroring `core.memory.search`. Depends on `std.test` and `std.str`.

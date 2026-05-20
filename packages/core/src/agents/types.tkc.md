@@ -1,1 +1,1 @@
-Defines core agent type structures: trigger types (manual, schedule, file change, webhook, MCP event), permissions (read/write file, MCP tool, HTTP, model), agent definitions, run statuses, and agent runs. Provides factory functions for creating new agents and runs.
+Defines core agent type structures: trigger types (manual, schedule, file change, webhook, MCP event), permissions (read/write file, MCP tool, HTTP, model), agent definitions, run statuses, and agent runs. Provides factory functions for creating new agents and runs. Depends on shared.types and std.str.

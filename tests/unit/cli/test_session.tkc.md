@@ -1,0 +1,1 @@
+Tests CLI session management. Verifies session creation with name and provider, session ID extraction from JSON, active state detection, and session serialisation format. Covers the session tracking used by the CLI proxy to count intercepted requests, redacted entities, and saved tokens. Uses stubs mirroring `cli.sessions`. Depends on `std.test` and `std.str`.

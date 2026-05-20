@@ -1,1 +1,1 @@
-Agent observability and debugging. Computes per-agent statistics (runs, success/failure rates, cost, duration), formats run history tables, manages debug traces with step recording, and determines if an agent should be paused due to consecutive failures.
+Agent observability and debugging. Computes per-agent statistics (runs, success/failure rates, cost, duration), formats run history tables, manages debug traces with step recording, and determines if an agent should be paused due to consecutive failures. Depends on shared.types, core.agents.types, std.str, and shared.log.

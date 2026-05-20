@@ -1,1 +1,1 @@
-Removes individual Ollama models or the entire Ollama binary from the loke-managed install location (~/.loke/bin). Cleans PATH entries from shell profiles and verifies removal. Lists removable models via the Ollama API or CLI fallback.
+Removes individual Ollama models or the entire Ollama binary from the loke-managed install location (~/.loke/bin). Cleans PATH entries from shell profiles and verifies removal. Lists removable models via the Ollama API or CLI fallback. Depends on shared.types, std.str, shared.log, std.process, std.file, std.json, and std.http.

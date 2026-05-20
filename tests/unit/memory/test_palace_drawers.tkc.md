@@ -1,0 +1,1 @@
+Tests the memory palace drawer storage system. Verifies drawer creation with wing/hall/room location, store operations (add, retrieve, count), drawer lookup by ID, filtering by location scope, and correct handling of session IDs and token counts. Uses stubbed types mirroring the palace structure (wings, halls, rooms, drawers). Depends on `std.test` and `std.str`.

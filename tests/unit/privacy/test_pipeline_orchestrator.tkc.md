@@ -1,0 +1,1 @@
+Tests the privacy pipeline orchestrator that sequences all detection layers. Verifies sensitivity classification (low/medium/high/critical based on content keywords), PII detection count accumulation, layer sequencing, deduplication of overlapping detections, and sensitivity escalation. Uses stubs mirroring `core.privacy.pipeline`. Depends on `std.test` and `std.str`.

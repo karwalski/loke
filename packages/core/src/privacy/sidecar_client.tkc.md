@@ -1,0 +1,1 @@
+Privacy sidecar HTTP client. Communicates with a local privacy sidecar service on port 11435 to perform PII detection and anonymisation via REST endpoints. Provides health checking, text detection, text anonymisation, and model listing. Exports sidecarurl, isavailable, detect, anonymise, and listmodels. Depends on std.http, std.str, and std.json.

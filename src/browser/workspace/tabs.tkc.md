@@ -1,0 +1,1 @@
+Tab and bookmark management for the browser workspace. Defines tab, bookmark, and tabstore types, and exports functions to open, close, navigate, activate, pin, and list tabs, mark tabs as loaded, manage bookmarks (add/remove), find the active tab, reorder tabs, and serialise tabs and bookmarks to JSON. Depends on std.string, std.log, and std.str.

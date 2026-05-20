@@ -1,0 +1,1 @@
+Tests the content type detection system. Verifies classification of input text into types including plain, HTML, JSON, markdown, and CSV using heuristic rules (tag detection, brace/bracket prefixes, hash prefixes, comma+newline patterns). Uses stubs mirroring `core.privacy.content`. Depends on `std.test` and `std.str`.

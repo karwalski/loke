@@ -1,1 +1,1 @@
-Renders accessible form inputs (text fields, selects, checkboxes) with labels, hints, error states, and ARIA attributes. Includes a comprehensive CSS stylesheet for all form element styles including focus rings and validation states.
+Input, select, and checkbox UI components. Renders accessible form controls with labels, hints, error messages, and ARIA attributes for validation states. Exports types $validationstate, $inputconfig, $option, $selectconfig, $checkboxconfig, and functions defaultinput, renderinput, renderselect, rendercheckbox, and styles. Depends on std.str.

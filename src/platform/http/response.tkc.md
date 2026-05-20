@@ -1,0 +1,1 @@
+Standardised HTTP response envelope formatting. Provides success, error, and paginated JSON response builders that include data, error details (code, message), pagination metadata (total, page, perPage, hasMore), and request id tracking. Exports the envelope type plus success, errorresp, and paginated functions. Depends on std.str and std.json.

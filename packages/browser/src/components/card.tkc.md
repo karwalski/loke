@@ -1,1 +1,1 @@
-Renders semantic HTML card components (article elements) with optional header, body, and footer sections. Supports interactive cards with tabindex and hover/focus styles, plus custom class names.
+Card UI component. Renders an article element with optional header, body, and footer sections, supporting interactive (focusable/hoverable) mode and custom class names. Exports type $cardconfig and functions defaultconfig, render, and styles. Depends on std.str.

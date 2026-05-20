@@ -1,0 +1,1 @@
+Tests the Dashboard Definition Language (DDL) system used by moke's dashboard generator. Verifies dashboard card construction with id, title, chart type, and data source, validation of chart types (bar, line, pie, scatter, area, metric, table, text, list), card width constraints, and DDL JSON serialisation. Depends on `std.test` and `std.str`.

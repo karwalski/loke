@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MK9 JS Utility Tests</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 24px;
+      line-height: 1.6;
+    }
+    h1 { font-size: 20px; color: #58a6ff; margin-bottom: 8px; }
+    h2 { font-size: 15px; color: #8b949e; margin: 20px 0 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+    .summary {
+      padding: 12px 16px;
+      border-radius: 6px;
+      margin: 12px 0 20px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .summary.pass { background: #0d2818; border: 1px solid #238636; color: #3fb950; }
+    .summary.fail { background: #2d1117; border: 1px solid #da3633; color: #f85149; }
+    .module-header {
+      font-size: 14px;
+      font-weight: 600;
+      color: #d2a8ff;
+      margin: 16px 0 6px;
+      padding: 4px 8px;
+      background: #161b22;
+      border-radius: 4px;
+    }
+    .test-line {
+      font-size: 13px;
+      padding: 2px 8px 2px 24px;
+    }
+    .test-line.pass { color: #3fb950; }
+    .test-line.pass::before { content: '\2713  '; }
+    .test-line.fail { color: #f85149; font-weight: 600; }
+    .test-line.fail::before { content: '\2717  '; }
+    .fail-detail {
+      font-size: 12px;
+      color: #f0883e;
+      padding: 2px 8px 2px 40px;
+    }
+    #results { margin-top: 12px; }
+  </style>
+</head>
+<body>
+
+<h1>MK9 JavaScript Utility Tests</h1>
+<div id="summary"></div>
+<div id="results"></div>
+
+<!-- Load all 9 modules (relative paths to parent js/ directory) -->
+<script src="../json-parser.js"></script>
+<script src="../graphql-source.js"></script>
+<script src="../openapi-discovery.js"></script>
+<script src="../auth-methods.js"></script>
+<script src="../datagov-source.js"></script>
+<script src="../url-import.js"></script>
+<script src="../connection-manager.js"></script>
+<script src="../api-cache.js"></script>
+<script src="../rate-limiter.js"></script>
+
+<script>
+(function () {
+  'use strict';
+
+  // =========================================================================
+  // Test framework
+  // =========================================================================
+
+  var TESTS = { pass: 0, fail: 0, results: [] };
+  var _currentModule = '';
+
+  function setModule(name) {
+    _currentModule = name;
+    TESTS.results.push({ type: 'module', name: name });
+  }
+
+  function assert(cond, msg) {
+    var fullMsg = _currentModule + ': ' + msg;
+    if (cond) {
+      TESTS.pass++;
+      TESTS.results.push({ type: 'pass', msg: fullMsg });
+    } else {
+      TESTS.fail++;
+      TESTS.results.push({ type: 'fail', msg: fullMsg });
+    }
+  }
+
+  function assertEqual(a, b, msg) {
+    var fullMsg = _currentModule + ': ' + msg;
+    if (a === b) {
+      TESTS.pass++;
+      TESTS.results.push({ type: 'pass', msg: fullMsg });
+    } else {
+      TESTS.fail++;
+      TESTS.results.push({ type: 'fail', msg: fullMsg, detail: 'got ' + JSON.stringify(a) + ', expected ' + JSON.stringify(b) });
+    }
+  }
+
+  function assertDeepEqual(a, b, msg) {
+    var fullMsg = _currentModule + ': ' + msg;
+    if (JSON.stringify(a) === JSON.stringify(b)) {
+      TESTS.pass++;
+      TESTS.results.push({ type: 'pass', msg: fullMsg });
+    } else {
+      TESTS.fail++;
+      TESTS.results.push({ type: 'fail', msg: fullMsg, detail: 'got ' + JSON.stringify(a) + ', expected ' + JSON.stringify(b) });
+    }
+  }
+
+  // =========================================================================
+  // Stub localStorage and sessionStorage for isolated tests
+  // =========================================================================
+
+  function clearTestStorage() {
+    try { localStorage.removeItem('moke_graphql_queries'); } catch (e) {}
+    try { localStorage.removeItem('moke_api_connections'); } catch (e) {}
+    try { sessionStorage.removeItem('moke_api_cache'); } catch (e) {}
+    try { localStorage.removeItem('moke_cache_ttl'); } catch (e) {}
+  }
+
+  clearTestStorage();
+
+  // =========================================================================
+  // 1. json-parser.js (MokeJsonParser)
+  // =========================================================================
+
+  setModule('MokeJsonParser');
+
+  (function () {
+    var P = window.MokeJsonParser;
+
+    // detect() finds top-level array
+    var r1 = P.detect([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]);
+    assertEqual(r1.type, 'array', 'detect() finds top-level array');
+    assertDeepEqual(r1.headers, ['id', 'name'], 'detect() extracts headers from array');
+
+    // detect() unwraps "data" wrapper
+    var r2 = P.detect({ data: [{ x: 1 }, { x: 2 }] });
+    assertEqual(r2.type, 'wrapped', 'detect() unwraps data wrapper');
+    assertEqual(r2.path, 'data', 'detect() reports correct path for data wrapper');
+
+    // flatten() handles nested objects
+    var flat = P.flatten({ a: { b: 1 }, c: [2, 3] });
+    assertEqual(flat['a.b'], 1, 'flatten() handles nested objects with dot notation');
+    assertEqual(flat['c'], '[2,3]', 'flatten() serialises arrays to JSON strings');
+
+    // toDataset() returns headers + rows
+    var ds = P.toDataset([{ id: 1, val: 'x' }, { id: 2, val: 'y' }]);
+    assertDeepEqual(ds.headers, ['id', 'val'], 'toDataset() returns correct headers');
+    assertEqual(ds.rows.length, 2, 'toDataset() returns correct row count');
+    assertEqual(ds.meta.rowCount, 2, 'toDataset() meta has rowCount');
+
+    // detectPagination() finds "next" URL
+    var pag = P.detectPagination({ results: [], next: 'https://api.example.com/page2' });
+    assertEqual(pag.hasNext, true, 'detectPagination() finds next URL');
+    assertEqual(pag.nextUrl, 'https://api.example.com/page2', 'detectPagination() returns correct next URL');
+  })();
+
+  // =========================================================================
+  // 2. graphql-source.js (MokeGraphQL)
+  // =========================================================================
+
+  setModule('MokeGraphQL');
+
+  (function () {
+    var G = window.MokeGraphQL;
+
+    // buildQuery() generates valid GraphQL
+    var q1 = G.buildQuery('users', ['id', 'name', 'email']);
+    assert(q1.indexOf('users') !== -1, 'buildQuery() includes type name');
+    assert(q1.indexOf('id') !== -1, 'buildQuery() includes field names');
+    assert(q1.indexOf('{') !== -1 && q1.indexOf('}') !== -1, 'buildQuery() generates valid GraphQL structure');
+
+    // toDataset() converts array to tabular
+    var ds = G.toDataset({ users: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }] });
+    assertDeepEqual(ds.headers, ['id', 'name'], 'toDataset() extracts headers from array');
+    assertEqual(ds.rows.length, 2, 'toDataset() converts array to tabular rows');
+    assertEqual(ds.meta.arrayField, 'users', 'toDataset() records arrayField in meta');
+
+    // findArrayField() finds nested array
+    var found = G.findArrayField({ outer: { items: [1, 2, 3] } });
+    assert(found !== null, 'findArrayField() finds nested array');
+    assertEqual(found.key, 'items', 'findArrayField() returns correct key');
+    assertDeepEqual(found.value, [1, 2, 3], 'findArrayField() returns correct value');
+
+    // saveQuery/loadQueries roundtrip
+    try { localStorage.removeItem('moke_graphql_queries'); } catch (e) {}
+    G.saveQuery('test-q', 'https://api.test/graphql', '{ users { id } }', {}, {});
+    var loaded = G.loadQueries();
+    assert(loaded['test-q'] !== undefined, 'saveQuery/loadQueries roundtrip works');
+    assertEqual(loaded['test-q'].query, '{ users { id } }', 'saveQuery persists query string');
+    assertEqual(loaded['test-q'].endpoint, 'https://api.test/graphql', 'saveQuery persists endpoint');
+    // Clean up
+    G.deleteQuery('test-q');
+  })();
+
+  // =========================================================================
+  // 3. openapi-discovery.js (MokeOpenAPI)
+  // =========================================================================
+
+  setModule('MokeOpenAPI');
+
+  (function () {
+    var O = window.MokeOpenAPI;
+
+    // detectVersion() identifies Swagger 2.0
+    assertEqual(O.detectVersion({ swagger: '2.0' }), 'swagger2', 'detectVersion() identifies Swagger 2.0');
+
+    // detectVersion() identifies OpenAPI 3.0
+    assertEqual(O.detectVersion({ openapi: '3.0.1' }), 'openapi3.0', 'detectVersion() identifies OpenAPI 3.0');
+
+    // detectVersion() identifies OpenAPI 3.1
+    assertEqual(O.detectVersion({ openapi: '3.1.0' }), 'openapi3.1', 'detectVersion() identifies OpenAPI 3.1');
+
+    // resolveRef() resolves $ref pointers
+    var spec = {
+      components: {
+        schemas: {
+          Pet: { type: 'object', properties: { name: { type: 'string' } } }
+        }
+      }
+    };
+    var resolved = O.resolveRef(spec, '#/components/schemas/Pet');
+    assertEqual(resolved.type, 'object', 'resolveRef() resolves $ref pointers');
+    assert(resolved.properties && resolved.properties.name, 'resolveRef() returns full schema at ref');
+
+    // generateExample() produces valid examples
+    var schema = {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        age: { type: 'integer' },
+        active: { type: 'boolean' }
+      }
+    };
+    var example = O.generateExample(schema, {});
+    assertEqual(typeof example, 'object', 'generateExample() returns an object');
+    assertEqual(example.name, 'string', 'generateExample() generates string default');
+    assertEqual(example.age, 0, 'generateExample() generates integer default');
+    assertEqual(example.active, false, 'generateExample() generates boolean default');
+
+    // parseYAML() parses basic YAML
+    var yamlStr = 'name: test\nversion: 1.0\nitems:\n  - alpha\n  - beta';
+    var parsed = O.parseYAML(yamlStr);
+    assertEqual(parsed.name, 'test', 'parseYAML() parses string value');
+    assertEqual(parsed.version, 1.0, 'parseYAML() parses number value');
+    assert(Array.isArray(parsed.items), 'parseYAML() parses sequences');
+    assertEqual(parsed.items.length, 2, 'parseYAML() parses correct number of sequence items');
+    assertEqual(parsed.items[0], 'alpha', 'parseYAML() parses sequence item values');
+  })();
+
+  // =========================================================================
+  // 4. auth-methods.js (MokeAuth)
+  // =========================================================================
+
+  setModule('MokeAuth');
+
+  (function () {
+    var A = window.MokeAuth;
+
+    // applyAuth() adds Bearer header
+    var req1 = { headers: {} };
+    A.applyAuth(req1, { type: 'bearer', token: 'abc123' });
+    assertEqual(req1.headers['Authorization'], 'Bearer abc123', 'applyAuth() adds Bearer header');
+
+    // applyAuth() adds Basic auth
+    var req2 = { headers: {} };
+    A.applyAuth(req2, { type: 'basic', username: 'user', password: 'pass' });
+    assert(req2.headers['Authorization'].indexOf('Basic ') === 0, 'applyAuth() adds Basic auth header');
+    // Verify the encoded value
+    var decoded = atob(req2.headers['Authorization'].replace('Basic ', ''));
+    assertEqual(decoded, 'user:pass', 'applyAuth() encodes Basic credentials correctly');
+
+    // applyAuth() adds API key to header
+    var req3 = { headers: {} };
+    A.applyAuth(req3, { type: 'api_key', key_name: 'X-API-Key', key_value: 'mykey', key_location: 'header' });
+    assertEqual(req3.headers['X-API-Key'], 'mykey', 'applyAuth() adds API key to header');
+
+    // applyAuth() adds API key to query params
+    var req4 = { headers: {}, params: {} };
+    A.applyAuth(req4, { type: 'api_key', key_name: 'api_key', key_value: 'qval', key_location: 'query' });
+    assertEqual(req4.params['api_key'], 'qval', 'applyAuth() adds API key to query params');
+
+    // maskValue() masks correctly
+    assertEqual(A.maskValue('abcdef1234'), 'abcd****', 'maskValue() masks long values showing first 4 chars');
+    assertEqual(A.maskValue('ab'), '****', 'maskValue() fully masks short values');
+    assertEqual(A.maskValue(''), '****', 'maskValue() masks empty string');
+    assertEqual(A.maskValue(null), '****', 'maskValue() masks null');
+
+    // AUTH_TYPES has all 6 types
+    var types = Object.keys(A.AUTH_TYPES);
+    assertEqual(types.length, 6, 'AUTH_TYPES has 6 types');
+    assert(types.indexOf('none') !== -1, 'AUTH_TYPES includes none');
+    assert(types.indexOf('api_key') !== -1, 'AUTH_TYPES includes api_key');
+    assert(types.indexOf('bearer') !== -1, 'AUTH_TYPES includes bearer');
+    assert(types.indexOf('basic') !== -1, 'AUTH_TYPES includes basic');
+    assert(types.indexOf('oauth2') !== -1, 'AUTH_TYPES includes oauth2');
+    assert(types.indexOf('certificate') !== -1, 'AUTH_TYPES includes certificate');
+  })();
+
+  // =========================================================================
+  // 5. api-cache.js (MokeApiCache)
+  // =========================================================================
+
+  setModule('MokeApiCache');
+
+  (function () {
+    var C = window.MokeApiCache;
+
+    // Clear any existing state
+    C.clearAll();
+
+    // set/get roundtrip
+    var key1 = C.cacheKey('https://api.test/data', 'GET', null, {});
+    C.set(key1, { data: { foo: 'bar' }, status: 200 }, 60000);
+    var cached = C.get(key1);
+    assert(cached !== null, 'set/get roundtrip returns cached entry');
+    assertEqual(cached.data.foo, 'bar', 'set/get roundtrip preserves data');
+    assertEqual(cached.status, 200, 'set/get roundtrip preserves status');
+
+    // expired entries return null
+    var key2 = C.cacheKey('https://api.test/expired', 'GET', null, {});
+    // Manually insert an expired entry via sessionStorage
+    var store = JSON.parse(sessionStorage.getItem(C.STORAGE_KEY) || '{}');
+    store[key2] = { data: 'old', status: 200, cachedAt: Date.now() - 999999, ttl: 1 };
+    sessionStorage.setItem(C.STORAGE_KEY, JSON.stringify(store));
+    var expired = C.get(key2);
+    assertEqual(expired, null, 'expired entries return null');
+
+    // prune removes expired
+    var key3 = 'test-prune-key';
+    store = JSON.parse(sessionStorage.getItem(C.STORAGE_KEY) || '{}');
+    store[key3] = { data: 'prunable', status: 200, cachedAt: Date.now() - 999999, ttl: 1 };
+    sessionStorage.setItem(C.STORAGE_KEY, JSON.stringify(store));
+    var pruned = C.prune();
+    assert(pruned >= 1, 'prune removes expired entries');
+    store = JSON.parse(sessionStorage.getItem(C.STORAGE_KEY) || '{}');
+    assertEqual(store[key3], undefined, 'prune actually removes the expired key');
+
+    // stats tracks hits/misses
+    var stats = C.stats();
+    assert(typeof stats.entries === 'number', 'stats returns entry count');
+    assert(typeof stats.hits === 'number', 'stats returns hit count');
+    assert(typeof stats.misses === 'number', 'stats returns miss count');
+    assert(typeof stats.hitRate === 'number', 'stats returns hit rate');
+
+    // cacheKey is deterministic
+    var ka = C.cacheKey('https://api.test/foo', 'POST', '{"a":1}', { 'X-Key': 'val' });
+    var kb = C.cacheKey('https://api.test/foo', 'POST', '{"a":1}', { 'X-Key': 'val' });
+    assertEqual(ka, kb, 'cacheKey is deterministic for same inputs');
+    var kc = C.cacheKey('https://api.test/foo', 'GET', null, {});
+    assert(ka !== kc, 'cacheKey differs for different inputs');
+
+    C.clearAll();
+  })();
+
+  // =========================================================================
+  // 6. rate-limiter.js (MokeRateLimiter)
+  // =========================================================================
+
+  setModule('MokeRateLimiter');
+
+  (function () {
+    var R = window.MokeRateLimiter;
+
+    // calculateBackoff() increases exponentially
+    // Note: jitter adds 0-499ms, so we check the base pattern
+    var b0 = R.calculateBackoff(0, 1000);
+    var b1 = R.calculateBackoff(1, 1000);
+    var b2 = R.calculateBackoff(2, 1000);
+    assert(b0 >= 1000 && b0 < 1500, 'calculateBackoff() attempt 0 is base + jitter');
+    assert(b1 >= 2000 && b1 < 2500, 'calculateBackoff() attempt 1 doubles the base');
+    assert(b2 >= 4000 && b2 < 4500, 'calculateBackoff() attempt 2 quadruples the base');
+    assert(b2 > b1, 'calculateBackoff() increases with attempt number');
+
+    // parseRetryAfter() handles seconds
+    var delay1 = R.parseRetryAfter('30');
+    assertEqual(delay1, 30000, 'parseRetryAfter() handles numeric seconds');
+
+    var delay1b = R.parseRetryAfter('0.5');
+    assertEqual(delay1b, 1000, 'parseRetryAfter() enforces minimum 1000ms');
+
+    // parseRetryAfter() handles HTTP date
+    var futureDate = new Date(Date.now() + 60000).toUTCString();
+    var delay2 = R.parseRetryAfter(futureDate);
+    assert(delay2 >= 55000 && delay2 <= 65000, 'parseRetryAfter() handles HTTP date (approx 60s in future)');
+
+    // parseRetryAfter() with null returns default
+    var delayNull = R.parseRetryAfter(null);
+    assertEqual(delayNull, R.DEFAULT_BASE_DELAY, 'parseRetryAfter() returns default for null');
+
+    // getHost() extracts host from URL
+    assertEqual(R.getHost('https://api.example.com/v1/users'), 'api.example.com', 'getHost() extracts host from URL');
+    assertEqual(R.getHost('http://localhost:3000/test'), 'localhost:3000', 'getHost() includes port');
+  })();
+
+  // =========================================================================
+  // 7. url-import.js (MokeUrlImport)
+  // =========================================================================
+
+  setModule('MokeUrlImport');
+
+  (function () {
+    var U = window.MokeUrlImport;
+
+    // detectDelimiter() finds comma
+    var commaLines = ['name,age,city', 'Alice,30,Sydney', 'Bob,25,Melbourne'];
+    assertEqual(U.detectDelimiter(commaLines), ',', 'detectDelimiter() finds comma');
+
+    // detectDelimiter() finds tab
+    var tabLines = ['name\tage\tcity', 'Alice\t30\tSydney', 'Bob\t25\tMelbourne'];
+    assertEqual(U.detectDelimiter(tabLines), '\t', 'detectDelimiter() finds tab');
+
+    // parseCSV() handles quoted fields
+    var csvText = 'name,description\nAlice,"Has a comma, in here"\nBob,"Normal"';
+    var parsed = U.parseCSV(csvText);
+    assertDeepEqual(parsed.headers, ['name', 'description'], 'parseCSV() extracts headers');
+    assertEqual(parsed.rows.length, 2, 'parseCSV() parses correct number of rows');
+    assertEqual(parsed.rows[0].description, 'Has a comma, in here', 'parseCSV() handles quoted fields with commas');
+
+    // parseCSV() handles escaped quotes
+    var csvText2 = 'val\n"She said ""hello"""\nplain';
+    var parsed2 = U.parseCSV(csvText2);
+    assertEqual(parsed2.rows[0].val, 'She said "hello"', 'parseCSV() handles escaped double quotes');
+
+    // transformGoogleSheetsUrl() converts URL
+    var sheetsUrl = 'https://docs.google.com/spreadsheets/d/ABCDEF123/edit#gid=0';
+    var csvUrl = U.transformGoogleSheetsUrl(sheetsUrl);
+    assert(csvUrl.indexOf('/export?format=csv') !== -1, 'transformGoogleSheetsUrl() adds export format');
+    assert(csvUrl.indexOf('gid=0') !== -1, 'transformGoogleSheetsUrl() preserves gid');
+    assert(csvUrl.indexOf('ABCDEF123') !== -1, 'transformGoogleSheetsUrl() preserves spreadsheet ID');
+
+    // Non-Sheets URL is returned as-is
+    var plainUrl = 'https://example.com/data.csv';
+    assertEqual(U.transformGoogleSheetsUrl(plainUrl), plainUrl, 'transformGoogleSheetsUrl() returns non-Sheets URL unchanged');
+
+    // normaliseUrl() handles Dropbox
+    var dbUrl = 'https://www.dropbox.com/s/abc123/data.csv?dl=0';
+    var normDb = U.normaliseUrl(dbUrl);
+    assert(normDb.indexOf('dl=1') !== -1, 'normaliseUrl() converts Dropbox dl=0 to dl=1');
+    assert(normDb.indexOf('dl=0') === -1, 'normaliseUrl() removes Dropbox dl=0');
+
+    // normaliseUrl() handles GitHub blob
+    var ghUrl = 'https://github.com/user/repo/blob/main/data.csv';
+    var normGh = U.normaliseUrl(ghUrl);
+    assert(normGh.indexOf('raw.githubusercontent.com') !== -1, 'normaliseUrl() converts GitHub blob to raw');
+  })();
+
+  // =========================================================================
+  // 8. connection-manager.js (MokeConnectionManager)
+  // =========================================================================
+
+  setModule('MokeConnectionManager');
+
+  (function () {
+    var CM = window.MokeConnectionManager;
+
+    // Clear existing connections
+    localStorage.removeItem(CM.STORAGE_KEY);
+
+    // save/getAll roundtrip
+    CM.save({ name: 'Test API', url: 'https://api.test/v1', method: 'GET', headers: {} });
+    CM.save({ name: 'Other API', url: 'https://other.test/v2', method: 'POST', headers: {} });
+    var all = CM.getAll();
+    assertEqual(all.length, 2, 'save/getAll roundtrip returns saved connections');
+    assertEqual(all[0].name, 'Test API', 'save/getAll preserves connection name');
+    assertEqual(all[0].url, 'https://api.test/v1', 'save/getAll preserves connection URL');
+
+    // delete removes connection
+    CM.delete('Other API');
+    var afterDel = CM.getAll();
+    assertEqual(afterDel.length, 1, 'delete removes connection');
+    assertEqual(afterDel[0].name, 'Test API', 'delete removes correct connection');
+
+    // getHealth() returns green/amber/red
+    var connGreen = { lastTested: Date.now(), lastStatus: 200 };
+    assertEqual(CM.getHealth(connGreen), 'green', 'getHealth() returns green for recent 200');
+
+    var connRed = { lastTested: Date.now(), lastStatus: 500 };
+    assertEqual(CM.getHealth(connRed), 'red', 'getHealth() returns red for 500');
+
+    var connRedNoTest = {};
+    assertEqual(CM.getHealth(connRedNoTest), 'red', 'getHealth() returns red for untested connection');
+
+    var connAmber = { lastTested: Date.now() - 7200000, lastStatus: 200 };
+    assertEqual(CM.getHealth(connAmber), 'amber', 'getHealth() returns amber for stale 200');
+
+    // exportConfig() strips secrets
+    CM.save({ name: 'Secret API', url: 'https://secret.test', method: 'GET', headers: { 'Authorization': 'Bearer s3cr3t', 'Accept': 'application/json' } });
+    var exported = JSON.parse(CM.exportConfig());
+    var secretConn = null;
+    for (var i = 0; i < exported.length; i++) {
+      if (exported[i].name === 'Secret API') { secretConn = exported[i]; break; }
+    }
+    assert(secretConn !== null, 'exportConfig() includes the connection');
+    assertEqual(secretConn.headers['Authorization'], '***REDACTED***', 'exportConfig() strips Authorization header');
+    assertEqual(secretConn.headers['Accept'], 'application/json', 'exportConfig() preserves non-secret headers');
+
+    // Clean up
+    localStorage.removeItem(CM.STORAGE_KEY);
+  })();
+
+  // =========================================================================
+  // 9. datagov-source.js (MokeDataGov)
+  // =========================================================================
+
+  setModule('MokeDataGov');
+
+  (function () {
+    var D = window.MokeDataGov;
+
+    // parseCSV() handles basic CSV
+    var csvText = 'name,value,category\nAlpha,10,A\nBeta,20,B\nGamma,30,C';
+    var parsed = D.parseCSV(csvText);
+    assertDeepEqual(parsed.headers, ['name', 'value', 'category'], 'parseCSV() extracts headers');
+    assertEqual(parsed.rows.length, 3, 'parseCSV() parses correct number of rows');
+    assertDeepEqual(parsed.rows[0], ['Alpha', '10', 'A'], 'parseCSV() parses first row correctly');
+    assertDeepEqual(parsed.rows[2], ['Gamma', '30', 'C'], 'parseCSV() parses last row correctly');
+
+    // SUGGESTED has 6 entries
+    assertEqual(D.SUGGESTED.length, 6, 'SUGGESTED has 6 entries');
+    assert(D.SUGGESTED[0].query && D.SUGGESTED[0].label, 'SUGGESTED entries have query and label');
+  })();
+
+  // =========================================================================
+  // Render results
+  // =========================================================================
+
+  var summaryEl = document.getElementById('summary');
+  var resultsEl = document.getElementById('results');
+  var total = TESTS.pass + TESTS.fail;
+  var allPassed = TESTS.fail === 0;
+
+  summaryEl.className = 'summary ' + (allPassed ? 'pass' : 'fail');
+  summaryEl.textContent = (allPassed ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED') +
+    ' \u2014 ' + TESTS.pass + ' passed, ' + TESTS.fail + ' failed, ' + total + ' total';
+
+  var html = '';
+  for (var i = 0; i < TESTS.results.length; i++) {
+    var r = TESTS.results[i];
+    if (r.type === 'module') {
+      html += '<div class="module-header">' + r.name + '</div>';
+    } else if (r.type === 'pass') {
+      html += '<div class="test-line pass">' + r.msg + '</div>';
+    } else if (r.type === 'fail') {
+      html += '<div class="test-line fail">' + r.msg + '</div>';
+      if (r.detail) {
+        html += '<div class="fail-detail">' + r.detail + '</div>';
+      }
+    }
+  }
+  resultsEl.innerHTML = html;
+
+  // Log to console for CI/script usage
+  console.log('==== MK9 JS Utility Tests ====');
+  console.log('Pass: ' + TESTS.pass + '  Fail: ' + TESTS.fail + '  Total: ' + total);
+  if (TESTS.fail > 0) {
+    for (var j = 0; j < TESTS.results.length; j++) {
+      if (TESTS.results[j].type === 'fail') {
+        console.error('FAIL: ' + TESTS.results[j].msg + (TESTS.results[j].detail ? ' (' + TESTS.results[j].detail + ')' : ''));
+      }
+    }
+  }
+
+})();
+</script>
+
+</body>
+</html>

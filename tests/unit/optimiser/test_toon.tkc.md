@@ -1,0 +1,1 @@
+Tests the TOON serialiser that converts verbose JSON into compact token-optimised notation. Verifies encoding of message objects, role/content pairs, and empty objects, as well as decoding back to original JSON format and roundtrip correctness. Target: 30-60% token reduction. Uses stubs mirroring `core.optimiser.toon`. Depends on `std.test` and `std.str`.

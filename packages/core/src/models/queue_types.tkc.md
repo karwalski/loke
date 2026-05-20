@@ -1,0 +1,1 @@
+Type definitions for the model inference queue. Defines jobpriority enum (user, agent, evaluation), jobstatus enum (pending, running, completed, failed, cancelled), queuejob struct with prompt, model, priority, timestamps, result, and estimated tokens, and jobqueue struct holding jobs with a max concurrency setting. No imports.

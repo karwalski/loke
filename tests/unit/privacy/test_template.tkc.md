@@ -1,0 +1,1 @@
+Tests the prompt template engine. Verifies single and multiple field substitution using `{{field}}` markers, correct handling of templates with no matching placeholders, and preservation of surrounding text. Validates the versioned template system defined in `core.privacy.template`. Depends on `std.test` and `std.str`.

@@ -1,1 +1,1 @@
-Shared type definitions for the memory palace subsystem including palace location, drawer, closet, wing, status, and search result structs. Also provides default wing definitions and a location key helper function.
+Shared type definitions for the memory palace subsystem including palace location, drawer, closet, wing, status, and search result structs. Also provides default wing definitions and a location key helper function. Depends on shared.types and std.str.

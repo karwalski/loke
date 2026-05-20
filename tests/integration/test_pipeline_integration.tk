@@ -1,0 +1,127 @@
+// Copyright 2026 loke contributors
+// SPDX-License-Identifier: Apache-2.0
+
+m=tests.integration.testpipelineintegration;
+i=t:std.test;
+i=str:std.str;
+i=json:std.json;
+i=pipe:core.privacy.pipeline;
+i=ph:core.privacy.placeholder;
+i=policy:core.governance.policy;
+i=types:shared.types;
+
+(* Test: privacy pipeline detects email PII *)
+f=testpipelinedetectsemail():bool{
+  let config=pipe.newconfig("http://127.0.0.1:5002";"http://127.0.0.1:11434");
+  let text="Please contact john@example.com for details";
+  let run=pipe.run(text;"";config);
+  let hasentities=run.totalentities>0;
+  t.assert(hasentities;"pipeline detects email entity")
+};
+
+(* Test: privacy pipeline anonymises text *)
+f=testpipelineanonymises():bool{
+  let config=pipe.newconfig("http://127.0.0.1:5002";"http://127.0.0.1:11434");
+  let text="Call me at john@example.com or 0412345678";
+  let run=pipe.run(text;"";config);
+  let anonymised=run.result.anonymised;
+  let norawpii=!str.contains(anonymised;"john@example.com");
+  t.assert(norawpii;"anonymised text does not contain raw email")
+};
+
+(* Test: placeholder restoration round-trips *)
+f=testplaceholderrestore():bool{
+  let map=ph.newmap();
+  ph.addentry(map;"john@example.com";"[EMAIL_ADDRESS_1]";"email");
+  let llmout="The user at [EMAIL_ADDRESS_1] was contacted.";
+  let restored=ph.restore(llmout;map);
+  let hasoriginal=str.contains(restored;"john@example.com");
+  t.assert(hasoriginal;"restored text contains original value")
+};
+
+(* Test: sensitivity label mapping *)
+f=testsensitivitylabels():bool{
+  let pass=mut.true;
+  let pubresult=pipe.maxsensitivity(@());
+  if(!(pubresult=$public)){pass=false}el{};
+  <pass
+};
+
+(* Test: policy evaluates low risk public as allow *)
+f=testpolicyallowpublic():bool{
+  let decision=policy.evaluate($low;$public;"";"browser-chat");
+  let isallow=mt decision {
+    $allow:v true;
+    $allowwithwarning:msg false;
+    $requireapproval:msg false;
+    $deny:msg false
+  };
+  t.assert(isallow;"low risk + public sensitivity = allow")
+};
+
+(* Test: policy flags confidential data *)
+f=testpolicywarnconfidential():bool{
+  let decision=policy.evaluate($low;$confidential;"";"browser-chat");
+  let iswarn=mt decision {
+    $allow:v false;
+    $allowwithwarning:msg true;
+    $requireapproval:msg false;
+    $deny:msg false
+  };
+  t.assert(iswarn;"low risk + confidential = allow with warning")
+};
+
+(* Test: risk classification escalates restricted data *)
+f=testriskclassification():bool{
+  let tier=policy.classifyrisk($restricted;$low;0.0);
+  let ishigh=mt tier {
+    $low:v false;
+    $medium:v false;
+    $high:v true;
+    $critical:v false
+  };
+  t.assert(ishigh;"restricted sensitivity escalates to high risk")
+};
+
+(* Test: pipeline run produces request ID *)
+f=testpipelinerequestid():bool{
+  let config=pipe.newconfig("http://127.0.0.1:5002";"http://127.0.0.1:11434");
+  let run=pipe.run("hello world";"";config);
+  let hasid=str.len(run.requestid)>0;
+  t.assert(hasid;"pipeline run produces non-empty request ID")
+};
+
+(* Test: pipeline guardian system prompt is injected *)
+f=testguardianinjection():bool{
+  let config=pipe.newconfig("http://127.0.0.1:5002";"http://127.0.0.1:11434");
+  let run=pipe.run("hello";"Be helpful.";config);
+  let sysprompt=run.finalsystemprompt;
+  let hasguardian=str.len(sysprompt)>str.len("Be helpful.");
+  t.assert(hasguardian;"guardian prompt is injected into system prompt")
+};
+
+(* Test: empty text produces no entities *)
+f=testpipelineemptytext():bool{
+  let config=pipe.newconfig("http://127.0.0.1:5002";"http://127.0.0.1:11434");
+  let run=pipe.run("";"";config);
+  let noentities=run.totalentities=0;
+  t.assert(noentities;"empty text produces zero entities")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(testplaceholderrestore()){pass=pass+1}el{fail=fail+1};
+  if(testpolicyallowpublic()){pass=pass+1}el{fail=fail+1};
+  if(testpolicywarnconfidential()){pass=pass+1}el{fail=fail+1};
+  if(testriskclassification()){pass=pass+1}el{fail=fail+1};
+  if(testpipelinerequestid()){pass=pass+1}el{fail=fail+1};
+  if(testguardianinjection()){pass=pass+1}el{fail=fail+1};
+  if(testpipelineemptytext()){pass=pass+1}el{fail=fail+1};
+  if(testpipelinedetectsemail()){pass=pass+1}el{fail=fail+1};
+  if(testpipelineanonymises()){pass=pass+1}el{fail=fail+1};
+  if(testsensitivitylabels()){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

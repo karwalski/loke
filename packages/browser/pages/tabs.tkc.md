@@ -1,1 +1,1 @@
-Page handler that renders the tabs management template for the browser workspace tab bar interface.
+Tabs management page. Exports a get handler that renders the tabs.tkt template for viewing and switching between open browser tabs. Depends on std.http and ooke.template.

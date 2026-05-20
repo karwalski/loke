@@ -1,0 +1,1 @@
+Privacy layer health monitoring. Checks the availability of each configured detection layer, produces a health report indicating total vs available layers and whether the system is degraded, and formats the status as a human-readable string. Exports checkhealth, issystemhealthy, and formathealthstatus. Depends on std.str.

@@ -1,0 +1,121 @@
+// Copyright 2026 loke contributors
+// SPDX-License-Identifier: Apache-2.0
+
+m=test.privacy.pipelinefull;
+
+i=t:std.test;
+i=str:std.str;
+
+(* --- stub pipeline types and functions for end-to-end test --- *)
+
+t=$piientity{
+  entitytype:str;
+  value:str;
+  start:i64;
+  end:i64;
+  confidence:f64;
+  placeholder:str
+};
+
+(* anonymise text by replacing entity values with placeholders *)
+f=anonymisetext(text:str;entities:@$piientity):str{
+  let result=mut.text;
+  lp(let i=0;i<entities.len;i=i+1){
+    let entity=entities.get(i);
+    result=str.replace(result;entity.value;entity.placeholder)
+  };
+  <result
+};
+
+(* restore text by replacing placeholders with original values *)
+f=restoretext(text:str;entities:@$piientity):str{
+  let result=mut.text;
+  lp(let i=0;i<entities.len;i=i+1){
+    let entity=entities.get(i);
+    result=str.replace(result;entity.placeholder;entity.value)
+  };
+  <result
+};
+
+(* sensitivity classification *)
+f=maxsensitivity(entities:@$piientity):str{
+  let level=mut."public";
+  lp(let i=0;i<entities.len;i=i+1){
+    let entity=entities.get(i);
+    if(str.eq(entity.entitytype;"credit_card")){level="restricted"}el{
+      if(str.eq(entity.entitytype;"email")){
+        if(str.eq(level;"restricted")){}el{level="confidential"}
+      }el{}
+    }
+  };
+  <level
+};
+
+(* simple dedup: skip entities with same value *)
+f=dedupentities(entities:@$piientity):@$piientity{
+  let kept=mut.@();
+  lp(let i=0;i<entities.len;i=i+1){
+    let candidate=entities.get(i);
+    let dup=mut.false;
+    lp(let j=0;j<kept.len;j=j+1){
+      let existing=kept.get(j);
+      if(str.eq(candidate.value;existing.value)){dup=true}el{}
+    };
+    if(dup){}el{kept=@(kept;candidate)}
+  };
+  <kept
+};
+
+(* --- tests --- *)
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* 1. anonymise replaces email *)
+  let emailentity=$piientity{entitytype:"email";value:"alice@example.com";start:8;end:25;confidence:0.95;placeholder:"[EMAIL_1]"};
+  let text="Contact alice@example.com for help";
+  let anon=anonymisetext(text;@(emailentity));
+  if(t.assert(str.contains(anon;"[EMAIL_1]");"email replaced with placeholder")){pass=pass+1}el{fail=fail+1};
+
+  (* 2. anonymised text does not contain original value *)
+  if(t.assert(!str.contains(anon;"alice@example.com");"original email removed from output")){pass=pass+1}el{fail=fail+1};
+
+  (* 3. restore recovers original text *)
+  let restored=restoretext(anon;@(emailentity));
+  if(t.asserteq(restored;text;"restored text matches original")){pass=pass+1}el{fail=fail+1};
+
+  (* 4. multiple entities anonymised *)
+  let phoneentity=$piientity{entitytype:"phone";value:"0412345678";start:35;end:45;confidence:0.90;placeholder:"[PHONE_1]"};
+  let multitext="Email alice@example.com or call 0412345678";
+  let multianon=anonymisetext(multitext;@(emailentity;phoneentity));
+  if(t.assert(str.contains(multianon;"[EMAIL_1]");"first entity replaced in multi")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(multianon;"[PHONE_1]");"second entity replaced in multi")){pass=pass+1}el{fail=fail+1};
+
+  (* 5. clean text passes through unchanged *)
+  let clean="The weather is nice today";
+  let cleanresult=anonymisetext(clean;@());
+  if(t.asserteq(cleanresult;clean;"clean text unchanged")){pass=pass+1}el{fail=fail+1};
+
+  (* 6. sensitivity: credit card is restricted *)
+  let ccent=$piientity{entitytype:"credit_card";value:"4111111111111111";start:0;end:16;confidence:0.99;placeholder:"[CC_1]"};
+  if(t.asserteq(maxsensitivity(@(ccent));"restricted";"credit card is restricted sensitivity")){pass=pass+1}el{fail=fail+1};
+
+  (* 7. sensitivity: email is confidential *)
+  if(t.asserteq(maxsensitivity(@(emailentity));"confidential";"email is confidential sensitivity")){pass=pass+1}el{fail=fail+1};
+
+  (* 8. sensitivity: no entities is public *)
+  if(t.asserteq(maxsensitivity(@());"public";"no entities is public sensitivity")){pass=pass+1}el{fail=fail+1};
+
+  (* 9. dedup removes duplicates *)
+  let dup1=$piientity{entitytype:"email";value:"a@b.com";start:0;end:7;confidence:0.9;placeholder:"[E1]"};
+  let dup2=$piientity{entitytype:"email";value:"a@b.com";start:10;end:17;confidence:0.85;placeholder:"[E2]"};
+  let deduped=dedupentities(@(dup1;dup2));
+  if(t.assert(deduped.len=1;"dedup removes duplicate values")){pass=pass+1}el{fail=fail+1};
+
+  (* 10. dedup keeps distinct entities *)
+  let distinct=dedupentities(@(emailentity;phoneentity));
+  if(t.assert(distinct.len=2;"dedup keeps distinct entities")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

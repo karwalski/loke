@@ -1,0 +1,1 @@
+Tests moke's cost comparison calculations. Verifies per-request cost comparison with cloud vs local pricing for input/output tokens, savings calculation (cloud minus local), session-level savings aggregation, and correct identification of local vs cloud routing for cost display. Depends on `std.test` and `std.str`.

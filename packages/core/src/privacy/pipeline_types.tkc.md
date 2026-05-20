@@ -1,0 +1,1 @@
+Privacy pipeline stage enum. Defines the pipelinestage variant type representing the ordered stages of the privacy pipeline: regex scan, NER scan, Presidio scan, deduplication, anonymisation, and guardian prompt injection. No imports.

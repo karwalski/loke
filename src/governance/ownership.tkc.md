@@ -1,0 +1,1 @@
+Use-case ownership registry for AI governance. Tracks business, technical, and risk owners per use-case, supports assigning and updating owners by role, and validates that all three ownership roles are filled. Exports owner, usecaseownership, and ownershipstore types, plus assign, get, list, hasallowners, and missingroles functions. Depends on std.str and std.log.

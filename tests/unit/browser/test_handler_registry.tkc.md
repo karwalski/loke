@@ -1,0 +1,1 @@
+Unit tests for the browser handler registry. Verifies registerall returns all expected API and page routes, correct route count, and that handler wrapper functions correctly delegate to underlying handlers.

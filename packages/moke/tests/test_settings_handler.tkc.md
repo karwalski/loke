@@ -1,0 +1,1 @@
+Tests the moke settings page handler structure. Verifies module declaration is `page.moke.settings`, template path is `templates/settings.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

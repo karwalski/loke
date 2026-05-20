@@ -1,0 +1,1 @@
+Multi-window manager for the browser shell. Tracks open windows via the wmstate and windowentry types, and exports functions to open, close, focus, list, and find windows by id. Depends on std.log and std.str.

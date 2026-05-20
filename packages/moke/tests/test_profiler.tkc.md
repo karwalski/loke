@@ -1,0 +1,1 @@
+Tests moke's column profiling system used for dataset type detection. Verifies column profile construction with name, type, null count, distinct count, and PII flag, numeric value detection heuristics, PII column identification by name patterns, and correct type inference for the 26-detector cascade. Depends on `std.test` and `std.str`.

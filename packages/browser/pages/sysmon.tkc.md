@@ -1,1 +1,1 @@
-System monitoring page that takes a snapshot of system metrics via the sysmon module, serialises them to JSON, and passes them to the sysmon template for display.
+System monitor page. Exports a get handler that captures a system monitoring snapshot via core.monitoring.sysmon, serialises it to JSON, and renders the sysmon.tkt template with the live stats. Depends on std.http, ooke.template, and core.monitoring.sysmon.

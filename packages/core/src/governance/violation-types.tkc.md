@@ -1,1 +1,1 @@
-Defines core governance type definitions: violation severity levels (info, advisory, warning, block), violation types (PII, policy breach, budget exceeded, etc.), the violation struct, and scan results. Provides severity label formatting and ranking utilities.
+Defines core governance type definitions: violation severity levels (info, advisory, warning, block), violation types (PII, policy breach, budget exceeded, etc.), the violation struct, and scan results. Provides severity label formatting and ranking utilities. Depends on std.str.

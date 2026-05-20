@@ -1,1 +1,1 @@
-API endpoint that lists available Ollama models with their sizes and running status. Queries the local Ollama instance and returns a JSON array of model metadata.
+Models listing API endpoint. Exports a get handler that proxies the Ollama /api/tags endpoint to retrieve available local models, returning the result as JSON or an empty models array on failure. Depends on std.http and std.str.

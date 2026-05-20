@@ -1,0 +1,1 @@
+Tests the moke streaming response handler. Verifies stream event construction with event type, data, and timestamp, stream state transitions (connecting, open, closed, error), session management for tracking active streams, and correct handling of SSE event parsing. Depends on `std.test` and `std.str`.

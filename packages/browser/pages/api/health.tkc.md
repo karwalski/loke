@@ -1,1 +1,1 @@
-Health check API endpoint that reports system version, Ollama service status (running/stopped/unreachable), and configured port number.
+Health-check API endpoint. Exports a get handler that probes the local Ollama instance at 127.0.0.1:11434 to determine its status (running or offline) and returns a JSON response with the loke version, Ollama status, and port. Depends on std.http and std.str.

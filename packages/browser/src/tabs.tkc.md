@@ -1,1 +1,1 @@
-Browser tab management backed by a SQLite store. Supports opening, closing, switching, listing, and retrieving the active tab, with each tab tracking its URL, title, and privacy score.
+Tab management data layer. Provides CRUD operations for browser tabs backed by a SQLite store, including open, close, switch (activate), list, and active-tab retrieval. Each tab tracks a title, URL, active state, privacy score, and creation timestamp. Exports type $tab and functions open, close, switch, list, and active. Depends on std.db.

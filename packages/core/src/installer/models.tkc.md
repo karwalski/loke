@@ -1,1 +1,1 @@
-Recommends a Qwen 2.5 model variant (1.5B to 32B) based on available system RAM and provides disk space sufficiency checks. Lists all supported model tiers with size, minimum RAM, and estimated throughput.
+Recommends a Qwen 2.5 model variant (1.5B to 32B) based on available system RAM and provides disk space sufficiency checks. Lists all supported model tiers with size, minimum RAM, and estimated throughput. Depends on std.str and shared.log.

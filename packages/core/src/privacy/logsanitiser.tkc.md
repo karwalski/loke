@@ -1,0 +1,1 @@
+Log sanitiser that auto-redacts PII from log output. Runs regex-based PII detection patterns against text and replaces matches with [REDACTED]. Also redacts values for known sensitive keys (api_key, token, password, secret, authorization, cookie). Depends on std.str and core.privacy.regex.

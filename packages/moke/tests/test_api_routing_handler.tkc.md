@@ -1,0 +1,1 @@
+Tests the moke API routing handler structure. Verifies module declaration is `page.moke.api.routing`, POST handler exists, and imports (std.http, std.json, moke.routingexplainer, moke.tiervisualiser, moke.costcomparison) are present. Depends on `std.test` and `std.str`.

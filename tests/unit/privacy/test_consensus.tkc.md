@@ -1,0 +1,1 @@
+Unit tests for consensus module: strategy name resolution, overlap resolution across all four strategies (most-restrictive, first-match, unanimous, majority), detection preservation and deduplication. Depends on std.test, std.str.

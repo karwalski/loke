@@ -1,0 +1,1 @@
+Integration test for the `/api/health` endpoint. Verifies healthy response construction with version, port, and Ollama connection status, degraded response when Ollama is disconnected, correct JSON shape (`ok`, `loke`, `ollama`, `port` fields), and HTTP status code validation. Uses stubbed types mirroring the health API response format. Depends on `std.test` and `std.str`.

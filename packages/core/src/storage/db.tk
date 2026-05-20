@@ -1,9 +1,15 @@
+// Copyright 2026 loke contributors
+// SPDX-License-Identifier: Apache-2.0
+
 m=core.storage.db;
 
 
 i=t:shared.types;
 i=db:std.db;
 i=str:std.str;
+i=crypto:std.crypto;
+i=kc:core.storage.keychain;
+i=log:shared.log;
 i=m:core.storage.migrations;
 
 t=$dbconn{handle:i64};
@@ -13,11 +19,47 @@ t=$store{
   datadir:str
 };
 
+(* GA2.2: retrieve or generate a 32-byte hex encryption key via OS keychain *)
+f=ensuredbkey():str!$lokeerr{
+  if(kc.haskey("db_encryption_key")){
+    let existing=kc.getdbkey();
+    if(str.len(existing)>0){
+      <$ok(existing)
+    }el{};
+  }el{};
+  let keybytes=crypto.randombytes(32);
+  let hexkey=crypto.tohex(keybytes);
+  let stored=kc.setdbkey(hexkey);
+  if(!stored){
+    <$err($storageerr("failed to store database encryption key in keychain"))
+  }el{};
+  log.info("db: generated new database encryption key";"db";"system");
+  <$ok(hexkey)
+};
+
+(* GA2.2: apply PRAGMA key to enable SQLCipher encryption after opening *)
+f=applyencryptionkey(conn:$dbconn;hexkey:str):i64!$lokeerr{
+  let pragmasql=str.concat("PRAGMA key='x''";str.concat(hexkey;"''"));
+  mt db.exec(conn;pragmasql) {
+    $ok:v $ok(v);
+    $err:e $err($storageerr("failed to apply database encryption key via PRAGMA key"))
+  }
+};
+
 f=openstore(datadir:str):$store!$lokeerr{
   let path=str.concat(datadir;"/loke.db");
   let conn=mt db.open(path) {
     $ok:conn conn;
     $err:e $err($storageerr(str.concat("failed to open database: ";path)))
+  };
+  (* GA2.2: enable SQLCipher encryption *)
+  let hexkey=mt ensuredbkey() {
+    $ok:k k;
+    $err:e $err(e)
+  };
+  mt applyencryptionkey(conn;hexkey) {
+    $ok:v 1;
+    $err:e $err(e)
   };
   mt runmigrations(conn) {
     $ok:v2 $ok($store{conn:conn;datadir:datadir});

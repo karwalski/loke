@@ -1,0 +1,1 @@
+Tests the MCP JSON-RPC protocol implementation. Verifies request encoding with id, method, and params fields, notification encoding (no id field), correct `jsonrpc: "2.0"` version string inclusion, and proper JSON structure for both request and notification message types. Uses stubs mirroring `core.mcp.protocol`. Depends on `std.test` and `std.str`.

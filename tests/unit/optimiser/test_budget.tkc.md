@@ -1,0 +1,1 @@
+Tests the token budget enforcement system. Verifies budget limit checking (within/over budget), remaining budget calculation with floor at zero, and over-budget detection. Covers daily, weekly, and monthly token limits with pre-flight cost estimation. Uses stubs mirroring `core.optimiser.budget`. Depends on `std.test` and `std.str`.

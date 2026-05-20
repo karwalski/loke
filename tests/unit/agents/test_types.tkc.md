@@ -1,0 +1,1 @@
+Tests agent type definitions and construction. Verifies agent JSON creation with name, description, and provider fields, default provider assignment (ollama), default max turns limit, enabled state, and correct JSON structure for serialisation. Uses stubs mirroring `core.agents.types`. Depends on `std.test` and `std.str`.

@@ -1,0 +1,1 @@
+Tests the use case ownership tracking system. Verifies ownership store creation, assignment of business, technical, and risk owners to use cases, ownership lookup by use case ID, update timestamps, and validation that all three owner roles can be independently assigned and retrieved. Uses stubbed types mirroring `core.governance.ownership`. Depends on `std.test` and `std.str`.

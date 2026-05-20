@@ -1,1 +1,1 @@
-Priority-based job queue for local model inference requests. Manages job lifecycle (pending, running, completed, failed, cancelled) with user/agent/evaluation priority levels and provides formatted table output for queue inspection.
+Priority-based job queue for local model inference requests. Manages job lifecycle (pending, running, completed, failed, cancelled) with user/agent/evaluation priority levels and provides formatted table output for queue inspection. Depends on shared.types, std.str, shared.log, and core.models.queuetypes.

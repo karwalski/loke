@@ -1,0 +1,1 @@
+Tests the namespaced typed key-value settings store. Verifies store creation, string value set/get with namespace, key overwrite behaviour, key removal, and correct handling of missing keys. Covers the settings persistence layer used for user preferences and configuration. Uses stubbed types mirroring `core.storage.settings`. Depends on `std.test` and `std.str`.

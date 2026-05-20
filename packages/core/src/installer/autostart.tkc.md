@@ -1,1 +1,1 @@
-Manages automatic start and crash recovery for the local Ollama server. Checks health status, spawns ollama serve if stopped, polls for readiness with configurable timeout, and handles crash restarts up to a configurable maximum.
+Manages automatic start and crash recovery for the local Ollama server. Checks health status, spawns ollama serve if stopped, polls for readiness with configurable timeout, and handles crash restarts up to a configurable maximum. Depends on core.models.ollama, std.process, std.str, shared.log, and std.time.

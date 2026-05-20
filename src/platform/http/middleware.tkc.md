@@ -1,0 +1,1 @@
+HTTP middleware chain for request processing. Defines middlewareentry and middlewarechain types, and exports functions to create a new chain, register middleware by slot (id, slot, handler key), and run before-auth and after-auth middleware stages. Depends on std.http and std.str.

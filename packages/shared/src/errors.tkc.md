@@ -1,1 +1,1 @@
-Error formatting and classification utilities for loke. Provides human-readable error message formatting and criticality classification for the lokeerr tagged union. Depends on shared.types and std.str.
+Error formatting and classification utilities for loke. Provides human-readable error message formatting via the format function and criticality classification via iscritical (privacy and storage errors are critical, others are not) for the $lokeerr tagged union. Exports format and iscritical functions. Depends on shared.types and std.str.

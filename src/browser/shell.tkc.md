@@ -1,0 +1,1 @@
+Browser shell window configuration and lifecycle management. Defines the windowconfig and shellstate types, and exports functions to create default window settings (1280x800, titled "loke"), initialise shell state pointing at the local server on port 11430, start/show/hide the shell, update the title, and send IPC events. Depends on std.str and std.log.

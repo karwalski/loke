@@ -1,1 +1,1 @@
-Renders accessible modal dialogs with overlay, title, body, footer, and close button. Includes JavaScript for keyboard trap (Tab/Escape), overlay click-to-close, and focus management via the lokeModal API.
+Modal dialog UI component. Renders an accessible overlay dialog with optional title, body, footer, and close button, including focus trapping and Escape-key dismissal via client-side JavaScript. Exports type $modalconfig and functions defaultconfig, render, script (exposing window.lokeModal.open/close), and styles. Depends on std.str.

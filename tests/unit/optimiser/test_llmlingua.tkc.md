@@ -1,0 +1,1 @@
+Unit tests for core.optimiser.llmlingua: compress request body construction, savings percentage and ratio calculations, shouldcompress threshold logic (including default 2000-char threshold), and URL building for health and compress endpoints.

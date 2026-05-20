@@ -1,0 +1,1 @@
+Tests the moke presentation page handler structure. Verifies module declaration is `page.presentation`, template path is `templates/presentation.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

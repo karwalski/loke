@@ -1,0 +1,1 @@
+Tests the moke dashboard page handler structure. Verifies module declaration is `page.moke.dashboard`, template path is `templates/dashboard.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

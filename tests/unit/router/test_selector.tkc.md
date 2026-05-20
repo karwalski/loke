@@ -1,0 +1,1 @@
+Unit tests for core.router.selector: model selection by sensitivity level, latency tolerance, cost estimation, local-first preference, and cloud fallback logic. Uses stub functions mirroring selector.tk behaviour.

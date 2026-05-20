@@ -1,0 +1,1 @@
+End-to-end unit tests for the full privacy pipeline: text anonymisation with placeholder replacement, text restoration, multi-entity handling, sensitivity classification, entity deduplication. Depends on std.test, std.str.

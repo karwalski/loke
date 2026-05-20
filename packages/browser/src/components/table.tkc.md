@@ -1,1 +1,1 @@
-Renders accessible data tables with sortable column headers, ARIA sort indicators, and a client-side JavaScript sort handler. Supports compact mode and provides open/close/row rendering for streaming table construction.
+Data table UI component. Renders a responsive, accessible HTML table with sortable columns, compact mode, and client-side sort-on-click behaviour. Exports types $sortdir, $column, $tableconfig, and functions defaultconfig, renderopen, renderclose, renderrow, script, and styles. Depends on std.str.

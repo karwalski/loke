@@ -1,0 +1,1 @@
+Built-in regulation definitions. Provides factory functions for six privacy regulations (GDPR, Australian Privacy Act 1988, HIPAA, CCPA, UK GDPR, PDPA) each with pre-configured rules specifying severity and action (log, warn, block). Also provides allregulations to return all six and defaultset to build a complete built-in policy set. Depends on core.policy.types and std.time.

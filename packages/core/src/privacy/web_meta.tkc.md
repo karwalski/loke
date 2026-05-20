@@ -1,1 +1,1 @@
-Web privacy analyser that inspects HTTP headers and HTML content for trackers, tracking cookies, weak referrer policies, and data-collection form fields. Produces a privacy grade (A-F) and a human-readable report summarising findings.
+Web privacy analyser that inspects HTTP headers and HTML content for trackers, tracking cookies, weak referrer policies, and data-collection form fields. Produces a privacy grade (A-F) and a human-readable report summarising findings. Depends on std.str.

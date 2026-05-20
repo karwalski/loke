@@ -1,0 +1,1 @@
+Per-layer privacy filter metrics. Tracks detection counts, total processing time, and average confidence for each privacy detection layer. Provides functions to create new metric records, record detections, and format metrics as human-readable strings. Exports newmetric, recorddetection, and formatmetric. Depends on std.str.

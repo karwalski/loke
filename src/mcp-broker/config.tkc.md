@@ -1,0 +1,1 @@
+MCP broker configuration types and policy enforcement. Defines serverconfig (name, transport, command, URL, environment, tool allow/deny lists, cost cap, approval requirement) and brokerconfig types. Exports newserver, defaultbrokerconfig, istoolallowed (evaluating allow/deny lists), and JSON serialisation for server configs. Depends on std.string and std.log.

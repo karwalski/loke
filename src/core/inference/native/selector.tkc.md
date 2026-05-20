@@ -1,0 +1,1 @@
+Inference path selector that chooses the best local backend based on model id and request tier. Routes interactive requests to Ollama, considered requests to MLX (if available) or Ollama, and background requests to native llama.cpp. Exports the inferencepath sum type, select, mlxcheck, and pathlabel functions. Depends on std.str and std.log.

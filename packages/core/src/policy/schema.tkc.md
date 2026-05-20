@@ -1,1 +1,1 @@
-Core policy type definitions for loke governance: classification levels, provider permissions, anonymisation rules, budget limits, retention policies, MCP server permissions, and the top-level policy struct. Also provides the built-in default policy factory function.
+Core policy type definitions for loke governance: classification levels, provider permissions, anonymisation rules, budget limits, retention policies, MCP server permissions, and the top-level policy struct. Also provides the built-in default policy factory function. No imports.

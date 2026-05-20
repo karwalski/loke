@@ -1,0 +1,1 @@
+Tests the moke API agents handler structure. Verifies module declaration is `page.moke.api.agents`, GET/postscan/postschema/getdiary handlers exist, and imports (std.http, std.json, moke.agents.qualityscanner, moke.agents.schemadetector, moke.agents.status) are present. Depends on `std.test` and `std.str`.

@@ -1,0 +1,1 @@
+CLI commands for the MCP broker. Provides cmdlist to display a formatted table of registered servers with transport, status, and tool counts; cmdtest to check connectivity and tool availability for a named server; and cmddisable to disable a server by name. Depends on std.string, std.log, loke.mcpbroker.registry, and loke.mcpbroker.broker.

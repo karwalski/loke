@@ -1,0 +1,1 @@
+Tests the model capability registry. Verifies model registration with name, provider, and tier, rejection of invalid inputs (empty name, empty provider, invalid tier), model lookup by name returning the correct provider, and tier classification (local, cloud, premium). Uses stubs mirroring `core.models.registry`. Depends on `std.test` and `std.str`.

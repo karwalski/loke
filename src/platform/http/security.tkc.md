@@ -1,0 +1,1 @@
+HTTP security headers and rate limiting configuration. Defines a securityconfig with Content-Security-Policy (restrictive default-src 'self'), HSTS toggle, and per-minute rate limit. Exports defaultconfig, securityheaders (CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy), and checkratelimit. Depends on std.str.

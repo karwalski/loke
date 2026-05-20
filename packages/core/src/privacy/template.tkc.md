@@ -1,1 +1,1 @@
-Prompt template engine with built-in templates for data analysis, code review, summarisation, classification, and agent tasks. Supports parameterised rendering with validation, default values for optional params, and missing-param detection.
+Prompt template engine with built-in templates for data analysis, code review, summarisation, classification, and agent tasks. Supports parameterised rendering with validation, default values for optional params, and missing-param detection. Depends on shared.types, std.str, std.json, and shared.log.

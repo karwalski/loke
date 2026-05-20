@@ -1,0 +1,1 @@
+API client error classification and retry logic. Determines whether an HTTP status code is retryable (429, 500, 502, 503, 504), extracts error code and message from JSON response bodies, and provides a default retry configuration (3 attempts, 500ms base delay). Exports apierror and retryconfig types, plus isretryable, classify, and defaultretry. Depends on std.str and std.json.

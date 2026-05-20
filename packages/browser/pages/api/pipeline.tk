@@ -1,44 +1,239 @@
+// Copyright 2026 loke contributors
+// SPDX-License-Identifier: Apache-2.0
+
 m=browser.pages.api.pipeline;
 i=http:std.http;
 i=str:std.str;
 i=json:std.json;
 i=file:std.file;
+i=log:shared.log;
+i=t:shared.types;
+i=pipe:core.privacy.pipeline;
+i=ph:core.privacy.placeholder;
+i=ks:core.governance.killswitch;
+i=audit:core.storage.audit;
+i=policy:core.governance.policy;
+i=keychain:core.storage.keychain;
+i=dbmod:core.storage.db;
 
 f=settingspath():str{ <"/Users/matthew.watt/.loke/settings.json" };
+f=datadir():str{ <"/Users/matthew.watt/.loke" };
+
+f=sensitivitylabel(level:$sensitivitylevel):str{
+  mt level {
+    $public:v "PUBLIC";
+    $internal:v "INTERNAL";
+    $confidential:v "CONFIDENTIAL";
+    $restricted:v "RESTRICTED"
+  }
+};
+
+f=parsetolerance(s:str):$latencytolerance{
+  if(str.eq(s;"patient")){
+    <$patient
+  }el{
+    if(str.eq(s;"background")){
+      <$background
+    }el{
+      <$instant
+    }
+  }
+};
+
+f=risktierstr(tier:$risktier):str{
+  mt tier {
+    $low:v "low";
+    $medium:v "medium";
+    $high:v "high";
+    $critical:v "critical"
+  }
+};
+
+f=isdeny(decision:$policydecision):bool{
+  mt decision {
+    $allow:v false;
+    $allowwithwarning:msg false;
+    $requireapproval:msg false;
+    $deny:msg true
+  }
+};
+
+f=getpolicymessage(decision:$policydecision):str{
+  mt decision {
+    $allow:v "";
+    $allowwithwarning:msg msg;
+    $requireapproval:msg msg;
+    $deny:msg msg
+  }
+};
+
+f=getapikeyfallback(provider:str):str{
+  (* GA1.5: Try keychain first, fall back to settings.json *)
+  let keychainval=keychain.getapikey(provider);
+  if(str.len(keychainval)>10){
+    <keychainval
+  }el{
+    let settings=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
+    let sparsed=json.dec(settings);
+    let keyfield=str.concat(provider;"_api_key");
+    let settingsval=json.str(sparsed;keyfield);
+    <settingsval
+  }
+};
+
+f=buildplaceholdermap(entities:@$piientity):$placeholdermap{
+  let map=ph.newmap();
+  let count=str.arraylen(entities);
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>count){
+      br
+    }el{
+      let entity=str.arrayget(entities;i);
+      ph.addentry(map;entity.value;entity.placeholder;entity.entitytype);
+      i=i+1
+    }
+  };
+  <map
+};
 
 f=post(req:i64):i64{
+  let cid=str.randhex(16);
+  let startms=str.nowunix();
   let rawbody=mt http.body(req) {$ok:v v; $err:e ""};
   let parsed=json.dec(rawbody);
   let text=json.str(parsed;"text");
   let sysprompt=json.str(parsed;"system_prompt");
 
-  let entities=mut.0;
-  let sensitivity=mut."PUBLIC";
-  if(str.contains(text;"patient_name")){entities=entities+1; sensitivity="CONFIDENTIAL"}el{};
-  if(str.contains(text;"medicare_number")){entities=entities+1; sensitivity="CONFIDENTIAL"}el{};
-  if(str.contains(text;"dob")){entities=entities+1}el{};
-  if(str.contains(text;"contact_name")){entities=entities+1}el{};
-  if(str.contains(text;"@")){entities=entities+1}el{};
-  if(entities>3){sensitivity="RESTRICTED"}el{};
-  let entstr=str.fromint(entities);
-  let piifields=str.concat(",\"entities_found\":";str.concat(entstr;str.concat(",\"sensitivity\":\"";str.concat(sensitivity;"\""))));
+  (* Validate input *)
+  if(str.len(text)<1){
+    <http.res(400;"{\"ok\":false,\"error\":\"text field is required\"}")
+  }el{};
 
-  let settings=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
-  let sparsed=json.dec(settings);
-  let anthropickey=json.str(sparsed;"anthropic_api_key");
+  (* GA1.3: Check kill switch before any LLM dispatch *)
+  let store=mt dbmod.openstore(datadir()) {$ok:v v; $err:e 0};
+  if(store>0){
+    let killengaged=ks.isengaged(store);
+    if(killengaged){
+      log.warn("pipeline blocked: kill switch engaged";"pipeline";cid);
+      <http.res(403;"{\"ok\":false,\"error\":\"Kill switch is engaged. All LLM traffic is blocked.\",\"kill_switch\":true}")
+    }el{}
+  }el{};
+
+  (* GA1.1: Run core privacy pipeline — regex + NER + Presidio *)
+  let pipeconfig=pipe.newconfig("http://127.0.0.1:5002";"http://127.0.0.1:11434");
+  let piperun=pipe.run(text;sysprompt;pipeconfig);
+  let anonymised=piperun.result.anonymised;
+  let entities=piperun.result.entities;
+  let sensitivity=piperun.result.sensitivity;
+  let entitycount=piperun.totalentities;
+  let requestid=piperun.requestid;
+  let finalsystemprompt=piperun.finalsystemprompt;
+
+  let senslabel=sensitivitylabel(sensitivity);
+  let entitycountstr=str.fromint(entitycount);
+
+  (* GA1.8: Evaluate governance policy *)
+  let risktier=policy.classifyrisk(sensitivity;$low;0.0);
+  let policydecision=policy.evaluate(risktier;sensitivity;"";"browser-chat");
+  let risklabel=risktierstr(risktier);
+
+  (* Block if policy denies *)
+  if(isdeny(policydecision)){
+    let denyreason=getpolicymessage(policydecision);
+    let denyresp=str.concat("{\"ok\":false,\"error\":\"Policy denied: ";str.concat(denyreason;str.concat("\",\"sensitivity\":\"";str.concat(senslabel;str.concat("\",\"risk_tier\":\"";str.concat(risklabel;"\"}"))))))
+    ;
+    log.warn(str.concat("pipeline denied by policy: ";denyreason);"pipeline";cid);
+    <http.res(403;denyresp)
+  }el{};
+
+  (* GA1.5: Get API key from keychain with settings.json fallback *)
+  let anthropickey=getapikeyfallback("anthropic");
   let hasanthropic=str.len(anthropickey)>20;
 
+  (* Determine model and provider *)
+  let modelid=mut."qwen2.5:3b";
+  let provider=mut."ollama";
   if(hasanthropic){
-    let abody=str.concat("{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":";str.concat(json.enc(sysprompt);str.concat(",\"messages\":[{\"role\":\"user\",\"content\":";str.concat(json.enc(text);"}]}"))));
+    modelid="claude-sonnet-4-20250514";
+    provider="anthropic"
+  }el{};
+
+  (* Route to LLM using anonymised text — GA1.7: provider routing *)
+  let llmresponse=mut."";
+  let rawllmjson=mut."";
+  let tokensin=mut.0;
+  let tokensout=mut.0;
+  let costusd=mut.0.0;
+
+  if(hasanthropic){
+    (* Anthropic: send anonymised text with guardian system prompt *)
+    let abody=str.concat("{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":";str.concat(json.enc(finalsystemprompt);str.concat(",\"messages\":[{\"role\":\"user\",\"content\":";str.concat(json.enc(anonymised);"}]}"))));
     let headers=str.concat("{\"x-api-key\":\"";str.concat(anthropickey;"\",\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}"));
     let aresp=http.postheaders("https://api.anthropic.com/v1/messages";abody;headers);
-    <http.res(200;str.concat("{\"ok\":true,\"anthropic_raw\":";str.concat(aresp;str.concat(",\"model\":\"claude-sonnet-4-20250514\",\"provider\":\"anthropic\"";str.concat(piifields;"}")))))
+    rawllmjson=aresp;
+    (* Extract token usage from Anthropic response *)
+    let aparsed=json.dec(aresp);
+    let usagein=json.i64(aparsed;"usage.input_tokens");
+    let usageout=json.i64(aparsed;"usage.output_tokens");
+    tokensin=usagein;
+    tokensout=usageout;
+    costusd=0.003*(usagein/1000)+0.015*(usageout/1000);
+    llmresponse=aresp
   }el{
-    let payload=str.concat("{\"model\":\"qwen2.5:3b\",\"prompt\":";str.concat(json.enc(text);",\"stream\":false}"));
+    (* Ollama: send anonymised text *)
+    let payload=str.concat("{\"model\":\"qwen2.5:3b\",\"prompt\":";str.concat(json.enc(anonymised);",\"stream\":false}"));
     let ollamaresp=http.posturl("http://127.0.0.1:11434/api/generate";payload);
     let ollamaparsed=json.dec(ollamaresp);
     let response=json.str(ollamaparsed;"response");
-    <http.res(200;str.concat("{\"ok\":true,\"response\":";str.concat(json.enc(response);str.concat(",\"model\":\"qwen2.5:3b\",\"provider\":\"ollama\"";str.concat(piifields;"}")))))
+    llmresponse=response;
+    rawllmjson=ollamaresp
+  };
+
+  (* GA1.2: Restore placeholders in LLM response *)
+  let placeholdermap=buildplaceholdermap(entities);
+  let restoredresponse=ph.restore(llmresponse;placeholdermap);
+
+  (* Pipeline timing *)
+  let endms=str.nowunix();
+  let pipelinems=endms-startms;
+  let pipelinemsstr=str.fromint(pipelinems);
+
+  (* GA1.4: Log to audit trail *)
+  if(store>0){
+    let auditevent=$auditevent{
+      eventtype:"llm_request";
+      usecase:"browser-chat";
+      modelid:modelid;
+      provider:provider;
+      sensitivity:senslabel;
+      risktier:risklabel;
+      tokensin:tokensin;
+      tokensout:tokensout;
+      costusd:costusd;
+      durationms:pipelinems;
+      correlationid:cid
+    };
+    mt audit.logevent(store;auditevent) {
+      $ok:v 0;
+      $err:e log.warn("audit log write failed";"pipeline";cid)
+    }
+  }el{};
+
+  (* Build policy warning field if applicable *)
+  let warningfield=mut."";
+  let warnmsg=getpolicymessage(policydecision);
+  if(str.len(warnmsg)>0){
+    warningfield=str.concat(",\"policy_warning\":";json.enc(warnmsg))
+  }el{};
+
+  (* Build response — compatible with moke (anthropic_raw, provider, model fields) *)
+  if(hasanthropic){
+    let resp=str.concat("{\"ok\":true,\"anthropic_raw\":";str.concat(restoredresponse;str.concat(",\"model\":\"";str.concat(modelid;str.concat("\",\"provider\":\"";str.concat(provider;str.concat("\",\"entities_found\":";str.concat(entitycountstr;str.concat(",\"sensitivity\":\"";str.concat(senslabel;str.concat("\",\"request_id\":\"";str.concat(requestid;str.concat("\",\"pipeline_ms\":";str.concat(pipelinemsstr;str.concat(",\"risk_tier\":\"";str.concat(risklabel;str.concat("\"";str.concat(warningfield;"}")))))))))))))))));
+    <http.res(200;resp)
+  }el{
+    let resp=str.concat("{\"ok\":true,\"response\":";str.concat(json.enc(restoredresponse);str.concat(",\"model\":\"";str.concat(modelid;str.concat("\",\"provider\":\"";str.concat(provider;str.concat("\",\"entities_found\":";str.concat(entitycountstr;str.concat(",\"sensitivity\":\"";str.concat(senslabel;str.concat("\",\"request_id\":\"";str.concat(requestid;str.concat("\",\"pipeline_ms\":";str.concat(pipelinemsstr;str.concat(",\"risk_tier\":\"";str.concat(risklabel;str.concat("\"";str.concat(warningfield;"}")))))))))))))))));
+    <http.res(200;resp)
   }
 };
 
