@@ -594,44 +594,291 @@
   }
 
   /* ── MK4.9.1 Enhanced data profiler ── */
+  // ── Advanced type detection engine ──────────────────────────────────
+  // Detection cascade: most specific first, fall back to generic.
+  // Each detector returns {type, confidence, subtype?, stats?} or null.
+  var TYPE_DETECTORS = [
+    // 1. PII by column name
+    function(h, vals, strs) {
+      var piiNames = {email:1,phone:1,mobile:1,name:1,firstname:1,lastname:1,fullname:1,ssn:1,sin:1,dob:1,dateofbirth:1,birthdate:1,address:1,streetaddress:1,postcode:1,zipcode:1,zip:1,medicare:1,medicarenumber:1,passport:1,passportno:1,license:1,driverlicense:1,taxfilenumber:1,tfn:1,abn:1,acn:1,bsb:1,accountnumber:1,creditcard:1,cardnumber:1,cvv:1,contact:1,contactname:1,contactemail:1,contactphone:1,ipaddress:1,ip:1,socialse:1};
+      var clean = h.toLowerCase().replace(/[^a-z]/g,'');
+      if (piiNames[clean]) {
+        var subtype = /email/i.test(h)?'email':/phone|mobile/i.test(h)?'phone':/name/i.test(h)?'person_name':/address|street|postcode|zip/i.test(h)?'address':/dob|birth/i.test(h)?'dob':/medicare|tfn|abn|ssn|passport|license/i.test(h)?'gov_id':/card|cvv|bsb|account/i.test(h)?'financial':/ip/i.test(h)?'ip_address':'pii';
+        return {type:'pii',subtype:subtype,confidence:0.95};
+      }
+      return null;
+    },
+    // 2. Email by content
+    function(h, vals, strs) {
+      var re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.6) return {type:'pii',subtype:'email',confidence:m/vals.length};
+      return null;
+    },
+    // 3. Phone by content
+    function(h, vals, strs) {
+      var re = /^[\+]?[\d\s\-\(\)]{7,18}$/;
+      var m = strs.filter(function(s){return re.test(s.trim())}).length;
+      if (m > vals.length*0.6) return {type:'pii',subtype:'phone',confidence:m/vals.length};
+      return null;
+    },
+    // 4. IP address
+    function(h, vals, strs) {
+      var re = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.5) return {type:'pii',subtype:'ip_address',confidence:m/vals.length};
+      return null;
+    },
+    // 5. URL
+    function(h, vals, strs) {
+      var re = /^https?:\/\/[^\s]+$/i;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.5) return {type:'url',confidence:m/vals.length};
+      return null;
+    },
+    // 6. UUID / GUID
+    function(h, vals, strs) {
+      var re = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.7) return {type:'uuid',confidence:m/vals.length};
+      return null;
+    },
+    // 7. JSON / structured
+    function(h, vals, strs) {
+      var m = strs.filter(function(s){return (s[0]==='{'||s[0]==='[') && (s[s.length-1]==='}'||s[s.length-1]===']')}).length;
+      if (m > vals.length*0.5) return {type:'json',confidence:m/vals.length};
+      return null;
+    },
+    // 8. Hex colour
+    function(h, vals, strs) {
+      var re = /^#[0-9a-fA-F]{3,8}$/;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.7) return {type:'colour',subtype:'hex',confidence:m/vals.length};
+      return null;
+    },
+    // 9. Currency ($, £, €, ¥)
+    function(h, vals, strs) {
+      var re = /^[\$£€¥][\s]?[\d,]+\.?\d*$|^[\d,]+\.?\d*[\s]?[\$£€¥]$/;
+      var m = strs.filter(function(s){return re.test(s.trim())}).length;
+      if (m > vals.length*0.5) {
+        var nums = strs.map(function(s){return parseFloat(s.replace(/[\$£€¥,\s]/g,''))}).filter(function(n){return !isNaN(n)});
+        return {type:'currency',confidence:m/vals.length,min:Math.min.apply(null,nums),max:Math.max.apply(null,nums),sum:nums.reduce(function(a,b){return a+b},0),mean:nums.reduce(function(a,b){return a+b},0)/nums.length};
+      }
+      return null;
+    },
+    // 10. Percentage
+    function(h, vals, strs) {
+      var re = /^-?[\d.]+\s?%$/;
+      var m = strs.filter(function(s){return re.test(s.trim())}).length;
+      if (m > vals.length*0.5) {
+        var nums = strs.map(function(s){return parseFloat(s)}).filter(function(n){return !isNaN(n)});
+        return {type:'percentage',confidence:m/vals.length,min:Math.min.apply(null,nums),max:Math.max.apply(null,nums),mean:nums.reduce(function(a,b){return a+b},0)/nums.length};
+      }
+      return null;
+    },
+    // 11. Boolean
+    function(h, vals, strs) {
+      var boolMap = {true:1,false:1,yes:1,no:1,'0':1,'1':1,y:1,n:1,t:1,f:1,on:1,off:1,active:1,inactive:1,enabled:1,disabled:1};
+      var lowers = strs.map(function(s){return s.toLowerCase()});
+      var m = lowers.filter(function(s){return boolMap[s]}).length;
+      var uniq = new Set(lowers).size;
+      if (m > vals.length*0.8 && uniq <= 4) {
+        var trueVals = lowers.filter(function(s){return s==='true'||s==='yes'||s==='1'||s==='y'||s==='t'||s==='on'||s==='active'||s==='enabled'}).length;
+        return {type:'boolean',confidence:m/vals.length,trueRatio:trueVals/vals.length};
+      }
+      return null;
+    },
+    // 12. ISO datetime (YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, YYYY/MM/DD)
+    function(h, vals, strs) {
+      var re = /^\d{4}[-\/]\d{2}[-\/]\d{2}/;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.6) {
+        var sorted = strs.filter(function(s){return re.test(s)}).sort();
+        var hasTime = strs.some(function(s){return /T\d{2}:\d{2}/.test(s)});
+        return {type:'datetime',subtype:hasTime?'datetime':'date',confidence:m/vals.length,dateMin:sorted[0],dateMax:sorted[sorted.length-1]};
+      }
+      return null;
+    },
+    // 13. AU/UK date (DD/MM/YYYY, DD-MM-YYYY)
+    function(h, vals, strs) {
+      var re = /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      if (m > vals.length*0.6) return {type:'datetime',subtype:'date_dmy',confidence:m/vals.length};
+      return null;
+    },
+    // 14. Unix timestamp (10 or 13 digit integer)
+    function(h, vals, strs) {
+      var re = /^\d{10,13}$/;
+      var m = strs.filter(function(s){return re.test(s)}).length;
+      var nums = strs.filter(function(s){return re.test(s)}).map(Number);
+      if (m > vals.length*0.6 && nums.length>0 && nums[0]>946684800) return {type:'datetime',subtype:'unix_timestamp',confidence:m/vals.length};
+      return null;
+    },
+    // 15. Time only (HH:MM, HH:MM:SS)
+    function(h, vals, strs) {
+      var re = /^\d{1,2}:\d{2}(:\d{2})?(\s?(AM|PM))?$/i;
+      var m = strs.filter(function(s){return re.test(s.trim())}).length;
+      if (m > vals.length*0.6) return {type:'time',confidence:m/vals.length};
+      return null;
+    },
+    // 16. Duration (Xh Ym, X min, X:YY:ZZ)
+    function(h, vals, strs) {
+      var re = /^\d+\s?(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|d|day|days)/i;
+      var re2 = /^\d+:\d{2}(:\d{2})?$/;
+      var m = strs.filter(function(s){return re.test(s.trim())||re2.test(s.trim())}).length;
+      if (m > vals.length*0.5) return {type:'duration',confidence:m/vals.length};
+      return null;
+    },
+    // 17. Geo coordinate
+    function(h, vals, strs) {
+      var nums = vals.map(Number).filter(function(n){return !isNaN(n)});
+      if (nums.length > vals.length*0.8) {
+        var allLat = nums.every(function(n){return n>=-90&&n<=90});
+        var allLon = nums.every(function(n){return n>=-180&&n<=180});
+        if ((allLat || allLon) && /lat|lng|lon|long|coord|geo/i.test(h)) {
+          return {type:'geo',subtype:allLat&&!allLon?'latitude':'longitude',confidence:0.85,min:Math.min.apply(null,nums),max:Math.max.apply(null,nums)};
+        }
+      }
+      return null;
+    },
+    // 18. ID / primary key (all unique, often first column, alphanumeric pattern)
+    function(h, vals, strs) {
+      var uniq = new Set(vals).size;
+      if (uniq === vals.length && vals.length > 2) {
+        var idPattern = /id$|_id$|^id_|key$|code$|number$|^ref|^sku|^urn/i;
+        if (idPattern.test(h) || /^[A-Z]{2,5}-\d+$/.test(String(vals[0]))) {
+          return {type:'id',subtype:'primary_key',confidence:0.9};
+        }
+        if (uniq === vals.length) return {type:'id',subtype:'unique',confidence:0.7};
+      }
+      return null;
+    },
+    // 19. Categorical code (short uppercase, <20 unique, e.g., status codes)
+    function(h, vals, strs) {
+      var uniq = new Set(vals).size;
+      var avgLen = strs.reduce(function(a,s){return a+s.length},0) / strs.length;
+      if (uniq <= 20 && avgLen <= 15 && strs.every(function(s){return s.length<=20})) {
+        var freq = {};
+        strs.forEach(function(s){freq[s]=(freq[s]||0)+1});
+        var top = Object.keys(freq).sort(function(a,b){return freq[b]-freq[a]}).slice(0,5);
+        return {type:'categorical',subtype:uniq<=5?'enum':'code',confidence:0.8,cardinality:uniq,top:top};
+      }
+      return null;
+    },
+    // 20. Integer
+    function(h, vals, strs) {
+      var re = /^-?\d+$/;
+      var m = strs.filter(function(s){return re.test(s.trim())}).length;
+      if (m > vals.length*0.7) {
+        var nums = strs.map(function(s){return parseInt(s,10)}).filter(function(n){return !isNaN(n)});
+        return {type:'integer',confidence:m/vals.length,min:Math.min.apply(null,nums),max:Math.max.apply(null,nums),mean:nums.reduce(function(a,b){return a+b},0)/nums.length};
+      }
+      return null;
+    },
+    // 21. Float / decimal
+    function(h, vals, strs) {
+      var nums = vals.map(Number).filter(function(n){return !isNaN(n)});
+      if (nums.length > vals.length*0.7) {
+        var hasDecimal = strs.some(function(s){return /\.\d/.test(s)});
+        return {type:hasDecimal?'float':'numeric',confidence:nums.length/vals.length,min:Math.min.apply(null,nums),max:Math.max.apply(null,nums),mean:nums.reduce(function(a,b){return a+b},0)/nums.length};
+      }
+      return null;
+    },
+    // 22. Ordinal / rating (1-5, 1-10, A-F grades)
+    function(h, vals, strs) {
+      var uniq = new Set(vals).size;
+      if (uniq >= 3 && uniq <= 10) {
+        var nums = vals.map(Number).filter(function(n){return !isNaN(n) && n>=0 && n<=100 && n===Math.floor(n)});
+        if (nums.length > vals.length*0.8) {
+          var isRating = Math.max.apply(null,nums) <= 10;
+          if (isRating || /rating|score|grade|rank|level|priority|severity/i.test(h)) {
+            return {type:'ordinal',subtype:isRating?'rating':'rank',confidence:0.75,min:Math.min.apply(null,nums),max:Math.max.apply(null,nums),values:Array.from(new Set(nums)).sort()};
+          }
+        }
+        var grades = strs.filter(function(s){return /^[A-F][+-]?$|^(Pass|Fail|Excellent|Good|Fair|Poor|High|Medium|Low)$/i.test(s.trim())});
+        if (grades.length > vals.length*0.6) return {type:'ordinal',subtype:'grade',confidence:grades.length/vals.length};
+      }
+      return null;
+    },
+    // 23. Postcode / ZIP
+    function(h, vals, strs) {
+      if (/post|zip/i.test(h)) {
+        var au = strs.filter(function(s){return /^\d{4}$/.test(s)}).length;
+        var us = strs.filter(function(s){return /^\d{5}(-\d{4})?$/.test(s)}).length;
+        var uk = strs.filter(function(s){return /^[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}$/i.test(s)}).length;
+        if (au>vals.length*0.5) return {type:'geo',subtype:'postcode_au',confidence:au/vals.length};
+        if (us>vals.length*0.5) return {type:'geo',subtype:'zipcode_us',confidence:us/vals.length};
+        if (uk>vals.length*0.5) return {type:'geo',subtype:'postcode_uk',confidence:uk/vals.length};
+      }
+      return null;
+    },
+    // 24. Country / state code
+    function(h, vals, strs) {
+      if (/country|state|province|region/i.test(h)) {
+        var uniq = new Set(strs.map(function(s){return s.toUpperCase()})).size;
+        if (uniq <= 50 && strs.every(function(s){return s.length<=30})) {
+          return {type:'geo',subtype:/state|province/i.test(h)?'state':'country',confidence:0.8,cardinality:uniq};
+        }
+      }
+      return null;
+    },
+    // 25. Categorical (generic fallback for low-cardinality text)
+    function(h, vals, strs) {
+      var uniq = new Set(vals).size;
+      if (uniq <= Math.max(50, vals.length*0.5)) {
+        var freq = {};
+        strs.forEach(function(s){freq[s]=(freq[s]||0)+1});
+        var top = Object.keys(freq).sort(function(a,b){return freq[b]-freq[a]}).slice(0,5);
+        return {type:'categorical',confidence:0.6,cardinality:uniq,top:top};
+      }
+      return null;
+    },
+    // 26. Free text (high cardinality, long values)
+    function(h, vals, strs) {
+      var avgLen = strs.reduce(function(a,s){return a+s.length},0) / Math.max(strs.length,1);
+      return {type:'text',subtype:avgLen>200?'long_text':avgLen>50?'short_text':'label',confidence:0.5,avgLength:Math.round(avgLen),maxLength:Math.max.apply(null,strs.map(function(s){return s.length}))};
+    }
+  ];
+
   function profileDataset(headers, rows) {
     if (!rows || rows.length === 0) return {};
+    var savedTypes = JSON.parse(sessionStorage.getItem('moke_col_types') || '{}');
     var profile = {};
     headers.forEach(function(h, ci) {
       var vals = rows.map(function(r) { return r[h] !== undefined ? r[h] : (Array.isArray(r) ? r[ci] : undefined); }).filter(function(v) { return v !== '' && v !== null && v !== undefined; });
-      var numVals = vals.map(Number).filter(function(n) { return !isNaN(n); });
-      var isNumeric = numVals.length > vals.length * 0.7;
-      // Date detection: check if values match common date patterns
-      var datePattern = /^\d{4}[-\/]\d{2}[-\/]\d{2}/;
-      var dateVals = vals.filter(function(v) { return datePattern.test(String(v)); });
-      var isDate = dateVals.length > vals.length * 0.7;
-      // Boolean detection
-      var boolVals = vals.filter(function(v) { var s = String(v).toLowerCase(); return s==='true'||s==='false'||s==='yes'||s==='no'||s==='0'||s==='1'; });
-      var isBool = boolVals.length > vals.length * 0.8 && new Set(vals.map(function(v){return String(v).toLowerCase()})).size <= 4;
-      // Check for user override
-      var savedTypes = JSON.parse(sessionStorage.getItem('moke_col_types') || '{}');
-      var p = { name: h, count: vals.length, unique: new Set(vals).size, nulls: rows.length - vals.length };
+      var strs = vals.map(function(v) { return String(v); });
+      var p = { name: h, count: vals.length, unique: new Set(vals).size, nulls: rows.length - vals.length, confidence: 0 };
+
       if (savedTypes[h]) {
         p.type = savedTypes[h];
-      } else if (isDate) {
-        p.type = 'datetime';
-        var sorted = dateVals.sort();
-        p.dateMin = sorted[0];
-        p.dateMax = sorted[sorted.length - 1];
-      } else if (isBool) {
-        p.type = 'boolean';
-      } else if (isNumeric && numVals.length > 0) {
-        p.type = 'numeric';
-        p.min = Math.min.apply(null, numVals);
-        p.max = Math.max.apply(null, numVals);
-        p.mean = numVals.reduce(function(a,b){return a+b},0) / numVals.length;
+        p.confidence = 1.0;
+        p.overridden = true;
       } else {
-        p.type = 'categorical';
-        var freq = {};
-        vals.forEach(function(v) { freq[v] = (freq[v]||0) + 1; });
-        p.top = Object.keys(freq).sort(function(a,b){return freq[b]-freq[a]}).slice(0,3);
+        // Run cascade — first match wins
+        for (var d = 0; d < TYPE_DETECTORS.length; d++) {
+          var result = TYPE_DETECTORS[d](h, vals, strs);
+          if (result) {
+            p.type = result.type;
+            p.subtype = result.subtype || null;
+            p.confidence = result.confidence || 0.5;
+            // Copy stats
+            if (result.min != null) p.min = result.min;
+            if (result.max != null) p.max = result.max;
+            if (result.mean != null) p.mean = result.mean;
+            if (result.sum != null) p.sum = result.sum;
+            if (result.top) p.top = result.top;
+            if (result.cardinality != null) p.cardinality = result.cardinality;
+            if (result.dateMin) p.dateMin = result.dateMin;
+            if (result.dateMax) p.dateMax = result.dateMax;
+            if (result.trueRatio != null) p.trueRatio = result.trueRatio;
+            if (result.avgLength != null) p.avgLength = result.avgLength;
+            if (result.maxLength != null) p.maxLength = result.maxLength;
+            if (result.values) p.values = result.values;
+            break;
+          }
+        }
       }
-      p.isPII = /name|email|phone|ssn|dob|address|medicare|contact/i.test(h);
+      p.isPII = p.type === 'pii';
       profile[h] = p;
     });
     return profile;
@@ -898,11 +1145,20 @@
         var p = columnProfile[col] || {};
         var dp = datasetProfile[col] || {};
         var chipCls, chipLabel;
-        if (p.pii || dp.isPII) { chipCls = 'type-pii'; chipLabel = 'PII'; }
-        else if (p.type === 'numeric') { chipCls = 'type-numeric'; chipLabel = 'numeric'; }
-        else if (p.type === 'datetime') { chipCls = 'type-date'; chipLabel = 'date'; }
-        else if (p.type === 'boolean') { chipCls = 'type-text'; chipLabel = 'bool'; }
-        else { chipCls = 'type-category'; chipLabel = 'category'; }
+        var dt = dp.type || p.type || 'categorical';
+        var typeMap = {
+          pii:'type-pii', email:'type-pii', phone:'type-pii',
+          numeric:'type-numeric', integer:'type-numeric', float:'type-numeric', currency:'type-numeric', percentage:'type-numeric', ordinal:'type-numeric',
+          datetime:'type-date', time:'type-date', duration:'type-date',
+          boolean:'type-text',
+          id:'type-numeric', uuid:'type-numeric',
+          geo:'type-date',
+          url:'type-category', json:'type-category', colour:'type-category',
+          categorical:'type-category', text:'type-category'
+        };
+        chipCls = typeMap[dt] || 'type-category';
+        chipLabel = dt + (dp.subtype ? ':' + dp.subtype : '');
+        if (dp.confidence && dp.confidence < 0.7 && !dp.overridden) chipLabel += ' ?';
         var piiIcon = (p.pii || dp.isPII) ? '<span class="col-pii-lock" title="Potential PII column">&#128274;</span>' : '';
         var detailId = 'col-detail-' + idx;
         _html += '<div class="col-row-wrap">';
@@ -911,20 +1167,27 @@
         _html += '<div class="col-profile-detail" id="' + detailId + '">';
         // Type override dropdown
         _html += '<div class="col-profile-stat"><span class="ps-label">Type</span><select class="col-type-select" onchange="overrideColType(\'' + escHtml(col) + '\',this.value)">';
-        ['numeric','categorical','datetime','boolean','text','pii','id','currency','percentage','email','phone','url'].forEach(function(t) {
+        ['integer','float','numeric','currency','percentage','ordinal','categorical','boolean','datetime','time','duration','text','pii','id','uuid','geo','url','json','colour','email','phone'].forEach(function(t) {
           _html += '<option value="' + t + '"' + ((dp.type||'categorical')===t?' selected':'') + '>' + t + '</option>';
         });
         _html += '</select></div>';
         _html += '<div class="col-profile-stat"><span class="ps-label">Count</span><span class="ps-val">' + (dp.count || 0) + '</span></div>';
         _html += '<div class="col-profile-stat"><span class="ps-label">Unique</span><span class="ps-val">' + (dp.unique || 0) + '</span></div>';
         _html += '<div class="col-profile-stat"><span class="ps-label">Nulls</span><span class="ps-val">' + (dp.nulls || 0) + '</span></div>';
-        if (dp.type === 'numeric') {
-          _html += '<div class="col-profile-stat"><span class="ps-label">Min</span><span class="ps-val">' + (dp.min != null ? dp.min.toLocaleString() : '—') + '</span></div>';
-          _html += '<div class="col-profile-stat"><span class="ps-label">Max</span><span class="ps-val">' + (dp.max != null ? dp.max.toLocaleString() : '—') + '</span></div>';
-          _html += '<div class="col-profile-stat"><span class="ps-label">Mean</span><span class="ps-val">' + (dp.mean != null ? dp.mean.toFixed(2) : '—') + '</span></div>';
-        } else if (dp.type === 'datetime') {
-          _html += '<div class="col-profile-stat"><span class="ps-label">Range</span><span class="ps-val">' + (dp.dateMin||'—') + ' → ' + (dp.dateMax||'—') + '</span></div>';
-        } else if (dp.top && dp.top.length > 0) {
+        if (dp.confidence) _html += '<div class="col-profile-stat"><span class="ps-label">Confidence</span><span class="ps-val" style="color:' + (dp.confidence>=0.8?'var(--green)':dp.confidence>=0.6?'var(--amber)':'var(--red)') + '">' + (dp.confidence*100).toFixed(0) + '%</span></div>';
+        if (dp.subtype) _html += '<div class="col-profile-stat"><span class="ps-label">Subtype</span><span class="ps-val">' + dp.subtype + '</span></div>';
+        if (dp.min != null && dp.max != null) {
+          _html += '<div class="col-profile-stat"><span class="ps-label">Min</span><span class="ps-val">' + (typeof dp.min==='number'?dp.min.toLocaleString():dp.min) + '</span></div>';
+          _html += '<div class="col-profile-stat"><span class="ps-label">Max</span><span class="ps-val">' + (typeof dp.max==='number'?dp.max.toLocaleString():dp.max) + '</span></div>';
+        }
+        if (dp.mean != null) _html += '<div class="col-profile-stat"><span class="ps-label">Mean</span><span class="ps-val">' + dp.mean.toFixed(2) + '</span></div>';
+        if (dp.sum != null) _html += '<div class="col-profile-stat"><span class="ps-label">Sum</span><span class="ps-val">' + dp.sum.toLocaleString() + '</span></div>';
+        if (dp.dateMin) _html += '<div class="col-profile-stat"><span class="ps-label">Range</span><span class="ps-val">' + dp.dateMin + ' → ' + (dp.dateMax||'—') + '</span></div>';
+        if (dp.trueRatio != null) _html += '<div class="col-profile-stat"><span class="ps-label">True ratio</span><span class="ps-val">' + (dp.trueRatio*100).toFixed(0) + '%</span></div>';
+        if (dp.avgLength != null) _html += '<div class="col-profile-stat"><span class="ps-label">Avg length</span><span class="ps-val">' + dp.avgLength + ' chars</span></div>';
+        if (dp.cardinality != null) _html += '<div class="col-profile-stat"><span class="ps-label">Cardinality</span><span class="ps-val">' + dp.cardinality + '</span></div>';
+        if (dp.values) _html += '<div class="col-profile-stat"><span class="ps-label">Values</span><span class="ps-val">' + dp.values.join(', ') + '</span></div>';
+        if (dp.top && dp.top.length > 0) {
           _html += '<div class="col-profile-stat"><span class="ps-label">Top vals</span></div>';
           _html += '<div class="col-top-vals">';
           dp.top.forEach(function(v) { _html += '<span class="col-top-val">' + escHtml(String(v).substring(0, 30)) + '</span>'; });
