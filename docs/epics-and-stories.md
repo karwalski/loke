@@ -767,6 +767,18 @@ loke is local-first and single-user by design. The companion device support (F8)
 | MK4.9.5 | M | **Done** | **Governance dashboard page** — Wire the governance.tkt page with real data from loke. Show: total requests today, PII entities detected, local vs cloud ratio, cost this session, top triggered privacy rules, model usage breakdown. Pull from `/api/savings` and session-local counters. Refresh on interval. |
 | MK4.9.6 | S | **Done** | **Settings page improvements** — Show masked API key status (configured/not set with last-4 chars). Test connection button for each provider. Show current routing preference. Session memory toggle. Export/import settings. |
 
+
+## Epic MK4.10: Advanced Data Type Detection
+
+*The data profiler should detect types beyond numeric/categorical. Detection follows a priority cascade — try the most specific type first, fall back to generic. Users can override any detection via the schema panel dropdown.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| MK4.10.1 | M | **Done** | **Date/datetime detection + boolean detection + user override** — Detect ISO dates (YYYY-MM-DD), booleans (true/false/yes/no/0/1). Type override dropdown in schema panel persists to sessionStorage. Date columns show range (min→max). |
+| MK4.10.2 | M | | **Advanced type cascade** — Detection order (most specific first): (1) PII by column name (email/phone/name/ssn/dob/address/medicare), (2) Email by regex, (3) Phone by regex, (4) URL by regex, (5) Currency (\.NN pattern), (6) Percentage (NN.N% pattern), (7) ID/key (unique values = row count, often first column), (8) Boolean, (9) Datetime (ISO, AU dd/mm/yyyy, US mm/dd/yyyy, timestamps), (10) Integer (no decimal), (11) Float (has decimal), (12) Categorical (low cardinality text), (13) Free text (high cardinality text, long values). Each type stores relevant stats (e.g., currency: min/max/sum, datetime: range, ID: uniqueness %). |
+| MK4.10.3 | S | | **Type-specific schema display** — Each type gets a distinct icon/colour in the schema panel. Date: calendar icon, range. Currency: dollar icon, sum/mean. Percentage: percent icon. Email/Phone: PII lock. ID: key icon. Boolean: toggle icon with true/false ratio. Free text: text icon with avg length. |
+| MK4.10.4 | S | | **Type detection confidence score** — Each detection reports a confidence (0-1). Show confidence in the schema detail panel. Low-confidence detections (<0.7) get an amber badge suggesting user review. |
+
 ## Epic MK5: Upload and Workspace
 
 *User-supplied data and multi-dataset project workspace.*

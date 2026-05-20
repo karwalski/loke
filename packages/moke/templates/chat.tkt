@@ -77,6 +77,11 @@
     background: rgba(59,130,246,.1); color: #60a5fa; font-size: 0.85em;
     padding: 1px 6px; border-radius: 3px;
   }
+  .col-type-select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; font-size: 0.82em; cursor: pointer;
+  }
+  .col-type-select:focus { border-color: var(--teal); outline: none; }
 
   /* Pipeline console */
   .console-card {
@@ -596,8 +601,26 @@
       var vals = rows.map(function(r) { return r[h] !== undefined ? r[h] : (Array.isArray(r) ? r[ci] : undefined); }).filter(function(v) { return v !== '' && v !== null && v !== undefined; });
       var numVals = vals.map(Number).filter(function(n) { return !isNaN(n); });
       var isNumeric = numVals.length > vals.length * 0.7;
+      // Date detection: check if values match common date patterns
+      var datePattern = /^\d{4}[-\/]\d{2}[-\/]\d{2}/;
+      var dateVals = vals.filter(function(v) { return datePattern.test(String(v)); });
+      var isDate = dateVals.length > vals.length * 0.7;
+      // Boolean detection
+      var boolVals = vals.filter(function(v) { var s = String(v).toLowerCase(); return s==='true'||s==='false'||s==='yes'||s==='no'||s==='0'||s==='1'; });
+      var isBool = boolVals.length > vals.length * 0.8 && new Set(vals.map(function(v){return String(v).toLowerCase()})).size <= 4;
+      // Check for user override
+      var savedTypes = JSON.parse(sessionStorage.getItem('moke_col_types') || '{}');
       var p = { name: h, count: vals.length, unique: new Set(vals).size, nulls: rows.length - vals.length };
-      if (isNumeric && numVals.length > 0) {
+      if (savedTypes[h]) {
+        p.type = savedTypes[h];
+      } else if (isDate) {
+        p.type = 'datetime';
+        var sorted = dateVals.sort();
+        p.dateMin = sorted[0];
+        p.dateMax = sorted[sorted.length - 1];
+      } else if (isBool) {
+        p.type = 'boolean';
+      } else if (isNumeric && numVals.length > 0) {
         p.type = 'numeric';
         p.min = Math.min.apply(null, numVals);
         p.max = Math.max.apply(null, numVals);
@@ -883,9 +906,15 @@
         var piiIcon = (p.pii || dp.isPII) ? '<span class="col-pii-lock" title="Potential PII column">&#128274;</span>' : '';
         var detailId = 'col-detail-' + idx;
         _html += '<div class="col-row-wrap">';
-        _html += '<div class="col-row-main" onclick="toggleColProfile(\'' + detailId + '\')">' + piiIcon + '<span class="col-name">' + col + '</span><span class="type-chip ' + chipCls + '">' + chipLabel + '</span></div>';
+        _html += '<div class="col-row-main" onclick="toggleColProfile(\'' + detailId + '\')">' + piiIcon + '<span class="col-name">' + col + '</span><span class="type-chip ' + chipCls + '" title="Click column to see details. Use dropdown to override type.">' + chipLabel + '</span></div>';
         // Expandable profile detail
         _html += '<div class="col-profile-detail" id="' + detailId + '">';
+        // Type override dropdown
+        _html += '<div class="col-profile-stat"><span class="ps-label">Type</span><select class="col-type-select" onchange="overrideColType(\'' + escHtml(col) + '\',this.value)">';
+        ['numeric','categorical','datetime','boolean','text','pii','id','currency','percentage','email','phone','url'].forEach(function(t) {
+          _html += '<option value="' + t + '"' + ((dp.type||'categorical')===t?' selected':'') + '>' + t + '</option>';
+        });
+        _html += '</select></div>';
         _html += '<div class="col-profile-stat"><span class="ps-label">Count</span><span class="ps-val">' + (dp.count || 0) + '</span></div>';
         _html += '<div class="col-profile-stat"><span class="ps-label">Unique</span><span class="ps-val">' + (dp.unique || 0) + '</span></div>';
         _html += '<div class="col-profile-stat"><span class="ps-label">Nulls</span><span class="ps-val">' + (dp.nulls || 0) + '</span></div>';
@@ -893,6 +922,8 @@
           _html += '<div class="col-profile-stat"><span class="ps-label">Min</span><span class="ps-val">' + (dp.min != null ? dp.min.toLocaleString() : '—') + '</span></div>';
           _html += '<div class="col-profile-stat"><span class="ps-label">Max</span><span class="ps-val">' + (dp.max != null ? dp.max.toLocaleString() : '—') + '</span></div>';
           _html += '<div class="col-profile-stat"><span class="ps-label">Mean</span><span class="ps-val">' + (dp.mean != null ? dp.mean.toFixed(2) : '—') + '</span></div>';
+        } else if (dp.type === 'datetime') {
+          _html += '<div class="col-profile-stat"><span class="ps-label">Range</span><span class="ps-val">' + (dp.dateMin||'—') + ' → ' + (dp.dateMax||'—') + '</span></div>';
         } else if (dp.top && dp.top.length > 0) {
           _html += '<div class="col-profile-stat"><span class="ps-label">Top vals</span></div>';
           _html += '<div class="col-top-vals">';
@@ -913,6 +944,28 @@
   window.toggleColProfile = function(detailId) {
     var el = document.getElementById(detailId);
     if (el) el.classList.toggle('open');
+  };
+
+  window.overrideColType = function(colName, newType) {
+    var saved = JSON.parse(sessionStorage.getItem('moke_col_types') || '{}');
+    saved[colName] = newType;
+    sessionStorage.setItem('moke_col_types', JSON.stringify(saved));
+    // Update the badge in the schema view
+    if (columnProfile[colName]) columnProfile[colName].type = newType;
+    if (datasetProfile[colName]) datasetProfile[colName].type = newType;
+    // Find and update the type chip visually
+    var wraps = document.querySelectorAll('.col-row-wrap');
+    wraps.forEach(function(w) {
+      var nameEl = w.querySelector('.col-name');
+      if (nameEl && nameEl.textContent === colName) {
+        var chip = w.querySelector('.type-chip');
+        if (chip) {
+          chip.textContent = newType;
+          chip.className = 'type-chip ' + ({numeric:'type-numeric',datetime:'type-date',boolean:'type-text',pii:'type-pii',id:'type-numeric',currency:'type-numeric',percentage:'type-numeric',email:'type-pii',phone:'type-pii',url:'type-category'}[newType] || 'type-category');
+        }
+      }
+    });
+    consoleLog('Profile', 'Column "' + colName + '" type overridden to: ' + newType, 'stage-profile');
   };
 
   /* ── MK4.6.1 Data preview table ── */
