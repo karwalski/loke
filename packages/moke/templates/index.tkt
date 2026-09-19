@@ -1,6 +1,3 @@
-<!-- Copyright 2026 loke contributors -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-
 {! layout("base") !}
 
 {! block("title") !}Datasets — moke{! end !}
@@ -34,6 +31,28 @@
   .dataset-grid-1 { display: grid; grid-template-columns: 1fr; gap: 14px; margin-bottom: 8px; }
 
   /* Dataset card */
+  /* MK19.6: real snapshots versus synthetic fixtures must be distinguishable.
+     The synthetic sets imitate government data and contain fabricated names, so
+     labelling them as government data is a misrepresentation. */
+  .badge-synthetic {
+    background: rgba(160, 160, 160, 0.12);
+    color: var(--text-dim, #999);
+    border: 1px solid rgba(160, 160, 160, 0.3);
+  }
+  .badge-real {
+    background: rgba(70, 170, 120, 0.14);
+    color: var(--green, #4a9);
+    border: 1px solid rgba(70, 170, 120, 0.35);
+  }
+  .ds-provenance {
+    font-size: 0.72rem;
+    color: var(--text-dim, #888);
+    margin-top: 6px;
+    line-height: 1.45;
+  }
+  .ds-provenance a { color: inherit; text-decoration: underline; }
+  .section-note { font-size: 0.85rem; color: var(--text-dim, #999); max-width: 62ch; }
+
   .ds-card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 10px; padding: 18px 20px;
@@ -374,12 +393,32 @@
 
 </div>
 
+<!-- ── Real, attributed open data (MK19) ──────────────────────────────
+     Rendered from static/data/manifest.json rather than hand-written, so a new
+     dataset arrives complete instead of needing edits in four files. Appended
+     after the synthetic cards above rather than replacing them: both stores
+     coexist during the migration (MK19.1). -->
+<div id="real-datasets-section" hidden>
+  <div class="section-heading">
+    <h2>Real open data</h2>
+    <p class="section-note">
+      Attributed snapshots of government open data, committed so the demo works
+      offline. These are <strong>not synthetic</strong> — which is the point of
+      separating them. On a genuine public aggregate the privacy filter finds
+      nothing, and that is the honest half of the contrast against the
+      fabricated fixtures above, where it finds everything.
+    </p>
+  </div>
+  <div class="ds-grid" id="real-datasets-grid"></div>
+</div>
+
 <!-- ── Upload ── -->
 <div class="upload-section">
   <p>Have your own data? Upload a CSV or JSON file for local analysis.</p>
   <a href="/upload">⬆️ Upload your own data</a>
 </div>
 
+<script src="/static/js/moke-data.js"></script>
 <script>
   var DATASETS = {
     'au.medicare': (function() {
@@ -2314,5 +2353,104 @@
       btn.parentNode.insertBefore(sel, btn);
     });
   })();
+  /* ── Manifest-driven dataset cards (MK19.1, MK19.6) ──────────────────
+   * Renders the real, attributed snapshots from static/data/manifest.json.
+   * Fails quietly by leaving its section hidden: a missing manifest should not
+   * break the page, but it must not silently look like there are no datasets
+   * either, so the failure is logged and the section stays out of the way.
+   */
+  function renderManifestDatasets() {
+    if (!window.MokeData) return;
+    MokeData.catalogue().then(function (datasets) {
+      var real = datasets.filter(function (d) { return d.kind === 'snapshot'; });
+      if (!real.length) return;
+      var grid = document.getElementById('real-datasets-grid');
+      var section = document.getElementById('real-datasets-section');
+      if (!grid || !section) return;
+
+      grid.innerHTML = real.map(function (d) {
+        var p = d.provenance || {};
+        var rows = (d.data && d.data.rowcount) || 0;
+        var cols = (d.data && d.data.colcount) || 0;
+        var sens = (d.sensitivity || 'PUBLIC').toLowerCase();
+        return '' +
+          '<div class="ds-card" data-dataset-id="' + esc(d.id) + '">' +
+            '<div class="ds-card-header">' +
+              '<span class="ds-icon">\u{1F4C4}</span>' +
+              '<span class="ds-name">' + esc(d.short_name || d.name) + '</span>' +
+            '</div>' +
+            '<p class="ds-desc">' + esc(d.description || '') + '</p>' +
+            '<div class="ds-meta">' +
+              '<span>' + rows.toLocaleString() + ' rows</span><span class="sep">\u00B7</span>' +
+              '<span>' + cols + ' cols</span><span class="sep">\u00B7</span>' +
+              '<span class="badge badge-' + esc(sens) + '">' + esc(d.sensitivity || 'PUBLIC') + '</span>' +
+              '<span class="sep">\u00B7</span>' +
+              '<span class="badge badge-real" title="Real government open data, not synthetic">real</span>' +
+            '</div>' +
+            '<p class="ds-provenance">' +
+              esc(p.attribution || '') +
+              (p.licence ? ' Licence: ' + esc(p.licence) + '.' : '') +
+              (p.transformations && p.transformations.length
+                ? ' This is a derived snapshot: ' + p.transformations.length +
+                  ' transformation(s) recorded in the manifest.'
+                : '') +
+            '</p>' +
+            '<div class="ds-footer">' +
+              '<button class="load-btn" data-load-manifest="' + esc(d.id) + '">Load dataset</button>' +
+            '</div>' +
+          '</div>';
+      }).join('');
+
+      grid.querySelectorAll('[data-load-manifest]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          loadManifestDataset(btn.getAttribute('data-load-manifest'), btn);
+        });
+      });
+      section.hidden = false;
+    }).catch(function (e) {
+      // Logged rather than surfaced: the synthetic datasets above still work, so
+      // a manifest failure degrades the page rather than breaking it.
+      console.warn('[moke] manifest unavailable, real datasets not shown:', e);
+    });
+  }
+
+  /* Store a handle rather than rows, so sessionStorage does not have to hold the
+   * whole dataset — the quota is about 5MB and setItem throws uncaught. */
+  function loadManifestDataset(id, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading\u2026'; }
+    MokeData.meta(id).then(function (m) {
+      var res = MokeActive.setFromManifest(m);
+      if (!res.ok) throw new Error(res.error);
+      // Fetch once now so a later consumer does not pay the latency, and so a
+      // missing snapshot is reported here rather than on another page.
+      return MokeData.rows(id).then(function (parsed) {
+        if (parsed.rowcountMismatch) {
+          console.warn('[moke] ' + id + ' row count differs from its manifest entry:',
+                       parsed.rowcountMismatch);
+        }
+        if (parsed.ragged && parsed.ragged.length) {
+          console.warn('[moke] ' + id + ' has ' + parsed.ragged.length +
+                       ' ragged record(s); they are reported, not padded');
+        }
+        window.location.href = '/chat';
+      });
+    }).catch(function (e) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Load dataset'; }
+      console.error('[moke] could not load ' + id + ':', e);
+      alert('Could not load that dataset: ' + e.message);
+    });
+  }
+
+  /* Escape for the innerHTML above. A dataset description comes from a manifest
+   * in this repository rather than from a user, but escaping is the correct
+   * default and costs nothing. */
+  function esc(v) {
+    return String(v == null ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  document.addEventListener('DOMContentLoaded', renderManifestDatasets);
+
 </script>
 {! end !}
