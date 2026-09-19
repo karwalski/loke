@@ -5,6 +5,23 @@ detected entities with types, confidence scores, and character spans.
 
 Entity types: private_person, private_email, private_phone, private_address,
 private_url, private_date, account_number, secret
+
+Operating point (story AD1.4)
+----------------------------
+A detector without a tunable threshold has no operating point, so no
+precision/recall curve can be reported for it. `confidence_threshold` in
+models.json is applied to every span on both /detect and /anonymise, and a
+per-request `threshold` overrides it so the operating point can be swept.
+Because a missed entity leaks and a spurious one only costs utility, the
+threshold is deliberately a floor on what is *reported*, and the number of spans
+suppressed by it is returned so a caller can see what was withheld.
+
+Model pinning (story VM1.2)
+---------------------------
+The model revision is read from models.json or LOKE_PF_REVISION. Left unset, the
+hub resolves whatever is current, which makes any measurement taken against this
+service unreproducible - so the service says so loudly at startup rather than
+staying quiet about it.
 """
 
 import json
@@ -29,14 +46,82 @@ def save_models_config(config):
         json.dump(config, f, indent=2)
         f.write("\n")
 
-print("Loading OpenAI Privacy Filter model...")
-t0 = time.time()
-classifier = pipeline(
-    task="token-classification",
-    model="openai/privacy-filter",
-    aggregation_strategy="simple"
+_CONFIG = load_models_config()
+
+
+def _primary_model():
+    """The enabled model with the lowest priority number, or a default."""
+    enabled = [m for m in _CONFIG.get("models", []) if m.get("enabled")]
+    enabled.sort(key=lambda m: m.get("priority", 99))
+    return enabled[0] if enabled else {}
+
+
+_PRIMARY = _primary_model()
+MODEL_PATH = _PRIMARY.get("model_path", "openai/privacy-filter")
+
+# Story VM1.2: pin the revision so a measurement can be reproduced.
+MODEL_REVISION = os.environ.get("LOKE_PF_REVISION") or _PRIMARY.get("model_revision") or None
+
+# Story AD1.4: the operating point. Applied on every path, overridable per
+# request so a precision/recall curve can actually be swept.
+DEFAULT_THRESHOLD = float(
+    os.environ.get("LOKE_PF_THRESHOLD", _PRIMARY.get("confidence_threshold", 0.0))
 )
+
+print(f"Loading {MODEL_PATH} (revision: {MODEL_REVISION or 'UNPINNED'})...")
+t0 = time.time()
+_pipeline_kwargs = {
+    "task": "token-classification",
+    "model": MODEL_PATH,
+    "aggregation_strategy": "simple",
+}
+if MODEL_REVISION:
+    _pipeline_kwargs["revision"] = MODEL_REVISION
+classifier = pipeline(**_pipeline_kwargs)
 print(f"Model loaded in {time.time()-t0:.1f}s")
+print(f"Confidence threshold: {DEFAULT_THRESHOLD}")
+if not MODEL_REVISION:
+    print(
+        "WARNING: model revision is not pinned. The hub resolves whatever is "
+        "current, so results from this service are NOT reproducible. Set "
+        "model_revision in models.json or LOKE_PF_REVISION before recording any "
+        "measurement (story VM1.2).",
+        file=sys.stderr,
+    )
+if DEFAULT_THRESHOLD > 0.0:
+    print(
+        f"WARNING: confidence threshold is {DEFAULT_THRESHOLD}, so spans scoring "
+        "below it are NOT reported. For a privacy filter that increases leakage: "
+        "a missed entity leaks, whereas a spurious one only costs utility. This "
+        "value should be justified against a measured recall floor (story AD1.2) "
+        "rather than assumed. The safe default is 0.",
+        file=sys.stderr,
+    )
+
+
+def _request_threshold(body):
+    """Per-request operating point, falling back to the configured default."""
+    raw = body.get("threshold")
+    if raw is None:
+        return DEFAULT_THRESHOLD
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_THRESHOLD
+    return min(max(val, 0.0), 1.0)
+
+
+def _apply_threshold(results, threshold):
+    """Split spans into those reported and those suppressed by the threshold.
+
+    Returns (kept, suppressed_count). The count is reported so a caller can see
+    that something was withheld rather than inferring silence means nothing was
+    found - a false negative is the dangerous error here.
+    """
+    if threshold <= 0.0:
+        return list(results), 0
+    kept = [r for r in results if float(r.get("score", 0.0)) >= threshold]
+    return kept, len(results) - len(kept)
 
 PLACEHOLDER_MAP = {
     "private_person": "NAME",
@@ -56,10 +141,13 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             text = body.get("text", "")
             
+            threshold = _request_threshold(body)
+
             t0 = time.time()
-            results = classifier(text)
+            raw_results = classifier(text)
             elapsed = int((time.time() - t0) * 1000)
-            
+            results, suppressed = _apply_threshold(raw_results, threshold)
+
             entities = []
             counters = {}
             for r in results:
@@ -88,8 +176,11 @@ class Handler(BaseHTTPRequestHandler):
                 "count": len(entities),
                 "sensitivity": sensitivity,
                 "elapsed_ms": elapsed,
-                "model": "openai/privacy-filter",
+                "model": MODEL_PATH,
+                "model_revision": MODEL_REVISION,
                 "layer": "openai-privacy-filter",
+                "threshold": threshold,
+                "suppressed_below_threshold": suppressed,
             }
             
             self.send_response(200)
@@ -102,8 +193,9 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             text = body.get("text", "")
             
-            results = classifier(text)
-            
+            threshold = _request_threshold(body)
+            results, suppressed = _apply_threshold(classifier(text), threshold)
+
             # Sort by start position descending to replace from end
             results.sort(key=lambda r: r["start"], reverse=True)
             anonymised = text
@@ -126,6 +218,10 @@ class Handler(BaseHTTPRequestHandler):
                 "anonymised": anonymised,
                 "mappings": mappings,
                 "count": len(mappings),
+                "threshold": threshold,
+                "suppressed_below_threshold": suppressed,
+                "model": MODEL_PATH,
+                "model_revision": MODEL_REVISION,
             }).encode())
         
         elif self.path == "/models/add":
