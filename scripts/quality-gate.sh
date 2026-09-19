@@ -109,6 +109,13 @@ step_checks() {
     python3 ./scripts/check_claims.py --check || failed=1
   fi
 
+  if [[ -f tests/fixtures/pii-corpus/generate.py ]]; then
+    echo "  PII corpus spans verify"
+    python3 tests/fixtures/pii-corpus/generate.py --verify >/dev/null \
+      || { echo "  corpus span verification failed — every recall figure computed" \
+                "from it would be wrong" >&2; failed=1; }
+  fi
+
   # Only tracked files matter: the question is whether a fresh clone builds,
   # not what happens to be sitting in the working directory.
   # Known defects are listed explicitly in scripts/known-defects.txt, each with

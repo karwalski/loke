@@ -15,10 +15,59 @@ it is marketing.
 
 ---
 
-## Status: no performance figures are currently published
+## Measured
 
-loke has no benchmark harness yet, so there is nothing in the measured column. That is the honest
-position, and it is stated rather than filled with estimates.
+### PII detection, regex layer only — 2026-09-19
+
+The first measurement this project has recorded. **It is not loke's detection accuracy**, and the
+caveat travels with the number wherever it is quoted.
+
+| Metric | Value | N |
+|---|---|---|
+| Recall, regex-addressable types only | **0.932** | 88 entities |
+| Recall, all claimed types | **0.774** | 106 entities |
+| Recall, exact span match | 0.698 | 106 entities |
+| Precision | 0.626 | 49 false positives |
+
+**Workload:** `tests/fixtures/pii-corpus`, 74 synthetic cases (40 positive, 20 negative, 14
+adversarial), spans verified by construction, seed 20260919.
+**Arm:** `regex-layer-python-re`.
+**Caveat, mandatory:** the ten pattern strings are read directly from
+`packages/core/src/privacy/patterns.tk`, so this is not a reimplementation — but it is evaluated with
+Python's regex engine rather than toke's, and the regex layer is one of several. Both limits push in
+unknown directions. A real figure needs the compiled detector and is blocked on the toolchain
+migration.
+
+Both recall figures are given because neither alone is honest: scoring the regex layer against
+`PERSON` understates the layer, and omitting `PERSON` overstates loke, since the layers that would
+cover the remainder are not running.
+
+**What it found, which is the point of measuring:**
+
+- Every `EMAIL` miss (6 of 28) is a mixed-case address. The pattern is `[a-z0-9._%+-]+@…` with no
+  case-insensitive flag, so `John.Smith@Corp.COM` is not matched. That is a leak, not a rounding error.
+- 36 of the 49 false positives come from `au_tfn` (20) and `ssn_us` (16). Both are bare nine-digit
+  patterns with no checksum validation, so they match invoice numbers, sequence identifiers and
+  measurement codes, and they collide with each other.
+- 10 of the 18 entities of types with no detector were matched incidentally by another pattern, which
+  means **Medicare numbers are currently reported as tax file numbers**.
+- Medicare, BSB, ACN and bank account numbers have **no detector at all**, despite Medicare being the
+  primary identifier in the flagship demo datasets and central to two of the shipped regulatory presets.
+
+Reproduce:
+
+```sh
+python3 tests/fixtures/pii-corpus/generate.py
+python3 tests/fixtures/pii-corpus/score_patterns.py
+```
+
+---
+
+## Status: no *performance* figure is published
+
+The detection measurement above is the only entry. **No performance figure — latency, throughput,
+token reduction, compression ratio or cache hit rate — has been measured at all**, so none is
+published. That is the honest position, stated rather than filled with estimates.
 
 The apparatus needed to change this is specified and tracked:
 
@@ -30,7 +79,7 @@ The apparatus needed to change this is specified and tracked:
 | CI uploads pass/fail counts only, never numbers | VM1.5 |
 | The token-optimisation methodology is written but not implemented | VM1.7 |
 | No disclosure accounting on any request | DA1 |
-| No labelled PII corpus and no ground truth | AD1.1 |
+| ~~No labelled PII corpus and no ground truth~~ — **done**, see the measurement above | AD1.1 |
 
 The methodology for the token-optimisation work already exists at publishable standard in
 [research/toon-benchmark-methodology.md](research/toon-benchmark-methodology.md) — named baselines

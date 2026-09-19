@@ -130,8 +130,8 @@ Landing page with categorised dataset cards. One-click loading into the analysis
 | IT Server Hardware | 200 | 34 | CONFIDENTIAL | 12 overloaded (>90% CPU), 8 expired warranties, 5 unpatched, 3 untested DR servers across SYD-1/SYD-2/MEL-1/BNE-1 |
 | IT Performance Metrics | 10,000 | 12 | INTERNAL | Daily CPU spikes 09:00-10:00, memory leak on 3 servers, disk latency degradation, correlated network/error spikes. Generated via seeded PRNG. |
 | IT Incidents & Alerts | 500 | 14 | CONFIDENTIAL | Recurring P1 on 2 servers (same root cause), P2 cluster during maintenance windows, >15% SLA breach rate for network category |
-| IT Change Management | 300 | 11 | INTERNAL | Emergency changes correlate with P1 incidents, Friday deployments have 3x rollback rate |
-| IT Application Performance | 2,000 | 13 | INTERNAL | Version 2.3.1 latency regression, one endpoint with 5x error rate, apdex drops during peak hours |
+| IT Change Management | 300 | 11 | INTERNAL | Emergency changes correlate with P1 incidents, Friday deployments carry a deliberately elevated (synthetic, not measured) failure rate of roughly 3x rollback rate |
+| IT Application Performance | 2,000 | 13 | INTERNAL | Version 2.3.1 latency regression, one endpoint with a deliberately elevated (synthetic, not measured) error rate of roughly 5x, apdex drops during peak hours |
 | IT Asset & Cost | 48 | 14 | CONFIDENTIAL | 20% of servers consume 60% of costs, 5 servers past depreciation still running |
 
 **Customer Intelligence (1 dataset):**
