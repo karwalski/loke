@@ -177,10 +177,17 @@ User input (may contain PII)
 | Stage | Data Present | Sensitivity | Storage |
 |-------|-------------|-------------|---------|
 | User input | Raw PII, proprietary data | Maximum | In-memory only |
-| After anonymisation | Placeholders, no PII | Reduced | In-memory only |
-| Mapping table | PII ↔ placeholder mappings | Maximum | Encrypted on disk |
-| After compression | Anonymised, compressed prompt | Low | In-memory, then transmitted |
-| Audit log | Metadata, anonymised prompts, routing decisions | Medium | Encrypted on disk |
+| After anonymisation | Placeholders in place of **detected** entities; undetected PII remains | Reduced, not eliminated | In-memory only |
+| Mapping table | PII ↔ placeholder mappings | Maximum | **Plaintext on disk** — encryption inert (X8) |
+| After compression | Redacted, compressed prompt | Reduced | In-memory, then transmitted |
+| Audit log | Specified: usage and cost metadata only — no prompt content, no placeholder values, no policy decision. Actual: no row is written yet (GA5, DA1) | Low | **Plaintext on disk** — encryption inert (X8) |
+
+> Two corrections to earlier versions of this table. "After anonymisation: no PII" was an absolute this
+> document contradicts itself in §10.6 — the honest statement there is the one that governs: no combination
+> of layers guarantees complete detection. And the mapping table and audit log are **not** encrypted at
+> rest: the toolchain links plain SQLite, which silently ignores the encryption pragma (X8). The audit log
+> has also never contained prompts; what it does and does not evidence is set out in
+> [architecture.md](architecture.md) §7.
 
 ### 3.2 Inbound Response Flow
 
@@ -569,19 +576,38 @@ The following table consolidates the highest-priority threats with their risk ra
 
 **Threat:** Crafted input evades all four PII detection layers.
 
-**Mitigations:**
-1. **Defence in depth:** Four independent detection layers (regex, NLP, SLM NER, Presidio) with different detection methodologies. An input must evade all four to pass undetected.
-2. **Fail closed:** If any layer encounters an error or timeout, the entire request is blocked. No fallback to "send anyway."
+**Mitigations:** items 1 and 2 describe the intended design; see the status note beneath this list for what
+is in force today.
+
+1. **Defence in depth:** Up to four detection layers (regex, NER, SLM NER, Presidio) with different
+   methodologies. Under `most-restrictive` consensus an input must evade every *enabled* layer to pass
+   undetected — and only two are enabled by default, since Presidio and the privacy-filter sidecar are
+   optional and not bundled. Evading all enabled layers is possible; §10.6 is the governing statement.
+2. **Fail closed:** the intent is that when no detection layer is healthy the request is blocked, with no
+   fallback to "send anyway."
 3. **Continuous test corpus:** Maintain a growing corpus of adversarial PII patterns, including obfuscated PII (e.g., SSNs with spaces, emails with Unicode confusables, names in non-Latin scripts). Run this corpus against every build.
 4. **User review (beta):** During the beta period, outbound prompts are displayed for user review before transmission. The user is the final layer.
 5. **Configurable strictness:** Enterprise deployments can require all four layers to agree before allowing transmission, rather than any single layer being sufficient to flag PII.
 6. **Regular model updates:** Keep the SLM NER model and Presidio recognisers updated as new PII patterns emerge.
 
+> **Status of items 1 and 2.** Item 2 is not implemented. `packages/browser/pages/api/pipeline.tk` falls back
+> to five `str.contains` checks when the detection sidecar is unavailable; those checks only *count*
+> occurrences, the outbound text is left unmodified, and the request is transmitted. That is failing **open**
+> — tracked as **NC1.9**. Item 1's depth is also weaker than it reads: two layers by default, and both NER
+> layers currently emit a constant token per entity type, so multiple same-type entities in one prompt
+> collapse to one placeholder and restoration can substitute the wrong value (**PL1.1**). There is no recall
+> measurement against a labelled corpus yet (**AD1.1**), so the residual is unquantified rather than small.
+
 ### 9.2 Mapping Table Exposure (I-2) — High
 
-**Threat:** Encrypted mapping table is exfiltrated along with its encryption key.
+**Threat:** The mapping table is exfiltrated — in the intended design, along with its encryption key; today,
+without needing one, since the file is plaintext (X8).
 
-**Mitigations:**
+**Mitigations:** this list is the specified design. **The first item is not in force:** the 32-byte key is
+generated and held in the OS keychain correctly, but the toolchain links plain SQLite, which silently ignores
+the encryption pragma and returns success, so the mapping table is **plaintext on disk** today (X8). Rely on
+full-disk encryption and file permissions until that is fixed.
+
 1. **AES-256-GCM encryption at rest** with a key derived from the user's OS keychain credential, not stored on disk.
 2. **Key derivation:** Use PBKDF2 or Argon2 with a high iteration count. The raw key never exists on disk.
 3. **Memory protection:** Zero mapping table plaintext from memory after each lookup. Use secure buffer allocation where the platform supports it.
@@ -744,7 +770,16 @@ The length and structure of anonymised prompts may reveal information about the 
 
 ### 10.5 Cloud LLM Provider Behaviour
 
-Once an anonymised prompt reaches a cloud LLM provider, loke has no control over how the provider stores, processes, or uses that data. loke mitigates this by sending only anonymised, compressed data, but the provider could still retain and analyse it. Users must accept their provider's terms of service. loke's audit trail provides evidence of exactly what was sent.
+Once a redacted prompt reaches a cloud LLM provider, loke has no control over how the provider stores,
+processes, or uses that data. loke reduces the exposure by sending redacted, compressed text on the fallback
+path — and no entity values at all on the primary path — but the provider could still retain and analyse what
+it receives. Users must accept their provider's terms of service.
+
+The audit trail does **not** provide evidence of exactly what was sent. It deliberately records no prompt
+content and no placeholder values, and it records nothing about what was detected or what the policy engine
+decided — and today it records nothing at all, since `logevent` has no production caller. What it specifies is
+a per-interaction usage and cost ledger. See [architecture.md](architecture.md) §7, and stories GA5.1, GA5.2,
+GA5.3 and GA5.5.
 
 ### 10.6 Local Model Accuracy
 
@@ -803,9 +838,9 @@ Results will be published in a summary report (with sensitive details redacted) 
 
 | Classification | Definition | Examples | Handling |
 |---------------|-----------|----------|----------|
-| **Restricted** | PII, credentials, mapping table contents | Names, SSNs, API keys, placeholder↔value mappings | Encrypted at rest, never transmitted externally, memory-zeroed after use |
+| **Restricted** | PII, credentials, mapping table contents | Names, SSNs, API keys, placeholder↔value mappings | *Intended:* encrypted at rest, never transmitted externally, memory-zeroed after use. *Actual:* API keys are in the OS keychain; the mapping table is plaintext on disk (X8) |
 | **Confidential** | User's prompts, documents, code before anonymisation | Raw user input, proprietary source code, business data | Processed locally, anonymised before any external transmission |
-| **Internal** | Anonymised prompts, routing metadata, audit entries | Anonymised text with placeholders, model selection decisions, token counts | May be transmitted to cloud LLMs (anonymised form only), stored locally with encryption |
+| **Internal** | Redacted prompts, routing metadata, audit entries | Redacted text with placeholders, model selection decisions, token counts | May be transmitted to cloud LLMs (redacted form only), stored locally — unencrypted today (X8) |
 | **Public** | Application configuration (non-sensitive), documentation | Model names, provider names, version numbers | No special handling required |
 
 ## Appendix B: Threat Model Change Log

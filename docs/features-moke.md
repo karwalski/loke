@@ -1,12 +1,27 @@
 # moke — Feature Document
 
-**Version:** 0.2.0
-**Generated:** 2026-05-20
+**Version:** 0.2.1
+**Generated:** 2026-05-20 · **Revised:** 2026-09-19
 **License:** Apache 2.0
 
 moke is a data analysis demo application that exercises loke's privacy pipeline, governance controls, and LLM integration end-to-end. It serves as a reference implementation, integration test scaffold, and the primary demo for loke's capabilities.
 
 moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port 11430 for LLM inference and privacy filtering.
+
+> **moke is a demonstration, and what it demonstrates is not always what the label says.** Most of its UI
+> is real and works; several of the loke capabilities it appears to exercise are not reachable through the
+> endpoint it calls. Each case carries an inline note naming what is actually true and the story that
+> would fix it; the full mapping of claim → code → proof is [claims.md](claims.md). **No figure shown in
+> moke's UI is a published measurement** — the cost and savings figures are per-session estimates, and the
+> project publishes figures only from [metrics-baseline.md](metrics-baseline.md).
+>
+> The most consequential case: moke's privacy demonstration calls loke's `/api/pipeline`, which does
+> **not** invoke `core.privacy.pipeline`. It calls the privacy-filter sidecar on port 11435 directly and,
+> when the sidecar is not running, falls through to five literal column-name checks that count entities
+> without altering the text — then forwards the unaltered text to the provider while still showing an
+> entity count and a sensitivity badge. **So with the sidecar down, moke's confirmation modal can report
+> anonymisation that did not happen.** Tracked as **NC1.9** (fail closed) and **AD1.6**; recorded as A13
+> in [claims.md](claims.md).
 
 ---
 
@@ -25,6 +40,25 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 | **Memory palace** | Hierarchical wing/hall/room/drawer navigation with semantic search, AAAK compression, and persistent storage. |
 | **MCP tools** | Tool browser, broker status, memory operations — invoke MCP tools with JSON args and see results. |
 | **Data type detection** | 26-detector cascade identifies PII, dates, currency, percentages, IDs, booleans, geo coordinates, URLs, and more. |
+
+> **What the table above does and does not evidence.** Sensitivity classification, pipeline transparency,
+> feedback, the kill-switch toggle, the 26-detector cascade and the client-side ML are moke's own code and
+> work as described. Four rows need qualifying:
+>
+> - **Privacy pipeline** — demonstrates the *sidecar*, not loke's core pipeline, and fails open when the
+>   sidecar is down. See the note at the top of this document (**NC1.9**, **AD1.6**).
+> - **Cost tracking** — real arithmetic over per-session estimates (`packages/moke/src/cost_comparison.tk`,
+>   `token_optimisation.tk:57-58`), computed from a character-derived token count against a modelled cloud
+>   price. It does not read loke's metrics tables, which return zeros (**DA1.6**), and no figure from it is
+>   publishable (**VM1.7**).
+> - **Governance dashboard** — the risk breakdown, request log and privacy score are computed over events
+>   held in the page, not over a persisted ledger; they reset on reload. Compliance report generation uses
+>   moke's own `packages/moke/src/governance.tk:135`, which works over those in-session events. loke's core
+>   report engine does **not** work: `core/governance/report-engine.tk:86,104,122,140,158` all query
+>   `timestamp` and `detail` columns that `audit_log` does not have, and the table is never written in any
+>   case (**GA5.6**, **GA5.7**, **DA1**).
+> - **Memory palace** — navigation, AAAK compression and persistence are real. The search is keyword
+>   matching over an index table (`core/memory/search.tk:104-130`), not semantic retrieval.
 
 ---
 
@@ -72,6 +106,14 @@ Progress stored in sessionStorage — survives page navigation. "Start Demo" but
 Landing page with categorised dataset cards. One-click loading into the analysis workspace.
 
 **Dataset Categories:**
+
+> **The counts below are wrong in three different ways and the tables are incomplete.**
+> `packages/moke/templates/index.tkt` ships **15** datasets — 6 government and public sector, 6 IT
+> operations, 3 customer — while the headings here say 3 + 8 + 1 and the tables list 3 + 6 + 1. README
+> says 9. The shipped set includes NSW Public Schools, Opal Card Journeys, Property Transactions,
+> Wattle & Co Users and Wattle & Co Orders, none of which appears below. Undercounting demo data is not a
+> credibility risk in the way an overstated capability is, but it shows these tables are hand-maintained
+> rather than generated from the tree. Recorded as K9 in [claims.md](claims.md).
 
 **Government & Public Sector (3 datasets):**
 
@@ -156,8 +198,21 @@ Each detector returns `{type, subtype, confidence, stats}`.
 - Local vs cloud ratio
 - Estimated savings vs cloud-only
 
+> **"Estimated" is doing real work in that last line.** The figure is arithmetic over a
+> character-derived token count against a modelled cloud price (`packages/moke/src/token_optimisation.tk:57-58`,
+> `cost_comparison.tk`). It is a session estimate for the operator's benefit, not a measured saving, and it
+> must not be quoted outside the UI. See [metrics-baseline.md](metrics-baseline.md); measuring it properly
+> is **VM1.7** and **CB1.5**.
+
 **Privacy Review (Pre-Send):**
-Before sending to the LLM, shows the privacy confirmation modal (see Confirm section below). Users see exactly what data leaves and what stays local.
+Before sending to the LLM, shows the privacy confirmation modal (see Confirm section below). Users see what the request will contain.
+
+> **The modal shows what the pipeline reported, which is not always what was sent.** When the
+> privacy-filter sidecar is unavailable, loke's `/api/pipeline` returns an entity count and a sensitivity
+> label while forwarding the text unchanged — so the "anonymised" panel can display placeholders for a
+> request that went out in the clear. Until the pipeline fails closed (**NC1.9**), treat the modal as a
+> report of intent rather than a record of what crossed the boundary. See the note at the top of this
+> document and A13 in [claims.md](claims.md).
 
 ---
 
@@ -195,7 +250,17 @@ Colour-coded header: RESTRICTED (red), CONFIDENTIAL (red), INTERNAL (amber), PUB
 Three-phase pipeline combining LLM design with local computation.
 
 **Phase 1 — LLM Design:**
-User question + dataset schema sent to loke's pipeline endpoint. LLM returns Dashboard DDL (Domain Definition Language) describing card layout, chart types, metrics, queries.
+The user's question is sent to loke's pipeline endpoint. The LLM returns Dashboard DDL (Domain
+Definition Language) describing card layout, chart types, metrics and queries.
+
+> **The schema is not sent.** `buildPhase1Prompt(question)` in `templates/dashboard.tkt` interpolates
+> only the question, while opening with *"You have access to this dataset"* — which the model does not.
+> It is therefore designing cards against column names it has to guess, and the system prompt compounds
+> this by instructing it to *"use realistic sample values that match the dataset schema"*, so the values
+> it returns are invented. Story **NC1.4** is fixing the code: pass the NC1.2 schema profile and remove
+> the sample-value instruction. **NC1.5** and **NC1.6** stop fabricated values reaching a card and put a
+> provenance state on each one. Until then, treat a rendered number as resolved only where the card says
+> so.
 
 **Phase 2 — Local Computation:**
 Client-side query execution — zero data egress. Supports: groupBy, bucketDates, metric calculations (sum, avg, min, max, count), filters on numeric/categorical columns.
@@ -272,6 +337,16 @@ Toggle to immediately block all external LLM traffic. Pulsing red banner when ac
 
 **Compliance Reporting:**
 Generate reports as inline, CSV, or JSON. Templates for: EU GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA.
+
+> **These reports cover the current session, and they are not compliance evidence.** Generation uses
+> moke's own `packages/moke/src/governance.tk:135` over events held in the page, so a report describes one
+> browser session and nothing before it. The risk breakdown, request log and privacy score above have the
+> same scope and reset on reload. loke's core report engine — which would report over a persisted ledger —
+> does not work: `core/governance/report-engine.tk:86,104,122,140,158` query `timestamp` and `detail`
+> columns that `audit_log` does not have, and nothing writes to `audit_log` in any case. The framework
+> templates name regulations loke ships presets for; they do not make a deployment compliant with any of
+> them. Tracked as **GA5.6**, **GA5.7**, **DA1**, **RG1.4**; recorded as E8, E9, F4 in
+> [claims.md](claims.md).
 
 **External Integration Connectors (10 presets):**
 PagerDuty, Datadog, Grafana, Splunk, Elastic, Slack, Microsoft Teams, Opsgenie, ServiceNow, Custom webhook.

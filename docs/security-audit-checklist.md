@@ -2,6 +2,13 @@
 
 **Purpose:** Run this checklist before every release. Every item must pass or have a documented exception with an assigned owner and remediation date. No release ships with a failing critical item.
 
+> **The gate is not currently met.** Three defects block `[CRITICAL]` items in §2 and §3 against the code as
+> it stands — round-trip restoration for multi-entity input (PL1.1), mapping-table encryption at rest (X8,
+> which appears as a critical item in both sections), and failing closed when no detection layer is healthy
+> (NC1.9). A further item in §10 on tamper-evidence also fails (GA5.2, GA5.3, GA5.9). They are named at the
+> point of use rather than weakened, and they are open release blockers. This checklist is a gate, not a
+> record of passing.
+
 **Last reviewed:** 2026-04-05
 **Review cadence:** Quarterly (next review: 2026-07-04)
 
@@ -12,7 +19,9 @@
 1. Create a GitHub issue from the `security-audit` issue template for each release.
 2. Assign a reviewer for each section. The reviewer must not be the author of the code under review.
 3. Check each item. Record pass/fail/NA and any notes.
-4. All critical items (marked with `[CRITICAL]`) must pass. No exceptions.
+4. All critical items (marked with `[CRITICAL]`) must pass. No exceptions — an item that cannot pass is a
+   release blocker with a story against it, never a tick with a caveat. The ones currently in that state are
+   named at the top of this document and again at each point of use.
 5. Non-critical items that fail must have a tracking issue created before the release ships.
 6. The completed checklist is attached to the release notes as an artefact.
 
@@ -50,16 +59,34 @@ npm ci --ignore-scripts && npm ls --all > /dev/null
 
 ## 2. Privacy Pipeline
 
-- [ ] [CRITICAL] PII detection test suite passes with 100% of known PII patterns detected across all four layers (regex, compromise.js, SLM NER, Presidio)
-- [ ] [CRITICAL] Reversible anonymisation round-trip tests pass — original values are correctly restored from placeholders in all test cases
-- [ ] [CRITICAL] Mapping table encryption tests pass — mapping tables are encrypted at rest using the configured encryption key, and plaintext mappings are never written to disk
-- [ ] [CRITICAL] No PII appears in any log output (check all log levels: debug, info, warn, error)
+> **Three items in this section cannot pass today.** They are kept as the gate, with the blocking defect and
+> its story named, rather than silently weakened or ticked. A release may not claim them.
+>
+> - **Round-trip restoration fails for multi-entity input.** Both NER layers return a hardcoded constant
+>   token, `"[" + label + "_NER_1]"` (`ner.tk:83-87`, `ner_local.tk:59-62`), so every entity of a given type
+>   in one prompt collapses to one placeholder and `restore()` substitutes whichever original it meets first
+>   — a response can return person A's name where person B was referenced. Story **PL1.1**.
+> - **Mapping tables are not encrypted at rest.** The key is generated and held in the OS keychain correctly,
+>   but the toolchain links plain SQLite, which silently ignores the encryption pragma and returns success.
+>   The mapping table is plaintext on disk. Tracked as **X8**.
+> - **The pipeline does not fail closed.** `packages/browser/pages/api/pipeline.tk` falls back to five
+>   `str.contains` checks when the detection sidecar is unavailable; those only count occurrences, the
+>   outbound text is left unmodified, and the request is transmitted. Story **NC1.9**.
+>
+> Also note that "100% detection" is not an achievable gate: `docs/threat-model.md` §10.6 states that no
+> combination of layers guarantees complete detection, and no labelled corpus or recall measurement exists
+> yet (**AD1.1**), so the false-negative-rate item below has no instrument behind it.
+
+- [ ] [CRITICAL] PII detection test suite passes — every pattern in the committed corpus is detected by at least one enabled layer (regex, local NER, SLM NER, Presidio). This is corpus coverage, not a detection guarantee
+- [ ] [CRITICAL] Reversible anonymisation round-trip tests pass — original values are correctly restored from placeholders, **including where a single prompt contains several entities of the same type**. *Currently failing — PL1.1*
+- [ ] [CRITICAL] Mapping table encryption tests pass — mapping tables are encrypted at rest using the configured encryption key, and plaintext mappings are never written to disk. *Currently failing — X8*
+- [ ] [CRITICAL] No pattern-matched PII appears in any log output (check all log levels: debug, info, warn, error). The log sanitiser's scope is the regex pattern set plus a sensitive-key list; free-text PII such as person names is not covered by any pattern
 - [ ] [CRITICAL] No PII appears in error messages or stack traces sent to any external service
-- [ ] PII detection false negative rate is within acceptable bounds (< 0.1% on the standard test corpus)
+- [ ] PII detection false negative rate is measured against a labelled corpus and reported with its N. *No corpus exists yet — AD1.1; until it does, record NA rather than a figure*
 - [ ] PII detection false positive rate has not regressed from the previous release
 - [ ] New PII patterns or entity types added since the last release have corresponding test cases
-- [ ] Anonymisation performance meets latency targets (< 500ms for typical prompts)
-- [ ] The anonymisation pipeline fails closed — if any layer throws an exception, the request is blocked, not sent through unfiltered
+- [ ] Anonymisation latency is measured and recorded. *No timing harness exists — VM1.1; record NA rather than a figure, and see `docs/metrics-baseline.md`*
+- [ ] [CRITICAL] The anonymisation pipeline fails closed — when no detection layer is healthy the request is blocked with 503, not sent through unfiltered. *Currently failing — NC1.9*
 
 ### Privacy Pipeline Test Commands
 
@@ -81,7 +108,7 @@ npm run test:log-leakage
 
 ## 3. Data Storage and Encryption
 
-- [ ] [CRITICAL] Mapping tables (placeholder-to-real-value) are encrypted at rest using AES-256-GCM or equivalent
+- [ ] [CRITICAL] Mapping tables (placeholder-to-real-value) are encrypted at rest using AES-256-GCM or equivalent. *Currently failing — X8; the toolchain links plain SQLite, which ignores the encryption pragma and reports success*
 - [ ] [CRITICAL] API keys and provider credentials are stored in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) — never in plaintext files
 - [ ] [CRITICAL] No secrets (API keys, tokens, credentials) appear in the codebase, configuration templates, or test fixtures
 - [ ] SQLite database files (conversations, audit logs) are encrypted at rest when enterprise policy requires it
@@ -169,7 +196,7 @@ npm run test:log-leakage
 - [ ] [CRITICAL] Enterprise policy hard blocks cannot be overridden by the local user without administrator escalation
 - [ ] Local application settings are protected against modification by other applications on the system
 - [ ] Session tokens (if used for companion device or MCP communication) have appropriate expiry and rotation
-- [ ] Audit trail entries are append-only and tamper-evident — a user cannot silently delete or modify their own audit log
+- [ ] Audit trail entries are append-only and tamper-evident — a user cannot silently delete or modify their own audit log. *Currently failing: the stored digest is a concatenation of two non-secret fields and does not incorporate the previous row, so nothing chains (GA5.2); no verifier exists (GA5.3); and ordinary `DELETE`/`UPDATE` on `audit_log` are unrestricted (GA5.9)*
 - [ ] Multi-user scenarios (shared devices) maintain strict isolation between user profiles
 
 ---
@@ -189,7 +216,7 @@ npm run test:log-leakage
 ## 11. Logging and Monitoring
 
 - [ ] [CRITICAL] No PII, credentials, or mapping table contents appear in application logs at any log level
-- [ ] Audit trail captures all security-relevant events: outbound requests, MCP tool calls, policy violations, companion device connections, configuration changes
+- [ ] Audit trail captures all security-relevant events: outbound requests, MCP tool calls, policy violations, companion device connections, configuration changes. *Currently failing — no audit row is written at all: `logevent` has no production caller and the browser route never opens an audit store (GA5, DA1). Even once written: the persisted record holds usage and cost metadata only — the policy decision, detected-entity detail, detection layer, approval/override outcome and kill-switch state are on an unpersisted structure (GA5.5), and `created_at` receives a string literal rather than a time (GA5.1). See `docs/architecture.md` §7 for what the trail does and does not evidence*
 - [ ] Log rotation is configured to prevent disk exhaustion
 - [ ] Error reporting (if enabled) sends only anonymised, structured error data — no stack traces containing file paths, user data, or environment details
 - [ ] Debug logging is disabled in production builds

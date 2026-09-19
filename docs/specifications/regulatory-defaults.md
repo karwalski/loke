@@ -12,6 +12,24 @@ loke intercepts, anonymises, and routes LLM traffic on behalf of users. Differen
 
 Each preset is a **starting point**. Users and enterprise administrators can override any individual setting. The default preset is **EU GDPR**, chosen because it is the most restrictive general-purpose baseline and provides the safest out-of-box experience.
 
+> **What a preset is, and what it is not.** loke ships a **policy preset** for each regulation named here:
+> a set of defaults for detection scope, consensus strategy, confidence thresholds, retention, provider
+> allow-listing and audit behaviour, chosen to be a defensible opening position under that regulation.
+> Selecting a preset does not make a deployment compliant with the regulation, and this document does not
+> claim it does. Compliance is a property of an organisation's processing as a whole — its lawful basis, its
+> contracts, its processes and its assessment — and it is determined by that organisation and its assessor.
+> Where a statement below reads as a determination rather than a configuration, treat it as a bug and report
+> it. Detection is also not guaranteed: this project's own threat model states that no combination of layers
+> guarantees complete detection (`docs/threat-model.md` §10.6), and there is no recall measurement against a
+> labelled corpus yet (AD1.1).
+>
+> **The YAML blocks below are the specified configuration schema, not a description of running behaviour.**
+> Four fields in them are not honoured by any code today, and a reader should not infer the behaviour from
+> the setting: `placeholder_format` (the placeholder generator emits `[TYPE_N]` unconditionally and reads no
+> format setting), `hash_chain` (the stored digest covers two non-secret fields and does not incorporate the
+> previous row — **GA5.2**, **GA5.3**), and `pipeline_failure_action` / `outbound_validation` (no outbound
+> re-scan exists, and the detection path currently fails **open** — **NC1.9**).
+
 ---
 
 ## Table of Contents
@@ -92,11 +110,54 @@ GDPR distinguishes between **anonymisation** (irreversible, data is no longer pe
 
 **loke EU GDPR preset behaviour:**
 
-- **Outbound data to cloud LLMs:** Full anonymisation by default. Placeholder tokens ($c1, $l2) must not be reversible by the LLM provider. The mapping table is stored locally and never transmitted.
-- **Local processing:** Pseudonymisation is acceptable because the data never leaves the device and the mapping is under the user's control.
-- **Reversibility:** The local mapping table enables response restoration. This is acceptable because the mapping never leaves the device. Under GDPR, pseudonymised data on a single device under user control carries minimal risk.
-- **Special category data (Art. 9):** Must be fully anonymised before any cloud transmission. No pseudonymised special category data may be sent externally, even with safeguards. loke must block or fully redact (replace with generic tokens, not consistent placeholders) special category data when the EU GDPR preset is active.
-- **Recital 26 threshold:** Anonymisation must render re-identification "reasonably unlikely" considering "all the means reasonably likely to be used." Consistent placeholder tokens across a conversation are acceptable provided the conversation context alone does not enable re-identification.
+- **Outbound data to cloud LLMs on the fallback path:** detected entities are replaced with placeholder
+  tokens of the form `[EMAIL_1]`, `[PERSON_2]`, which must not be reversible by the LLM provider. The
+  mapping table is stored locally and never transmitted. Note the terminology: because loke retains the
+  mapping, this is **pseudonymisation** in the Art. 4(5) sense, not anonymisation — the preset's job is to
+  minimise what is disclosed, not to take the data outside the Regulation. On the **primary** path no
+  entity values are transmitted at all (`docs/architecture.md` §4.1), which is the stronger position and
+  the one to prefer where the task allows it.
+- **Local processing:** Pseudonymisation is acceptable because the data never leaves the device and the
+  mapping is under the user's control.
+- **Reversibility:** The local mapping table enables response restoration within the originating request.
+  The mapping never leaves the device. Two qualifications belong with that: the mapping database is
+  **plaintext on disk** today, because the toolchain links plain SQLite and silently ignores the encryption
+  pragma (X8), so the "under the user's control" argument currently rests on OS file permissions and
+  full-disk encryption rather than on application-level encryption; and loke holding the mapping is
+  precisely what keeps loke a controller of personal data. Whether the *provider* also holds personal data
+  is a separate, context-dependent question (CJEU C-413/23 P, 4 September 2025) and is a matter for the
+  deployment's own assessment.
+- **Special category data (Art. 9):** Must be fully anonymised before any cloud transmission. No pseudonymised special category data may be sent externally, even with safeguards. loke must block or fully redact special category data when the EU GDPR preset is active. The instruction previously read "replace with generic tokens, not consistent placeholders", which presumed a distinction the implementation does not make — see the Recital 26 bullet below. Until PL1.3 chooses a scoping policy there are no consistent placeholders to contrast generic tokens *with*; the operative requirement for this preset is that the token carries no distinguishing information about the entity it replaced.
+- **Recital 26 threshold:** Anonymisation must render re-identification "reasonably unlikely" considering
+  "all the means reasonably likely to be used." This document previously reasoned at length about whether
+  *consistent* placeholder tokens across a conversation meet that threshold. **That reasoning assumed a
+  property the code does not have, and it is withdrawn.** What the code does:
+  - Placeholder indices come from `makeplaceholder(entitytype, index)`, and the index passed in is the
+    length of the **whole entity array** (`regex.tk:85`, `presidio.tk:166`). So an index is ordinal within
+    a single request and is shared across entity types — the second entity found is `_2` whether it is an
+    email or a card number.
+  - Consequently the same value receives a **different token in a different prompt**, depending only on
+    where in that prompt it happened to be found. There is no cross-prompt consistency, and therefore no
+    linkage channel arising *from* consistency — because there is no consistent mapping to link on.
+  - The stored mapping is scoped `WHERE request_id=?` with a 24-hour expiry, so it is not reused across
+    requests either.
+
+  **The Recital 26 question is therefore still open, not answered.** Deciding the scoping policy
+  deliberately — stable-per-entity tokens, which aid coherence and do introduce a cross-prompt linkage
+  channel, versus per-session salted tokens, which defeat it and cost cross-session continuity — is story
+  **PL1.3**, with the surrogate *style* (opaque token versus type-consistent realistic value) as a second
+  axis. Measuring the residual after whichever defence is chosen is **PL1.4**. Neither the existence of a
+  linkage channel from stable surrogates nor the per-session-scoping defence is a novel observation: the
+  first is how the standard pseudonymity vocabulary defines the trade, and published work already scopes
+  surrogate mappings per conversation (`docs/research/disclosure-measurement-findings.md` §2). Only the
+  magnitude, the scoping frontier and the residual are open questions.
+
+  **A separate and more serious defect sits underneath this one.** Both NER layers return a hardcoded
+  constant token, `"[" + label + "_NER_1]"` (`ner.tk:83-87`, `ner_local.tk:59-62`), so every entity of a
+  given type in one prompt collapses to a single token — and `placeholder.tk`'s `restore()` then replaces
+  that token with whichever original it encounters first. **A response can return person A's name where
+  person B was referenced.** That is a live correctness and disclosure defect, tracked as **PL1.1**, and it
+  must be read as affecting any assessment of this preset today.
 
 ### 2.5 Data Retention
 
@@ -114,7 +175,14 @@ GDPR Chapter V (Arts. 44-49) restricts transfers of personal data outside the EE
 - **Provider allow-list by jurisdiction:** Only providers in countries with an EU adequacy decision are permitted by default. As of April 2026, adequacy decisions cover: Andorra, Argentina, Canada (PIPEDA), Faroe Islands, Guernsey, Israel, Isle of Man, Japan, Jersey, New Zealand, Republic of Korea, Switzerland, United Kingdom, United States (EU-US Data Privacy Framework participants), and Uruguay.
 - **US providers:** Permitted only if the provider is listed on the EU-US Data Privacy Framework (DPF) participant list. OpenAI, Anthropic, and Google are DPF-certified. loke maintains a provider metadata registry that includes DPF status.
 - **Non-adequate jurisdictions:** Blocked by default. Enterprise administrators can override with documentation of Standard Contractual Clauses (SCCs) or Binding Corporate Rules (BCRs).
-- **Practical implication for loke:** Because loke anonymises data before transmission, and truly anonymised data is outside GDPR scope (Recital 26), the cross-border restriction applies only if anonymisation is incomplete or disabled. The preset enforces maximum anonymisation to make this moot.
+- **Practical implication for loke:** Truly anonymised data is outside GDPR scope (Recital 26), so the
+  strength of the cross-border restriction depends on how complete the anonymisation actually is. The
+  preset selects the widest-coverage settings available, but it does not make the restriction moot:
+  detection is not guaranteed — this project's threat model states that no combination of layers
+  guarantees complete detection (`docs/threat-model.md` §10.6) — there is no recall measurement against a
+  labelled corpus yet (AD1.1), and loke holds the re-identification mapping, which keeps the transmitted
+  data pseudonymised rather than anonymous for loke as controller. Treat the provider allow-list as the
+  operative control here and anonymisation as a reduction on top of it, not as a replacement for it.
 
 ### 2.7 Provider Restrictions
 
@@ -125,17 +193,35 @@ GDPR Chapter V (Arts. 44-49) restricts transfers of personal data outside the EE
 
 ### 2.8 Audit Requirements
 
-- **Art. 30 — Records of processing activities:** Enterprises must maintain records. loke's audit trail serves this requirement by logging: what data categories were processed, which provider received data, what anonymisation was applied, timestamps.
+- **Art. 30 — Records of processing activities:** Enterprises must maintain records. loke's audit trail
+  contributes to this far less than it should today — in fact not at all yet: `logevent` has no production
+  caller and no row is written (GA5, DA1). The record it *specifies* holds event type, use case, model,
+  provider, sensitivity, risk tier, token counts, cost, duration and correlation ID. It does **not** specify what
+  anonymisation was applied, which entities or categories were detected, which layer detected them, or the
+  policy decision — those fields live only on an unpersisted decision-trace structure (**GA5.5**) — and
+  `created_at` currently receives a string literal rather than a time, so there is no reliable timestamp
+  (**GA5.1**). As it stands the trail is a per-interaction usage and cost ledger; see
+  `docs/architecture.md` §7.
 - **Art. 5(2) — Accountability:** The controller must demonstrate compliance. loke's audit export (PDF/CSV/JSON per story A3.4) enables this.
 - **Log retention:** 5 years recommended, aligned with typical limitation periods for DPA enforcement actions.
-- **Log contents:** Timestamp, interaction ID, PII entity types detected (not values), anonymisation method applied, provider name and jurisdiction, token counts (input/output), routing decision rationale, user overrides and confirmations.
+- **Log contents (specified):** Timestamp, interaction ID, PII entity types detected (not values),
+  anonymisation method applied, provider name and jurisdiction, token counts (input/output), routing decision
+  rationale, user overrides and confirmations. **Actual, today:** of that list only the interaction
+  (correlation) ID, provider, model and token counts are persisted, plus event type, use case, sensitivity,
+  risk tier, cost and duration. Entity types detected, anonymisation method, routing rationale and user
+  overrides are not persisted (**GA5.5**), and the timestamp column receives a string literal (**GA5.1**).
 
 ### 2.9 Breach Notification
 
 - **Art. 33:** Controller must notify the supervisory authority within **72 hours** of becoming aware of a personal data breach, unless the breach is unlikely to result in a risk to rights and freedoms.
 - **Art. 34:** Data subjects must be notified without undue delay if the breach is likely to result in a **high risk** to their rights and freedoms.
 - **loke relevance:** A breach in loke's context would be: PII transmitted to an LLM provider without anonymisation due to a pipeline failure, PII mapping table exfiltrated, audit logs containing PII leaked.
-- **loke safeguards:** The privacy pipeline includes a final validation step (outbound content scan) that blocks transmission if PII is detected after anonymisation. Pipeline failures trigger a local alert and block transmission rather than failing open.
+- **loke safeguards (specified, and not yet in force):** the design calls for a final validation step — an
+  outbound content scan that blocks transmission if PII is detected after anonymisation — and for pipeline
+  failures to alert locally and block rather than fail open. **Neither exists in the code today.** There is
+  no outbound re-scan anywhere, and when the detection sidecar is unavailable the pipeline falls back to five
+  `str.contains` checks that only count occurrences, leaves the text unmodified, and transmits (**NC1.9**).
+  A deployment relying on these safeguards to bound its breach exposure does not have them.
 
 ### 2.10 loke Configuration Mapping
 
@@ -174,8 +260,8 @@ privacy:
   anonymisation:
     strength: full              # Full anonymisation for outbound, pseudonymisation local-only
     reversible: true            # Local mapping retained for response restoration
-    placeholder_format: "$t{n}" # e.g., $c1, $l2, $p3
-    special_category_mode: irreversible_redact  # Generic tokens, not consistent placeholders
+    placeholder_format: "[TYPE_N]" # e.g. [EMAIL_1], [PERSON_2]. Not configurable in code — see note in Purpose
+    special_category_mode: irreversible_redact  # Token carries no information about the entity replaced
 
 data_retention:
   pii_mappings: 24h             # Purged 24h after session close
@@ -201,12 +287,12 @@ audit:
   log_pii_values: false         # Never log actual PII
   log_retention: 5y
   export_formats: [pdf, csv, json]
-  hash_chain: true              # Tamper detection
+  hash_chain: true              # Specified; not tamper-evident in code today — GA5.2, GA5.3
   siem_forwarding: optional
 
 breach:
-  pipeline_failure_action: block_and_alert  # Never fail open
-  outbound_validation: enabled   # Final PII scan before transmission
+  pipeline_failure_action: block_and_alert  # Specified; the code currently fails open — NC1.9
+  outbound_validation: enabled   # Specified; no outbound re-scan exists in code — NC1.9
   notification_window: 72h       # For enterprise alerting integration
 ```
 
@@ -267,7 +353,11 @@ The Privacy Act does not prescribe specific anonymisation techniques. De-identif
 
 **loke AU Privacy Act preset behaviour:**
 
-- **Outbound data:** De-identification via placeholder replacement. The standard is "reasonable steps in the circumstances" — loke's four-layer pipeline exceeds this.
+- **Outbound data:** De-identification via placeholder replacement. The standard is "reasonable steps in
+  the circumstances". A multi-layer pipeline is evidence toward reasonable steps; whether it *is* reasonable
+  in a given deployment's circumstances is for that deployment and its assessor to determine, not for loke
+  to assert. Note also that only two layers are enabled by default (regex and NER) — Presidio and the
+  privacy-filter sidecar are optional and not bundled.
 - **Sensitive information:** Stronger protections apply. The preset applies the same irreversible redaction as EU GDPR for health, biometric, racial, political, religious, sexual orientation, criminal, and trade union data.
 - **Re-identification prohibition:** The Privacy Act 2024 amendments reinforce that re-identification of de-identified data is prohibited. loke's mapping tables must be secured accordingly.
 
@@ -455,7 +545,10 @@ HIPAA provides two explicit de-identification methods:
 
 - **Safe Harbor enforcement:** Detection is attempted for all 18 identifier categories. It is **not** guaranteed — this project's own threat model states that no combination of layers guarantees 100% detection, and no recall measurement against a labelled corpus exists yet (AD1.1, AD1.2). Do not rely on this for a Safe Harbor determination.
 - **Clinical data:** Diagnosis codes, medication names, and clinical notes are anonymised (replaced with generic medical category tokens) to prevent indirect identification.
-- **Reversibility:** Mapping tables are retained locally under the same encryption and access controls as ePHI. The mapping table itself is treated as PHI.
+- **Reversibility:** The mapping table is treated as PHI and retained locally. It is **not** encrypted at
+  rest today — the toolchain links plain SQLite and silently ignores the encryption pragma (X8) — so the
+  access controls protecting it are OS file permissions and whatever full-disk encryption the host provides.
+  A deployment that needs application-level encryption of the mapping table does not have it yet.
 - **Re-identification:** Only permitted by the covered entity, and only with proper safeguards. loke's local restoration of placeholders is re-identification — this is acceptable because it occurs on the covered entity's device under their control.
 
 ### 4.5 Data Retention
@@ -482,7 +575,10 @@ HIPAA does not contain an explicit prohibition on cross-border transfers of PHI.
 
 ### 4.7 Provider Restrictions
 
-- **BAA mandatory:** Any cloud LLM provider receiving data (even de-identified, as a precautionary measure in healthcare settings) must have a BAA in place. loke blocks transmission to providers without BAA status confirmed in the provider registry.
+- **BAA mandatory:** Any cloud LLM provider receiving data (even de-identified, as a precautionary measure
+  in healthcare settings) must have a BAA in place. This preset records `baa_required` as a rule, but
+  **nothing in the code blocks transmission on BAA status** — there is no BAA field in a provider registry
+  and no check against one. Treat BAA verification as an operator responsibility until that gate is built.
 - **Provider BAA status (as of April 2026):**
   - Anthropic: BAA available for enterprise plans
   - OpenAI: BAA available for enterprise plans
@@ -519,7 +615,14 @@ The **HITECH Act** (2009) and the **Breach Notification Rule** (45 CFR 164.400-4
 - **Notification to media:** If 500 or more residents of a state/jurisdiction are affected, within 60 days.
 - **De-identified data:** Breach of properly de-identified data is not a reportable breach (the data is not PHI).
 
-**loke relevance:** If loke's de-identification pipeline fails and PHI reaches a cloud provider, this constitutes an impermissible disclosure and likely a breach. loke's fail-closed design (block transmission on pipeline error) is critical for HIPAA compliance.
+**loke relevance:** If loke's de-identification pipeline fails and PHI reaches a cloud provider, this
+constitutes an impermissible disclosure and likely a breach. Failing closed is therefore the correct design
+— and **it is not what the code does today.** When the detection sidecar is unavailable,
+`packages/browser/pages/api/pipeline.tk` falls back to five `str.contains` checks that only *count*
+occurrences, leaves the outbound text unmodified, and transmits anyway. A filter that fails open is worse
+than one that fails closed, because the caller is told a filter ran. Returning 503 and never dispatching
+when no detection layer is healthy is story **NC1.9**. Until it lands, do not rely on this preset in a
+setting where an impermissible disclosure is the consequence.
 
 ### 4.10 loke Configuration Mapping
 
@@ -662,7 +765,13 @@ CCPA/CPRA use two relevant concepts:
 
 **loke CCPA/CPRA preset behaviour:**
 
-- **Outbound data:** De-identification via placeholder replacement. loke's local mapping table technically enables re-identification, but since loke is operated by (or on behalf of) the consumer's own employer/organisation — not "the business" selling data — the de-identification requirements are met for the outbound transmission to the LLM provider.
+- **Outbound data:** De-identification via placeholder replacement. loke's local mapping table enables
+  re-identification, so the four 1798.140(m) conditions — technical safeguards, business processes against
+  re-identification and inadvertent release, and no attempt to re-identify — are conditions the *deploying
+  organisation* must meet, not conditions loke meets on its behalf. loke can supply the technical safeguard
+  and the record of what was transmitted; the business processes and the undertaking not to re-identify are
+  the deployment's. Whether the outbound transmission qualifies as de-identified is that deployment's
+  assessment.
 - **Sensitive personal information:** The preset treats all CPRA sensitive PI categories with enhanced protection (irreversible redaction for outbound data).
 - **"Do Not Sell or Share" compliance:** If a consumer has exercised their right to opt out, loke must block all transmission of their personal information to cloud LLM providers (or ensure complete de-identification).
 
@@ -1401,7 +1510,12 @@ Some conflicts require human judgment:
 
 ## 12. loke Configuration Schema Reference
 
-This section documents every configuration field introduced by the regulatory presets. These fields are implemented in loke's hierarchical configuration system (story F1.5) and enforced by the policy engine (epic A3).
+This section documents every configuration field introduced by the regulatory presets. The fields are
+*specified* against loke's hierarchical configuration system (story F1.5) and the policy engine (epic A3).
+Specification is not implementation: the four fields named in the note at the top of this document —
+`placeholder_format`, `hash_chain`, `pipeline_failure_action` and `outbound_validation` — are read by no code
+today. Treat this section as the schema to build against, and check the named story before relying on a field
+to change behaviour.
 
 ### 12.1 Top-Level Structure
 
@@ -1436,7 +1550,7 @@ interface PrivacyConfig {
   anonymisation: {
     strength: 'full' | 'safe_harbor' | 'de_identification' | 'anonymisation' | 'placeholder_only';
     reversible: boolean;
-    placeholder_format: string;      // e.g., "$t{n}" or "$n"
+    placeholder_format: string;      // e.g. "[TYPE_N]". Not read by any code today — see note in Purpose
     special_category_mode?: 'irreversible_redact';
     clinical_data_mode?: 'generic_category';  // HIPAA only
     mapping_table_classification?: 'ephi';     // HIPAA only

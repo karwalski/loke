@@ -80,14 +80,29 @@
 
 ## Audit
 
-- [ ] All AI calls logged in F6.2 audit trail: timestamp, correlation ID, provider, model, token counts, cost, governance decision
+> **No audit row is written today.** `core.storage.audit::logevent` holds the only `INSERT` into `audit_log`
+> and has no production caller, and the browser route never opens an audit store. Every item below therefore
+> fails on that ground first; the record it specifies would additionally hold usage and cost metadata only,
+> and be neither time-ordered nor tamper-evident. What the trail does and does not evidence is set out in
+> `docs/architecture.md` §7. Tracked as **GA5** and **DA1**.
+
+- [ ] All AI calls logged in F6.2 audit trail: event type, use case, correlation ID, provider, model,
+      sensitivity, risk tier, token counts, cost, duration
+- [ ] A usable timestamp is written. *Currently failing — `created_at` receives the string literal `'now()'`
+      (GA5.1)*
+- [ ] The governance decision, detected-entity detail, detection layer, approval/override outcome and
+      kill-switch state are recorded. *Currently failing — these exist only on the unpersisted
+      `$decisiontrace` structure (GA5.5)*
 - [ ] No prompt content written to the audit trail
 - [ ] No PII placeholder mappings written to the audit trail
-- [ ] Audit trail is append-only; no delete or update operations on audit records
+- [ ] Audit trail is append-only; no delete or update operations on audit records. *Currently failing —
+      nothing enforces it: no trigger, no immutability constraint (GA5.9), and the hash chain does not chain
+      (GA5.2, GA5.3)*
 
 ## Kill Switch
 
 - [ ] `G1.6 kill_switch.is_global_active()` checked before every AI call in the router
 - [ ] Kill switch activation blocks all outbound AI requests immediately
 - [ ] Kill switch state is persisted across restarts
-- [ ] Kill switch activation and deactivation events are written to the audit trail
+- [ ] Kill switch activation and deactivation events are written to the audit trail, and kill-switch state
+      is recorded on each interaction. *State-on-interaction currently failing — GA5.5*
