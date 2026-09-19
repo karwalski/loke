@@ -1,8 +1,11 @@
 # Disclosure Measurement — Literature Findings
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-09-19
-**Status:** Research input. Feeds epics PL1, EM1, DA1, CB1, AD1 and NC1.
+**Status:** Research input. Feeds epics PL1, EM1, DA1, CB1, AD1, GA5 and NC1.
+
+Part I covers disclosure measurement and linkage. **Part II covers benchmarks, enforcement evaluation
+and competitive prior art, and is the more consequential of the two for positioning.**
 
 This document records what the external literature already establishes about measuring disclosure to
 external language models, and what loke would have to establish itself. It exists so that loke's
@@ -317,3 +320,318 @@ shows it is genuinely outside the closest prior art's design space; build the me
 placeholder collision defect (PL1.1), because it is a live bug rather than a research question; and
 treat the scoping ablation and the metric validation as the research contributions, specified to the
 standard in §6 and §7.
+
+---
+
+# Part II — Benchmarks, enforcement and competitive prior art
+
+Added 2026-09-19 from a second research pass. This part is more consequential than Part I for
+positioning, because it establishes that **loke's data flow is not novel** and locates where the
+genuine contribution actually is.
+
+## 10. The architecture is table stakes, not a contribution
+
+**Schema-out / execute-locally is the default implementation of the entire text-to-SQL field.** BIRD,
+Spider and Spider 2.0 all hand the model a schema and score by executing the returned SQL against a
+database the model never saw. That is architecturally identical to loke's primary path.
+
+It also ships commercially today:
+
+| Product | Mechanism |
+|---|---|
+| **Vanna.AI** | RAG over the information schema; top-k schema chunks plus documentation and prior question/SQL pairs go into the prompt; the LLM returns SQL; Vanna executes it against the connected database. Credentials stay in your infrastructure |
+| **WrenAI** | Same shape via a semantic layer and vector store retrieving the relevant schema slice |
+| **Snowflake Cortex Analyst / Databricks Genie** | Warehouse-native: semantic model goes to the model, SQL executes inside the warehouse |
+
+It is published as a named pattern ("the schema-driven LLM query pattern"), and **arXiv:2512.04852,
+*Ask Safely: Privacy-Aware LLM Query Generation for Knowledge Graphs*** applies it to graphs with
+almost exactly loke's privacy rationale — that the data may be sensitive while the schema is not.
+
+**Worse for the strict version:** the field moved *away* from schema-only because it underperforms.
+Sample rows and value retrieval are standard in competitive systems; adding first-few-rows to CREATE
+TABLE statements is reported to raise Spider scores by around 6 points *(**unverified** — secondary
+source; pin before relying on it)*. MaskSQL, which is far more permissive than loke in that it sends
+*masked* values, still pays roughly **20 execution-accuracy points** on BIRD.
+
+**Consequences.**
+1. Do not position the data flow as novel. A reviewer retires that claim in one sentence.
+2. Expect the no-custody arm to **lose** to a data-in-prompt baseline on some question classes. Plan
+   the work around quantifying that cost credibly, not around proving it does not exist.
+3. Do not claim "low leakage". **arXiv:2406.14545** (*Zero-Knowledge Schema Inference Attacks*,
+   Findings of NAACL 2025) reconstructs table names from a deployed text-to-SQL system at **F1 up to
+   0.99** against generative models and 0.78 against fine-tuned ones. Schemas encode business logic,
+   regulatory scope and sometimes values in column names. Reformulate as **bounded and auditable**:
+   O(schema) rather than O(data), declared, with the exact bytes reviewable.
+
+## 11. The unaddressed hole: a returned query is a channel
+
+A query is an information channel even when no row is transmitted. An adversary — or a compromised
+model — that can shape queries and observe results across multiple turns can extract cell values a
+piece at a time: a query-shaped oracle, including binary-search style extraction over N requests.
+
+**No published benchmark tests this.** "The model never receives data" is therefore true at the byte
+level and potentially false at the information level. If the enforcement layer does not bound it, this
+is precisely the gap that sinks a security claim. It must be stated as an open problem and given a
+story, not asserted away. Tracked in NC1 and AD1.
+
+## 12. Where loke is genuinely differentiated
+
+1. **Enforcement, not architecture.** Every commercial comparable is redact-and-forward, block-and-
+   exclude, or detect-at-the-keyboard — see §14. The text-to-SQL products get the data flow right *by
+   accident* and make **no security claim at all**: no threat model, no injection resistance, no
+   artifact validation, no provenance. Being first to treat that data flow as a security control with
+   a proof obligation and an audit trail is the real contribution.
+2. **No proxy-level injection benchmark exists.** The closest work evaluates guardrail classifiers
+   *inside* an agent harness; one paper uses a proxy as the *attacker*, not the enforcement point.
+   This is a clean, publishable gap.
+3. **The dominant patent does not read on loke.** See §15.
+4. **The closest academic work leaves the runtime open.** arXiv:2510.03662 is an offline oracle with
+   no enforcement, no adversary and no structured data — and its central finding argues *for* an
+   architectural control: models are biased toward abstraction and **systematically overshare**, so a
+   model-mediated minimisation decision cannot be trusted.
+
+## 13. Benchmark selection, and the trap in it
+
+**Primary: InfiAgent-DABench** (arXiv:2401.05507, ICML 2024, Apache-2.0). 257 closed-form questions
+over 52 CSV files, 7 concept categories *and* 9 domains — the "7 categories" figure is the concept
+axis, not the domain axis. Scoring is strict: a question counts only if **all** its sub-questions are
+correct. Requires a Python execution sandbox (Docker or subprocess).
+
+DABench is the right primary **because it is the only candidate where paste-the-data is the honest
+status quo baseline.** On BIRD and Spider, schema-only is already the norm, so measuring it there
+proves nothing.
+
+> **The single largest internal-validity threat.** DABench's harness post-processes model output into
+> its `@answer_name[value]` template using a separate reformat model. That reformat step is worth up
+> to **32 accuracy points**: Mistral-7B-Instruct goes 6.23 → 38.67, Qwen-72B 44.75 → 59.92, GPT-4
+> 72.76 → 78.99. That is larger than any plausible effect of the disclosure regime under test. If the
+> treatment arm returns a structured spec (naturally parseable) and the baseline returns prose with an
+> embedded answer, the experiment measures **format compliance** and calls it privacy-preserving
+> correctness. The reformat step must be identical, frozen and applied symmetrically, and both
+> reformat-on and reformat-off numbers must be reported.
+
+**Statistical note.** 257 items gives roughly ±6 pp binomial confidence at 95%. Comparisons must be
+**paired on identical items** with McNemar's test, not two independent proportions.
+
+**Secondary: BIRD Mini-Dev** (500 items across SQLite/MySQL/PostgreSQL; CC BY-SA 4.0). Metrics are
+**EX** (execution accuracy, set equality on returned rows) and **R-VES**, which has replaced raw VES
+and is computed *only over queries that pass EX* — so R-VES is **not comparable across systems with
+different EX** and must never be a standalone headline. BIRD is near saturation: leaderboard EX is
+around 82 against reported human performance of 92.96, so a ±2 pp privacy cost sits inside leaderboard
+churn.
+
+**Avoid Spider 2.0-Snow.** The annotation-error audit below found a **62.8–66.1% error rate on Snow
+specifically**, which makes scores above about 80 close to meaningless. Lite or DBT are defensible.
+Spider 2.0 schemas "often contain over 1,000 columns", up to around 3,000 — *the frequently-quoted
+"average 700–800 columns" is secondary-source only and should not be asserted.* Spider 2.0's relaxed
+execution-accuracy semantics live in the evaluation code and are **not documented** on the official
+site — read the evaluation suite before relying on them.
+
+**Tertiary: DataSciBench** (arXiv:2502.13897; 222 effective prompts / 519 test cases; GPT-4o best API
+at 64.51%).
+
+### The corrected-benchmark critique — cite the right version
+
+Two versions of this work exist and they disagree. **Cite the journal version as primary:** Jin, Choi,
+Zhu, Kang (UIUC), *Pervasive Annotation Errors Break Text-to-SQL Benchmarks and Leaderboards*,
+**arXiv:2601.08778 v3 = PVLDB Vol 19 No 5**, CC BY 4.0. It re-evaluates **16** open-source agents and
+reports score changes of **−7% to 31%** and ranking changes of **−9 to +9** positions. The CIDR 2026
+workshop precursor (*Text-to-SQL Benchmarks are Broken*) covers 5 systems and reports −3% to 31%.
+Error rates: **BIRD Mini-Dev 52.8%**; Spider 2.0-Snow 62.8% (journal) or 66.1% (CIDR).
+
+Rank-correlation evidence worth quoting: uncorrected versus full dev ranking gives Spearman
+**rs = 0.85, p = 3.26e-5**; corrected versus full dev gives **rs = 0.32, p = 0.23** — not significant.
+
+> **Correction to an earlier note in this project's planning:** the claim that CHESS rose from 62% to
+> 81% after correction is **wrong**. The paper reports **67.3% → 76.3% (+9.0 pp)**. A secondary source
+> claims it moved 7th → 1st; that rank change is **unverified**. Do not restate 62 → 81.
+
+**The pre-emption loke should use is stronger and cheaper than the paper's own recommendation.**
+Because loke's comparison is **within-benchmark and paired** — same question, same data, two disclosure
+regimes — annotation errors are a *shared* confound that largely cancels in the difference. Say so
+explicitly, then: report paired deltas rather than leaderboard-style absolutes; hand-audit a stratified
+random sample of about 100 items and publish the audit; and report both raw and audited subsets. That
+converts the objection into a methods contribution.
+
+### Other candidates, one line each
+
+| Benchmark | Size | Execution needed? |
+|---|---|---|
+| DS-1000 | 1,000 problems, 7 Python libraries | Yes |
+| ARCADE | 1,082 problems / 136 notebooks / 106 datasets | Yes (fuzzy dataframe match) |
+| TableBench | 3,681 tables, avg 16.7 rows × 6.7 cols | Optional (PoT/SCoT modes) |
+| WikiTableQuestions | 4,344 questions | No |
+| TabFact | 118,275 statements over 16,573 tables; 2,024-pair test slice | No |
+| SpreadsheetBench | 912 instructions / 2,729 test cases | Yes (spreadsheet runtime) |
+| SheetCopilot | 221 spreadsheet control tasks | Yes (live spreadsheet app) |
+
+## 14. Injection and enforcement evaluation
+
+**AgentDojo** (arXiv:2406.13352, NeurIPS 2024 D&B, latest v3 Nov 2024): **97 user tasks, 629 security
+test cases**, four suites. Metrics **Benign Utility**, **Utility Under Attack**, **Attack Success
+Rate**. It is now a **regression suite, not a discriminator** — use it for a floor, never as a headline.
+
+**The methodological trap, with numbers.** A re-evaluation (AgentDyn, arXiv:2602.03117) on GPT-4o:
+
+| Defence | Utility under attack | ASR |
+|---|---|---|
+| Prompt Sandwiching | 56.13% | 31.17% |
+| Spotlighting | 52.24% | 27.61% |
+| **Tool Filter** | **4.91%** | **4.22%** |
+
+Tool Filter looks best on a security-only leaderboard while having destroyed the agent. Meta SecAlign,
+state of the art on AgentDojo at ~1.9% ASR, rises to ~9% on AgentDyn — the AgentDojo figure is a
+benchmark artefact.
+
+**Mandatory for loke:** never report ASR without paired Utility-Under-Attack from the same run; define
+a composite acceptance gate up front (for example, ASR ≤ X% *at* UuA ≥ 0.9 × Benign Utility); and
+report **false-block rate on a clean benign corpus**, because over-refusal is the failure mode a
+schema-enforcing proxy is most exposed to.
+
+**Single-turn injection is saturated; multi-step and persistent attacks are where the signal is.**
+**ClawTrojan** (arXiv:2605.31042, RUC-NLPIR, May 2026) reaches **95.5% ASR on a GPT-5.4-class local
+agentic harness while existing single-turn injections produce near-zero ASR on the same model.** Its
+shape is the one that matters for loke: the injection hides in a file or tool output, is **persisted
+into workspace state**, and executes in a **later session** — no individual step is malicious.
+**StepJack** (arXiv:2608.06477, 480 examples) shows multi-step raising ASR on 3 of 6 computer-use
+agents by up to +31.2 pp, e.g. GPT-5.4-mini 41.7% → 72.9%.
+
+Still-discriminative corpora to use, rather than AgentDojo alone: **ClawTrojan**, **StepJack**,
+**AgentDyn** (60 tasks / 560 injection cases, tasks averaging 7.1 steps, 10 defences in 4 families
+including real guardrail models), **Alizadeh et al.** (arXiv:2506.01055 — data-flow exfiltration
+grafted onto AgentDojo; 15–50 pp utility drop, average ASR ~20%; models resist leaking passwords but
+readily leak other personal data — **the closest published methodology to loke's exfiltration
+evaluation, to extend rather than reinvent**), **ToolPrivacyBench** (arXiv:2606.28061 — purpose-bound
+disclosure, with a ready-made over-disclosure metric), and **Adaptive Evaluation of Out-of-Band
+Defenses** (arXiv:2606.26479 — the methodological standard a proxy will be judged against; read it
+before designing the harness).
+
+Also: **Agent Security Bench** (arXiv:2410.02644, ICLR 2025) — 16 attack types × 11 defences × 10
+scenarios, highest average ASR **84.3%**. **InjecAgent** — 1,054 cases; GPT-4 vulnerable 24% baseline
+rising to 47% with enhanced attack prompts. A 2026 taxonomy analysis (arXiv:2605.16282) finds these
+suites disagree with one another, so **cross-benchmark ASR numbers are not commensurable** — pick two,
+freeze versions, report both.
+
+### Designing a proxy-specific corpus
+
+Organise it around loke's **own invariants**, not around "did the agent misbehave":
+
+- **I1** no data row value crosses the boundary outbound
+- **I2** the returned artifact is well-formed in the permitted language, over the declared schema only
+- **I3** executing the artifact touches only authorised data and opens no outbound channel
+- **I4** state persisted by one request cannot alter the enforcement decision of a later one
+
+Four attack families, each keyed to an invariant:
+
+1. **Outbound disclosure (I1)** — injections in the *question* that induce the client to attach rows;
+   schema field names that encode data (`col_ssn_078_05_1120`); requests for "sample values to
+   disambiguate"; and **iterative oracles that extract a cell value over N requests through
+   query-shaped channels alone**. This last class is the real hole in schema-only architectures and
+   almost nobody tests it — see §11.
+2. **Artifact abuse (I2/I3)** — returned code containing side-effecting constructs: `COPY TO`,
+   `INTO OUTFILE`, UDF or extension loading, `ATTACH`, `requests.post`, `os.system`, DNS-resolving
+   hostnames in string literals, `pd.read_csv('http://…')`. Include encoding and **parser-differential**
+   variants: a differential between loke's validator and its executor is the classic proxy bug.
+3. **Data-flow exfiltration** — the Alizadeh methodology; grade on what data reached the attacker, not
+   on whether the model complied. Include exfiltration via error messages, timing and row counts.
+4. **Persistence (I4)** — ClawTrojan-shaped: injections landing in cached schema descriptions, column
+   comments, saved queries, semantic-layer metadata, few-shot examples or user memory, firing on a
+   later request. **If loke caches schemas or learns from prior queries, this is the highest-severity
+   untested class.**
+
+Per case, record: invariant targeted, injection surface, turn count, adaptive versus static, and a
+concrete ground-truth oracle. Every attack case needs a **paired benign twin** so over-refusal is
+measured on the same distribution. Report a 4-tuple per configuration: Benign Utility, Utility Under
+Attack, ASR, False-Block Rate. Add an **adaptive tier** — publish the enforcement rules, let a red team
+optimise against them for a fixed budget, and report static and adaptive ASR separately. Static-only
+ASR will not be believed.
+
+### The enumerable bypass corpus — six classes, each with authority
+
+Claiming unbypassability is not survivable. Claiming "enforced at N of 6, with these requiring endpoint
+or managed-policy co-deployment" is.
+
+1. **Default TLS-interception exemptions.** Vendors ship do-not-decrypt lists *enabled by default* and
+   document that pinned and mutually-authenticated TLS cannot be inspected. **Test: does any LLM API
+   endpoint fall in a default exemption category?**
+2. **Certificate pinning in native apps and SDKs.** Vendor guidance for resigning failures is a
+   do-not-decrypt rule — deliberate loss of visibility. Browser-facing pinning (HPKP, RFC 7469) was
+   deprecated and removed from Chrome by v67, so the risk now concentrates in native clients.
+3. **Split tunnelling.** A shipped product feature, including **URL-based split tunnelling as a browser
+   extension**. **Test: can a user exclude an API host without admin rights?**
+4. **Browser extensions** — both a bypass vector (requests originate outside an interposing agent's
+   view) and, conversely, the only enforcement point that survives encrypted transport metadata.
+   Related control: Chrome Enterprise `CACertificateManagementAllowed` governs whether a user can
+   remove an interception root.
+5. **Encrypted transport metadata — newest and most serious.** **RFC 9849, TLS Encrypted Client Hello,
+   Standards Track, published March 2026**; OpenSSL shipped support 11 March 2026. SNI-based DLP rules
+   fail **silently** against ECH-enabled destinations. Adjacent: QUIC/HTTP-3 and DoH (RFC 8484).
+   *(Reported mitigation via managed browser policy is **unverified** — confirm the policy name.)*
+6. **Direct-to-API egress with its own credentials.** The residual case, over pinned or ECH-protected
+   TLS. **No vendor documents a reliable network-layer control**; every documented answer is
+   non-network (endpoint agent, browser extension, managed policy, or provider-side key restriction).
+   loke must include this case and state honestly that network enforcement alone does not cover it.
+
+## 15. Patents
+
+**US 12,554,888, "Privacy-preserving prompt engineering for generative artificial intelligence."**
+Assignee **SAP SE**; filed 17 Nov 2023, granted 17 Feb 2026. Claim 1: receive prompt via UI → detect
+sensitive data violating a security protocol → generate a modified prompt anonymising it → submit to
+the LLM → receive a reply containing anonymised data → generate a modified reply that **de-anonymises**
+→ present. That is textbook redact-and-forward with round-trip de-anonymisation, and it reads on
+Presidio-style gateways, Nightfall, and MaskSQL's mapping step.
+
+**It does not read on loke's primary path**, because there is no sensitive data in the prompt being
+anonymised and no de-anonymisation of the reply — loke sends a schema and receives a query. That is a
+genuine design-around **provided loke never adds value-masking to the question path.** The moment it
+does, it lands inside the claim.
+*(Inventor attribution is **unverified** — sources conflict between Laurent Gomez and
+Hegde/C K/Venugopal. Resolve against the granted PDF before any freedom-to-operate work.)*
+
+**US 12,556,533, "Protecting private information during large language module interactions."** Assignee
+**Gen Digital**; filed 26 Mar 2024, granted 17 Feb 2026. Claim 1 covers sensitivity-scored
+**provider routing** plus a **credential-decoupling relay** so the provider cannot link a prompt to the
+user. Not redaction. Relevant only if loke does sensitivity-tiered routing or acts as a shared-credential
+relay — note loke's router **does** route by sensitivity, so this one deserves a closer read.
+
+**No patent found claiming schema-out/execute-locally** — but that is because it is well-known
+published practice, not unclaimed white space. Novelty is likely barred by Ask Safely
+(arXiv:2512.04852) and the schema-driven-query literature. Any IP strategy should target the
+**enforcement** layer, not the data-flow shape.
+
+## 16. Commercial comparables — none execute artifacts locally
+
+| Product | Mechanism | Executes model output against unseen data? |
+|---|---|---|
+| LiteLLM | Routing, keys, budgets, fallbacks. **No built-in guardrails**; PII delegated to external services via hooks | No |
+| Portkey | Guardrails run on Portkey's infrastructure before the model; deny/log/retry. Custom PII logic is Enterprise-gated | No |
+| Cloudflare AI Gateway | Caching, rate limiting, retries, logging. **No native PII redaction or moderation** | No |
+| Kong AI Gateway | Built-in PII sanitisation plus cloud guardrail integrations | No |
+| Microsoft Purview DLP for M365 Copilot | Policy conditions on sensitive-information type or sensitivity label; actions **block prompt** or exclude labelled files from grounding | No — block-and-exclude, not even redact |
+| Nightfall AI | POST the outgoing prompt to a scan endpoint, receive findings **plus a redacted payload**, forward the redacted prompt yourself | No — canonical redact-and-forward |
+| Harmonic Security | Small models **at the point of typing**, in-browser, before submit | No |
+| Prompt Security (SentinelOne, acquired Aug 2025) | Endpoint agent plus browser extension, DOM analysis, semantic DLP redacting before the prompt reaches the tool | No |
+
+Group B — the ones that *do* share loke's data flow — are Vanna, WrenAI, Cortex Analyst and Genie
+(§10). They make **no security claim**, which is exactly the space loke occupies.
+
+## 17. Revised assessment
+
+**The architecture is table stakes; the enforcement, the threat model and the measurement are the
+product.** Lead with the proxy-specific invariant-keyed attack corpus (§14), the persistence and
+data-flow classes in particular, and with the honest bypass enumeration (§14, six classes). Treat the
+correctness benchmark as a **cost measurement loke is candid about**, not a novelty it is claiming —
+and expect the no-custody arm to lose ground on some question classes.
+
+Written the other way round, the engineering would be correct and the positioning would not survive
+first contact with a reviewer or a competitor.
+
+### Verification debt
+
+These were not confirmed and must be checked before being relied on: the CHESS correction figures by
+hand against the paper's tables; Spider 2.0's relaxed-EX definition from its evaluation suite; the
+"+6 pp from sample rows" Spider result; per-category annotation-error counts; the inventor of
+US 12,554,888; CyberSecEval per-category ASR ranges; AgentDojo's own per-defence table (the numbers in
+§14 are AgentDyn's re-evaluation and must not be attributed to AgentDojo); the "adaptive attacks bypass
+>90% of defences" and "78-study meta-analysis" claims; ToolPrivacyBench's case count; and the Chrome
+ECH policy name.
