@@ -300,10 +300,10 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| A3.1 | L | **Spec done** | Policy definition format and loader (YAML/TOML, enterprise URL fetch, merge rules, hot-reload) |
-| A3.2 | M | **Spec done** | Regional regulatory defaults (EU GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA) |
-| A3.3 | M | **Spec done** | Compliance feedback loop (response scanning, warning UI, require-confirmation mode) |
-| A3.4 | L | **Spec done** | Audit reporting and export (PDF/CSV/JSON, time ranges, templates, scheduled reports) |
+| A3.1 | L | **Done** | Policy definition format and loader (YAML/TOML, enterprise URL fetch, merge rules, hot-reload) |
+| A3.2 | M | **Done** | Regional regulatory defaults (EU GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA) |
+| A3.3 | M | **Done** | Compliance feedback loop (response scanning, warning UI, require-confirmation mode) |
+| A3.4 | L | **Done** | Audit reporting and export (PDF/CSV/JSON, time ranges, templates, scheduled reports) |
 
 ## Epic A4: User Onboarding & Experience
 
@@ -311,10 +311,10 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| A4.1 | L | **Spec done** | First-run setup wizard (hardware check, Ollama install, provider config, privacy presets, test interaction) |
-| A4.2 | M | **Spec done** | Pipeline visibility panel (real-time stage display, expandable details, CLI --verbose equivalent) |
-| A4.3 | M | **Spec done** | Savings dashboard (tokens saved, cost saved, PII intercepted, local ratio, trends) |
-| A4.4 | M | **Spec done** | Prompt approval workflow for beta (pre-send display, approve/edit/cancel, "don't ask again") |
+| A4.1 | L | **Done** | First-run setup wizard (hardware check, Ollama install, provider config, privacy presets, test interaction) |
+| A4.2 | M | **Done** | Pipeline visibility panel (real-time stage display, expandable details, CLI --verbose equivalent) |
+| A4.3 | M | **Done** | Savings dashboard (tokens saved, cost saved, PII intercepted, local ratio, trends) |
+| A4.4 | M | **Done** | Prompt approval workflow for beta (pre-send display, approve/edit/cancel, "don't ask again") |
 
 ## Epic A6: Desktop Distribution
 
@@ -335,9 +335,9 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| A5.1 | M | **Spec done** | Issue reporting form (accessible from any view, captures type/description/repro steps/expected behaviour/optional screenshots, configurable destination — API endpoint, email, or external tracker) `[R14.1]` |
-| A5.2 | M | **Spec done** | AI-assisted report drafting (optional: use LLM via privacy pipeline to help user refine problem statement and benefit description; form works without AI) `[R14.2]` |
-| A5.3 | M | **Spec done** | Version check and update notification (check configurable endpoint daily or on demand, display update availability in UI, manual update trigger in settings — no auto-update) `[R11.1, R11.2]` |
+| A5.1 | M | **Done** | Issue reporting form (accessible from any view, captures type/description/repro steps/expected behaviour/optional screenshots, configurable destination — API endpoint, email, or external tracker) `[R14.1]` |
+| A5.2 | M | **Done** | AI-assisted report drafting (optional: use LLM via privacy pipeline to help user refine problem statement and benefit description; form works without AI) `[R14.2]` |
+| A5.3 | M | **Done** | Version check and update notification (check configurable endpoint daily or on demand, display update availability in UI, manual update trigger in settings — no auto-update) `[R11.1, R11.2]` |
 
 ---
 
@@ -767,6 +767,7 @@ loke is local-first and single-user by design. The companion device support (F8)
 | MK4.8.4 | S | **Done** | **Insight Lab demo configs per dataset** — Pre-configured analysis settings per dataset: Customer Intelligence → k=4 clustering on spend/frequency, Medicare → anomaly detection on benefit_paid, Water Quality → correlation matrix on chemical readings. One-click to run with sensible defaults. |
 | MK4.8.5 | M | **Done** | **Dashboard export** — Export rendered dashboard as PNG (html2canvas already loaded), JSON DDL (the chart definition), or shareable link (encode DDL in URL hash). Export button on dashboard header. |
 | MK4.8.6 | S | **Done** | **Dashboard templates** — Save/load dashboard configurations. Store DDL in localStorage with name. Template selector dropdown on dashboard page. Share templates between datasets. |
+| MK4.8.7 | M | **Done** | **Semantic colour coding for chart values** — Dashboard charts should colour-code data values by semantic meaning when grouping by categorical columns. Three tiers: (1) **Known-value matching** — pattern-match group labels against a built-in dictionary: negative/warning/error terms (failed, critical, expired, breach, overdue, rejected, blocked, offline, down, high-risk, P1, RESTRICTED) → red; positive/success terms (passed, healthy, active, approved, resolved, online, up, compliant, low-risk, PUBLIC) → green; neutral/missing terms (unknown, null, n/a, other, pending, none, unclassified) → grey. (2) **LLM-assisted** — when the LLM generates DDL, it can nominate `"colour": "red"/"green"/"amber"/"grey"` per data series based on the question context (e.g., "show servers with expired warranties" → expired = red, valid = green). Add `colour` as an optional field in the DDL card schema. (3) **Local pattern fallback** — for values not in the dictionary and no LLM hint, run a simple client-side classifier: numeric ranges (high = amber/red, low = green for metrics like CPU/error rate; inverted for metrics like uptime/availability), boolean (true = green, false = red), status-like strings (regex against common status patterns). Implement the colour map as a JS object in `dashboard.tkt` with the dictionary and pattern matcher. Chart.js `backgroundColor` array populated per data point. |
 
 ## Epic MK4.9: Data Experience & Multi-Dataset Workspace
 
@@ -1075,12 +1076,12 @@ loke is local-first and single-user by design. The companion device support (F8)
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| GA4.1 | S | | **Unblock G1-G4 governance epics** — Review and update the 17 governance stories (G1: gateway, G2: transparency, G3: monitoring, G4: dashboards) for current architecture. Remove any blockers related to ooke readiness (now resolved). Schedule for implementation. |
-| GA4.2 | S | | **Unblock AG1 agent framework** — Review the 8 agent framework stories for current architecture. These depend on memory (M1) — establish dependency chain and schedule. |
-| GA4.3 | S | | **Unblock M1-M2 memory system** — Review the 11 memory palace and AAAK stories. These are foundational for agents. Schedule for implementation. |
-| GA4.4 | S | | **Implement A3 policy engine** — Move 4 stories from "Spec Done" to active development: policy loader, regulatory defaults, compliance feedback loop, audit reporting. |
-| GA4.5 | S | | **Implement A4 onboarding** — Move 4 stories from "Spec Done": first-run wizard, pipeline visibility panel, savings dashboard, prompt approval workflow. |
-| GA4.6 | S | | **Implement A5 feedback pipeline** — Move 3 stories from "Spec Done": in-app feedback form, issue report drafting, status updates. Also unblock X5 (3 stories): universal widget, feedback-to-development pipeline, feedback-driven learning loops. |
+| GA4.1 | S | **Done** | **Unblock G1-G4 governance epics** — Review and update the 17 governance stories (G1: gateway, G2: transparency, G3: monitoring, G4: dashboards) for current architecture. Remove any blockers related to ooke readiness (now resolved). Schedule for implementation. |
+| GA4.2 | S | **Done** | **Unblock AG1 agent framework** — Review the 8 agent framework stories for current architecture. These depend on memory (M1) — establish dependency chain and schedule. |
+| GA4.3 | S | **Done** | **Unblock M1-M2 memory system** — Review the 11 memory palace and AAAK stories. These are foundational for agents. Schedule for implementation. |
+| GA4.4 | S | **Done** | **Implement A3 policy engine** — Move 4 stories from "Spec Done" to active development: policy loader, regulatory defaults, compliance feedback loop, audit reporting. |
+| GA4.5 | S | **Done** | **Implement A4 onboarding** — Move 4 stories from "Spec Done": first-run wizard, pipeline visibility panel, savings dashboard, prompt approval workflow. |
+| GA4.6 | S | **Done** | **Implement A5 feedback pipeline** — Move 3 stories from "Spec Done": in-app feedback form, issue report drafting, status updates. Also unblock X5 (3 stories): universal widget, feedback-to-development pipeline, feedback-driven learning loops. |
 
 ## Epic T15: Full Test Suite Audit and Expansion
 
@@ -1099,3 +1100,199 @@ loke is local-first and single-user by design. The companion device support (F8)
 | T15.9 | S | **Done** | **Fix known test failures** — Address `test_kill_switch` exit 139 (toke `.get()` dispatch regression). Fix any other test failures discovered in T15.1. Target: 100% of existing tests passing. |
 | T15.10 | S | **Done** | **Run full regression and update coverage doc** — Execute `scripts/run_tests.sh` with all new tests. Update `docs/test-coverage.md` with final module coverage map. Target: >80% of source modules have at least one test file. Report total tests, pass rate, and any remaining gaps. |
 
+
+---
+
+# NO-CUSTODY ARCHITECTURE
+
+> **Why this layer exists**
+>
+> loke's original core path is: detect PII, substitute placeholders, send the redacted text to an
+> external model. Peer-reviewed work establishes that this is not an effective privacy defence —
+> large models infer and re-identify obscured entities from surrounding context (Staab et al.,
+> ICLR 2024, arXiv:2310.07298; Staab et al., ICLR 2025, arXiv:2402.13846; RUPTA, arXiv:2407.11770;
+> the Text Anonymization Benchmark, *Computational Linguistics* 48(4), 2022). Redaction reduces
+> disclosure; it does not prevent identification.
+>
+> The architecture that does not depend on redaction working is one where **the model never receives
+> the data at all**: loke sends a schema profile and the user's intent, the model returns an
+> executable artifact, and loke runs that artifact locally against data that never leaves the device.
+>
+> **Before writing or repositioning any claim in this layer, read
+> `docs/research/disclosure-measurement-findings.md`.** It records what the external literature
+> already establishes, what remains genuinely open, and — in §8 — a list of nine things loke must not
+> claim because they are already published or are definitions rather than findings.
+>
+> loke already implements this, in one place, without having named it. moke's Insight Lab sends only
+> column names, receives an analysis specification, and executes it locally
+> (`packages/moke/src/ml/proposal.tk`, `packages/moke/templates/insight.tkt`). This layer makes that
+> pattern the primary architecture rather than an accident, and demotes anonymise-and-send to an
+> explicitly-labelled fallback for the cases that genuinely require prose in the prompt.
+
+## Epic NC1: No-Custody Artifact Execution
+
+*Make schema-out / artifact-back / execute-locally the default path. The model receives names, types and intent; it never receives rows.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| NC1.1 | M | | **Define the artifact contract** — Specify the closed operation set an artifact may express, building on the existing `$dashboard` DDL (`packages/moke/src/ddl.tk`) and the 15 operations in `packages/moke/src/compute.tk` (`opcount`, `opsum`, `opavg`, `opmin`, `opmax`, `opgroup`, `optimeseries`, `optopn`, `opdistribution`, `opcorrelate`, `oppercentile`, `opcountby`, `oplatest`, `opdistinct`, `opjoin`). The set MUST remain non-Turing-complete and MUST NOT include arbitrary code: toke exposes no sandboxing primitive (`process.tki` offers spawn/wait/kill only, with no jail, resource cap or syscall filter), so a closed op set is the only safe design. Write `docs/specifications/artifact-contract.md` with the grammar, the validation rules, and the explicit rejection criteria. |
+| NC1.2 | M | | **No-custody schema profile** — Build a profile emitter that carries column names, inferred types, cardinality, null-rate and row count, and **nothing else**. This replaces `packages/moke/src/hooks.tk::profiletotoon` and `packages/core/src/optimiser/profiler.tk::totoonschema`, both of which currently embed **three real sample values per column plus real min/max/mean** — so today's "schema-first" request ships real data. Acceptance: a profile built from a dataset containing a unique sentinel value contains that value zero times. |
+| NC1.3 | M | | **Wire the Insight Lab's proposal path** — The no-custody LLM path never executes: `packages/moke/templates/insight.tkt:897` posts `{columns: [...]}` while `packages/moke/pages/api/ml.tk:146-160` requires at least one of `schema_toon`, `num_cols`, `cat_cols` and returns 400 otherwise, so the client silently falls back to `heuristicSuggestions()`. Fix the contract, and fix `packages/moke/src/ml/proposal.tk`'s `if(i<n){...}` loops, which process only one element where `lp` was intended. |
+| NC1.4 | L | | **Send the schema on the dashboard path** — `packages/moke/templates/dashboard.tkt`'s `buildPhase1Prompt(question)` sends only the question while telling the model *"You have access to this dataset"*. It does not. Pass the NC1.2 profile. Remove the instruction `Use realistic sample values that match the dataset schema` from both system prompts (`:1019` and `:1095`), and the equivalent clause in `templates/chat.tkt:2527`. |
+| NC1.5 | M | | **Make fabricated values inadmissible** — Drop `normaliseDDL`'s ingestion of the model's `data` array into the render slot (`dashboard.tkt:448-468`) and the `Math.round(Math.random() * 900 + 100)` chart fallback (`:791-794`). A card with no locally-resolved value MUST NOT display a number. |
+| NC1.6 | M | | **Provenance state on every card** — Render one of `resolved` / `unresolved` / `no-data` per card. `renderMetricCard` (`dashboard.tkt:714`) currently emits `→ computed locally` **unconditionally**, including on values the model invented; the only honest signal today is a `console.info` no user sees. `resolveQueries` MUST record why each `continue` fired so the reason can be surfaced. |
+| NC1.7 | L | | **Promote local execution into core** — `packages/moke/src/compute.tk::execute()` is a complete local query engine with no production caller. Make it (or a core equivalent) the execution target for artifacts, and add a second backend using toke's parameterised SQL (`std.db`'s `db.many` with bound parameters) so generated queries can run against the local store without string interpolation. |
+| NC1.8 | M | | **Demote anonymise-and-send to a labelled fallback** — Keep the path for tasks that genuinely need prose, but make selecting it explicit, record it as a custody event (DA1), and state its residual risk at the point of use. Update the pipeline so no-custody is attempted first and the fallback is a deliberate, logged decision rather than the default. |
+| NC1.9 | M | | **Fail closed** — `packages/browser/pages/api/pipeline.tk` currently falls back to five `str.contains` checks when the detection sidecar is unavailable and **still transmits**. A filter that fails open is worse than one that fails closed. When no detection layer is healthy, return 503; never dispatch. |
+| NC1.10 | S | | **Correct the architecture documents** — `docs/features-moke.md:200` states the schema is sent on the dashboard path; it is not. Update `docs/architecture.md` so the pipeline diagram shows the no-custody path as primary and the redaction path as fallback. |
+
+## Epic DA1: Disclosure Accounting
+
+*Record what actually left the device on every external call. Today nothing does.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| DA1.1 | M | | **Define the disclosure record** — Per external call: bytes transmitted, estimated tokens, field/column names disclosed, entity types and counts, whether any real data values were included, a custody flag (`no-custody` / `redacted-data` / `raw`), model and provider, and the correlation ID. This is the substrate every later claim depends on. |
+| DA1.2 | M | | **Create the missing metrics table** — `packages/core/src/metrics/collector.tk` writes to `metrics_raw`, which **no migration creates** (`packages/core/src/storage/migrations.tk` defines only `schema_migrations`, `settings`, `audit_log`, `placeholder_maps`, `sessions`), so `record()` fails at runtime. Add the migration, extend the schema with the DA1.1 fields, and fix `summarise()`'s hardcoded `avgsavingpct:0.0` (`collector.tk:91`). |
+| DA1.3 | M | | **Wire the collector** — Nothing anywhere calls `collector.record`. Call it on every external dispatch. Acceptance: after one request, exactly one row exists with non-null disclosure fields. |
+| DA1.4 | S | | **Typed stage records** — `packages/moke/src/console_log.tk`'s `$logentry{stage, status, detail, durationms, ts}` already rides along in the pipeline response and already reports column counts, but `detail` is free text. Add typed disclosure fields so the per-stage record is machine-readable rather than a string. |
+| DA1.5 | S | | **Surface it** — Show disclosure per request in the pipeline panel and in aggregate on the savings view, replacing the hardcoded percentages currently in `packages/browser/templates/savings.tkt:138,225` and `packages/moke/templates/chat.tkt:2764`. |
+| DA1.6 | M | | **Replace the stubbed metrics module** — `packages/core/src/audit/metrics.tk:37-87` returns zeros from every function and `""` from `export()`, while ignoring the `store` and `period` arguments it is passed. Implement against DA1.2. |
+
+## Epic EM1: Exposure Metric
+
+*A disclosure measure that is defined, computed and validated — not asserted. Depends on DA1 and research spike RS2.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| EM1.1 | M | | **Specify the metric on established axes** — Adopt the three axes already established for disclosure risk — **singling out, linkability, inference** — each as a *control-corrected* rate, rather than inventing a scheme (`docs/research/disclosure-measurement-findings.md` §4). A vector, never a weighted-sum scalar with hand-chosen weights. Quasi-identifier *combination* presence is the strongest single component; presence of any real value is a **gate, not a summand**; bytes and tokens are the strawman baseline to beat, not a privacy measure. State the threat model per component — mixing provider-side linkage, third-party analytics exposure and model memorisation into one number is the specific error the consensus literature warns against. If a single display number is needed, present it explicitly as a lossy projection of the validated vector. |
+| EM1.2 | L | | **Validate the metric, do not assert it** — In the order of persuasiveness set out in `docs/research/disclosure-measurement-findings.md` §7: (a) **dose-response** — inject disclosure of known magnitude and show the metric scales with the dose; (b) **Spearman ρ against attack success across ≥30–50 *configurations*** (arm × dataset × model × redaction level, not individual requests) with bootstrap intervals; (c) against **two structurally different attacks** — linkage and attribute inference — since validating only against the attack the metric was built around is circular; (d) reported as **TPR at low FPR on a log ROC**, not AUC, because one confident identification is the breach. Skip membership inference against model weights: prompts to a frontier API are not training data under standard retention, and reaching for it looks like instrument-shopping. If the metric does not correlate, report that. |
+| EM1.3 | M | | **Comparative measurement across arms** — Report exposure for the three arms of CB1 (data-in-prompt, schema-only, full no-custody) on the same workload, so the architectural claim is quantified as *relative reduction*, never as elimination. |
+| EM1.4 | S | | **Surface through the Scorecard pattern** — `docs/design-principles.md:145` already defines an ambient, queryable scorecard tracking "privacy, cost, compliance, local ratio". Exposure belongs there, not in a warning. |
+| EM1.5 | S | | **State the limits** — Publish, alongside the metric, what it cannot measure: inference from context, provider-side retention and training, and correlation across accounts. The metric bounds disclosure, not consequence. |
+
+## Epic PL1: Placeholder Correctness and Linkage
+
+*Fix a live restoration bug, then make the consistency decision deliberately. Depends on research spike RS1.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| PL1.1 | M | | **Fix entity collision — live correctness bug** — `packages/core/src/privacy/ner.tk:83-87` and `ner_local.tk:59-62` both return a **hardcoded constant**, `"[" + label + "_NER_1]"`. Every `PERSON` detected by NER becomes `[PERSON_NER_1]`, so three people in one prompt collapse to one token, and `placeholder.tk:42-55 restore()` then replaces that token with whichever original it encounters first. **A response can therefore return person A's name where person B was referenced.** This is both a correctness defect and a disclosure defect, and it means `docs/security-audit-checklist.md:54`'s `[CRITICAL]` round-trip assertion cannot hold for multi-entity input. |
+| PL1.2 | S | | **Fix the off-by-one in restore** — `placeholder.tk:46` uses `if(i>len){br}` where `len=str.arraylen(...)`, reading one index past the end. The same `if(i>n){br}` idiom appears in `packages/core/src/eval/bench.tk:85,128,171` and `privacy/test_harness.tk:181,190,229`; fix them together. |
+| PL1.3 | M | | **Decide scoping deliberately** — Placeholder indices are ordinal *within a single request* and shared across entity types (`makeplaceholder(entitytype, index)` called with the whole array's length: `regex.tk:85`, `presidio.tk:166`), so the same value gets different tokens in different prompts. Choose between stable-per-entity tokens (better coherence, introduces a cross-prompt linkage channel) and per-session salted tokens (defeats it, costs cross-session continuity), implement the choice as a documented default with the surrogate *style* — opaque token versus type-consistent realistic value — as a second explicit axis. Note the defence is not itself novel: published work already scopes mappings per conversation (`docs/research/disclosure-measurement-findings.md` §2). |
+| PL1.4 | L | | **Measure the residual** — Run the five-arm scoping ablation specified in `docs/research/disclosure-measurement-findings.md` §6 (persistent global / per-session / per-request / no-substitution / **random re-pairing control**), crossed with surrogate style. Report **control-corrected linkage advantage** against the re-pairing arm — never raw accuracy, since type-consistent surrogates leak structure and inflate the naive chance rate — with Wilson intervals, plus TPR at 1% and 0.1% FPR. The headline is the residual after the defence. Framing constraint: the *existence* of a linkage channel from stable surrogates is a definition, not a finding; only the magnitude, the scoping frontier and the residual are results. |
+| PL1.5 | S | | **Correct the documents that assume a property the code lacks** — `~/tk/toke-website/templates/loke.tkt:51` publicly claims "consistent placeholders"; `docs/specifications/regulatory-defaults.md:99` reasons about whether consistent placeholders meet the Recital 26 threshold; `packages/core/src/privacy/placeholder_store.tkc.md:1` claims restoration "across sessions" when the store is scoped `WHERE request_id=?` with 24-hour expiry. All three describe behaviour that does not exist. |
+
+---
+
+# VERIFICATION PROGRAMME
+
+> **Why this layer exists**
+>
+> loke publishes specific numbers — token reduction, pipeline overhead, classification latency,
+> compression ratio, retrieval latency, cache hit rate — and none of them is produced by a
+> measurement. The methodology, however, already exists and is genuinely rigorous:
+> `docs/research/toon-benchmark-methodology.md` specifies named baselines, twelve task types, four
+> data shapes, a licensed dataset table, N with warm-up discard, BCa bootstrap confidence intervals,
+> Wilcoxon signed-rank tests, Benjamini-Hochberg correction, Cliff's delta, SHA-256 frozen snapshots
+> and judge calibration against human annotation. `docs/research/research-proposal.md` §5.2 specifies
+> per-entity precision/recall/F1 and marginal recall per added detection layer.
+>
+> The task is therefore **implementation, not design**. One thing must be built first: `std.test`
+> exposes three assertion functions over string comparison and cannot record a numeric result, so
+> today a test can prove a threshold was met but cannot publish the value it measured.
+
+## Epic VM1: Verification Measurement Substrate
+
+*Build the apparatus that lets a measurement be recorded, repeated and reproduced. Prerequisite for every other story in this layer.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| VM1.1 | M | | **Numeric result sink** — A structured results file (one JSON object per measurement) carrying the value, units, N, the workload identifier, the tokenizer where relevant, the model and its pinned version, the seed, the timestamp and the toolchain commit from `TOOLCHAIN.lock`. `std.test` cannot carry a number, so measurement runs must write results directly rather than asserting through the test harness. |
+| VM1.2 | S | | **Pin what is currently unpinned** — `packages/privacy-filter/server.py:34-38` loads `openai/privacy-filter` with no revision, so the model is whatever the hub resolves at first run. Pin the revision. Record every external model's exact version string in each result. |
+| VM1.3 | M | | **Repetition and intervals** — Run each configuration N times with the first run discarded as warm-up, and report BCa bootstrap confidence intervals, exactly as `docs/research/toon-benchmark-methodology.md` already specifies. No single-run number may be published. |
+| VM1.4 | M | | **Containerised harness** — No Dockerfile exists anywhere in the repo. Add a pinned container so a measurement can be reproduced by someone else, and record the image digest in each result. |
+| VM1.5 | S | | **Numbers out of CI** — `.github/workflows/ci.yml` uploads one artefact containing pass/fail counts only. Add a second artefact carrying measurement results, so a number can be traced to the commit that produced it. |
+| VM1.6 | S | | **Repair and wire the existing harness** — `packages/core/src/eval/bench.tk` is a working keyword-scoring benchmark with no callers, no persistence, and loop bounds that read one element past the end (`:85`, `:128`, `:171`). Give it an entry point, persist through VM1.1, and add the `loke benchmark` subcommand missing from `packages/cli/src/commands.tk`. |
+| VM1.7 | M | | **Implement the TOON methodology** — Build `benchmarks/toon/` to the specification already written in `docs/research/toon-benchmark-methodology.md`: baselines B1 (raw JSON, primary), B2 (minified), B3 (YAML); the named dataset table with licence checks and SHA-256 snapshots; token counting per provider tokenizer rather than the character-length ratio `optimiser/toon.tk:282` currently computes. |
+| VM1.8 | S | | **Single source for published numbers** — Create `docs/metrics-baseline.md` as the only file the project publishes figures from, each with its tokenizer or "bytes", its N and its date; and adopt the precedence rule that any other page disagreeing with it is a bug. Publish negative results there too. |
+
+## Epic CB1: Correctness Benchmark — Three Arms
+
+*Prove that a no-custody architecture can do the work, or find out that it cannot. Depends on VM1 and research spike RS3.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| CB1.1 | M | | **Define the three arms precisely** — (A) data in the prompt; (B) schema only, model answers directly; (C) schema only, model returns an artifact, loke executes locally. State exactly which model does what in each arm, since the strongest objection to a local-first design is that it is handicapped by weak local models — and arm C does not use a local model for generation at all, only for custody. |
+| CB1.2 | L | | **Execution-based scoring harness** — Score by executing the result, not by matching strings, with a gold-executability invariant asserted before any comparison. Report per-arm accuracy with confidence intervals and the paired significance test between arms. |
+| CB1.3 | M | | **Output-contract control** — Adherence to the required output format materially changes scores on published analysis benchmarks, so the contract must be treated as a controlled variable and reported, not left implicit. |
+| CB1.4 | M | | **Pre-empt the corrected-benchmark critique** — Published text-to-SQL benchmarks contain documented annotation errors large enough to move scores substantially. Cite that work, use execution-based scoring, and report results against corrected labels where available rather than waiting to be told. |
+| CB1.5 | M | | **Cost and token accounting per arm** — Tokens per completed task against arm A as the named baseline. This is what makes "minimising token spend" falsifiable; today no baseline workload is defined anywhere. |
+| CB1.6 | M | | **Position against the closest prior art on its own datasets** — The nearest work formalises minimisation as an ordinal lattice over per-entity actions (retain, abstract, redact) and searches it under a utility floor, but **every point in that lattice still sends data to the model**. loke's no-custody path sits outside it, made feasible by moving the computation rather than the data (`docs/research/disclosure-measurement-findings.md` §5). That is a real contribution **only if** loke demonstrates comparable utility at a comparable operating point **on the same datasets** that work uses; anything less reads as redacting everything and losing the task. Also reuse its two black-box recovery audits verbatim so loke's numbers are directly comparable to a published baseline. Schema-only prompting is already standard in text-to-SQL — cite it as support, do not deny it. Depends on RS4. |
+
+## Epic AD1: Adversarial Corpora
+
+*Ground truth for detection, and real attacks for enforcement. None of this exists today.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| AD1.1 | L | | **PII ground-truth corpus** — No labelled corpus exists in the repo and no public dataset is referenced anywhere in code. Build or import one in the span format `[{text, entities:[{start,end,type}]}]` that `docs/epics-and-stories.md` F3b.9 already specifies, with a documented matching rule (exact span versus overlap — currently unspecified anywhere) and locale coverage including Australian identifier types. |
+| AD1.2 | M | | **Entity-level scoring with a recall floor** — False negatives leak identity, so recall is the decisive metric: set a high floor on direct identifiers and report precision as a utility cost, not as the headline. `packages/core/src/privacy/evaluation.tk` already implements correct precision/recall/F1 with zero-division guards but has no callers and no data source — wire it. |
+| AD1.3 | M | | **Marginal value per detection layer** — Report what each added layer contributes in recall and what it costs in false positives, as `docs/research/research-proposal.md` §5.2 already specifies. This is the evidence that determines whether the multi-layer design earns its complexity. |
+| AD1.4 | M | | **Operating-point control** — The sidecar's `confidence_threshold` is declared in `packages/privacy-filter/models.json` and **never applied**: `/detect` and `/anonymise` return every classifier span regardless of score. Without it there is no operating point to tune and no precision/recall curve to report. Plumb it through `packages/core/src/privacy/sidecar_client.tk`, which currently returns unparsed response strings with no timeout or retry. |
+| AD1.5 | L | | **Injection and exfiltration corpus** — Single-turn injection strings are no longer discriminative against current frontier models, so a corpus built from them will score misleadingly well. Include multi-step, data-flow and persistence attacks. Report utility alongside attack success: a defence that blocks everything scores perfectly on a security-only metric while being useless. Depends on RS3. |
+| AD1.6 | M | | **Enumerated bypass corpus** — Every network enforcement point has documented bypass paths: TLS do-not-decrypt exception lists, certificate pinning, split tunnelling, browser extensions, and direct-to-API egress. loke additionally ships `--no-privacy` (`locales/en.json:390`) and its proxy requires opt-in client reconfiguration rather than intercepting anything. Enumerate each path, test it, and publish the result as a threat model rather than claiming unbypassability. |
+| AD1.7 | M | | **Wire Epic F3b's orphaned modules or withdraw the claim** — Ten multi-layer privacy modules have zero importers: `filter_registry`, `layer_config`, `consensus`, `filter_metrics`, `evaluation`, `sidecar_client`, `layer_health`, `entity_routing`, `org_policy`, `test_harness`. `privacy/pipeline.tk` imports none of them and uses its own `dedupentities()`. `consensus.tk:24 resolveoverlaps` ignores its `strategy` argument entirely and marks every detection `action:"mask"`, so the four named strategies exist only as display strings. Either connect them or mark the epic unimplemented. |
+| AD1.8 | S | | **Un-exclude the existing harness** — `packages/core/src/privacy/test_harness.tk` holds seven real PII cases and is explicitly skipped by `scripts/run_tests.sh:25`, so it has never run in CI. |
+
+## Epic GA5: Assurance Evidence
+
+*Make the audit trail something an assessor could actually rely on, and be precise about what it does and does not evidence.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| GA5.1 | S | | **Fix audit timestamps** — `packages/core/src/storage/audit.tk:47` writes the **string literal** `'now()'` into `created_at`, so every row carries the same seven characters instead of a time. `ORDER BY created_at` is therefore undefined and the period filters in `packages/core/src/governance/dashboard.tk:63,75,86,97` cannot work. Without a time basis there is no period, and without a period there is no evidence of a control operating *over* one. |
+| GA5.2 | M | | **Real hash chain** — `audit.tk:38` computes `hash = str.concat(correlationid, eventtype)`. That is not a hash, it covers none of the payload, and `prev_hash` is stored but is **not an input**, so nothing chains. Compute a cryptographic digest over a canonical serialisation of every persisted field **including the previous row's hash**, using an unambiguous field separator and a defined genesis value. toke provides `crypto.sha256`, `crypto.tohex` and `crypto.constanteq`. |
+| GA5.3 | M | | **Chain verification** — No verifier exists anywhere in the codebase. Add one that reads forward in insertion order, recomputes each digest, and reports the first divergent row. Expose it so a user can check their own trail. Acceptance: detects a field mutation, a digest mutation, **and a deleted row** — deletion is the case that proves the chain actually chains. |
+| GA5.4 | S | | **Delete the duplicate implementation** — `src/core/audit/trail.tk` is worse than the live one: `chainhash()` returns `str.fromi32(str.len(acc))` (a string length), `verifychain()` is hardcoded `<true`, and `newevent()` sets `let now:i64=0`. It has no callers and has never compiled. Remove it rather than fixing it. |
+| GA5.5 | M | | **Persist the decision trace** — `packages/core/src/governance/trace.tk`'s `$decisiontrace` has seventeen well-chosen fields, no caller, no table and no insert; `complete()` writes a single log line and discards the structure. Persist it, and add the fields an assessor needs that exist nowhere in `$auditevent`: policy decision, entities detected, detection layer, approval or override outcome, and kill-switch state. |
+| GA5.6 | M | | **Fix the report engine** — `packages/core/src/governance/report-engine.tk:86,104,122,140,158` all query `SELECT timestamp, event_type, detail FROM audit_log`, but `audit_log` has neither a `timestamp` nor a `detail` column, so all five report types fail. `buildcompliancerows` also hardcodes `generatedat:"now"`. |
+| GA5.7 | M | | **Replace hardcoded compliance results** — `packages/core/src/governance/compliance.tk:42-56,82-90` returns a literal `PASS` for "PII anonymised before cloud" and "Audit trail complete" without querying the store it is passed. Compute every check from real state. Note the module is already honest about encryption at `:91-95` — that honesty should propagate outward, not be overwritten. |
+| GA5.8 | S | | **State what the trail evidences** — Document plainly that the record is a per-interaction usage and cost ledger, that it deliberately excludes prompt content and placeholder values (`docs/architecture.md:207`), and therefore what it can and cannot support. Distinguish design effectiveness at a point in time from operating effectiveness over a period, and do not describe the ledger as the latter. |
+| GA5.9 | S | | **Enforce append-only** — The trail is described as append-only but nothing enforces it: no trigger, no immutability constraint, and ordinary `DELETE`/`UPDATE` on `audit_log` are unrestricted. |
+
+## Epic RG1: Regulatory Alignment — ANZ First
+
+*Reduce every regulatory statement to what is actually shipped, and add the standards that matter for the primary market.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| RG1.1 | M | | **APRA CPS 234 preset** — Currently the standard exists as a single string in `packages/moke/tests/test_governance.tk:41` and nowhere else: no preset module, no entry in `packages/core/src/policy/regulations.tk`, no specification section, no UI option. Build it as a real preset with information-security control mapping. |
+| RG1.2 | M | | **APRA CPS 230 preset** — Absent from the codebase entirely. Operational risk and service-provider management are precisely what a third-party model dependency engages, so this is the more consequential of the two for the primary market. |
+| RG1.3 | M | | **Australian Privacy Act reforms** — Named at `docs/specifications/regulatory-defaults.md:272` with zero implementation. Add the preset fields and rules the reforms require. |
+| RG1.4 | S | | **Reword "makes you compliant" to "ships a preset for"** — Three statements cross the line: `docs/specifications/regulatory-defaults.md:58` (anonymisation "removes the need for" a lawful basis), `docs/privacy-filters.md:226` (the pipeline "satisfies" Article 25), and `docs/privacy-filters.md:227` (deleting the local mapping "enables Article 17" — factually wrong, since it does nothing about data already transmitted and retained). |
+| RG1.5 | S | | **Withdraw the absolutes** — `docs/specifications/regulatory-defaults.md:456` claims all eighteen HIPAA identifier categories are detected and replaced "No exceptions", which `docs/threat-model.md:751` directly contradicts ("no combination of layers guarantees 100% detection"). The threat model is right. |
+| RG1.6 | M | | **Control-framework mapping** — Map loke's controls to NIST AI RMF, ISO/IEC 42001, and the OWASP top-tens for LLM and agentic applications, as a reference table with honest coverage gaps rather than a compliance claim. |
+
+## Epic RS: Research Spikes
+
+*Time-boxed investigations that must complete before the stories depending on them can be specified properly.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| RS1 | M | **Done** | **Pseudonym linkage** — Complete; findings in `docs/research/disclosure-measurement-findings.md` §2, §3, §6.
+| RS2 | M | **Done** | **Exposure metric foundations** — Complete; findings in `docs/research/disclosure-measurement-findings.md` §4, §5, §7.
+| RS3 | M | | **Benchmark harness requirements** — Pin down the current composition, scoring definition, execution requirements and published baselines of the analysis and injection benchmarks to be used, including the corrected-benchmark critique and which attack corpora remain discriminative against current models. Feeds CB1 and AD1.5. |
+| RS4 | M | | **Prior art and differentiation** — Establish the closest academic prior art on prompt data minimisation, the relevant patent landscape, and whether any commercial gateway executes model-generated artifacts locally against data the model never sees, or whether all of them redact and forward. Output must be usable to state loke's distinction precisely, including the case where the distinction is narrower than assumed. Feeds CB1.6 and the positioning in NC1.10. |
+
+## Epic X6: Claims Register
+
+*One file that maps every public assertion to its evidence, and a gate that keeps it honest.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| X6.1 | M | | **Create `docs/claims.md`** — Every externally-visible claim in `README.md`, `docs/features-loke.md`, `docs/features-moke.md`, `docs/architecture.md` and the public site, with a verdict (verified / partial / stub / absent), the implementing code at file and line, and the test or measurement that proves it. Seed it from the audit already completed. |
+| X6.2 | S | | **Mark unverified claims inline** — Apply an explicit marker to every claim in the register that is not verified, so the assertion stays visible but flagged, using the withdrawal idiom already established on the public site rather than inventing a new one. |
+| X6.3 | S | | **CI gate** — Fail the build when a claim marked verified has no evidence pointer, and when a published figure has no corresponding entry in `docs/metrics-baseline.md`. |
+| X6.4 | S | | **Correct the coverage statement** — `docs/test-coverage.md` reports 35.5% module coverage, which counts files that have a test rather than modules actually exercised; of 86 test files, 52 carry an explicit stub marker and re-declare the module under test instead of importing it, and only about 12 import real production code. State both numbers and what each means. |
+| X6.5 | S | | **Withdraw unsupported results language** — `docs/research/research-proposal.md:15` states "We present empirical benchmarks demonstrating" token savings, detection accuracy and call reduction figures that no measurement produced. Rewrite as proposed methodology pending execution. |
