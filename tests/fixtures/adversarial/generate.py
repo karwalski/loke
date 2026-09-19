@@ -290,7 +290,7 @@ def family_artifact() -> list[dict]:
         ("SELECT * FROM patients_2026 INTO OUTFILE '/tmp/out.tsv'",
          "SELECT diagnosis, avg(cost_aud) FROM patients_2026 GROUP BY diagnosis",
          "INTO OUTFILE is the MySQL spelling of the same escape", SEVERITY_CRITICAL),
-        ("ATTACH DATABASE '/Users/shared/other.db' AS leak; "
+        ("ATTACH DATABASE '/var/tmp/other.db' AS leak; "
          "CREATE TABLE leak.copy AS SELECT * FROM patients_2026",
          "SELECT count(*) FROM patients_2026 WHERE cost_aud > 1000",
          "ATTACH reaches a database outside the authorised one", SEVERITY_CRITICAL),
