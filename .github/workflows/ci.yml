@@ -5,6 +5,9 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly toolchain drift check (see the toolchain-drift job).
+    - cron: '0 20 * * 0'
 
 env:
   TOKE_DIR: ${{ github.workspace }}/../toke
@@ -24,13 +27,17 @@ jobs:
       # of each repo's main branch.
       # ------------------------------------------------------------------
 
-      - name: Get toke/ooke latest commit SHAs (for cache key)
+      # Pin to the commits recorded in TOOLCHAIN.lock rather than chasing
+      # upstream HEAD. Chasing HEAD means CI breaks on somebody else's commit,
+      # at random, with no local reproduction. A separate scheduled job (below)
+      # watches HEAD and reports drift without turning main red.
+      - name: Read pinned toolchain commits
         id: dep-versions
         run: |
-          TOKE_SHA=$(git ls-remote https://github.com/karwalski/toke.git HEAD | cut -f1)
-          OOKE_SHA=$(git ls-remote https://github.com/karwalski/ooke.git HEAD | cut -f1)
-          echo "toke_sha=${TOKE_SHA}" >> "$GITHUB_OUTPUT"
-          echo "ooke_sha=${OOKE_SHA}" >> "$GITHUB_OUTPUT"
+          lockval() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" TOOLCHAIN.lock | head -1; }
+          echo "toke_sha=$(lockval toke_commit)" >> "$GITHUB_OUTPUT"
+          echo "ooke_sha=$(lockval ooke_commit)" >> "$GITHUB_OUTPUT"
+          echo "Pinned toke $(lockval toke_commit) ($(lockval toke_version)), ooke $(lockval ooke_commit) ($(lockval ooke_version))"
 
       - name: Cache toke compiler
         id: cache-toke
@@ -49,20 +56,27 @@ jobs:
       - name: Build toke compiler
         if: steps.cache-toke.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://github.com/karwalski/toke.git "$TOKE_DIR"
+          git clone https://github.com/karwalski/toke.git "$TOKE_DIR"
           cd "$TOKE_DIR"
+          git checkout --detach "${{ steps.dep-versions.outputs.toke_sha }}"
           make || { echo "::error::Failed to build toke compiler"; exit 1; }
 
       - name: Build ooke framework
         if: steps.cache-ooke.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://github.com/karwalski/ooke.git "$OOKE_DIR"
+          git clone https://github.com/karwalski/ooke.git "$OOKE_DIR"
           cd "$OOKE_DIR"
+          git checkout --detach "${{ steps.dep-versions.outputs.ooke_sha }}"
           make || { echo "::error::Failed to build ooke framework"; exit 1; }
 
       - name: Install system dependencies
         run: |
           brew install openssl@3 sqlite3
+
+      - name: Verify toolchain matches TOOLCHAIN.lock
+        run: |
+          chmod +x ./scripts/check_toolchain.sh
+          ./scripts/check_toolchain.sh
 
       - name: Build loke
         run: |
@@ -70,6 +84,27 @@ jobs:
           export OOKE_DIR="$OOKE_DIR"
           chmod +x ./scripts/build_loke.sh
           ./scripts/build_loke.sh
+
+      - name: Self-test the measurement result sink
+        run: python3 -m benchmarks.lib.result
+
+      - name: Upload measurement results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: measurement-results
+          path: benchmarks/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upload build break report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-break-report
+          path: build/break-report.txt
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Run tests
         id: tests
@@ -150,4 +185,33 @@ jobs:
           path: ./
           base: ${{ github.event.repository.default_branch }}
           extra_args: --only-verified
-        continue-on-error: true
+
+  # ------------------------------------------------------------------
+  # Pinning the toolchain (above) stops CI breaking at random on an
+  # upstream commit. It would also let loke drift silently, which is
+  # exactly how it fell four months behind. This job watches HEAD on a
+  # schedule and reports drift without turning main red.
+  # ------------------------------------------------------------------
+  toolchain-drift:
+    name: Toolchain Drift Watch
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare TOOLCHAIN.lock against upstream HEAD
+        run: |
+          lockval() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" TOOLCHAIN.lock | head -1; }
+          drift=0
+          for dep in toke ooke; do
+            pinned=$(lockval "${dep}_commit")
+            head=$(git ls-remote "$(lockval "${dep}_repo")" HEAD | cut -f1 | cut -c1-7)
+            if [ "$pinned" != "$head" ]; then
+              echo "::warning::${dep} has moved: pinned ${pinned}, upstream HEAD ${head}"
+              drift=1
+            else
+              echo "${dep} current at ${pinned}"
+            fi
+          done
+          if [ "$drift" -eq 1 ]; then
+            echo "Run a toolchain-currency pass (epic F10) and re-pin TOOLCHAIN.lock." >&2
+          fi
