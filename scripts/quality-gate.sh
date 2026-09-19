@@ -1,279 +1,162 @@
 #!/usr/bin/env bash
-# quality-gate.sh — Single-command quality gate for the loke project.
-# Runs: lint -> build -> test pipeline. Stops at first failure.
+# quality-gate.sh — run the real checks, in order, and stop at the first failure.
+#
+# This script previously reported "Gate passed" with all four steps green, in
+# about one second, on a tree where 294 of 532 files did not type-check and the
+# build refused to link. Every step tested `command -v ooke` and fell through to
+# a no-op branch, because the binary is named ooke-toke, not ooke. The build
+# fallback additionally checked for directories in the legacy src/ tree, so it
+# would have kept passing if every real module were deleted.
+#
+# A gate that cannot fail is worse than no gate, because it gets cited. This one
+# calls the actual scripts and has no fallbacks: if a tool is missing, that is a
+# failure, not a reason to skip the step.
 #
 # Usage:
-#   ./scripts/quality-gate.sh              # Run the full gate
-#   ./scripts/quality-gate.sh --step lint  # Run a specific step
-#   ./scripts/quality-gate.sh --from test  # Run from a specific step onwards
-#   ./scripts/quality-gate.sh --timing     # Show timing breakdown
+#   ./scripts/quality-gate.sh              # run every step
+#   ./scripts/quality-gate.sh --step build # run one step
+#   ./scripts/quality-gate.sh --from test  # run from a step onwards
+#   ./scripts/quality-gate.sh --list       # show the steps
 #
 # Exit codes:
-#   0 — All steps passed
-#   1 — A step failed (gate failed)
-#   2 — Usage error
+#   0  every step run passed
+#   1  a step failed
+#   2  usage error
 
-set -euo pipefail
+set -uo pipefail
 
-# --- Configuration ---
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-SHOW_TIMING=false
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; DIM=$'\033[2m'; NC=$'\033[0m'
+
+STEPS=(toolchain checks build test)
 STEP_FILTER=""
 FROM_STEP=""
 
-# --- Colours ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m' # No Colour
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
-# --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --step)
-      STEP_FILTER="$2"
-      shift 2
-      ;;
-    --from)
-      FROM_STEP="$2"
-      shift 2
-      ;;
-    --timing)
-      SHOW_TIMING=true
-      shift
-      ;;
-    --help|-h)
-      echo "Usage: quality-gate.sh [--step <step>] [--from <step>] [--timing]"
-      echo ""
-      echo "Steps: lint, build, unit, integration"
-      echo ""
-      echo "Options:"
-      echo "  --step <name>   Run only the specified step"
-      echo "  --from <name>   Run from the specified step onwards"
-      echo "  --timing        Show timing breakdown for each step"
-      echo "  --help          Show this help message"
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 2
-      ;;
+    --step) STEP_FILTER="${2:-}"; shift 2 ;;
+    --from) FROM_STEP="${2:-}"; shift 2 ;;
+    --list) printf '%s\n' "${STEPS[@]}"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-# --- Step Tracking ---
-STEPS=("lint" "build" "unit" "integration")
-STEP_TIMES=()
-TOTAL_START=$(date +%s)
-GATE_PASSED=true
-FAILED_STEP=""
+for named in "$STEP_FILTER" "$FROM_STEP"; do
+  [[ -z "$named" ]] && continue
+  found=0
+  for s in "${STEPS[@]}"; do [[ "$s" == "$named" ]] && found=1; done
+  if [[ "$found" -eq 0 ]]; then
+    echo "unknown step: $named (known: ${STEPS[*]})" >&2
+    exit 2
+  fi
+done
 
-# Determine which steps to run
-should_run_step() {
+should_run() {
   local step="$1"
-
-  # If --step is set, only run that step
   if [[ -n "$STEP_FILTER" ]]; then
     [[ "$step" == "$STEP_FILTER" ]]
-    return $?
+    return
   fi
-
-  # If --from is set, skip steps before the target
   if [[ -n "$FROM_STEP" ]]; then
-    local found=false
+    local reached=0
     for s in "${STEPS[@]}"; do
-      if [[ "$s" == "$FROM_STEP" ]]; then
-        found=true
-      fi
-      if [[ "$s" == "$step" ]] && $found; then
-        return 0
-      fi
+      [[ "$s" == "$FROM_STEP" ]] && reached=1
+      [[ "$s" == "$step" ]] && { [[ "$reached" -eq 1 ]]; return; }
     done
-    return 1
   fi
-
   return 0
 }
 
-# Run a step and track timing
+RAN=0
 run_step() {
-  local step_name="$1"
-  local step_cmd="$2"
-  local step_desc="$3"
-
-  if ! should_run_step "$step_name"; then
+  local step="$1" label="$2"; shift 2
+  should_run "$step" || return 0
+  RAN=1
+  printf '%s\n' "${DIM}── ${label}${NC}"
+  local start=$SECONDS
+  if "$@"; then
+    printf '%s[ok]%s   %-22s %ss\n\n' "$GREEN" "$NC" "$label" "$((SECONDS - start))"
     return 0
   fi
+  printf '%s[FAIL]%s %-22s %ss\n' "$RED" "$NC" "$label" "$((SECONDS - start))"
+  printf '%sGate failed at: %s%s\n' "$RED" "$label" "$NC"
+  exit 1
+}
 
-  local step_start
-  step_start=$(date +%s)
+# --- Steps ---------------------------------------------------------------
 
-  # Run the command, capture exit code
-  local exit_code=0
-  local output
-  output=$(eval "$step_cmd" 2>&1) || exit_code=$?
+step_toolchain() {
+  [[ -x ./scripts/check_toolchain.sh ]] || { echo "scripts/check_toolchain.sh missing or not executable" >&2; return 1; }
+  ./scripts/check_toolchain.sh
+}
 
-  local step_end
-  step_end=$(date +%s)
-  local step_duration=$((step_end - step_start))
-  STEP_TIMES+=("$step_name:${step_duration}s")
+# Cheap checks that do not need the compiler. Each must fail loudly.
+step_checks() {
+  local failed=0
 
-  if [[ $exit_code -eq 0 ]]; then
-    printf "${GREEN}[✓]${NC} %-22s %-40s %s\n" "$step_desc" "passed" "${step_duration}s"
-  else
-    printf "${RED}[✗]${NC} %-22s %-40s %s\n" "$step_desc" "FAILED" "${step_duration}s"
-    if [[ -n "$output" ]]; then
-      echo ""
-      echo "$output" | head -20
-      echo ""
-    fi
-    GATE_PASSED=false
-    FAILED_STEP="$step_name"
-    return 1
+  if [[ -f benchmarks/lib/result.py ]]; then
+    echo "  measurement result sink self-test"
+    python3 -m benchmarks.lib.result >/dev/null || { echo "  result sink self-test failed" >&2; failed=1; }
   fi
+
+  if [[ -x ./scripts/check_claims.py ]] || [[ -f ./scripts/check_claims.py ]]; then
+    echo "  claims register"
+    python3 ./scripts/check_claims.py --check || failed=1
+  fi
+
+  # Only tracked files matter: the question is whether a fresh clone builds,
+  # not what happens to be sitting in the working directory.
+  # Known defects are listed explicitly in scripts/known-defects.txt, each with
+  # the story that removes it, so tolerated debt stays visible and reviewable
+  # rather than being silently excluded here.
+  echo "  no hardcoded home directories in tracked files"
+  local hits
+  hits=$(git ls-files -z 'scripts/*' 'packages/*' 'tests/*' '*.toml' '*.sh' 2>/dev/null \
+           | xargs -0 grep -In '/Users/[a-z.]*/' 2>/dev/null \
+           | grep -vFf <(grep -v '^#' scripts/known-defects.txt | awk 'NF{print $1}') || true)
+  if [[ -n "$hits" ]]; then
+    printf '%s\n' "$hits" | head -5
+    echo "  hardcoded home directories found above — a fresh clone must build" >&2
+    echo "  (known exceptions are listed in scripts/known-defects.txt)" >&2
+    failed=1
+  fi
+
+  echo "  no C-style comments in tracked toke source"
+  if git ls-files -z '*.tk' 2>/dev/null | xargs -0 grep -ln '^//' 2>/dev/null | head -5 | grep .; then
+    echo "  toke source must stay comment-free; documentation belongs in .tkc.md" >&2
+    failed=1
+  fi
+
+  return "$failed"
 }
 
-# --- Banner ---
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " loke quality gate"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-# --- Step 1: Lint ---
-# Check for ooke lint, fall back to basic syntax check
-LINT_CMD="true"
-if command -v ooke &>/dev/null; then
-  LINT_CMD="ooke lint"
-else
-  # Fallback: verify all .tk files are non-empty and have a module declaration
-  LINT_CMD='
-    errors=0
-    while IFS= read -r -d "" f; do
-      if ! head -20 "$f" | grep -q "^m="; then
-        echo "WARN: $f may be missing module declaration"
-      fi
-    done < <(find src -name "*.tk" -print0)
-    exit $errors
-  '
-fi
-
-run_step "lint" "$LINT_CMD" "Lint" || {
-  echo ""
-  printf "${RED}Gate FAILED at step: lint${NC}\n"
-  exit 1
+step_build() {
+  [[ -x ./scripts/build_loke.sh ]] || { echo "scripts/build_loke.sh missing or not executable" >&2; return 1; }
+  ./scripts/build_loke.sh
 }
 
-# --- Step 2: Build ---
-BUILD_CMD="true"
-if command -v ooke &>/dev/null; then
-  BUILD_CMD="ooke build"
-else
-  # Fallback: verify source structure is intact
-  BUILD_CMD='
-    for dir in src/core src/cli src/platform src/companion src/mcp-broker; do
-      if [[ ! -d "$dir" ]]; then
-        echo "ERROR: missing directory $dir"
-        exit 1
-      fi
-    done
-    echo "Build check: source structure verified"
-  '
-fi
-
-run_step "build" "$BUILD_CMD" "Build" || {
-  echo ""
-  printf "${RED}Gate FAILED at step: build${NC}\n"
-  exit 1
+step_test() {
+  [[ -x ./scripts/run_tests.sh ]] || { echo "scripts/run_tests.sh missing or not executable" >&2; return 1; }
+  ./scripts/run_tests.sh .
 }
 
-# --- Step 3: Unit Tests ---
-UNIT_CMD="true"
-if command -v ooke &>/dev/null; then
-  UNIT_CMD="ooke test tests/unit/"
-else
-  # Fallback: verify test files exist and have run_all functions
-  UNIT_CMD='
-    count=0
-    errors=0
-    while IFS= read -r -d "" f; do
-      count=$((count + 1))
-      if ! grep -q "run_all" "$f"; then
-        echo "WARN: $f missing run_all function"
-      fi
-    done < <(find tests/unit -name "*.tk" -print0)
-    echo "Unit tests: $count test files found"
-    if [[ $count -eq 0 ]]; then
-      echo "ERROR: no unit test files found"
-      exit 1
-    fi
-  '
+# --- Run -----------------------------------------------------------------
+
+printf '\n%sloke quality gate%s\n\n' "$YELLOW" "$NC"
+
+run_step toolchain "Toolchain"      step_toolchain
+run_step checks    "Static checks"  step_checks
+run_step build     "Build"          step_build
+run_step test      "Tests"          step_test
+
+if [[ "$RAN" -eq 0 ]]; then
+  echo "no steps matched the given filters" >&2
+  exit 2
 fi
 
-run_step "unit" "$UNIT_CMD" "Unit tests" || {
-  echo ""
-  printf "${RED}Gate FAILED at step: unit tests${NC}\n"
-  exit 1
-}
-
-# --- Step 4: Integration Tests ---
-INTEGRATION_CMD="true"
-if command -v ooke &>/dev/null; then
-  INTEGRATION_CMD="ooke test tests/integration/"
-else
-  # Fallback: verify integration test files exist
-  INTEGRATION_CMD='
-    count=0
-    while IFS= read -r -d "" f; do
-      count=$((count + 1))
-      if ! grep -q "run_all" "$f"; then
-        echo "WARN: $f missing run_all function"
-      fi
-    done < <(find tests/integration -name "*.tk" -print0)
-    echo "Integration tests: $count test files found"
-    if [[ $count -eq 0 ]]; then
-      echo "ERROR: no integration test files found"
-      exit 1
-    fi
-  '
-fi
-
-run_step "integration" "$INTEGRATION_CMD" "Integration tests" || {
-  echo ""
-  printf "${RED}Gate FAILED at step: integration tests${NC}\n"
-  exit 1
-}
-
-# --- Summary ---
-TOTAL_END=$(date +%s)
-TOTAL_DURATION=$((TOTAL_END - TOTAL_START))
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-if $GATE_PASSED; then
-  printf "${GREEN}Gate passed${NC}                                                    %ss\n" "$TOTAL_DURATION"
-else
-  printf "${RED}Gate FAILED at step: %s${NC}                                     %ss\n" "$FAILED_STEP" "$TOTAL_DURATION"
-fi
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# --- Timing ---
-if $SHOW_TIMING; then
-  echo ""
-  echo "Timing breakdown:"
-  for entry in "${STEP_TIMES[@]}"; do
-    IFS=':' read -r name duration <<< "$entry"
-    printf "  %-22s %s\n" "$name" "$duration"
-  done
-  echo "  ────────────────────────────"
-  printf "  %-22s %ss\n" "Total" "$TOTAL_DURATION"
-fi
-
-if $GATE_PASSED; then
-  exit 0
-else
-  exit 1
-fi
+printf '%sGate passed%s\n\n' "$GREEN" "$NC"

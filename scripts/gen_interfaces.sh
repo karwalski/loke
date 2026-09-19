@@ -13,7 +13,7 @@
 set -e
 
 PROJECT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
-TOKE_DIR="${2:-/Users/matthew.watt/tk/toke}"
+TOKE_DIR="${2:-${TOKE_DIR:-$HOME/tk/toke}}"
 TKC="$TOKE_DIR/toke"
 IFACE_DIR="$PROJECT/build/interfaces"
 
@@ -28,7 +28,7 @@ if [ -d "$TOKE_DIR/stdlib" ]; then
 fi
 
 # Copy ooke .tki files
-OOKE_DIR="${OOKE_DIR:-/Users/matthew.watt/tk/toke-ooke}"
+OOKE_DIR="${OOKE_DIR:-$HOME/tk/toke-ooke}"
 if [ -d "$OOKE_DIR/src/ooke" ]; then
   mkdir -p "$IFACE_DIR/ooke"
   for f in "$OOKE_DIR/src/ooke"/*.tki; do
