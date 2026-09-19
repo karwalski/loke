@@ -1,6 +1,3 @@
-<!-- Copyright 2026 loke contributors -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-
 {! layout("base") !}
 {! block("title") !}moke — Dashboard{! end !}
 {! block("content") !}
@@ -76,6 +73,9 @@
   .phase-step.ph-running .ph-dot { background: var(--accent); animation: ph-pulse 0.9s infinite; }
   .phase-step.ph-done { color: var(--green); }
   .phase-step.ph-done .ph-dot { background: var(--green); }
+  /* NC1.6: a phase that did not do its work is shown as not done, not as done. */
+  .phase-step.ph-skipped { color: var(--amber); }
+  .phase-step.ph-skipped .ph-dot { background: var(--amber); animation: none; }
   .phase-sep { color: var(--border); font-size: 0.75em; padding: 0 2px; }
   @keyframes ph-pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
 
@@ -189,6 +189,31 @@
     margin-bottom: 16px;
   }
   .error-banner.visible { display: block; }
+
+  /* ── NC1.6 Card provenance states ───────────────────────────────────────── */
+  /* Amber for "look at this", muted grey for "nothing is loaded" — the same two
+     roles the badge classes in base.tkt already use. Text and borders come from
+     the theme tokens; the tints are the same rgba literals base.tkt uses. */
+  .dash-card.state-unresolved {
+    border-color: var(--amber); background: rgba(210,153,34,0.07);
+    box-shadow: inset 3px 0 0 var(--amber);
+  }
+  .dash-card.state-unresolved:hover { border-color: var(--amber); }
+  .dash-card.state-no-data {
+    border-color: var(--muted); background: rgba(139,148,158,0.07);
+    box-shadow: inset 3px 0 0 var(--muted);
+  }
+  .dash-card.state-no-data:hover { border-color: var(--muted); }
+  .card-state {
+    display: inline-block; font-size: 0.68em; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.09em;
+    padding: 3px 9px; border-radius: 10px; margin-bottom: 8px;
+  }
+  .card-state.unresolved { background: rgba(210,153,34,.18); color: var(--amber); }
+  .card-state.no-data    { background: rgba(139,148,158,.18); color: var(--muted); }
+  .card-state-reason { font-size: 0.82em; line-height: 1.55; color: var(--text); }
+  .card-state-note   { font-size: 0.78em; line-height: 1.5; color: var(--muted); margin-top: 6px; }
+  .metric-value.unresolved { color: var(--muted); }
 </style>
 
 <!-- ── Page header ──────────────────────────────────────────────────────────── -->
@@ -240,15 +265,15 @@
 <!-- ── Phase loading bar ─────────────────────────────────────────────────────── -->
 <div class="phase-bar" id="phase-bar" aria-live="polite" role="status">
   <div class="phase-step" id="ph1">
-    <span class="ph-dot"></span>Phase 1: Asking LLM to design dashboard…
+    <span class="ph-dot"></span><span class="ph-text">Phase 1: Asking LLM to design dashboard…</span>
   </div>
   <span class="phase-sep">›</span>
   <div class="phase-step" id="ph2">
-    <span class="ph-dot"></span>Phase 2: Running local computations…
+    <span class="ph-dot"></span><span class="ph-text">Phase 2: Running local computations…</span>
   </div>
   <span class="phase-sep">›</span>
   <div class="phase-step" id="ph3">
-    <span class="ph-dot"></span>Phase 3: Rendering…
+    <span class="ph-dot"></span><span class="ph-text">Phase 3: Rendering…</span>
   </div>
 </div>
 
@@ -285,6 +310,59 @@ const PALETTE = [
 ];
 const PALETTE_BORDER = PALETTE.map(c => c.replace('0.8','1'));
 
+// ── MK4.8.7: Semantic colour coding for chart values ──────────────────────
+var SEMANTIC_COLOURS = {
+  negative: ['failed','critical','expired','breach','overdue','rejected','blocked','offline','down','high-risk','p1','restricted','error','alert','violated','unhealthy','degraded','severe','fatal','emergency'],
+  positive: ['passed','healthy','active','approved','resolved','online','up','compliant','low-risk','public','ok','success','normal','good','operational','available','running','connected'],
+  neutral:  ['unknown','null','n/a','other','pending','none','unclassified','undefined','empty','missing','not set','tbd'],
+  warning:  ['warning','caution','medium-risk','degrading','expiring','approaching','internal','moderate','partial','intermittent']
+};
+
+var SEMANTIC_RGBA = {
+  negative: 'rgba(248,81,73,0.7)',
+  positive: 'rgba(63,185,80,0.7)',
+  neutral:  'rgba(139,148,158,0.5)',
+  warning:  'rgba(210,153,34,0.7)'
+};
+
+// Map DDL colour names to rgba values
+var DDL_COLOUR_MAP = {
+  red:    'rgba(248,81,73,0.7)',
+  green:  'rgba(63,185,80,0.7)',
+  grey:   'rgba(139,148,158,0.5)',
+  gray:   'rgba(139,148,158,0.5)',
+  amber:  'rgba(210,153,34,0.7)'
+};
+
+function semanticColour(value) {
+  if (value === null || value === undefined) return null;
+  var lower = String(value).toLowerCase().trim();
+  if (!lower) return null;
+
+  // Dictionary lookup
+  var cats = Object.keys(SEMANTIC_COLOURS);
+  for (var i = 0; i < cats.length; i++) {
+    if (SEMANTIC_COLOURS[cats[i]].indexOf(lower) !== -1) {
+      return SEMANTIC_RGBA[cats[i]];
+    }
+  }
+
+  // Boolean pattern
+  if (lower === 'true' || lower === 'yes') return SEMANTIC_RGBA.positive;
+  if (lower === 'false' || lower === 'no') return SEMANTIC_RGBA.negative;
+
+  // Percentage pattern (e.g. "92%", "15%")
+  var pctMatch = lower.match(/^(\d+(?:\.\d+)?)\s*%$/);
+  if (pctMatch) {
+    var pct = parseFloat(pctMatch[1]);
+    if (pct >= 80) return SEMANTIC_RGBA.positive;
+    if (pct <= 20) return SEMANTIC_RGBA.negative;
+    if (pct <= 40) return SEMANTIC_RGBA.warning;
+  }
+
+  return null;
+}
+
 // ── Dataset-specific prompt suggestions ────────────────────────────────────
 var DASH_PROMPTS = {
   'au.medicare': ['Claims by specialty and month', 'Cost distribution by state', 'Top providers by total benefit', 'Bulk billing rate over time'],
@@ -300,9 +378,23 @@ let chartInstances = {};    // id → Chart.js instance
 let sortState = {};         // table-id → { col, asc }
 
 // ── Phase bar helpers ──────────────────────────────────────────────────────
+const PHASE_LABELS = {
+  ph1: 'Phase 1: Asking LLM to design dashboard…',
+  ph2: 'Phase 2: Running local computations…',
+  ph3: 'Phase 3: Rendering…'
+};
+function phaseText(id, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const t = el.querySelector('.ph-text');
+  if (t) t.textContent = text;
+}
 function phaseReset() {
   ['ph1','ph2','ph3'].forEach(id => {
-    document.getElementById(id).className = 'phase-step';
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'phase-step';
+    phaseText(id, PHASE_LABELS[id]);
   });
   document.getElementById('phase-bar').classList.remove('visible');
 }
@@ -313,10 +405,18 @@ function phaseStart() {
 function phaseRun(id) {
   document.getElementById(id).classList.add('ph-running');
 }
-function phaseDone(id) {
+function phaseDone(id, text) {
   const el = document.getElementById(id);
-  el.classList.remove('ph-running');
+  el.classList.remove('ph-running','ph-skipped');
   el.classList.add('ph-done');
+  if (text) phaseText(id, text);
+}
+// NC1.6 — a phase that did not do its work says so, and is never marked done.
+function phaseSkipped(id, text) {
+  const el = document.getElementById(id);
+  el.classList.remove('ph-running','ph-done');
+  el.classList.add('ph-skipped');
+  if (text) phaseText(id, text);
 }
 
 // ── Error helpers ──────────────────────────────────────────────────────────
@@ -380,30 +480,27 @@ function extractJSON(text) {
 }
 
 // ── Normalise LLM response to internal DDL format ─────────────────────────
-// The system prompt asks for { charts: [...] } with xKey/yKey/data fields.
-// The renderer expects { cards: [...] } with card.kind/chart.chart_type etc.
-// This function bridges the two formats.
+// The prompt asks for { cards: [...] }. Some models answer with the older
+// { charts: [...] } shape instead, so that shape is still accepted and mapped.
+// NC1.5: no value carried by the model survives this function. Only column
+// references, the chart type and the operation are kept — any 'data' array the
+// model attached is dropped, because the model was never given the data and so
+// cannot have computed anything.
 function normaliseDDL(obj) {
-  // If it already has cards, keep it (old format or refined DDL)
+  // If it already has cards, keep it (DDL format or refined DDL)
   if (obj.cards && Array.isArray(obj.cards) && obj.cards.length > 0) return obj;
 
   // Convert { charts: [...] } to { cards: [...] }
   if (obj.charts && Array.isArray(obj.charts)) {
     var cards = obj.charts.map(function(ch, i) {
-      var chartType = (ch.type || 'bar').toLowerCase();
-      var xKey = ch.xKey || ch.x_key || ch.x_col || 'category';
-      var yKey = ch.yKey || ch.y_key || ch.y_col || 'value';
-      var chartData = ch.data || [];
-
-      // Build resolved_data from the LLM's sample data array
-      var labels = [], values = [];
-      if (Array.isArray(chartData) && chartData.length > 0) {
-        chartData.forEach(function(row) {
-          labels.push(String(row[xKey] || row.label || row.name || ''));
-          var v = row[yKey] || row.value || row.count || 0;
-          values.push(typeof v === 'number' ? v : parseFloat(v) || 0);
-        });
-      }
+      var chartType = (ch.type || ch.chart_type || 'bar').toLowerCase();
+      var xKey = ch.xKey || ch.x_key || ch.x_col || '';
+      var yKey = ch.yKey || ch.y_key || ch.y_col || '';
+      // The legacy shape carries no operation, so one is derived here from the
+      // column references: count rows per group when no measure was named, sum
+      // the named measure otherwise. A local decision, not a model-supplied one.
+      var op = (ch.query_op || ch.queryOp || '').toLowerCase();
+      if (!op) op = (!yKey || /^count$/i.test(String(yKey))) ? 'count_by_group' : 'sum_by_group';
 
       return {
         id: ch.id || ('chart-' + i),
@@ -414,8 +511,7 @@ function normaliseDDL(obj) {
           chart_type: chartType,
           x_col: xKey,
           y_col: yKey,
-          query_op: 'sum_by_group',
-          resolved_data: labels.length > 0 ? { labels: labels, values: values } : null
+          query_op: op
         }
       };
     });
@@ -429,6 +525,260 @@ function normaliseDDL(obj) {
 
   // Fallback: return as-is
   return obj;
+}
+
+// ── NC1.5: model-supplied values are inadmissible ──────────────────────────
+// The model receives a schema profile and no rows, so any value-shaped field in
+// its reply is invented. Each is deleted here, before anything can read it, so
+// no model-supplied number can reach a render slot. This also runs over saved
+// templates, whose stored values were computed in some earlier session against
+// possibly some other dataset and cannot be attested to now.
+function stripUnverifiedValues(ddlObj) {
+  ((ddlObj && ddlObj.cards) || []).forEach(function(card) {
+    if (!card) return;
+    delete card.provenance;
+    var m = card.metric, c = card.chart, t = card.table;
+    if (m) {
+      delete m.resolved_value; delete m.resolved_label;
+      delete m.value; delete m.data; delete m.delta; delete m.resolved_delta;
+      // A label of the form 'Total customers [12,483]' smuggles a number through
+      // the display channel, so the bracketed part goes too.
+      if (typeof m.label === 'string') m.label = m.label.replace(/\s*\[.*?\]\s*$/, '');
+    }
+    if (c) {
+      delete c.resolved_data; delete c.data;
+      delete c.labels; delete c.values; delete c.datasets;
+    }
+    if (t) {
+      delete t.resolved_rows; delete t.resolved_columns;
+      delete t.rows; delete t.data;
+    }
+  });
+  return ddlObj;
+}
+
+// ── NC1.6: provenance state on every card ──────────────────────────────────
+//   resolved   — computed here from the loaded rows. The only state that may
+//                carry a number, and the only one that may say it was computed.
+//   unresolved — the artifact referenced a column or an operation that could not
+//                be matched against the loaded data. The reason names it.
+//   no-data    — no dataset is loaded, so nothing could be computed at all.
+function setProvenance(card, state, reason, note) {
+  card.provenance = { state: state, reason: reason || '', note: note || '' };
+  return card;
+}
+function cardState(card) {
+  var p = card && card.provenance;
+  if (p && (p.state === 'resolved' || p.state === 'unresolved' || p.state === 'no-data')) {
+    return p.state;
+  }
+  // Unknown provenance is never treated as resolved.
+  return 'unresolved';
+}
+function cardReason(card) {
+  var p = card && card.provenance;
+  if (p && p.reason) return p.reason;
+  return 'This card was not resolved against the loaded data in this session, so no value is shown.';
+}
+function cardNote(card) {
+  var p = card && card.provenance;
+  return (p && p.note) ? p.note : '';
+}
+function markAllCards(ddlObj, state, reason) {
+  ((ddlObj && ddlObj.cards) || []).forEach(function(card) { setProvenance(card, state, reason); });
+  return ddlObj;
+}
+
+// Does this chart carry a series that was computed on this device?
+function chartHasLocalData(c) {
+  if (!c) return false;
+  if (c.resolved_data && Array.isArray(c.resolved_data.labels) && c.resolved_data.labels.length) return true;
+  // Scatter cards from the Insight Lab handoff carry locally computed points.
+  if (String(c.chart_type || '').toLowerCase() === 'scatter'
+      && Array.isArray(c.data) && c.data.length) return true;
+  return false;
+}
+
+// ── NC1.6: the block a card shows when it carries no local value ───────────
+function renderStateBlock(card) {
+  const state = cardState(card);
+  const cls   = (state === 'no-data') ? 'no-data' : 'unresolved';
+  const label = (state === 'no-data') ? 'No data loaded' : 'Not computed';
+  return `<div class="card-state ${cls}">${esc(label)}</div>
+    <div class="card-state-reason">${esc(cardReason(card))}</div>`;
+}
+
+// ── NC1.4: schema profile ──────────────────────────────────────────────────
+// What is built here, and sent: column names, an inferred type, a distinct-value
+// count, a null rate, and the row count. Nothing else. No sample values, no
+// minimum, no maximum, no mean, no modal category — those are real data.
+// Values are read only in order to be counted; none is stored on the result.
+var PROFILE_PII_RE      = /_name$|_email$|phone|dob$|ssn|tfn|medicare|card_no|pii_/i;
+var PROFILE_DT_NAME_RE  = /date|time|created|updated|timestamp|period|expiry/i;
+var PROFILE_NUM_NAME_RE = /amount|price|cost|total|count|qty|quantity|revenue|salary|wage|rate|score|age|size|weight|height|lat|lon|pct|percent/i;
+var PROFILE_DT_VALUE_RE = /^\d{4}-\d{2}-\d{2}|^\d{2}[\/\-]\d{2}[\/\-]\d{4}|^\d{1,2}\/\d{1,2}\/\d{2,4}/;
+var PROFILE_BOOL_RE     = /^(true|false|yes|no|y|n)$/i;
+
+// Type detector. Same cascade as inferColTypes() in upload.tkt — column-name
+// patterns first, then a vote over value shapes — reusing parseNumeric() below
+// for the numeric test and the date shapes bucketDates() already accepts.
+// Returns a type name, or null meaning 'decide from cardinality'. Never a value.
+function inferColumnType(header, rows, idx) {
+  var name = String(header || '');
+  var limit = Math.min(rows.length, 200);
+  var nonNull = 0, numeric = 0, datey = 0, booly = 0;
+  for (var i = 0; i < limit; i++) {
+    var v = rows[i] ? rows[i][idx] : null;
+    if (v === null || v === undefined || v === '') continue;
+    nonNull++;
+    var s = String(v).trim();
+    if (!isNaN(parseNumeric(s))) numeric++;
+    if (PROFILE_DT_VALUE_RE.test(s)) datey++;
+    if (PROFILE_BOOL_RE.test(s)) booly++;
+  }
+  if (nonNull === 0) {
+    // No rows on the device — the column name is all there is to go on.
+    if (PROFILE_DT_NAME_RE.test(name)) return 'datetime';
+    if (PROFILE_NUM_NAME_RE.test(name)) return 'numeric';
+    return 'unknown';
+  }
+  if (booly / nonNull > 0.9) return 'boolean';
+  if (datey / nonNull > 0.6) return 'datetime';
+  if (numeric / nonNull > 0.8) return 'numeric';
+  return null;
+}
+
+function readActiveDataset() {
+  var ds = null;
+  try { ds = JSON.parse(sessionStorage.getItem('moke_dataset')); } catch (_) {}
+  return ds;
+}
+
+// Rows here are arrays indexed by header position, which is the shape the
+// dataset loaders write and the shape resolveQueries() reads.
+function buildSchemaProfile(dataset) {
+  if (!dataset || !Array.isArray(dataset.headers) || !dataset.headers.length) return null;
+  var headers = dataset.headers;
+  var rows = Array.isArray(dataset.rows) ? dataset.rows : [];
+  var piiNamed = [];
+  var columns = headers.map(function(h, idx) {
+    var nonNull = 0, distinct = 0;
+    // 'seen' never leaves this function; only its size is reported.
+    var seen = Object.create(null);
+    for (var i = 0; i < rows.length; i++) {
+      var v = rows[i] ? rows[i][idx] : null;
+      if (v === null || v === undefined || v === '') continue;
+      nonNull++;
+      var k = String(v);
+      if (seen[k] === undefined) { seen[k] = 1; distinct++; }
+    }
+    var type = inferColumnType(h, rows, idx);
+    if (type === null) {
+      type = (distinct <= 25 || distinct / nonNull < 0.4) ? 'categorical' : 'text';
+    }
+    if (PROFILE_PII_RE.test(String(h))) piiNamed.push(h);
+    return {
+      name: h,
+      type: type,
+      distinct_count: rows.length > 0 ? distinct : null,
+      null_rate: rows.length > 0 ? (rows.length - nonNull) / rows.length : null
+    };
+  });
+  return {
+    name: dataset.name || dataset.id || 'dataset',
+    row_count: rows.length,
+    rows_loaded: rows.length > 0,
+    columns: columns,
+    pii_named_columns: piiNamed
+  };
+}
+
+// Render the profile for the prompt. It can only print the fields built above,
+// so it cannot print a data value.
+function formatSchemaProfile(profile) {
+  if (!profile) return '';
+  var lines = [];
+  lines.push('Dataset name: ' + profile.name);
+  lines.push(profile.rows_loaded
+    ? 'Row count: ' + profile.row_count
+    : 'Row count: unknown — only the column list is loaded on this device.');
+  lines.push('Columns, as "name | inferred type | distinct values | null rate":');
+  profile.columns.forEach(function(c) {
+    var card = (c.distinct_count === null) ? 'unknown' : String(c.distinct_count);
+    var nr   = (c.null_rate === null) ? 'unknown' : (c.null_rate * 100).toFixed(1) + '%';
+    lines.push('  ' + c.name + ' | ' + c.type + ' | ' + card + ' | ' + nr);
+  });
+  if (profile.pii_named_columns.length) {
+    lines.push('Columns whose names suggest personal data — do not ask for their contents: '
+      + profile.pii_named_columns.join(', '));
+  }
+  return lines.join('\n');
+}
+
+// ── Phase 2, in one place ──────────────────────────────────────────────────
+// Strips anything this browser did not compute, resolves what it can against the
+// loaded rows, and leaves every card carrying the state it actually reached.
+// Returns a report the caller uses to label the phase indicator truthfully.
+function applyLocalResolution(ddlObj) {
+  stripUnverifiedValues(ddlObj);
+  var total = ((ddlObj && ddlObj.cards) || []).length;
+  var dataset = readActiveDataset();
+  var rows = (dataset && Array.isArray(dataset.rows)) ? dataset.rows : [];
+  if (!rows.length) {
+    markAllCards(ddlObj, 'no-data',
+      'No dataset is loaded on this device, so nothing was computed. Load a dataset, then generate again.');
+    return { ddl: ddlObj, ran: false, resolved: 0, total: total, rowCount: 0 };
+  }
+  try {
+    resolveQueries(ddlObj, dataset);
+  } catch (err) {
+    console.warn('[moke] Phase 2 resolveQueries failed', err);
+    markAllCards(ddlObj, 'unresolved',
+      'The local resolver failed on this dashboard (' + (err && err.message ? err.message : 'unknown error')
+      + '), so no values were computed.');
+    return { ddl: ddlObj, ran: false, resolved: 0, total: total, rowCount: rows.length };
+  }
+  var resolved = ((ddlObj && ddlObj.cards) || []).filter(function(c) {
+    return cardState(c) === 'resolved';
+  }).length;
+  return { ddl: ddlObj, ran: true, resolved: resolved, total: total, rowCount: rows.length };
+}
+
+// Phase indicator text for a resolution report. A phase that computed nothing is
+// marked skipped, never done.
+function reportPhase2(report) {
+  if (!report.ran && report.rowCount === 0) {
+    phaseSkipped('ph2', 'Phase 2: no local computation — no dataset loaded');
+  } else if (!report.ran) {
+    phaseSkipped('ph2', 'Phase 2: local computation failed — no values computed');
+  } else if (report.resolved === 0) {
+    phaseSkipped('ph2', 'Phase 2: 0 of ' + report.total + ' cards resolved against the loaded data');
+  } else {
+    phaseDone('ph2', 'Phase 2: ' + report.resolved + ' of ' + report.total
+      + ' cards computed locally from ' + report.rowCount + ' rows');
+  }
+}
+
+// The Insight Lab handoff carries values this browser computed (k-means,
+// z-score, correlation), so those cards are genuinely resolved. A card that
+// arrived with no computed value is not.
+function markLocalHandoff(ddlObj) {
+  ((ddlObj && ddlObj.cards) || []).forEach(function(card) {
+    var hasLocal = false;
+    if (card.kind === 'metric') {
+      var m = card.metric || {};
+      hasLocal = (typeof m.resolved_value === 'number' && !isNaN(m.resolved_value))
+        || /\[.+\]\s*$/.test(String(m.label || ''));
+    } else if (card.kind === 'chart') {
+      hasLocal = chartHasLocalData(card.chart);
+    } else if (card.kind === 'table') {
+      var t = card.table || {};
+      hasLocal = !!(t.resolved_rows && t.resolved_rows.length) || !!(t.rows && t.rows.length);
+    }
+    if (hasLocal) setProvenance(card, 'resolved', '', 'computed in this browser by Insight Lab');
+    else setProvenance(card, 'unresolved', 'The Insight Lab handoff carried no computed value for this card.');
+  });
+  return ddlObj;
 }
 
 // ── Phase 2: local query resolution ───────────────────────────────────────
@@ -518,63 +868,100 @@ function fmtMetricValue(n, unit) {
   return prefix + s + suffix;
 }
 
-// Main Phase 2 resolver — mutates ddlObj in-place, returns it
+// The operations the local resolver actually implements. Anything else is
+// reported as unsupported rather than silently ignored.
+const METRIC_OPS = ['count','sum','mean','min','max'];
+const CHART_OPS  = ['count_by_group','mean_by_group','sum_by_group','count_by_day','timeseries','top_n'];
+const TABLE_OPS  = ['top_n','filter'];
+
+function missingColumnReason(name) {
+  return name
+    ? 'Column "' + name + '" is not in the loaded data, so nothing was computed.'
+    : 'The artifact named no column, so nothing was computed.';
+}
+function unsupportedOpReason(op, supported) {
+  return op
+    ? 'Operation "' + op + '" is not one the local resolver implements. It knows: ' + supported.join(', ') + '.'
+    : 'The artifact named no operation, so nothing was computed.';
+}
+
+// Main Phase 2 resolver — mutates ddlObj in-place, returns it.
+// NC1.6: every card leaves this function carrying a provenance state, and every
+// early exit records why it fired, so the renderer can name the column or the
+// operation that failed instead of quietly showing something else.
 function resolveQueries(ddlObj, dataset) {
   const rows    = dataset.rows || [];
   const headers = dataset.headers || [];
-  if (!rows.length) return ddlObj;
+  if (!rows.length) {
+    return markAllCards(ddlObj, 'no-data',
+      'No rows are loaded on this device, so nothing was computed.');
+  }
 
   for (const card of (ddlObj.cards || [])) {
+    // Default: not resolved. A card becomes resolved only by reaching the end of
+    // its branch with a locally computed result.
+    setProvenance(card, 'unresolved',
+      'Nothing on this card could be matched against the loaded data.');
     try {
       if (card.kind === 'metric') {
         const m = card.metric || {};
         const op  = (m.query_op || '').toLowerCase();
         const col = m.query_col || '';
+        if (METRIC_OPS.indexOf(op) === -1) {
+          setProvenance(card, 'unresolved', unsupportedOpReason(op, METRIC_OPS)); continue;
+        }
         const idx = getColIndex(headers, col);
-        if (idx === -1 || !op) continue;
+        if (idx === -1) { setProvenance(card, 'unresolved', missingColumnReason(col)); continue; }
 
         let result = NaN;
         const nums = rows.map(r => parseNumeric(r[idx])).filter(n => !isNaN(n));
         if (op === 'count') {
           result = rows.filter(r => r[idx] !== null && r[idx] !== undefined && r[idx] !== '').length;
-        } else if (op === 'sum') {
-          result = nums.reduce((a, b) => a + b, 0);
-        } else if (op === 'mean') {
-          result = nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : NaN;
-        } else if (op === 'min') {
-          result = nums.length ? Math.min(...nums) : NaN;
-        } else if (op === 'max') {
-          result = nums.length ? Math.max(...nums) : NaN;
+        } else {
+          if (!nums.length) {
+            setProvenance(card, 'unresolved',
+              'Column "' + headers[idx] + '" holds no numeric values, so "' + op + '" could not be computed.');
+            continue;
+          }
+          if (op === 'sum')       result = nums.reduce((a, b) => a + b, 0);
+          else if (op === 'mean') result = nums.reduce((a, b) => a + b, 0) / nums.length;
+          else if (op === 'min')  result = Math.min(...nums);
+          else if (op === 'max')  result = Math.max(...nums);
+        }
+        if (typeof result !== 'number' || isNaN(result)) {
+          setProvenance(card, 'unresolved',
+            '"' + op + '" over column "' + headers[idx] + '" produced no value.');
+          continue;
         }
 
         m.resolved_value = result;
-        // Rebuild label with [value] so the existing injectedMatch regex still fires,
-        // but also store resolved_value for the updated renderer
-        const baseLabel = (m.label || card.title || '').replace(/\s*\[.*?\]$/, '');
-        m.label = baseLabel + ' [' + fmtMetricValue(result, m.unit || '') + ']';
+        m.resolved_label = String(m.label || card.title || '').replace(/\s*\[.*?\]\s*$/, '');
+        setProvenance(card, 'resolved', '',
+          op + '(' + headers[idx] + ') over ' + rows.length + ' rows');
 
       } else if (card.kind === 'chart') {
         const c  = card.chart || {};
         const op = (c.query_op || '').toLowerCase();
+        if (CHART_OPS.indexOf(op) === -1) {
+          setProvenance(card, 'unresolved', unsupportedOpReason(op, CHART_OPS)); continue;
+        }
         const xIdx = getColIndex(headers, c.x_col);
         const yIdx = getColIndex(headers, c.y_col);
         const topN = parseInt(c.top_n) || 10;
         let resolved = null;
 
         if (op === 'count_by_group') {
-          if (xIdx === -1) continue;
+          if (xIdx === -1) { setProvenance(card, 'unresolved', missingColumnReason(c.x_col)); continue; }
           resolved = groupBy(rows, xIdx, xIdx, 'count');
-        } else if (op === 'mean_by_group') {
-          if (xIdx === -1 || yIdx === -1) continue;
-          resolved = groupBy(rows, xIdx, yIdx, 'mean');
-        } else if (op === 'sum_by_group') {
-          if (xIdx === -1 || yIdx === -1) continue;
-          resolved = groupBy(rows, xIdx, yIdx, 'sum');
+        } else if (op === 'mean_by_group' || op === 'sum_by_group') {
+          if (xIdx === -1) { setProvenance(card, 'unresolved', missingColumnReason(c.x_col)); continue; }
+          if (yIdx === -1) { setProvenance(card, 'unresolved', missingColumnReason(c.y_col)); continue; }
+          resolved = groupBy(rows, xIdx, yIdx, op === 'sum_by_group' ? 'sum' : 'mean');
         } else if (op === 'count_by_day' || op === 'timeseries') {
-          if (xIdx === -1) continue;
+          if (xIdx === -1) { setProvenance(card, 'unresolved', missingColumnReason(c.x_col)); continue; }
           resolved = bucketDates(rows, xIdx, yIdx !== -1 ? yIdx : xIdx, 'count');
         } else if (op === 'top_n') {
-          if (yIdx === -1) continue;
+          if (yIdx === -1) { setProvenance(card, 'unresolved', missingColumnReason(c.y_col)); continue; }
           const sorted = [...rows]
             .filter(r => !isNaN(parseNumeric(r[yIdx])))
             .sort((a, b) => parseNumeric(b[yIdx]) - parseNumeric(a[yIdx]))
@@ -585,34 +972,72 @@ function resolveQueries(ddlObj, dataset) {
           };
         }
 
-        if (resolved) {
-          // Trim to top_n / 10 entries
-          const limit = topN || 10;
-          c.resolved_data = {
-            labels: resolved.labels.slice(0, limit),
-            values: resolved.values.slice(0, limit),
-          };
+        if (!resolved || !resolved.labels || !resolved.labels.length) {
+          setProvenance(card, 'unresolved',
+            '"' + op + '" over the loaded rows produced no series, so there is nothing to plot.');
+          continue;
         }
+        // Trim to top_n / 10 entries
+        const limit = topN || 10;
+        const groupCount = resolved.labels.length;
+        c.resolved_data = {
+          labels: resolved.labels.slice(0, limit),
+          values: resolved.values.slice(0, limit),
+        };
+        setProvenance(card, 'resolved', '',
+          op + ' over ' + rows.length + ' rows'
+          + (groupCount > limit ? ', showing the first ' + limit + ' of ' + groupCount + ' groups' : ''));
 
       } else if (card.kind === 'table') {
         const t  = card.table || {};
-        const op = (t.query_op || '').toLowerCase();
+        const op = (t.query_op || 'top_n').toLowerCase();
         const cols = t.columns || [];
-        const colIdxs = cols.map(c => getColIndex(headers, c));
+        if (!cols.length) {
+          setProvenance(card, 'unresolved', 'The artifact named no columns for this table.'); continue;
+        }
+        if (TABLE_OPS.indexOf(op) === -1) {
+          setProvenance(card, 'unresolved', unsupportedOpReason(op, TABLE_OPS)); continue;
+        }
+        // Match the requested columns against the loaded headers. An unmatched
+        // column is dropped rather than rendered as a column of empty cells,
+        // and is named in the note.
+        const matched = [], missing = [];
+        cols.forEach(function(name) {
+          const i = getColIndex(headers, name);
+          if (i === -1) missing.push(name); else matched.push({ name: headers[i], idx: i });
+        });
+        if (!matched.length) {
+          setProvenance(card, 'unresolved',
+            'None of the requested columns (' + cols.join(', ') + ') are in the loaded data.');
+          continue;
+        }
         const limit = parseInt(t.limit) || 10;
+        const notes = [];
+        if (missing.length) notes.push('columns not in the loaded data were dropped: ' + missing.join(', '));
 
         let filtered = rows;
         if (op === 'filter') {
           const fIdx = getColIndex(headers, t.filter_col);
-          const fVal = String(t.filter_val || '').toLowerCase();
-          if (fIdx !== -1 && fVal) {
-            filtered = rows.filter(r => String(r[fIdx] ?? '').toLowerCase().includes(fVal));
+          if (fIdx === -1) {
+            setProvenance(card, 'unresolved',
+              'Filter column "' + (t.filter_col || '') + '" is not in the loaded data, so no rows were selected.');
+            continue;
           }
+          const fVal = String(t.filter_val || '').toLowerCase();
+          if (!fVal) {
+            setProvenance(card, 'unresolved',
+              'No filter value was supplied for column "' + headers[fIdx] + '", so no rows were selected.');
+            continue;
+          }
+          filtered = rows.filter(r => String(r[fIdx] ?? '').toLowerCase().includes(fVal));
+          notes.push(filtered.length + ' of ' + rows.length + ' rows matched the filter');
           filtered = filtered.slice(0, limit);
         } else {
           // top_n: sort by sort_col descending
           const sIdx = getColIndex(headers, t.sort_col);
-          if (sIdx !== -1) {
+          if (sIdx === -1) {
+            notes.push('sort column "' + (t.sort_col || '') + '" is not in the loaded data, so rows are in file order');
+          } else {
             filtered = [...rows].sort((a, b) => {
               const na = parseNumeric(a[sIdx]), nb = parseNumeric(b[sIdx]);
               if (!isNaN(na) && !isNaN(nb)) return nb - na;
@@ -622,14 +1047,27 @@ function resolveQueries(ddlObj, dataset) {
           filtered = filtered.slice(0, limit);
         }
 
-        // Build resolved_rows using matched column indices (fall back to raw value)
-        t.resolved_rows = filtered.map(row =>
-          colIdxs.map(idx => idx !== -1 ? String(row[idx] ?? '') : '')
-        );
+        t.resolved_columns = matched.map(mc => mc.name);
+        t.resolved_rows = filtered.map(row => matched.map(mc => String(row[mc.idx] ?? '')));
+        setProvenance(card, 'resolved', '',
+          filtered.length + ' rows read locally from ' + rows.length
+          + (notes.length ? ' — ' + notes.join('; ') : ''));
+
+      } else if (card.kind === 'text' || card.kind === 'list') {
+        // Model-authored prose. The model was given the schema and never the
+        // rows, so nothing here was computed and it must not claim to be.
+        setProvenance(card, 'unresolved',
+          'Model-authored text. The model was given the schema only, never your data, so nothing here is computed from your rows.');
+
+      } else {
+        setProvenance(card, 'unresolved',
+          'Card kind "' + String(card.kind) + '" has no local resolver, so nothing was computed.');
       }
     } catch (e) {
-      // Skip cards that throw — don't break the whole dashboard
+      // Never break the whole dashboard — and never present the card as computed.
       console.warn('[moke] resolveQueries error on card', card.id, e);
+      setProvenance(card, 'unresolved',
+        'The local resolver threw an error on this card: ' + (e && e.message ? e.message : 'unknown error') + '.');
     }
   }
   return ddlObj;
@@ -642,39 +1080,69 @@ function destroyCharts() {
 }
 
 // ── Render a single metric card ────────────────────────────────────────────
+// NC1.5/NC1.6: a number is rendered only for a card whose provenance says it was
+// resolved locally, and '→ computed locally' is printed only on that same path.
 function renderMetricCard(card) {
   const m = card.metric || {};
   const unit = m.unit || '';
-  let displayLabel, resolvedVal;
+  const displayLabel = String(m.resolved_label || m.label || card.title || '')
+    .replace(/\s*\[.*?\]\s*$/, '');
 
-  if (m.resolved_value !== undefined && !isNaN(m.resolved_value)) {
-    // Phase 2 set resolved_value directly — use it
-    displayLabel = (m.label || card.title || '').replace(/\s*\[.*?\]$/, '');
-    resolvedVal  = fmtMetricValue(m.resolved_value, unit);
-  } else {
-    // Fall back to injected [value] in label string
-    const rawLabel = m.label || card.title || '';
-    const injectedMatch = rawLabel.match(/^(.*?)\s*\[(.+?)\]$/);
-    displayLabel = injectedMatch ? injectedMatch[1] : (card.title || m.label || '');
-    resolvedVal  = injectedMatch ? injectedMatch[2] : '—';
+  let shown = null;
+  if (cardState(card) === 'resolved') {
+    if (typeof m.resolved_value === 'number' && !isNaN(m.resolved_value)) {
+      // Computed by resolveQueries from the loaded rows.
+      shown = fmtMetricValue(m.resolved_value, unit);
+    } else {
+      // A locally computed handoff (Insight Lab) injects its value as 'label [v]'.
+      const injected = String(m.label || '').match(/^(.*?)\s*\[(.+?)\]\s*$/);
+      if (injected) shown = injected[2];
+    }
   }
 
+  if (shown === null) {
+    // Covers a card marked resolved that carries no value: it is downgraded here
+    // rather than rendered with a placeholder that reads as a computed result.
+    if (cardState(card) === 'resolved') {
+      setProvenance(card, 'unresolved',
+        'This card carries no locally computed value, so no number is shown.');
+    }
+    return `<div class="card-label">${esc(displayLabel)}</div>
+      <div class="metric-value unresolved">—</div>
+      ${renderStateBlock(card)}`;
+  }
+
+  const note = cardNote(card);
   return `<div class="card-label">${esc(displayLabel)}</div>
-    <div class="metric-value">${esc(resolvedVal)}<span class="metric-unit">${esc(unit)}</span></div>
-    <div class="metric-delta flat">&#x2192; computed locally</div>`;
+    <div class="metric-value">${esc(shown)}<span class="metric-unit">${esc(unit)}</span></div>
+    <div class="metric-delta flat">&#x2192; computed locally${note ? ' · ' + esc(note) : ''}</div>`;
 }
 
 // ── Render a chart card (Chart.js) ─────────────────────────────────────────
+// NC1.5: no canvas is emitted unless there is a locally computed series to plot,
+// so there is nothing for a fabricated series to be drawn into.
 function renderChartCard(card) {
   const c = card.chart || {};
+  if (cardState(card) !== 'resolved' || !chartHasLocalData(c)) {
+    if (cardState(card) === 'resolved') {
+      setProvenance(card, 'unresolved',
+        'No locally computed series is attached to this chart, so nothing is plotted.');
+    }
+    return `<div class="card-label">${esc(card.title)}</div>
+      ${renderStateBlock(card)}`;
+  }
   const cid = 'canvas-' + card.id;
+  const note = cardNote(card);
   return `<div class="card-label">${esc(card.title)}</div>
-    <div class="chart-wrap"><canvas id="${esc(cid)}"></canvas></div>`;
+    <div class="chart-wrap"><canvas id="${esc(cid)}"></canvas></div>
+    <div class="card-state-note">&#x2192; computed locally${note ? ' · ' + esc(note) : ''}</div>`;
 }
 
 // Mount Chart.js after DOM insertion
 function mountChart(card) {
   const c = card.chart || {};
+  // NC1.5/NC1.6: only a locally resolved card is ever plotted.
+  if (cardState(card) !== 'resolved' || !chartHasLocalData(c)) return;
   const cid = 'canvas-' + card.id;
   const canvas = document.getElementById(cid);
   if (!canvas || typeof Chart === 'undefined') return;
@@ -733,22 +1201,52 @@ function mountChart(card) {
     return;
   }
 
-  // Use resolved data from Phase 2 if available; otherwise fall back to demo data
-  let chartLabels, chartData;
-  if (c.resolved_data && c.resolved_data.labels && c.resolved_data.labels.length) {
-    chartLabels = c.resolved_data.labels;
-    chartData   = c.resolved_data.values;
-  } else {
-    chartLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'].slice(0,7);
-    chartData   = chartLabels.map(() => Math.round(Math.random() * 900 + 100));
-  }
+  // NC1.5: the only series that can be plotted is the one Phase 2 computed here.
+  // There is no fabricated fallback, and an unresolved card never reaches this point.
+  if (!c.resolved_data || !c.resolved_data.labels || !c.resolved_data.labels.length) return;
+  const chartLabels = c.resolved_data.labels;
+  const chartData   = c.resolved_data.values;
 
   const isPie = jsType === 'pie' || jsType === 'doughnut';
+  const isBar = jsType === 'bar';
+  const useSemanticColours = isPie || isBar;
+
+  // MK4.8.7: Build per-label colour arrays for bar and pie charts
+  var bgColours, borderColours;
+  if (useSemanticColours) {
+    // Check for DDL-nominated colours per series
+    var ddlColours = (c.colours || c.colors || null);  // { "failed": "red", ... } or array
+    bgColours = chartLabels.map(function(label, idx) {
+      // Priority 1: DDL colour field
+      if (ddlColours) {
+        var ddlVal = null;
+        if (Array.isArray(ddlColours) && ddlColours[idx]) {
+          ddlVal = ddlColours[idx];
+        } else if (typeof ddlColours === 'object' && ddlColours[label]) {
+          ddlVal = ddlColours[label];
+        }
+        if (ddlVal && DDL_COLOUR_MAP[ddlVal.toLowerCase()]) {
+          return DDL_COLOUR_MAP[ddlVal.toLowerCase()];
+        }
+        if (ddlVal && ddlVal.match(/^rgba?\(/)) return ddlVal;
+      }
+      // Priority 2: semantic colour from label
+      var sc = semanticColour(label);
+      if (sc) return sc;
+      // Priority 3: default palette
+      return PALETTE[idx % PALETTE.length];
+    });
+    borderColours = bgColours.map(function(c) { return c.replace(/[\d.]+\)$/, '1)'); });
+  } else {
+    bgColours = PALETTE[0];
+    borderColours = PALETTE_BORDER[0];
+  }
+
   const dataset = {
     label: yLabel,
     data: chartData,
-    backgroundColor: isPie ? PALETTE.slice(0, chartLabels.length) : PALETTE[0],
-    borderColor:     isPie ? PALETTE_BORDER.slice(0, chartLabels.length) : PALETTE_BORDER[0],
+    backgroundColor: bgColours,
+    borderColor:     borderColours,
     borderWidth: 1,
     fill: chartType === 'area',
     tension: 0.35,
@@ -785,7 +1283,12 @@ function mountChart(card) {
 // ── Render a table card ────────────────────────────────────────────────────
 function renderTableCard(card) {
   const t = card.table || {};
-  const cols = t.columns || [];
+  const state = cardState(card);
+  // Only the columns actually matched against the loaded data are shown, so an
+  // unmatched column cannot appear as a column of blank cells.
+  const cols = (state === 'resolved' && t.resolved_columns && t.resolved_columns.length)
+    ? t.resolved_columns
+    : (t.columns || []);
   sortState[card.id] = sortState[card.id] || { col: t.sort_col || cols[0] || '', asc: false };
   const heatmapCol = t.heatmap_col || null;  // column name to colour-code by value
 
@@ -795,7 +1298,20 @@ function renderTableCard(card) {
     return `<th class="${esc(cls)}" onclick="tableSort('${esc(card.id)}','${esc(col)}')">${esc(col)}<span class="sort-arrow"></span></th>`;
   }).join('');
 
-  // Priority: resolved_rows (from Phase 2) > rows (from ML DDL handoff) > placeholder
+  // NC1.5/NC1.6: an unresolved or no-data table shows its requested columns and
+  // the reason, and no rows at all. The old em-dash placeholder rows are gone —
+  // they read as 'the data is here and empty', which was not true.
+  if (state !== 'resolved') {
+    return `<div class="card-label">${esc(card.title)}</div>
+      ${renderStateBlock(card)}
+      <table class="dash-table" id="table-${esc(card.id)}">
+        <thead><tr>${th}</tr></thead>
+        <tbody id="tbody-${esc(card.id)}"></tbody>
+      </table>`;
+  }
+
+  // Resolved: rows came either from Phase 2 (arrays) or from the locally
+  // computed Insight Lab handoff (objects).
   let tbody;
   if (t.resolved_rows && t.resolved_rows.length) {
     // Array of arrays from Phase 2 resolveQueries
@@ -823,17 +1339,25 @@ function renderTableCard(card) {
       return `<tr>${cells}</tr>`;
     }).join('');
   } else {
-    tbody = Array.from({length: Math.min(t.limit || 5, 5)}, () => {
-      const cells = cols.map(() => `<td>—</td>`).join('');
-      return `<tr>${cells}</tr>`;
-    }).join('');
+    // Marked resolved but carrying nothing to show — downgrade rather than
+    // invent placeholder rows.
+    setProvenance(card, 'unresolved',
+      'This table carries no locally computed rows, so none are shown.');
+    return `<div class="card-label">${esc(card.title)}</div>
+      ${renderStateBlock(card)}
+      <table class="dash-table" id="table-${esc(card.id)}">
+        <thead><tr>${th}</tr></thead>
+        <tbody id="tbody-${esc(card.id)}"></tbody>
+      </table>`;
   }
 
+  const note = cardNote(card);
   return `<div class="card-label">${esc(card.title)}</div>
     <table class="dash-table" id="table-${esc(card.id)}">
       <thead><tr>${th}</tr></thead>
       <tbody id="tbody-${esc(card.id)}">${tbody}</tbody>
-    </table>`;
+    </table>
+    <div class="card-state-note">&#x2192; computed locally${note ? ' · ' + esc(note) : ''}</div>`;
 }
 
 function tableSort(cardId, col) {
@@ -852,17 +1376,21 @@ function tableSort(cardId, col) {
 }
 
 // ── Render a text card ─────────────────────────────────────────────────────
+// NC1.6: prose is model-authored, never locally computed, and is labelled so.
 function renderTextCard(card) {
   const md = (card.text && card.text.markdown) ? card.text.markdown : '';
-  return `<div class="text-content">${renderMarkdown(md)}</div>`;
+  return `${renderStateBlock(card)}
+    <div class="text-content">${renderMarkdown(md)}</div>`;
 }
 
 // ── Render a list card ─────────────────────────────────────────────────────
+// NC1.6: list items are model-authored, never locally computed.
 function renderListCard(card) {
   const li = (card.list && card.list.items) ? card.list.items : [];
   const title = (card.list && card.list.title) ? card.list.title : card.title;
   const items = li.map(item => `<li><span class="list-bullet"></span>${esc(item)}</li>`).join('');
   return `<div class="card-label">${esc(title)}</div>
+    ${renderStateBlock(card)}
     <ul class="list-items">${items}</ul>`;
 }
 
@@ -884,15 +1412,24 @@ function renderDashboard(ddlObj) {
     el.className = `dash-card col-${colSpan}`;
     el.id = 'dc-' + card.id;
 
+    let html;
     switch (card.kind) {
-      case 'metric': el.innerHTML = renderMetricCard(card); break;
-      case 'chart':  el.innerHTML = renderChartCard(card);  chartCards.push(card); break;
-      case 'table':  el.innerHTML = renderTableCard(card);  break;
-      case 'text':   el.innerHTML = renderTextCard(card);   break;
-      case 'list':   el.innerHTML = renderListCard(card);   break;
+      case 'metric': html = renderMetricCard(card); break;
+      case 'chart':  html = renderChartCard(card);  break;
+      case 'table':  html = renderTableCard(card);  break;
+      case 'text':   html = renderTextCard(card);   break;
+      case 'list':   html = renderListCard(card);   break;
       default:
-        el.innerHTML = `<div class="card-label">${esc(card.kind)}</div><p style="font-size:0.85em;color:var(--muted)">${esc(card.title)}</p>`;
+        html = `<div class="card-label">${esc(card.kind)}</div>
+          <p style="font-size:0.85em;color:var(--muted)">${esc(card.title)}</p>
+          ${renderStateBlock(card)}`;
     }
+    el.innerHTML = html;
+    // A renderer may downgrade a card's state, so the class is applied afterwards.
+    const state = cardState(card);
+    if (state !== 'resolved') el.classList.add('state-' + state);
+    // Mount a chart only where a canvas was actually emitted.
+    if (card.kind === 'chart' && el.querySelector('canvas')) chartCards.push(card);
     grid.appendChild(el);
   });
 
@@ -924,15 +1461,18 @@ async function generateDashboard() {
   let ddlObj = null;
 
   try {
-    // Phase 1 — ask LLM
+    // Phase 1 — ask the model to design the dashboard. NC1.4: it is given a
+    // schema profile (names, types, cardinality, null rate, row count) and no
+    // data values, so it can reference real columns instead of guessing them.
+    const schemaProfileText = formatSchemaProfile(buildSchemaProfile(readActiveDataset()));
     const rid = 'dash-' + Date.now();
     var LOKE_URL = window.LOKE_URL || 'http://127.0.0.1:11430';
     const res = await fetch(LOKE_URL + '/api/pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: buildPhase1Prompt(question),
-        system_prompt: 'You are a dashboard design assistant. Return ONLY a valid JSON object (no markdown, no explanation). The JSON must have a "charts" array where each chart has: "title" (string), "type" ("bar"|"line"|"pie"|"doughnut"), "xKey" (column name from the dataset), "yKey" (column name or "count"), and "data" (array of objects with values for xKey and yKey). Include 4-6 charts. Use realistic sample values that match the dataset schema.',
+        text: buildPhase1Prompt(question, schemaProfileText),
+        system_prompt: DASHBOARD_SYSTEM_PROMPT,
         tolerance: 'patient',
         mode: 'dashboard',
         request_id: rid,
@@ -956,23 +1496,15 @@ async function generateDashboard() {
       phaseReset(); setBusy(false); return;
     }
 
-    // Normalise: if LLM returned { charts: [...] } convert to { cards: [...] }
+    // Normalise: if the model returned { charts: [...] } convert to { cards: [...] }
     ddlObj = normaliseDDL(ddlObj);
 
-    // Phase 2 — local compute
+    // Phase 2 — local compute. Anything the model may have invented is stripped
+    // first, and the phase indicator reports what actually ran.
     phaseRun('ph2');
-    let mokeDataset = null;
-    try { mokeDataset = JSON.parse(sessionStorage.getItem('moke_dataset')); } catch(_) {}
-    if (mokeDataset && mokeDataset.rows && mokeDataset.rows.length > 0) {
-      try {
-        ddlObj = resolveQueries(ddlObj, mokeDataset);
-      } catch (resolveErr) {
-        console.warn('[moke] Phase 2 resolveQueries failed, using LLM sample data:', resolveErr);
-      }
-    } else {
-      console.info('[moke] Phase 2: local data not loaded — showing LLM estimates');
-    }
-    phaseDone('ph2');
+    const report = applyLocalResolution(ddlObj);
+    ddlObj = report.ddl;
+    reportPhase2(report);
 
     // Phase 3 — render
     phaseRun('ph3');
@@ -1000,15 +1532,25 @@ async function refineDashboard() {
   setBusy(true);
 
   try {
-    const currentJSON = JSON.stringify(currentDDL);
-    const prompt = `Refine this dashboard: ${currentJSON}\n\nInstruction: ${instruction}\n\nRespond with ONLY the updated JSON object, no explanation.`;
+    // The current DDL carries locally computed values — including, for table
+    // cards, whole rows of the loaded data. None of that may go to a provider,
+    // so the artifact is stripped back to its column references and operations
+    // before it leaves the device.
+    const skeleton = stripUnverifiedValues(JSON.parse(JSON.stringify(currentDDL)));
+    const currentJSON = JSON.stringify(skeleton);
+    const schemaProfileText = formatSchemaProfile(buildSchemaProfile(readActiveDataset()));
+    const prompt = `Refine this dashboard specification: ${currentJSON}\n\nInstruction: ${instruction}\n\n`
+      + (schemaProfileText
+          ? `The dataset stays on the user's device. This is its schema profile, which contains no data values:\n${schemaProfileText}\n\n`
+          : `No dataset is loaded on the user's device, so no schema profile is available.\n\n`)
+      + `Return ONLY the updated JSON object. Reference columns and operations only, never values, because every value is computed locally.`;
     var LOKE_URL = window.LOKE_URL || 'http://127.0.0.1:11430';
     const res = await fetch(LOKE_URL + '/api/pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: prompt,
-        system_prompt: 'You are a dashboard design assistant. Return ONLY a valid JSON object (no markdown, no explanation). The JSON must have a "charts" array where each chart has: "title" (string), "type" ("bar"|"line"|"pie"|"doughnut"), "xKey" (column name from the dataset), "yKey" (column name or "count"), and "data" (array of objects with values for xKey and yKey). Include 4-6 charts. Use realistic sample values that match the dataset schema.',
+        system_prompt: DASHBOARD_SYSTEM_PROMPT,
         tolerance: 'patient',
         mode: 'dashboard',
       }),
@@ -1030,18 +1572,9 @@ async function refineDashboard() {
     ddlObj = normaliseDDL(ddlObj);
 
     phaseRun('ph2');
-    let mokeDataset2 = null;
-    try { mokeDataset2 = JSON.parse(sessionStorage.getItem('moke_dataset')); } catch(_) {}
-    if (mokeDataset2 && mokeDataset2.rows && mokeDataset2.rows.length > 0) {
-      try {
-        ddlObj = resolveQueries(ddlObj, mokeDataset2);
-      } catch (resolveErr) {
-        console.warn('[moke] Phase 2 (refine) resolveQueries failed, using LLM sample data:', resolveErr);
-      }
-    } else {
-      console.info('[moke] Phase 2 (refine): local data not loaded — showing LLM estimates');
-    }
-    phaseDone('ph2');
+    const refineReport = applyLocalResolution(ddlObj);
+    ddlObj = refineReport.ddl;
+    reportPhase2(refineReport);
 
     phaseRun('ph3');
     await new Promise(r => setTimeout(r, 150));
@@ -1058,8 +1591,32 @@ async function refineDashboard() {
 }
 
 // ── Build prompt (mirrors server-side build_phase1_prompt) ─────────────────
-function buildPhase1Prompt(question) {
-  return `You have access to this dataset. User asks: ${question}
+// NC1.4b: the instruction to invent sample values is gone. The model is told
+// what it is actually being given, and that values are not its job.
+const DASHBOARD_SYSTEM_PROMPT = 'You are a dashboard design assistant. '
+  + 'You are given a schema profile of a dataset that stays on the user\'s device: column names, '
+  + 'inferred types, distinct-value counts, null rates and a row count. You are not given any data '
+  + 'value, and you must not invent one. '
+  + 'Return ONLY a valid JSON object (no markdown fences, no explanation) describing which columns to '
+  + 'read and which operation to apply to them. Every card must reference columns by their exact names '
+  + 'from the schema profile. Do not include a data array, sample rows, example figures, or any number '
+  + 'presented as a result: every value is computed locally from the data on the device, and any value '
+  + 'you supply is discarded before rendering.';
+
+// NC1.4: the schema profile is passed in and described for what it is. The old
+// 'You have access to this dataset' framing is gone — it was not true, and it
+// left the model guessing column names.
+function buildPhase1Prompt(question, schemaProfileText) {
+  const given = schemaProfileText
+    ? `The dataset itself stays on the user's device. You are given only its schema profile, which contains no data values:
+
+${schemaProfileText}
+`
+    : `No dataset is loaded on the user's device, so there is no schema profile and no column names to work from. Design the cards from the question alone; every card will be shown to the user as "no data loaded" until a dataset is loaded.
+`;
+
+  return `${given}
+User asks: ${question}
 
 Design a dashboard as a JSON DDL object with the following top-level fields:
   title (string), summary (string), cards (array).
@@ -1069,8 +1626,16 @@ Each card must have:
   title (string), col_span (integer 1-3).
 
 For metric cards include a 'metric' object with: label, query_op, query_col, unit.
-For chart cards include a 'chart' object with: chart_type (line/bar/pie/area/scatter), x_col, y_col, query_op.
+  query_op must be one of: count, sum, mean, min, max.
+For chart cards include a 'chart' object with: chart_type (line/bar/pie/area/scatter), x_col, y_col, query_op, top_n.
+  query_op must be one of: count_by_group, sum_by_group, mean_by_group, count_by_day, timeseries, top_n.
 For table cards include a 'table' object with: columns (string array), query_op, sort_col, limit.
+  query_op must be one of: top_n, filter. For filter also give filter_col and filter_val.
+
+Every column you name must appear verbatim in the schema profile above. A name that
+does not match is reported to the user as unresolved, and that card shows no value.
+Return only column references and operations. Never return values, sample rows or
+example figures: every value is computed locally from the data on the device.
 
 Respond with ONLY the JSON object, no explanation.`;
 }
@@ -1135,19 +1700,19 @@ function loadDemo() {
     cards: [
       {
         id: "m-total-customers", kind: "metric", title: "Total Customers", col_span: 1,
-        metric: { label: "Total Customers [12,483]", query_op: "count", query_col: "customer_id", unit: "", delta_query_op: "count_prev_period" }
+        metric: { label: "Total Customers", query_op: "count", query_col: "customer_id", unit: "", delta_query_op: "count_prev_period" }
       },
       {
         id: "m-avg-ltv", kind: "metric", title: "Avg LTV", col_span: 1,
-        metric: { label: "Avg LTV [$3,241]", query_op: "mean", query_col: "lifetime_value", unit: "$", delta_query_op: "mean_prev_period" }
+        metric: { label: "Avg LTV", query_op: "mean", query_col: "lifetime_value", unit: "$", delta_query_op: "mean_prev_period" }
       },
       {
         id: "m-churn", kind: "metric", title: "Churn Rate", col_span: 1,
-        metric: { label: "Churn Rate [8.2]", query_op: "mean", query_col: "churned", unit: "%", delta_query_op: "mean_prev_period" }
+        metric: { label: "Churn Rate", query_op: "mean", query_col: "churned", unit: "%", delta_query_op: "mean_prev_period" }
       },
       {
         id: "m-avg-order", kind: "metric", title: "Avg Order Value", col_span: 1,
-        metric: { label: "Avg Order Value [$184]", query_op: "mean", query_col: "order_value", unit: "$", delta_query_op: "mean_prev_period" }
+        metric: { label: "Avg Order Value", query_op: "mean", query_col: "order_value", unit: "$", delta_query_op: "mean_prev_period" }
       },
       {
         id: "c-ltv-cluster", kind: "chart", title: "LTV by Cluster", col_span: 2,
@@ -1163,7 +1728,10 @@ function loadDemo() {
       }
     ]
   };
-  renderDashboard(demo);
+  // The demo is a specification of cards, not a set of figures: it carries no
+  // values, and resolves against whatever dataset is loaded — or reports
+  // no-data on every card when there is none.
+  renderDashboard(applyLocalResolution(demo).ddl);
 }
 
 // ── MK2.4: Auto-load ML result from Insight Lab handoff ────────────────────
@@ -1175,6 +1743,9 @@ function loadDemo() {
   try { ddl = JSON.parse(raw); } catch(_) { return; }
   // Consume the key so refresh doesn't re-load stale ML data
   try { sessionStorage.removeItem('moke_dashboard_ddl'); } catch(_) {}
+  // NC1.6: this handoff was computed in this browser, so its cards are marked
+  // resolved — and any card that arrived without a computed value is not.
+  markLocalHandoff(ddl);
   // Defer rendering so the DOM (including Chart.js script) is ready
   setTimeout(function() {
     renderDashboard(ddl);
@@ -1231,7 +1802,10 @@ window.loadTemplate = function() {
   var templates = JSON.parse(localStorage.getItem('moke_dashboard_templates') || '[]');
   var tmpl = templates.find(function(t) { return t.name === sel.value; });
   if (!tmpl) return;
-  currentDDL = JSON.parse(JSON.stringify(tmpl.ddl));
+  // A saved template's stored values were computed in an earlier session, possibly
+  // against a different dataset, so they are stripped and recomputed here. A
+  // template can never show a figure this session did not compute.
+  currentDDL = applyLocalResolution(JSON.parse(JSON.stringify(tmpl.ddl))).ddl;
   renderDashboard(currentDDL);
 };
 
