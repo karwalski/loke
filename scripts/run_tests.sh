@@ -3,7 +3,8 @@
 # Usage: ./scripts/run_tests.sh [directory]
 
 DIR="${1:-.}"
-TOKEDIR=/Users/matthew.watt/tk/toke
+# Accept TOKE_DIR (what CI exports) or legacy TOKEDIR; default to $HOME/tk/toke.
+TOKEDIR="${TOKE_DIR:-${TOKEDIR:-$HOME/tk/toke}}"
 TOKE=$TOKEDIR/toke
 STDLIB=$TOKEDIR/src/stdlib
 BUILDDIR="/tmp/loke-tests"
@@ -11,6 +12,11 @@ SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECTDIR="$(cd "$SCRIPTDIR/.." && pwd)"
 IFACE_DIR="$PROJECTDIR/build/interfaces"
 mkdir -p "$BUILDDIR"
+if [ ! -x "$TOKE" ]; then
+  echo "ERROR: toke compiler not executable at $TOKE" >&2
+  echo "       set TOKE_DIR to your toke checkout" >&2
+  exit 1
+fi
 
 PASS=0
 FAIL=0

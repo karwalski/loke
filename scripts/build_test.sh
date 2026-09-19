@@ -3,7 +3,8 @@
 # Usage: ./scripts/build_test.sh tests/unit/memory/test_aaak.tk
 set -e
 
-TOKEDIR=/Users/matthew.watt/tk/toke
+# Accept TOKE_DIR (what CI exports) or legacy TOKEDIR; default to $HOME/tk/toke.
+TOKEDIR="${TOKE_DIR:-${TOKEDIR:-$HOME/tk/toke}}"
 TOKE=$TOKEDIR/toke
 STDLIB=$TOKEDIR/src/stdlib
 SRC="$1"
@@ -16,6 +17,11 @@ fi
 NAME=$(basename "$SRC" .tk)
 BUILDDIR="/tmp/loke-tests"
 mkdir -p "$BUILDDIR"
+if [ ! -x "$TOKE" ]; then
+  echo "ERROR: toke compiler not executable at $TOKE" >&2
+  echo "       set TOKE_DIR to your toke checkout" >&2
+  exit 1
+fi
 
 # Step 1: emit LLVM IR (suppress warnings)
 $TOKE --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null
