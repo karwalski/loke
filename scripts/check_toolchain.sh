@@ -106,6 +106,25 @@ else
   esac
 fi
 
+# A pin nobody else can fetch is not a pin. CI dies on this with git exit 128 and
+# a message about path arguments, which reads as a syntax error and is not one, so
+# report it here where there is a local checkout to ask.
+for pair in "toke:$TOKE_DIR" "ooke:$OOKE_DIR"; do
+  name=${pair%%:*}
+  dir=${pair#*:}
+  sha=$(lockval "${name}_commit")
+  [ -n "$sha" ] && [ -d "$dir/.git" ] || continue
+  if ! git -C "$dir" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    echo "WARNING: ${name}_commit $sha is not in $dir at all — the lock is stale" >&2
+    continue
+  fi
+  if [ -z "$(git -C "$dir" branch -r --contains "$sha" 2>/dev/null)" ]; then
+    echo "WARNING: ${name}_commit $sha is on no remote branch. CI cannot fetch it," >&2
+    echo "         so the build is unreproducible off this machine. Push it, or" >&2
+    echo "         re-pin TOOLCHAIN.lock to a published commit." >&2
+  fi
+done
+
 if [ "$STATUS" -ne 0 ]; then
   hold=$(lockval hold_status)
   [ -n "$hold" ] && echo "" && echo "TOOLCHAIN.lock records: $hold" >&2
