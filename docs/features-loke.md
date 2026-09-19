@@ -63,12 +63,15 @@ Multi-layer detection system ensuring all outbound data passes through privacy f
 
 | Component | Module | Savings | Description |
 |-----------|--------|---------|-------------|
-| TOON serialiser | `core/optimiser/toon.tk` | 30–60% | Converts JSON to compact TOON format with type detection and abbreviation |
-| LLMLingua | `core/optimiser/llmlingua.tk` | 5–20x | Python sidecar REST API for adaptive prompt compression |
-| Semantic cache | `core/optimiser/cache.tk` | Up to 73% on hits | Vector-store backed prompt cache — embedding similarity (0.92 threshold), 24h TTL, auto-eviction |
+| TOON serialiser | `core/optimiser/toon.tk` | not measured | Converts JSON to compact TOON format with type detection and abbreviation. The saving computed in code is a character-length ratio, not a token count |
+| LLMLingua | `core/optimiser/llmlingua.tk` | not measured | REST client for adaptive prompt compression. **The sidecar is not bundled**, so this path is inert out of the box |
+| Semantic cache | `core/optimiser/cache.tk` | not measured | Vector-store backed prompt cache — embedding similarity (0.92 threshold), 24h TTL, auto-eviction. Hit rate depends entirely on the workload |
 | Token budget | `core/optimiser/budget.tk` | — | Daily/weekly/monthly limits with pre-flight cost estimates |
 
-**Combined target:** 60–80% token reduction on typical prompts.
+**No combined figure is published.** The previously-quoted 60–80% had no benchmark behind it and is
+withdrawn — see [metrics-baseline.md](metrics-baseline.md). The methodology to measure it is written in
+[research/toon-benchmark-methodology.md](research/toon-benchmark-methodology.md) and not yet executed
+(VM1.7).
 
 ---
 
@@ -92,7 +95,14 @@ Multi-layer detection system ensuring all outbound data passes through privacy f
 
 ### Storage & Audit
 
-**Database** (`core/storage/db.tk`): SQLite + SQLCipher via ooke native bindings. WAL mode, numbered migrations, parameterised queries (no string concatenation). SQLCipher encryption is enabled by default (GA2.2) — the encryption key is derived from the OS keychain and all tables are encrypted at rest.
+**Database** (`core/storage/db.tk`): SQLite via ooke native bindings. WAL mode, numbered migrations,
+parameterised queries (no string concatenation).
+
+> **Encryption at rest is not currently active.** A 32-byte key is generated and stored in the OS
+> keychain correctly, but the toolchain links plain SQLite, which silently ignores the encryption
+> pragma and returns success — which the calling code maps to a successful result. The database is
+> therefore **plaintext on disk**; rely on full-disk encryption. loke's own compliance check already
+> reports this state. Tracked as X8.
 
 **OS Keychain Integration** (`core/storage/keychain.tk`, `core/config/keychain.tk`): API keys and secrets stored in the OS keychain via Security framework bindings (GA2.1). Keys are fetched per-request with expiry validation, never written to disk, and never appear in log output.
 
@@ -272,5 +282,5 @@ DMG (macOS), NSIS (Windows). Code signing and notarisation. Auto-update via GitH
 The following GA (General Availability) epics have been completed, bringing all core engine features into active use across browser and CLI modes:
 
 - **GA1: Pipeline Integration** (GA1.1-GA1.9) — All core engine modules (privacy pipeline, response restoration, kill switch, audit logging, token optimisation, semantic cache, intelligent router, governance policy) are wired into the browser handler. End-to-end verification complete.
-- **GA2: Security Hardening** (GA2.1-GA2.5) — API keys migrated to OS keychain, SQLCipher encryption enabled, Apache 2.0 licence headers on all source files, auto-redaction on all log output, localhost-only HTTP binding enforced.
+- **GA2: Security Hardening** (GA2.1-GA2.5) — API keys migrated to OS keychain, auto-redaction on all log output, localhost-only HTTP binding enforced. Two items in this epic did not hold: database encryption is not active (above), and the source licence headers were subsequently removed wholesale by a migration script. Attribution is via `LICENSE` and `NOTICE`.
 - **GA3: UX Alignment** (GA3.1-GA3.7) — Full accessibility overhaul with ARIA labels, graduated 4-level warning system, simple/advanced view toggle, pre-send cost estimation, cancel in-flight requests, feedback comments on thumbs-down, sensitivity explanation tooltips.

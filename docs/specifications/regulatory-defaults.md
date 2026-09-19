@@ -55,7 +55,7 @@ GDPR is enforced by national Data Protection Authorities (DPAs). Maximum fines a
 
 ### 2.2 Key Requirements Relevant to loke
 
-- **Lawful basis for processing** (Art. 6): loke's processing of user data locally relies on legitimate interest or contract performance. Sending data to cloud LLMs requires a lawful basis — loke's anonymisation pipeline is designed to remove the need for one by ensuring no personal data leaves the device.
+- **Lawful basis for processing** (Art. 6): loke's processing of user data locally relies on legitimate interest or contract performance. Sending data to cloud LLMs requires a lawful basis — loke's anonymisation pipeline is designed to reduce what is disclosed. It does **not** remove the need for a lawful basis: pseudonymised data remains personal data, as this document itself states below, and loke holds the re-identification mapping. Recent case law makes personal-data status context-dependent rather than absolute, which is a matter for the deployment's own assessment.
 - **Data minimisation** (Art. 5(1)(c)): Only data adequate, relevant, and limited to what is necessary may be processed. loke's token optimisation pipeline directly serves this principle.
 - **Purpose limitation** (Art. 5(1)(b)): Data collected for one purpose must not be repurposed. loke must not use PII mappings or audit data for any purpose beyond the original interaction.
 - **Storage limitation** (Art. 5(1)(e)): Personal data must not be kept longer than necessary. PII mapping tables must be purged after the interaction lifecycle completes.
@@ -287,7 +287,7 @@ The Privacy Act does not prescribe specific anonymisation techniques. De-identif
 - **No adequacy list:** Australia does not maintain an equivalence or adequacy list. The obligation is on the disclosing entity to satisfy itself about the recipient's practices.
 - **Default:** All cloud LLM providers are permitted, but loke logs a compliance notice that the user/enterprise is responsible for assessing the provider's privacy practices.
 - **Enterprise override:** Enterprise administrators can restrict providers by jurisdiction or require specific contractual terms.
-- **Practical implication:** Because loke anonymises before transmission, APP 8 obligations are largely mitigated — de-identified data is outside the Act's scope.
+- **Practical implication:** Anonymising before transmission reduces what is disclosed under APP 8. It does not place the data outside the Act's scope as a matter of course — de-identification is a question of whether re-identification is reasonably likely in context, and loke retains the mapping. Treat this as a factor in a deployment's own assessment, not as a conclusion loke can reach on its behalf.
 
 ### 3.7 Provider Restrictions
 
@@ -453,7 +453,7 @@ HIPAA provides two explicit de-identification methods:
 
 **loke HIPAA preset behaviour:**
 
-- **Safe Harbor enforcement:** All 18 identifier categories are detected and replaced. No exceptions.
+- **Safe Harbor enforcement:** Detection is attempted for all 18 identifier categories. It is **not** guaranteed — this project's own threat model states that no combination of layers guarantees 100% detection, and no recall measurement against a labelled corpus exists yet (AD1.1, AD1.2). Do not rely on this for a Safe Harbor determination.
 - **Clinical data:** Diagnosis codes, medication names, and clinical notes are anonymised (replaced with generic medical category tokens) to prevent indirect identification.
 - **Reversibility:** Mapping tables are retained locally under the same encryption and access controls as ePHI. The mapping table itself is treated as PHI.
 - **Re-identification:** Only permitted by the covered entity, and only with proper safeguards. loke's local restoration of placeholders is re-identification — this is acceptable because it occurs on the covered entity's device under their control.
@@ -556,7 +556,7 @@ privacy:
       - medication_name
       - lab_result
       - clinical_note_content
-    safe_harbor_mode: strict       # All 18 identifiers enforced, no exceptions
+    safe_harbor_mode: strict       # Detection attempted for all 18 identifiers (not guaranteed)
   anonymisation:
     strength: safe_harbor           # HIPAA Safe Harbor de-identification
     reversible: true                # Mapping table treated as ePHI

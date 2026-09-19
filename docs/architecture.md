@@ -210,7 +210,11 @@ Append-only log of all AI calls: timestamp, correlation ID, provider, model, tok
 
 ## 8. Security Boundaries
 
-- **All outbound data passes through the privacy filter.** No path through the codebase sends a prompt to an external provider without traversing F3. This invariant is enforced by the router — direct provider calls are not possible.
+- **All outbound data passes through the privacy filter.** No path through this codebase sends a prompt
+  to an external provider without traversing F3. This is a **contributor invariant enforced by review**,
+  not a property of the language or the host: nothing prevents a direct HTTP call being written, and
+  loke ships a flag that disables the pipeline. It is also not a property of the *machine* — loke sees
+  only traffic addressed to it. Six classes of bypass are enumerated and testable (AD1.6).
 - **No PII in logs.** All log output passes through the auto-redaction filter configured in F1.3. Debug mode is subject to the same redaction rules as production logging.
 - **Local-first.** Core functionality requires no network. Ollama, Presidio, and LLMLingua are optional; loke degrades gracefully when they are unavailable.
 - **Kill switch (G1.6).** `kill_switch.is_global_active()` is checked before every AI call. When active, all outbound AI requests are blocked immediately and the user is shown an explanation.
@@ -223,6 +227,6 @@ Append-only log of all AI calls: timestamp, correlation ID, provider, model, tok
 
 - **Single ooke native binary.** `ooke build` produces a self-contained binary for the target platform. No external runtime (Node.js, Python, JVM) is required on the user's machine.
 - **Ollama REST for local models.** Ollama is called via its REST API. loke manages the Ollama process lifecycle but does not bundle Ollama — it must be installed separately.
-- **Presidio as optional Python sidecar.** The Presidio integration adapter calls a locally-running Presidio server via REST. If Presidio is not running, the SLM NER layer covers the same entity types at lower precision. loke starts Presidio automatically if a compatible Python environment is detected.
+- **Presidio as optional Python sidecar.** The Presidio integration adapter calls a locally-running Presidio server via REST. If Presidio is not running, the SLM NER layer covers the same entity types at lower precision. **loke does not start Presidio, and does not bundle it** — the user must run it. No auto-detection or subprocess launch exists.
 - **LLMLingua as optional Python sidecar.** Same pattern as Presidio — local REST call, graceful degradation to TOON-only compression if unavailable.
 - **No data leaves the device during inference.** When routing to local models, all inference is on-device. Cloud routing is an explicit user opt-in with per-request confirmation available.

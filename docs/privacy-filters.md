@@ -223,8 +223,8 @@ Recommended settings for GDPR compliance:
 
 Key GDPR considerations:
 - Article 5(1)(c) requires data minimisation — mask everything not essential
-- Article 25 requires data protection by design — loke's pipeline-first architecture satisfies this
-- Placeholder store enables Article 17 (right to erasure) — delete the mapping and the data is unrecoverable
+- Article 25 requires data protection by design. A pipeline-first architecture is evidence toward that, not a determination of compliance — which is a matter for the deployment and its assessor, not for loke
+- Deleting the local mapping makes the *local* placeholder-to-original association unrecoverable. It does **not** reach data already transmitted to and retained by a provider, so it is not on its own an Article 17 mechanism
 
 ### HIPAA (US Health Insurance Portability and Accountability Act)
 
