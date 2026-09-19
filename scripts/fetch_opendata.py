@@ -396,6 +396,104 @@ def write_manifest(entries: list[dict]) -> None:
         print(f"  WARNING: over the {MAX_TOTAL_BYTES:,} total budget", file=sys.stderr)
 
 
+
+# --- Dashboard validation (story MK19.7) ------------------------------------
+# A typo'd column reference or an unsupported operation produces a blank card on
+# stage with no error, so this is checked in CI rather than discovered live.
+
+# Operations the local resolver in templates/dashboard.tkt actually implements.
+# Anything outside this set silently renders nothing.
+SUPPORTED_OPS = {
+    "count", "sum", "mean", "min", "max",
+    "count_by_group", "mean_by_group", "sum_by_group", "count_by_day",
+    "timeseries", "top_n", "filter",
+}
+VALUE_KEYS = {"value", "resolved_value", "resolved_data", "resolved_rows", "data"}
+
+
+def validate_dashboards() -> int:
+    """Check every pre-baked dashboard against its snapshot's real header."""
+    dash_dir = DATA_DIR / "dashboards"
+    if not dash_dir.is_dir():
+        print("no dashboards directory; nothing to validate")
+        return 0
+    if not MANIFEST.is_file():
+        print("no manifest; cannot resolve dataset columns", file=sys.stderr)
+        return 1
+
+    manifest = json.loads(MANIFEST.read_text())
+    by_id = {d["id"]: d for d in manifest.get("datasets", [])}
+    problems = 0
+    checked = 0
+
+    for path in sorted(dash_dir.glob("*.ddl.json")):
+        try:
+            dash = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            print(f"  {path.name}: invalid JSON — {e}", file=sys.stderr)
+            problems += 1
+            continue
+
+        ds_id = dash.get("dataset_id")
+        entry = by_id.get(ds_id)
+        if not entry:
+            print(f"  {path.name}: dataset_id '{ds_id}' has no manifest entry", file=sys.stderr)
+            problems += 1
+            continue
+
+        snap = REPO / "packages" / "moke" / (entry["data"]["path"].lstrip("/"))
+        if not snap.is_file():
+            print(f"  {path.name}: snapshot missing at {snap}", file=sys.stderr)
+            problems += 1
+            continue
+
+        with snap.open(newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh))
+        cols = {h.strip() for h in header}
+
+        for card in dash.get("cards", []):
+            cid = card.get("id", "?")
+            body = card.get(card.get("kind", ""), {}) or {}
+            # A text or list card's body is a string, not an object — there is
+            # nothing to validate on it beyond its presence.
+            if not isinstance(body, dict):
+                checked += 1
+                continue
+
+            # A pre-baked card must carry no value: a value here is a
+            # fabricated number, which is the defect NC1.5 removed.
+            present = VALUE_KEYS & set(body) | (VALUE_KEYS & set(card))
+            if present:
+                print(f"  {path.name} [{cid}]: carries value key(s) {sorted(present)} — "
+                      f"values must be computed locally, never baked in", file=sys.stderr)
+                problems += 1
+
+            op = body.get("query_op")
+            if op and op not in SUPPORTED_OPS:
+                print(f"  {path.name} [{cid}]: operation '{op}' is not implemented by the "
+                      f"local resolver; the card will render nothing", file=sys.stderr)
+                problems += 1
+
+            refs = [body.get(k) for k in ("query_col", "x_col", "y_col", "sort_col",
+                                          "filter_col", "query_group")]
+            refs += list(body.get("columns") or [])
+            for ref in [r for r in refs if r]:
+                if ref in ("count", "*"):
+                    continue
+                if ref not in cols:
+                    print(f"  {path.name} [{cid}]: column '{ref}' is not in the snapshot. "
+                          f"Available: {', '.join(sorted(cols))}", file=sys.stderr)
+                    problems += 1
+            checked += 1
+
+    print(f"validated {checked} card(s) across "
+          f"{len(list(dash_dir.glob('*.ddl.json')))} dashboard(s)")
+    if problems:
+        print(f"{problems} problem(s) — a bad reference renders a blank card with no "
+              f"error, so this fails rather than warns", file=sys.stderr)
+    return 1 if problems else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", action="append", help="recipe id; repeatable")
@@ -403,12 +501,17 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--check", action="store_true",
                     help="report what would change; write nothing")
+    ap.add_argument("--validate-dashboards", action="store_true",
+                    help="check pre-baked dashboards against their snapshots and exit")
     args = ap.parse_args()
 
     if not RECIPES.is_file():
         print(f"no recipe file at {RECIPES}", file=sys.stderr)
         return 1
     recipes = json.loads(RECIPES.read_text())["recipes"]
+
+    if args.validate_dashboards:
+        return validate_dashboards()
 
     if args.list:
         for r in recipes:

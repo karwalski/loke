@@ -123,6 +123,20 @@ step_checks() {
                 "them would be scored against a lie" >&2; failed=1; }
   fi
 
+  if [[ -f packages/moke/static/js/tests/test-moke-data.js ]] && command -v node >/dev/null; then
+    echo "  dataset data layer"
+    node packages/moke/static/js/tests/test-moke-data.js >/dev/null \
+      || { echo "  data layer tests failed — includes the assertion that a schema" \
+                "profile leaks no cell value" >&2; failed=1; }
+  fi
+
+  if [[ -f scripts/fetch_opendata.py ]]; then
+    echo "  pre-baked dashboards reference real columns"
+    python3 ./scripts/fetch_opendata.py --validate-dashboards >/dev/null 2>&1 \
+      || { echo "  a dashboard references a column or operation that does not exist;" \
+                "it would render a blank card with no error" >&2; failed=1; }
+  fi
+
   # Only tracked files matter: the question is whether a fresh clone builds,
   # not what happens to be sitting in the working directory.
   # Known defects are listed explicitly in scripts/known-defects.txt, each with
