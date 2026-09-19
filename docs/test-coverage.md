@@ -1,23 +1,76 @@
 # Test Coverage Map
 
-Generated: 2026-05-20 (updated after T15 epic completion)
+Generated: 2026-05-20 (updated after T15 epic completion) · **Corrected: 2026-09-19 (story X6.4)**
 
-Stories: T15.1–T15.10
+Stories: T15.1–T15.10, X6.4
+
+> **Read this before quoting any figure below: 35.5% is not a measure of code exercised by tests.**
+> It counts source modules that have a test *file* named after them. Most of those files do not run the
+> module they are named for — they re-declare a copy of it inside the test and assert against the copy.
+>
+> | What is counted | Figure | What it means |
+> |---|---|---|
+> | Source modules with a test file targeting them | **35.5%** (145 of 408) | A file exists whose name or documented mapping points at the module. Says nothing about whether the module runs |
+> | Test files that import production code | **12 of 86** | These compile against the real module. This is the only set that can catch a regression in production code |
+> | Distinct production modules reached by those imports | **22** — about **5%** of 408 | Three of the 22 are types-only declarations, so roughly 19 modules have any behaviour exercised |
+> | Test files carrying an explicit `(* --- stub … *)` marker | **54 of 86** | These re-declare the module under test and assert against the re-declaration |
+>
+> The honest summary is: **about 5% of modules are exercised, not 35.5%.** A test that re-declares its
+> subject verifies that the assertion library works and that the author's mental model is
+> self-consistent. It cannot fail when production code changes, which is the only thing a regression test
+> is for. Several of the modules with a "Tested" row below have zero importers in production and cannot
+> run at all (see [claims.md](claims.md) section B).
+>
+> Fixing this is epic **T15** continued, plus **VM1.6** (repair and wire the existing harness) and
+> **AD1.8** (un-exclude it from discovery).
 
 ## Summary
 
-| Metric | Before T15 | After T15 |
-|--------|-----------|-----------|
-| Total source modules | 313 | 408 |
-| Total test files | 56 | 120 |
-| Modules with a matching test | 47 | 145 |
-| Modules without any test | 266 | 263 |
-| **Module coverage** | **15.0%** | **35.5%** |
-| JS utility test assertions | 0 | 70+ |
+| Metric | Before T15 | After T15 | Corrected 2026-09-19 |
+|--------|-----------|-----------|----------------------|
+| Total source modules | 313 | 408 | 408 (446 `.tk` files including interfaces) |
+| Total test files | 56 | 120 | **86** — the 120 figure was never accurate for `tests/` |
+| Modules with a matching test file | 47 | 145 | 145 |
+| Test files importing production code | — | — | **12** |
+| Distinct production modules imported | — | — | **22** |
+| Test files with an explicit stub marker | — | — | **54** |
+| **"Has a test file" coverage** | **15.0%** | **35.5%** | **35.5%** |
+| **Modules actually exercised** | — | — | **~5%** |
+| JS utility test assertions | 0 | 70+ | unchanged; separate harness |
 
-Note: "Modules with a matching test" counts source modules that have at least one
-test file targeting them (by basename or documented mapping). Some test files cover
-multiple modules; some modules are types-only or internal plumbing.
+The two coverage rows measure different things and both are reported because each is misleading alone.
+"Has a test file" is a measure of *intent* — somebody decided this module deserved a test. "Actually
+exercised" is a measure of *protection* — this module cannot silently break. Only the second is a
+coverage figure in the sense the word is normally used.
+
+### The stub pattern, and why the usual excuse is stale
+
+`tests/unit/privacy/test_guardian.tk:6` is the clearest illustration:
+
+```
+(* i=guardian:core.privacy.guardian; -- linker issue, stubbed below *)
+
+(* --- stub guardian functions (mirrors core.privacy.guardian) --- *)
+
+f=guardianversion():str{
+  <"1.0.0"
+};
+```
+
+The import of the real module is commented out and a copy follows. The test then asserts that the copy
+returns `"1.0.0"` — which it does, because the test file says so three lines earlier. If
+`core/privacy/guardian.tk` changed its version string, or its prompt text, or was deleted, this test
+would still pass.
+
+**The linker excuse is now likely stale.** Twelve test files do import production modules successfully
+today, including integration tests that link the privacy pipeline, the policy engine, the keychain and
+the TOON serialiser. Whatever blocked linking when these stubs were written has been resolved for at
+least those modules. Each stubbed file needs its commented-out import restored and tried; the ones that
+still fail should record the actual compiler or linker error rather than a five-year-old note.
+
+Of the 86 files: 54 carry a stub marker, 12 import production code, and the remaining 20 do neither —
+they declare their fixtures inline without labelling them as stubs, which is the same pattern with less
+honesty about it.
 
 ---
 
@@ -39,9 +92,18 @@ Note: the per-package totals include some modules mapped to tests via indirect
 coverage (e.g. `test_commands.tk` covers both `cli/ask.tk` and `cli/proxy.tk`),
 so the sum may differ slightly from the summary table which counts unique modules.
 
+**These per-package percentages carry the same caveat as the headline figure** — they count files, not
+exercised modules. The only packages with any import-level coverage at all are `core` (privacy
+pipeline, regex, placeholder, log sanitiser, policy, kill switch, TOON, keychain, db, settings, audit),
+`browser` (four API handlers) and `shared` (types).
+
 ---
 
 ## Tested Modules (Full List)
+
+> "Tested" in the tables below means **a test file exists and is mapped to this module**. It does not
+> mean the module is imported or executed. Rows where the test imports production code are the twelve
+> files listed under [Test files that import production code](#test-files-that-import-production-code).
 
 ### packages/core/src/privacy/
 
@@ -591,3 +653,39 @@ so the sum may differ slightly from the summary table which counts unique module
 | T15.6 | Moke page handlers | All 15 moke pages + 11 API handlers |
 | T15.7 | Integration tests | Full pipeline flow (partially started with test_pipeline_integration.tk) |
 | T15.8 | JS utility tests | static/js/*.js (not .tk -- separate harness needed) |
+
+---
+
+## Test files that import production code
+
+These twelve are the only files in `tests/` that compile against production modules. Everything else
+re-declares its subject.
+
+| Test file | Production modules imported |
+|---|---|
+| `tests/unit/privacy/test_log_sanitiser.tk` | `core.privacy.logsanitiser` |
+| `tests/unit/browser/test_pipeline_handler.tk` | `browser.pages.api.pipeline` |
+| `tests/unit/browser/test_health_handler.tk` | `browser.pages.api.health` |
+| `tests/unit/browser/test_models_handler.tk` | `browser.pages.api.models` |
+| `tests/unit/browser/test_settings_handler.tk` | `browser.pages.api.settings` |
+| `tests/integration/test_toon_roundtrip.tk` | `core.optimiser.toon`, `core.optimiser.toontypes` |
+| `tests/integration/test_keychain_e2e.tk` | `core.storage.keychain` |
+| `tests/integration/test_pipeline_integration.tk` | `core.privacy.pipeline`, `core.privacy.placeholder` |
+| `tests/integration/test_audit_trail_e2e.tk` | `core.storage.audit`, `core.storage.db` |
+| `tests/integration/test_kill_switch_e2e.tk` | `core.governance.killswitch` |
+| `tests/integration/test_privacy_pipeline_e2e.tk` | `core.privacy.pipeline`, `core.privacy.regex` |
+| `tests/integration/test_policy_evaluation_e2e.tk` | `core.governance.policy`, `core.governance.types` |
+
+Plus `page.api.*` handlers (approve, privacy, savings, tabs) and `shared.types` reached from browser
+handler tests.
+
+## Known exclusions
+
+`scripts/run_tests.sh:25` excludes `*/test_harness*` from discovery. That silently removes
+`packages/core/src/privacy/test_harness.tk` — the only harness in the tree able to score detection
+quality against a corpus — from every run, including CI. Un-excluding it is **AD1.8**; repairing and
+wiring it is **VM1.6**.
+
+CI reports pass and fail counts only. `std.test` exposes three string-comparison assertions and cannot
+record a numeric value, so no test can publish a measurement even when it takes one. That is the first
+blocker in [metrics-baseline.md](metrics-baseline.md), tracked as **VM1.1** and **VM1.5**.

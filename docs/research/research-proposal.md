@@ -399,7 +399,7 @@ This yields four conditions: Opaque-Automatic, Opaque-Interactive, Transparent-A
 - Table: Latency by layer (individual and cumulative).
 - Table: Reversibility accuracy — LLM response quality with and without anonymisation.
 
-**Expected findings:** Regex achieves near-perfect precision on structured PII (emails, SSNs, credit cards) but zero recall on names and indirect identifiers. NLP NER adds substantial recall for common Western names but introduces false positives (entity names, place names used as adjectives). SLM-based NER catches context-dependent PII that all other layers miss. Presidio serves as a high-confidence validator, marginally improving recall while reducing false positives through its multi-signal approach. The full pipeline is expected to exceed 98% F1 on the standard corpus and 90%+ on adversarial examples.
+**Hypothesised findings — none of this has been measured.** Regex is expected to show near-perfect precision on structured PII (emails, SSNs, credit cards) and zero recall on names and indirect identifiers. NLP NER should add recall for common Western names while introducing false positives (entity names, place names used as adjectives). SLM-based NER should catch context-dependent PII that other layers miss. Presidio would serve as a high-confidence validator. The per-layer marginal-value experiment that would establish any of this is story **AD1.3**, and it needs the labelled corpus from **AD1.1**, which does not yet exist. **The F1 figures previously stated in this paragraph as expectations are withdrawn** — see `docs/metrics-baseline.md`. An expectation quoted to two significant figures is indistinguishable from a result once it leaves the document, so no target accuracy is stated here.
 
 ### 6.3 Routing Quality Results
 
@@ -466,7 +466,11 @@ This yields four conditions: Opaque-Automatic, Opaque-Interactive, Transparent-A
 
 ## 8. Conclusion (500 words)
 
-**Content summary:** Restate the contributions, summarise the key findings, and argue for the practical importance of the intermediary pattern. The convergence of regulatory pressure (EU AI Act), cultural demand (local-first AI movement), and technical capability (small language models on consumer hardware) creates a timely window for this work. loke demonstrates that privacy, efficiency, and usability need not be in tension — the intermediary architecture achieves strong privacy guarantees and substantial cost savings while preserving (and in some cases improving) task quality. The user study results inform the design of transparency and control mechanisms that respect user autonomy without imposing excessive cognitive burden.
+**Content summary:** Restate the contributions, state what the benchmark programme found once it has been run, and argue for the practical importance of the intermediary pattern. The convergence of regulatory pressure (EU AI Act), cultural demand (local-first AI movement), and technical capability (small language models on consumer hardware) creates a timely window for this work.
+
+**Nothing in this section can be written yet.** The claim this conclusion was previously drafted around — that the intermediary architecture achieves strong privacy guarantees and substantial cost savings while preserving task quality — is the *question* the work asks, not a finding. It is withdrawn as stated. Two of its three parts are expected to cut the other way: the literature indicates the no-custody arm will **lose** accuracy to a data-in-prompt baseline on some question classes (MaskSQL pays roughly 20 execution-accuracy points on BIRD while sending strictly more than loke does), and redaction is established as a weak defence rather than a guarantee. A conclusion that does not report that cost is not a conclusion a reviewer will accept. See `docs/research/disclosure-measurement-findings.md` §8 and §10, and `docs/metrics-baseline.md`.
+
+Once **CB1** and **AD1** have run, this section reports what was measured, including where loke is worse. The user study results inform the design of transparency and control mechanisms that respect user autonomy without imposing excessive cognitive burden.
 
 ---
 
