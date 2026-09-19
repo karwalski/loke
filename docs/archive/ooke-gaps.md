@@ -1,3 +1,8 @@
+> **ARCHIVED 2026-09-19.** Superseded by [`UPSTREAM.md`](../../UPSTREAM.md), which is the single
+> register of what loke needs from toke and ooke. This document was re-verified before archiving and
+> its gaps are recorded there with the evidence that closed them. **Do not file anything from this
+> document** — it is retained as history, and filing it as written would report already-fixed problems.
+
 # ooke Gaps Discovered by loke/moke
 
 Filed for the toke project (ooke is built on toke). These block loke and moke API functionality.

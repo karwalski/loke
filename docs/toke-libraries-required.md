@@ -5,7 +5,7 @@
 **Audience:** the **toke development team**. Written from a downstream consumer's position so the
 requirements are visible before any interface is designed.
 
-This document follows the pattern of [ooke-bindings-required.md](ooke-bindings-required.md), which
+This document follows the pattern of [ooke-bindings-required.md](archive/ooke-bindings-required.md), which
 worked: downstream states the need and the interface it expects, upstream designs and ships, and the
 blocked stories unblock. That document is now complete, and this is the next set.
 

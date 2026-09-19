@@ -1,3 +1,8 @@
+> **ARCHIVED 2026-09-19.** Superseded by [`UPSTREAM.md`](../../UPSTREAM.md), which is the single
+> register of what loke needs from toke and ooke. This document was re-verified before archiving and
+> its gaps are recorded there with the evidence that closed them. **Do not file anything from this
+> document** — it is retained as history, and filing it as written would report already-fixed problems.
+
 # toke v3 Migration Issues — Post-Batch Status
 
 **Date:** 2026-05-04

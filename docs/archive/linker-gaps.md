@@ -1,3 +1,8 @@
+> **ARCHIVED 2026-09-19.** Superseded by [`UPSTREAM.md`](../../UPSTREAM.md), which is the single
+> register of what loke needs from toke and ooke. This document was re-verified before archiving and
+> its gaps are recorded there with the evidence that closed them. **Do not file anything from this
+> document** — it is retained as history, and filing it as written would report already-fixed problems.
+
 # Linker Gaps — loke build (2026-05-16)
 
 loke compiles all 172 modules to LLVM IR cleanly. Individual `.ll` → `.o` succeeds. The linker fails with 150+ undefined symbols due to **naming mismatches** between what toke's codegen emits and what the C stdlib glue provides.
