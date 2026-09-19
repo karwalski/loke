@@ -116,6 +116,13 @@ step_checks() {
                 "from it would be wrong" >&2; failed=1; }
   fi
 
+  if [[ -f tests/fixtures/adversarial/score.py ]]; then
+    echo "  adversarial corpus scorer discriminates"
+    python3 tests/fixtures/adversarial/score.py --self-test >/dev/null \
+      || { echo "  adversarial scorer self-test failed — the instrument no longer" \
+                "discriminates, so any figure it produced would be meaningless" >&2; failed=1; }
+  fi
+
   if [[ -f tests/fixtures/bank-statements/generate.py ]]; then
     echo "  bank statement fixtures reconcile"
     python3 tests/fixtures/bank-statements/generate.py --verify >/dev/null \
@@ -154,9 +161,47 @@ step_checks() {
     failed=1
   fi
 
-  echo "  no C-style comments in tracked toke source"
-  if git ls-files -z '*.tk' 2>/dev/null | xargs -0 grep -ln '^//' 2>/dev/null | head -5 | grep .; then
-    echo "  toke source must stay comment-free; documentation belongs in .tkc.md" >&2
+  # The two-line Apache licence header is REQUIRED, not a comment to be removed.
+  # 520 of 692 committed .tk files carry it, and a destructive migration script
+  # once stripped it from all of them (F10.6), so this check guards both
+  # directions: no stray C-style comments, and no missing licence header.
+  #
+  # Note also that toke gained (* ... *) block comments on 2026-04-27, so
+  # comment-freedom in this repository is a project choice for token density, not
+  # a language constraint. Documentation still belongs in .tkc.md companions.
+  if [[ -f scripts/verify_held_changes.py ]]; then
+    echo "  held toke changes are an equality-only sweep"
+    python3 scripts/verify_held_changes.py --quiet \
+      || { echo "  the uncommitted toke work is not what F10.13 claims it is" >&2; failed=1; }
+  fi
+
+  echo "  toke source carries its licence header and no stray comments"
+  stray=$(git ls-files -z '*.tk' 2>/dev/null \
+          | xargs -0 grep -ln '^//' 2>/dev/null \
+          | while read -r f; do
+              grep '^//' "$f" \
+                | grep -qv -e 'Copyright 2026 loke contributors' \
+                           -e 'SPDX-License-Identifier' && echo "$f"
+            done | head -5)
+  if [[ -n "$stray" ]]; then
+    printf '%s\n' "$stray"
+    echo "  C-style comments other than the licence header found above;" >&2
+    echo "  documentation belongs in .tkc.md companions" >&2
+    failed=1
+  fi
+
+  # _archived-tests/ never carried the header, so requiring it there would be a
+  # rule invented by this check rather than an invariant of the repository.
+  missing=$(git ls-files -z '*.tk' 2>/dev/null \
+            | tr '\0' '\n' | grep -v '^_archived-tests/' | tr '\n' '\0' \
+            | xargs -0 grep -L '^// Copyright 2026 loke contributors' 2>/dev/null \
+            | grep -vFf <(grep -v '^#' scripts/known-defects.txt | awk 'NF{print $1}') \
+            | head -5)
+  if [[ -n "$missing" ]]; then
+    printf '%s\n' "$missing"
+    echo "  toke source above is missing its Apache 2.0 licence header." >&2
+    echo "  A migration script deleted it from 520 files once (F10.6); do not" >&2
+    echo "  commit that removal. Restore it with: git checkout -- <file>" >&2
     failed=1
   fi
 
