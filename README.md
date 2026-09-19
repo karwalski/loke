@@ -268,11 +268,32 @@ moke is a data analysis demo that exercises loke's privacy pipeline, governance 
 
 ### Demo datasets
 
-15 Australian-themed datasets with embedded analysis patterns:
+**16 datasets: 15 synthetic and 1 real.** The distinction matters and is marked in the UI and in the
+manifest, because a synthetic dataset labelled as government data is a misrepresentation — and because
+the contrast between the two is what makes the privacy demonstration persuasive rather than merely
+asserted.
 
-- **IT Operations (6)** — 200 servers, 10K metrics, 500 incidents, 300 changes, 2K app performance, 48 asset/cost records
-- **Government & public sector (6)** — 500 Medicare claims, 200 water quality readings, ABS employment, NSW public schools, Opal card journeys, property transactions
-- **Customer intelligence (3)** — 1,000 customers with whale/at-risk/growth/dormant clusters, plus Wattle & Co users and orders
+**Real, with attribution** (1) — fetched by `scripts/fetch_opendata.py`, which verifies the portal's
+declared licence and refuses to commit a snapshot whose terms do not permit redistribution:
+
+- **Road fatalities** — BITRE Australian Road Deaths Database, 4,000 records from 2019 onward,
+  CC BY 3.0 AU. Aggregate incident data with no personal identifiers, so the privacy filter correctly
+  finds nothing in it. That is the honest half of the contrast.
+
+**Synthetic, authored for this project** (15) — shaped to resemble Australian public-sector and
+enterprise data, with deliberate patterns and anomalies to analyse. **These contain fabricated names
+and identifiers and are not government data**, despite the domains they imitate:
+
+- **IT Operations (6)** — servers, time-series metrics, incidents, changes, application performance,
+  asset and cost records
+- **Public-sector shaped (6)** — Medicare claims, water quality readings, employment, public schools,
+  transit card journeys, property transactions
+- **Customer intelligence (3)** — customers with whale, at-risk, growth and dormant clusters, plus
+  users and orders
+
+Row counts are recorded in `packages/moke/static/data/manifest.json` rather than here, so that a
+figure cannot drift from the data it describes. Note the backend store still holds pre-enrichment row
+counts for the synthetic sets, which is tracked as MK19.1.
 
 ### Pages
 

@@ -116,6 +116,13 @@ step_checks() {
                 "from it would be wrong" >&2; failed=1; }
   fi
 
+  if [[ -f tests/fixtures/bank-statements/generate.py ]]; then
+    echo "  bank statement fixtures reconcile"
+    python3 tests/fixtures/bank-statements/generate.py --verify >/dev/null \
+      || { echo "  statement fixtures do not reconcile — an import scored against" \
+                "them would be scored against a lie" >&2; failed=1; }
+  fi
+
   # Only tracked files matter: the question is whether a fresh clone builds,
   # not what happens to be sitting in the working directory.
   # Known defects are listed explicitly in scripts/known-defects.txt, each with
