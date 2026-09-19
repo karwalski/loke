@@ -1,9 +1,15 @@
 # loke — Epics & Stories
 
 **License:** Apache 2.0
-**Version:** v1.0 (all ooke bindings available — full backlog unblocked)
+**Version:** v1.1 (partially blocked — see `TOOLCHAIN.lock`)
 
 ---
+
+> **This is the project's only backlog.** `progress.json` was retired on 2026-09-19 and is archived at
+> [`archive/progress.json.retired-2026-09-19`](archive/progress.json.retired-2026-09-19); its open
+> items were re-verified and migrated as **Epic BG1**. Do not create a second backlog — the previous
+> pair produced ID collisions where the same letter named different epics, and statuses that were four
+> months stale.
 
 ## How This Document Is Structured
 
@@ -23,7 +29,7 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 > **Foundation layer — now in development**
 >
-> loke is built on **ooke** ([github.com/karwalski/ooke](https://github.com/karwalski/ooke)) — a lightweight CMS and web application framework written in the toke programming language. ooke Phase 1 and all required native bindings are complete. All stories are now unblocked.
+> loke is built on **ooke** ([github.com/karwalski/ooke](https://github.com/karwalski/ooke)) — a lightweight CMS and web application framework written in the toke programming language. ooke Phase 1 and the native bindings loke needs are complete, and the toke criterion in [`TOOLCHAIN.lock`](../TOOLCHAIN.lock) is met. **The hold now rests on ooke 3.0.0 alone** — the local build is `3.0.0-dev`, and a `-dev` suffix does not satisfy the gate. Stories marked ⏸ cannot compile until it lands; the rest proceed.
 >
 > **Architectural impact of ooke:**
 >
@@ -131,7 +137,7 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 |-------|------|--------|---------|
 | F5.1 | L | **Done** | Semantic intent classifier (< 10ms, embedding-based via ooke native inference or Ollama REST, configurable categories) |
 | F5.2 | M | **Done** | Sensitivity scorer (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED based on PII + policy — implemented in toke) |
-| F5.3 | XL | **Done** | Model selection engine (cheapest-adequate, fastest, best-quality, local-first bias, fallback chains — implemented in toke) |
+| F5.3 | XL | **Reopened — see X8.6.** Not done: zero matches for any of the four strategy names across `packages/` and `src/` (`docs/claims.md` D3). One fixed selection path exists in `packages/core/src/router/selector.tk` | Model selection engine (cheapest-adequate, fastest, best-quality, local-first bias, fallback chains) |
 | F5.4 | L | **Done** | Provider abstraction layer in toke (Ollama, OpenAI, Anthropic, Google, Mistral, OpenRouter — all via REST; streaming; tool calling) `[R4.8, R8.1]` |
 | F5.5 | L | **Done** | Cost-optimised routing via RouteLLM signal integration (85% cost reduction, 95% quality retention — RouteLLM called via REST or subprocess) |
 | F5.6 | M | **Done** | Latency tolerance routing dimension (`instant` < 2s / `patient` < 30s / `background` minutes-hours; determined by request source, task type, AG1 agent declaration, or user flag; unlocks larger local models in Considered/Background tiers for non-urgent tasks; cost vs speed comparison shown when tolerance is `background`; logged in audit trail for explainability) |
@@ -167,7 +173,7 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 *Extend local compute to nearby high-power devices over secure direct connections. Implemented in toke on ooke.*
 
-> Now unblocked — std.mdns and std.tls bindings are available.
+> The std.mdns and std.tls bindings are available; these stories still need a compiler, so they carry the ooke 3.0.0 hold like the rest of the Foundation layer.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
@@ -1167,7 +1173,9 @@ never leaves, not even for categorisation.
 
 ## Epic GA1: Pipeline Integration — Wire Core Engine into Browser
 
-*The core privacy pipeline, token optimiser, semantic cache, LLM router, audit trail, and kill switch are all fully implemented in `packages/core/`. However, the browser API handler (`packages/browser/pages/api/pipeline.tk`) bypasses ALL of them — it does naive string matching and sends raw data directly to Anthropic/Ollama. This is the single most critical gap in the project: the primary user interface has zero actual protections despite sophisticated infrastructure existing in core.*
+*Written when the browser API handler bypassed the core engine entirely. **Five of the nine wirings now exist at HEAD** — privacy pipeline, response restoration, kill switch, audit logging and policy evaluation. Four do not: the optimiser, the semantic cache, the router (the provider is still chosen by an if/else on API-key length), and therefore the end-to-end verification. Corrected 2026-09-19 against the committed tree; see `docs/claims.md` A13 for the line-level evidence.*
+
+> **Do not read the working tree for this epic's status.** The uncommitted copy of `pipeline.tk` strips all nine core imports and is a regression, not the state of the repository (F10.13, X8.5).
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
@@ -1175,11 +1183,11 @@ never leaves, not even for categorisation.
 | GA1.2 | M | **Done** | **Wire response restoration into browser handler** — After receiving LLM response, call `core.privacy.placeholder.restore()` to swap placeholders back to original values before returning to the user. Currently the browser returns raw LLM output with no restoration. The CLI proxy (`cli/src/proxy.tk`) does this correctly — use it as reference. |
 | GA1.3 | M | **Done** | **Wire kill switch check before LLM dispatch** — Before any outbound LLM request in `pipeline.tk`, call `core.governance.kill_switch.isengaged()`. If engaged, return an error response explaining why and when it will auto-release. Currently the kill switch is implemented but never checked — a user who trips it can continue sending data unprotected. |
 | GA1.4 | M | **Done** | **Wire audit logging into request path** — After each LLM call, call `core.storage.audit.logevent()` with: event type, model, provider, sensitivity, token counts (in/out), cost estimate, duration, and correlation ID. Currently `audit.tk` is never called from any request path. Note its hashing is **not** tamper-evident — the stored digest is a concatenation of two non-secret fields and does not incorporate the previous record; see GA5.2. |
-| GA1.5 | M | **Done** | **Wire token optimisation into pipeline** — Before sending to LLM, run prompt through `core.optimiser.toon.encode()` for structured data and/or `core.optimiser.llmlingua.compress()` for natural language. Report compression ratio in pipeline console. Target: 60-80% token reduction per spec. Currently TOON and LLMLingua are fully implemented but dormant. |
-| GA1.6 | M | **Done** | **Wire semantic cache into pipeline** — Before dispatching to LLM, check `core.optimiser.cache.lookup()` for semantically similar previous requests. If cache hit (similarity > 0.92), return cached response with `[cache hit]` indicator. On cache miss, store response via `cache.store()` after receiving. Target: up to 73% savings on cache hits per spec. |
-| GA1.7 | M | **Done** | **Wire intelligent router into pipeline** — Replace the if/else API key check with actual `core.router.selector.select()` which evaluates sensitivity × cost × latency × capability to choose the optimal model. Currently the router makes simplistic binary local/cloud choices; the spec requires multi-dimensional optimisation. |
+| GA1.5 | M | **Reopened** — no optimiser call exists in the handler | **Wire token optimisation into pipeline** — Before sending to LLM, run prompt through `core.optimiser.toon.encode()` for structured data and/or `core.optimiser.llmlingua.compress()` for natural language. Report compression ratio in pipeline console. Target: 60-80% token reduction per spec. Currently TOON and LLMLingua are fully implemented but dormant. |
+| GA1.6 | M | **Reopened** — no cache lookup exists in the handler | **Wire semantic cache into pipeline** — Before dispatching to LLM, check `core.optimiser.cache.lookup()` for semantically similar previous requests. If cache hit (similarity > 0.92), return cached response with `[cache hit]` indicator. On cache miss, store response via `cache.store()` after receiving. Target: up to 73% savings on cache hits per spec. |
+| GA1.7 | M | **Reopened** — `selector.select()` is never called; the provider is chosen by `str.len(anthropickey)>20`. Overlaps X8.6, which owns the four named strategies | **Wire intelligent router into pipeline** — Replace the if/else API key check with actual `core.router.selector.select()` which evaluates sensitivity × cost × latency × capability to choose the optimal model. Currently the router makes simplistic binary local/cloud choices; the spec requires multi-dimensional optimisation. |
 | GA1.8 | S | **Done** | **Wire governance policy evaluation** — Before dispatching, call `core.governance.policy.evaluate()` to get risk classification (low/medium/high) and decision ($allow/$allowwithwarning/$requireapproval). Show warnings to user per graduated severity. Currently policy evaluation exists but is never called from the browser. |
-| GA1.9 | S | **Done** | **Verify end-to-end pipeline in browser** — Full integration test: send a prompt containing PII through the browser, verify privacy filter detects and masks it, token optimiser compresses it, router selects appropriate model, audit log records the event, kill switch blocks when engaged, and response restoration returns clean output. Document the verified flow. |
+| GA1.9 | S | **Reopened** — cannot pass while GA1.5-GA1.7 are unwired, and the existing test asserts on JSON shape rather than on whether anonymisation occurred | **Verify end-to-end pipeline in browser** — Full integration test: send a prompt containing PII through the browser, verify privacy filter detects and masks it, token optimiser compresses it, router selects appropriate model, audit log records the event, kill switch blocks when engaged, and response restoration returns clean output. Document the verified flow. |
 
 ## Epic GA2: Security Hardening
 
@@ -1188,7 +1196,7 @@ never leaves, not even for categorisation.
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
 | GA2.1 | L | Done | **Migrate API keys to OS keychain** — Replace `~/.loke/settings.json` plaintext key storage with OS keychain integration. On macOS use Security framework via toke/ooke bindings. Keys fetched per-request with expiry validation, never written to disk, never appear in logs. Update `settings.tk` handler and all consumers. Spec: "Secrets and API keys stored in OS keychain, NEVER in config files." |
-| GA2.2 | M | Done | **Enable SQLCipher encryption** — Switch from plaintext SQLite to SQLCipher for `~/.loke/loke.db`. Derive encryption key from OS keychain. All tables encrypted at rest. Spec: "All tables encrypted at rest via SQLCipher from OS keychain secret." |
+| GA2.2 | M | **Reopened — see X8.1.** Not done: `PRAGMA key` is issued and silently ignored by plain SQLite, so the database is plaintext on disk. SQLCipher is not available in the toolchain and may never be; the replacement approach is field-level `std.encrypt` under X8.2 | **Enable SQLCipher encryption** — Switch from plaintext SQLite to SQLCipher for `~/.loke/loke.db`. Derive encryption key from OS keychain. All tables encrypted at rest. Spec: "All tables encrypted at rest via SQLCipher from OS keychain secret." |
 | GA2.3 | L | Done | **Add Apache 2.0 license headers to all source files** — Add `// Copyright 2026 loke contributors\n// SPDX-License-Identifier: Apache-2.0` header to all 629 `.tk` files and all `.tkt` template files (using appropriate comment syntax). Spec: "ALL source files MUST include header at top." Currently 0% compliance. |
 | GA2.4 | S | Done | **Auto-redact PII from all log output** — Implement log redaction filter per spec: "ALL log output passes through auto-redaction filter. Debug mode subject to same redaction rules as production." Ensure no PII appears in any log, console output, or error message. |
 | GA2.5 | S | Done | **Localhost-only HTTP binding enforcement** — Verify HTTP server binds to `127.0.0.1` only (not `0.0.0.0`). If external binding configured, log as warning per spec. Verify CORS restricted to localhost origins. |
@@ -1280,7 +1288,7 @@ never leaves, not even for categorisation.
 | NC1.6 | M | **Done** | **Provenance state on every card** — Render one of `resolved` / `unresolved` / `no-data` per card. `renderMetricCard` (`dashboard.tkt:714`) currently emits `→ computed locally` **unconditionally**, including on values the model invented; the only honest signal today is a `console.info` no user sees. `resolveQueries` MUST record why each `continue` fired so the reason can be surfaced. |
 | NC1.7 | L | | **Promote local execution into core** — `packages/moke/src/compute.tk::execute()` is a complete local query engine with no production caller. Make it (or a core equivalent) the execution target for artifacts, and add a second backend using toke's parameterised SQL (`std.db`'s `db.many` with bound parameters) so generated queries can run against the local store without string interpolation. |
 | NC1.8 | M | | **Demote anonymise-and-send to a labelled fallback** — Keep the path for tasks that genuinely need prose, but make selecting it explicit, record it as a custody event (DA1), and state its residual risk at the point of use. Update the pipeline so no-custody is attempted first and the fallback is a deliberate, logged decision rather than the default. |
-| NC1.9 | M | | **Fail closed** — `packages/browser/pages/api/pipeline.tk` currently falls back to five `str.contains` checks when the detection sidecar is unavailable and **still transmits**. A filter that fails open is worse than one that fails closed. When no detection layer is healthy, return 503; never dispatch. |
+| NC1.9 | M | | **Fail closed** — The defect is in **core, not the browser**: `packages/core/src/privacy/pipeline.tk:568` initialises `anonymisedtext` to the raw input and `:582` reassigns it from `anonymisetext(text; deduped)`. When the NER and Presidio layers are both unreachable the pipeline logs degraded mode (`:392`, `:523`, `:540`) and continues with an empty entity list, so `anonymisetext` returns the input unchanged and `packages/browser/pages/api/pipeline.tk:125-126,171` transmits it — while still reporting an `entities_found` count and a sensitivity label. A filter that fails open is worse than one that fails closed. Add a health gate: when no detection layer is healthy, return 503 and never dispatch. Fixing it in core fixes every caller at once; fixing it in the browser handler would leave the CLI path open. |
 | NC1.10 | L | | **Bound the query-shaped channel** — A returned artifact is itself an information channel. An adversary able to shape queries and observe results across several turns can extract cell values a piece at a time, including by binary search, without ever being sent a row. So "the model never receives data" is true at the byte level and not necessarily at the information level, and **no published benchmark tests this** (`docs/research/disclosure-measurement-findings.md` §11). Bound it: per-session limits on result cardinality and on repeated near-identical predicates, detection of value-probing query sequences, and disclosure accounting that counts *results returned to the model* as well as bytes sent. Until this is bounded, the no-custody claim must be stated with the limitation attached. |
 | NC1.11 | S | **Done** | **Correct the architecture documents** — `docs/features-moke.md:200` states the schema is sent on the dashboard path; it is not. Update `docs/architecture.md` so the pipeline diagram shows the no-custody path as primary and the redaction path as fallback. |
 
@@ -1393,7 +1401,7 @@ never leaves, not even for categorisation.
 | GA5.1 | S | | **Fix audit timestamps** — `packages/core/src/storage/audit.tk:47` writes the **string literal** `'now()'` into `created_at`, so every row carries the same seven characters instead of a time. `ORDER BY created_at` is therefore undefined and the period filters in `packages/core/src/governance/dashboard.tk:63,75,86,97` cannot work. Without a time basis there is no period, and without a period there is no evidence of a control operating *over* one. |
 | GA5.2 | M | | **Real hash chain** — `audit.tk:38` computes `hash = str.concat(correlationid, eventtype)`. That is not a hash, it covers none of the payload, and `prev_hash` is stored but is **not an input**, so nothing chains. Compute a cryptographic digest over a canonical serialisation of every persisted field **including the previous row's hash**, using an unambiguous field separator and a defined genesis value. toke provides `crypto.sha256`, `crypto.tohex` and `crypto.constanteq`. |
 | GA5.3 | M | | **Chain verification** — No verifier exists anywhere in the codebase. Add one that reads forward in insertion order, recomputes each digest, and reports the first divergent row. Expose it so a user can check their own trail. Acceptance: detects a field mutation, a digest mutation, **and a deleted row** — deletion is the case that proves the chain actually chains. |
-| GA5.4 | S | Blocked — file carries uncommitted migration edits; belongs with the legacy `src/` removal in Track 2 | **Delete the duplicate implementation** — `src/core/audit/trail.tk` is worse than the live one: `chainhash()` returns `str.fromi32(str.len(acc))` (a string length), `verifychain()` is hardcoded `<true`, and `newevent()` sets `let now:i64=0`. It has no callers and has never compiled. Remove it rather than fixing it. |
+| GA5.4 | S | Blocked — file carries uncommitted migration edits; belongs with the legacy `src/` removal in **F10.12** | **Delete the duplicate implementation** — `src/core/audit/trail.tk` is worse than the live one: `chainhash()` returns `str.fromi32(str.len(acc))` (a string length), `verifychain()` is hardcoded `<true`, and `newevent()` sets `let now:i64=0`. It has no callers and has never compiled. Remove it rather than fixing it. |
 | GA5.5 | M | | **Persist the decision trace** — `packages/core/src/governance/trace.tk`'s `$decisiontrace` has seventeen well-chosen fields, no caller, no table and no insert; `complete()` writes a single log line and discards the structure. Persist it, and add the fields an assessor needs that exist nowhere in `$auditevent`: policy decision, entities detected, detection layer, approval or override outcome, and kill-switch state. |
 | GA5.6 | M | | **Fix the report engine** — `packages/core/src/governance/report-engine.tk:86,104,122,140,158` all query `SELECT timestamp, event_type, detail FROM audit_log`, but `audit_log` has neither a `timestamp` nor a `detail` column, so all five report types fail. `buildcompliancerows` also hardcodes `generatedat:"now"`. |
 | GA5.7 | M | | **Replace hardcoded compliance results** — `packages/core/src/governance/compliance.tk:42-56,82-90` returns a literal `PASS` for "PII anonymised before cloud" and "Audit trail complete" without querying the store it is passed. Compute every check from real state. Note the module is already honest about encryption at `:91-95` — that honesty should propagate outward, not be overwritten. |
@@ -1432,6 +1440,103 @@ never leaves, not even for categorisation.
 |-------|------|--------|---------|
 | X6.1 | M | **Done** | **Create `docs/claims.md`** — Every externally-visible claim in `README.md`, `docs/features-loke.md`, `docs/features-moke.md`, `docs/architecture.md` and the public site, with a verdict (verified / partial / stub / absent), the implementing code at file and line, and the test or measurement that proves it. Seed it from the audit already completed. |
 | X6.2 | S | **Done** | **Mark unverified claims inline** — Apply an explicit marker to every claim in the register that is not verified, so the assertion stays visible but flagged, using the withdrawal idiom already established on the public site rather than inventing a new one. |
-| X6.3 | S | **Script written** | **CI gate** — Fail the build when a claim marked verified has no evidence pointer, and when a published figure has no corresponding entry in `docs/metrics-baseline.md`. `scripts/check_claims.py` implements both checks (standard library only, `--check` mode for CI) and passes on the current tree; the workflow step is not yet wired into `.github/workflows/ci.yml`. |
+| X6.3 | S | **Done** | **CI gate** — Fail the build when a claim marked verified has no evidence pointer, and when a published figure has no corresponding entry in `docs/metrics-baseline.md`. `scripts/check_claims.py` implements both checks (standard library only, `--check` mode for CI) and runs in CI through `scripts/quality-gate.sh --step checks`, which the `static-checks` job invokes — so the gate is live and needs no compiler. It is called from the gate script rather than named directly in the workflow, which is why a grep of `.github/` finds nothing. |
 | X6.4 | S | **Done** | **Correct the coverage statement** — `docs/test-coverage.md` reports 35.5% module coverage, which counts files that have a test rather than modules actually exercised; of 86 test files, 54 carry an explicit stub marker and re-declare the module under test instead of importing it, and only about 12 import real production code. State both numbers and what each means. |
 | X6.5 | S | **Done** | **Withdraw unsupported results language** — `docs/research/research-proposal.md:15` states "We present empirical benchmarks demonstrating" token savings, detection accuracy and call reduction figures that no measurement produced. Rewrite as proposed methodology pending execution. |
+
+## Epic X8: Security Guarantee Hardening
+
+*The controls that documents describe as protections and that do not operate. Cited in thirteen files
+before this epic existed, which is why it is written now.*
+
+> **⏸ Most of this epic is on hold for the toolchain.** Encryption needs `std.encrypt`, which is a toke
+> library. The exception is X8.1, which is a documentation correction and should be done immediately.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| X8.1 | S | | **Reverse the GA2.2 "Done" marking** — GA2.2 "Enable SQLCipher encryption" is marked **Done** in this document while `packages/core/src/governance/compliance.tk:91-95`, `docs/claims.md` A10, `docs/threat-model.md:181`, `docs/metrics-baseline.md:162`, `docs/security-audit-checklist.md:111` and both APRA presets correctly state the opposite. `packages/core/src/storage/db.tk:37-43` issues `PRAGMA key`; the toolchain links plain `-lsqlite3`, which ignores it and returns success. Mark GA2.2 not done and point it here. A story marked Done for a control that does not operate is the most dangerous kind of backlog entry. |
+| X8.2 | L | ⏸ On hold — toolchain | **Encrypt the mapping table at rest** — The placeholder↔value mapping is the highest-value data in the system (`docs/threat-model.md:181` rates it Maximum) and is plaintext on disk. SQLCipher is not available and may never be: toke links plain SQLite and there is no sqlcipher anywhere in the toolchain. Use field-level encryption via `std.encrypt` (`aes256gcmencrypt`/`decrypt`/`keygen`/`noncegen`, `hkdfsha` — verified present) with a per-record nonce, applied in `packages/core/src/privacy/placeholder_store.tk`. Do not reinstate a database-level claim. |
+| X8.3 | M | ⏸ On hold — toolchain | **Keychain-only key handling** — The key is derived through the OS keychain and exists nowhere else: no key file, no environment-variable fallback, no default. A missing key fails the operation rather than falling back to plaintext. Test that removing the keychain entry makes the store unreadable rather than transparently readable. |
+| X8.4 | M | ⏸ On hold — toolchain | **Verifiable deletion** — "Delete everything" is proven by filesystem inspection, not asserted in the interface: after deletion, no file under `~/.loke` contains any mapping value or imported record, verified by a test that greps the tree for known fixture values. Applies to MK21's workspace as well as the mapping table. |
+| X8.5 | S | ⏸ On hold — `pipeline.tk` must not be edited until NC1.9 is resolved | **Remove the two hardcoded home directories** — `packages/browser/pages/api/pipeline.tk` and `settings.tk` both hardcode the original developer's home path, so the settings file silently resolves nowhere for anyone else. Tolerated in `scripts/known-defects.txt:20-21`; both lines come out when this lands. |
+| X8.6 | L | ⏸ On hold — toolchain | **Router strategies: implement or withdraw** — `docs/claims.md` D3: "cheapest-adequate, fastest, best-quality, local-first" has zero matches across `packages/` and `src/`. One fixed selection path exists in `packages/core/src/router/selector.tk`. F5.3 is marked **Done** and must be reopened. Either implement the four named strategies as selectable and configurable, or remove the names from `docs/features-loke.md:86`. Note decision **R** in the open-decisions register: sensitivity-scored provider routing is claimed by US 12,556,533 and wants a professional read before the router is promoted outwardly. |
+
+Related and deliberately **not** duplicated here: fail-closed on detection unavailability is **NC1.9**;
+the ten orphaned multi-layer modules including `consensus` are **AD1.7**; the audit chain is **GA5.2**
+and **GA5.3**.
+
+## Epic X7: Test Suite De-stubbing
+
+*Fifty-four test files declare the module they are meant to be testing instead of importing it. The
+reason that was tolerated no longer exists.*
+
+> **Why now:** the stub pattern existed because the linker gap made cross-module imports fail. That gap
+> closed upstream — `UPSTREAM.md:77` records the verification. The excuse is dead; the stubs are not.
+>
+> **⏸ Execution is on hold for the toolchain**, since a de-stubbed test has to compile to be worth
+> anything. X7.1 can be done now.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| X7.1 | S | | **Inventory and triage the 54** — Of 86 test files, 54 carry an explicit stub marker and re-declare the module under test; about 12 import real production code (`docs/test-coverage.md`, corrected under X6.4). Classify each: de-stub, rewrite, or delete as testing nothing worth testing. Publish the list so the count cannot drift. |
+| X7.2 | XL | ⏸ On hold — toolchain | **De-stub the tests that guard a privacy or governance path first** — Priority order by what a passing stub currently misrepresents: the privacy pipeline, the governance gateway, the placeholder store, the router, then everything else. A test that re-declares its subject cannot fail when the subject breaks, which is how A13 came to be marked complete while the browser handler posted raw text. |
+| X7.3 | M | ⏸ On hold — toolchain | **Make a stubbed test a gate failure** — Add the stub-marker check to `scripts/quality-gate.sh` with `scripts/known-defects.txt` as the shrinking allowlist, so the count can only go down. |
+| X7.4 | S | ⏸ On hold — toolchain | **Restate coverage once** — Re-measure and update `docs/test-coverage.md` and the claims register with both numbers (files carrying a test, modules actually exercised) and what each means. |
+
+## Epic LC1: Local Compute Validation on Target Hardware
+
+*Nine stories are marked Done for behaviour that has never executed on the hardware it was written for.*
+
+> **This epic is blocked on a purchase, not on the toolchain.** `README.md:354-360`, `docs/claims.md` §J
+> and `docs/features-loke.md:161` all record the same blocker: there is no Apple Silicon test machine.
+> VM1.4's containerised harness is a partial substitute and cannot validate unified memory or MLX.
+> See decision **H** in the open-decisions register.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| LC1.1 | S | Blocked — hardware | **Acquire or arrange target hardware** — A base Apple Silicon Mac Mini is sufficient and is the recommendation. A cloud GPU instance cannot substitute: unified memory is the premise of the layer-offload design and a discrete-GPU instance has a PCIe boundary that predicts nothing about a Mini; MLX is Apple-Silicon-only, so a non-Apple host validates it not at all. `benchmarks/README.md:42` requires every local-inference figure to state which host produced it. |
+| LC1.2 | L | Blocked — LC1.1 | **Run the five unverifiable F2 claims** — `docs/claims.md` J1-J5. Record each through `benchmarks/lib/result.py` with the host, model version, workload and N, so the results are admissible rather than anecdotal. Any that fails becomes its own defect. |
+| LC1.3 | M | Blocked — LC1.1 | **MLX: exercise or withdraw** — The MLX path has zero importers and `generate()` would return `""` if called; F2.9 has no implementing code at all despite being marked Done. Either make it work on the target hardware or remove the MLX claim from the public site and the feature documents. |
+| LC1.4 | M | Blocked — LC1.1 | **Validate the CPS 230 continuity control** — `docs/specifications/policy-examples/apra-cps-230.yaml:82,213` carries `validation_status: UNVALIDATED` on the local-provider fallback and states twice that an untested fallback must not be presented to an assessor as a continuity control. This is the control the whole preset rests on. Exercise the degraded path end to end with the network disabled, then change that field and nothing before. |
+| LC1.5 | L | Blocked — LC1.1 | **Memory-splitting and layer offload** — Measure what actually fits and at what throughput when a model exceeds available memory, on real unified memory. This is the technique the tiered-inference design assumes; it has never been measured. Report tokens/second and resident memory per tier, and state the physical-security difference between a desk machine and a remote host in any write-up. |
+
+## Epic W2: Website Honesty and Positioning
+
+*Recorded retrospectively. The work landed before the epic was written, which is the defect this entry
+closes.*
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| W2.1 | M | **Done** | **Withdraw the two false absolutes** — The live site asserted "No AI usage bypasses governance — it is architecturally impossible" and "The LLM never sees real data". Both are false: enforcement is bypassable at six points (`docs/specifications/enforcement-bypass-corpus.md`) and the shipping path is redact-and-forward, which sends redacted real text. Replaced using the established withdrawal idiom rather than deletion, so a reader who remembers the claim finds out what happened to it. |
+| W2.2 | M | **Done** | **Remove the dead "try loke" link** — loke is not an online tool and must not be implied to be one. The call to action is now a local install, not a hosted demo. |
+| W2.3 | S | **Done** | **Reposition on the no-custody architecture, in the future tense it deserves** — The page describes schema-out/execute-locally as the intended primary path and says plainly that it is specified rather than shipped (NC1). It does not claim novelty: this is the text-to-SQL default and ships in several commercial products. The contribution claimed is treating it as a security control with a threat model, artifact validation and an audit obligation. |
+| W2.4 | S | | **Screenshots** — Three genuine screens, each captioned with its capture date: the Insight Lab (genuinely local), the dataset catalogue with real and synthetic badged apart, and the privacy review modal showing the placeholder mapping. Not the dashboard until NC1.4 lands. See decision **D**. |
+
+## Epic BG1: Playwright-Found Defects — Migrated from `progress.json`
+
+*The last twelve open items from the retired `progress.json`, re-verified against the committed tree on
+2026-09-19 rather than carried across on trust.*
+
+> **Nine of the twelve were already closed** and are recorded here so nobody reinstates them:
+>
+> | Retired item | Why it is closed |
+> |---|---|
+> | BUG-1 ooke API POST handlers not executing | `scripts/gen_handlers.sh` detects and registers `f=post(` — `UPSTREAM.md:84` |
+> | BUG-2 ooke API GET handlers not executing | Same mechanism for `f=get(` — `UPSTREAM.md:83` |
+> | BUG-3 page `get()` bypassed when a template exists | `serve.tk::serveregisterstatic` takes `handledpaths` and the handler claims the path first — `UPSTREAM.md:85,87` |
+> | FEAT-1 register API handlers in loke | 18 API routes registered in `packages/browser/src/_handlers.tk` |
+> | FEAT-2 register API handlers in moke | 15 API routes registered in `packages/moke/src/_handlers.tk` |
+> | FEAT-3 remove moke's direct Ollama call | moke forwards to loke at `packages/moke/pages/api/pipeline.tk:72` and `stream.tk:53`. The only remaining `11434` references are health checks |
+> | BUG-6 API key in localStorage | `packages/browser/pages/api/settings.tk:6,56-59` reads the keychain first, with a JSON migration fallback. Zero `localStorage` API-key references remain in the templates |
+> | BUG-7 moke dataset load/upload | Implemented — `packages/moke/pages/api/datasets.tk`, `upload.tk`; verified under X4a.4 |
+> | BUG-8 moke ML analysis | Implemented — `packages/moke/pages/api/ml.tk` (188 lines); Insight Lab verified under MK2.1 |
+>
+> The `V3`/`V3B` epics are also retired: the v3 migration completed at 562/562 files, so their
+> `not_started` statuses were stale by four months.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| BG1.1 | S | ⏸ On hold — needs a running binary | **Confirm the dashboard returns DDL JSON, not plain text** — Retired as BUG-4. MK3.2 and MK4.8.1 are both marked Done and the NC1.5/NC1.6 provenance work changed what the dashboard renders, so this is a re-verification rather than a fix. If it still returns plain text, MK4.8.1 reopens. |
+| BG1.2 | S | ⏸ On hold — needs a running binary | **Confirm the sysmon widget reports real figures** — Retired as BUG-5, which reported zeros and dashes. `packages/core/src/monitoring/sysmon.tk` exists; whether it is reached from the browser widget is unverified. A widget that displays dashes is a cosmetic defect; one that displays plausible zeros is a misreporting defect, so distinguish which it is. |
+| BG1.3 | S | ⏸ On hold — needs a running binary | **Confirm the multi-phase DDL flow end to end** — Retired as FEAT-4. Overlaps MK3.2 (Done) and BG1.1; close as a duplicate if BG1.1 passes. |
+
