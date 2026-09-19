@@ -15,7 +15,11 @@
   // Constants
   // ---------------------------------------------------------------------------
 
-  var BASE_URL = 'https://data.gov.au/api/3/action';
+  // Verified 2026-09-19: the CKAN base is /data/api/3/action. The previous
+  // value, /api/3/action, returns 404 with an HTML body — so every search
+  // through this module failed. It was never noticed because the module is not
+  // mounted by any page (MK19.8).
+  var BASE_URL = 'https://data.gov.au/data/api/3/action';
 
   /**
    * Pre-populated suggested datasets for quick access.
