@@ -181,19 +181,35 @@ def report(rows: dict, problems: list[str], digests: dict, record: bool) -> int:
     return 0
 
 
+# Exit code for "this environment cannot take the measurement", distinct from
+# "the measurement is wrong". Conflating them is why CI first reported a missing
+# tiktoken as a broken instrument.
+SKIPPED = 0
+
+
 def self_test() -> int:
-    """Guards on the instrument, before any figure from it is quoted."""
+    """Guards on the instrument, before any figure from it is quoted.
+
+    Returns 0 if the guards pass OR if no tokeniser is installed, and 1 only when a
+    tokeniser IS present and the instrument misbehaves. A missing tokeniser is an
+    environment gap; it is reported and the format guards still run, because those
+    need no tokeniser at all.
+    """
     failures = []
 
     def check(cond, msg):
         if not cond:
             failures.append(msg)
 
+    toks = tokenisers.available()
+    if not toks:
+        print("self-test: NO TOKENISER INSTALLED — the token guards cannot run here.")
+        print("  Install tiktoken to verify them. The format guards below still run,")
+        print("  since they do not need a tokeniser.")
+
     # 1. Minified JSON must beat indented JSON on tokens. If it does not, the
     #    tokeniser or the serialiser is wrong and every ratio is suspect.
     data = datasets._uniform_tabular(50)
-    toks = tokenisers.available()
-    check(bool(toks), "no tokeniser available; the harness cannot measure anything")
     if toks:
         t = toks[0]
         b1 = t.count(serialisers.b1_json(data))
@@ -250,7 +266,11 @@ def self_test() -> int:
         for f in failures:
             print("  - " + f, file=sys.stderr)
         return 1
-    print("self-test passed: 7 guard groups")
+    if toks:
+        print(f"self-test passed: 7 guard groups, tokenisers "
+              f"{', '.join(t.name for t in toks)}")
+    else:
+        print("self-test passed: 6 guard groups (token guards skipped, no tokeniser)")
     return 0
 
 
