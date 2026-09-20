@@ -116,6 +116,33 @@ step_checks() {
                 "from it would be wrong" >&2; failed=1; }
   fi
 
+  if [[ -f packages/moke/static/js/tests/test-moke-provenance.js ]] && command -v node >/dev/null; then
+    echo "  card provenance vocabulary"
+    node packages/moke/static/js/tests/test-moke-provenance.js >/dev/null \
+      || { echo "  provenance tests failed — a card could claim a number it did not compute" >&2; failed=1; }
+  fi
+
+  # Two checks for the defect class MK20.4 fixed: presentation mode rendered
+  # Math.random() figures under a "computed locally" caption, because the NC1.5
+  # rule lived in one template and it had no access to it.
+  echo "  presentation mode invents no figures"
+  if grep -n 'Math\.random' packages/moke/templates/presentation.tkt 2>/dev/null | grep .; then
+    echo "  presentation.tkt must not generate figures. It has no legitimate use for" >&2
+    echo "  Math.random: no ids, no jitter, no shuffling. Slides come from the DDL." >&2
+    failed=1
+  fi
+
+  echo "  provenance rule has one definition"
+  dupes=$(grep -l 'function cardState\|function setProvenance\|function stripUnverifiedValues' \
+          packages/moke/templates/*.tkt 2>/dev/null | head -3)
+  if [[ -n "$dupes" ]]; then
+    printf '%s\n' "$dupes"
+    echo "  the templates above define provenance helpers locally. There must be one" >&2
+    echo "  definition, in static/js/moke-provenance.js, or they drift and a page" >&2
+    echo "  without the rule renders numbers nobody computed." >&2
+    failed=1
+  fi
+
   if [[ -f tests/fixtures/adversarial/score.py ]]; then
     echo "  adversarial corpus scorer discriminates"
     python3 tests/fixtures/adversarial/score.py --self-test >/dev/null \

@@ -42,8 +42,12 @@ import re
 import subprocess
 import sys
 
-LICENCE_FIRST_LINE = "// Copyright 2026 loke contributors"
+# The header is the same notice in two comment syntaxes, because .tk is toke
+# source and .tkt is a template. Both lost it to the same rewriter.
+LICENCE_MARK = "Copyright 2026 loke contributors"
+LICENCE_FIRST_LINE = "// " + LICENCE_MARK          # .tk
 LICENCE_SPDX = "// SPDX-License-Identifier: Apache-2.0"
+TEMPLATE_FIRST_LINE = "<!-- " + LICENCE_MARK + " -->"   # .tkt
 
 # Must not be committed from the working tree under any option. Not a style
 # exception — the working copy is a live privacy regression (NC1.9).
@@ -68,24 +72,32 @@ def normalise_equality(s: str) -> str:
     return re.sub(r"(?<![=!<>])={1,2}(?!=)", "=", s)
 
 
+def tracked(pattern: str) -> list[str]:
+    return [f for f in git("ls-files", pattern).split()
+            if not f.startswith("_archived")]
+
+
 def tracked_tk() -> list[str]:
-    return [f for f in git("ls-files", "*.tk").split()
-            if not f.startswith("_archived-tests/")]
+    return tracked("*.tk")
 
 
 def check_licence_headers() -> list[str]:
-    """Every file that had the header at HEAD must still have it."""
+    """Every file that had the header at HEAD must still have it.
+
+    Covers .tk and .tkt. The .tkt case was missed on the first pass and 26 of 29
+    templates had lost the notice, which is how this check earned its second
+    file type.
+    """
     problems = []
-    # One pass over HEAD rather than 522 `git show` calls: git grep -l against the
+    # One pass over HEAD rather than a `git show` per file: git grep -l against the
     # commit lists exactly the files that carried the header when it was written.
     had_header = {
-        f for f in git("grep", "-l", "--fixed-strings", LICENCE_FIRST_LINE,
-                       "HEAD", "--", "*.tk").split("\n")
-        if f.startswith("HEAD:")
-        for f in [f[len("HEAD:"):]]
-        if not f.startswith("_archived-tests/")
+        f[len("HEAD:"):] for f in
+        git("grep", "-l", "--fixed-strings", LICENCE_MARK,
+            "HEAD", "--", "*.tk", "*.tkt").split("\n")
+        if f.startswith("HEAD:") and not f[len("HEAD:"):].startswith("_archived")
     }
-    for f in tracked_tk():
+    for f in tracked("*.tk") + tracked("*.tkt"):
         if f not in had_header:
             continue  # never had one; not this check's business
         try:
@@ -94,9 +106,10 @@ def check_licence_headers() -> list[str]:
         except FileNotFoundError:
             problems.append(f"{f}: deleted in the working tree but has a licence header at HEAD")
             continue
-        if not cur.startswith(LICENCE_FIRST_LINE):
+        first = cur.split("\n", 1)[0]
+        if LICENCE_MARK not in first:
             problems.append(f"{f}: licence header removed")
-        elif LICENCE_SPDX not in cur.split("\n", 3)[1]:
+        elif "SPDX-License-Identifier: Apache-2.0" not in cur.split("\n", 3)[1]:
             problems.append(f"{f}: SPDX line removed or altered")
     return problems
 
