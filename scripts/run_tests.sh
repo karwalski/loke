@@ -38,7 +38,11 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   VENDOR="$TOKEDIR/stdlib/vendor"
   CMARK_C=$(find "$VENDOR/cmark/src" -name '*.c' ! -name 'main.c' 2>/dev/null | tr '\n' ' ')
   TOML_C="$VENDOR/tomlc99/toml.c"
-  if ! find "$STDLIB" -name '*.c' ! -name 'llm_tool.c' ! -name 'infer_stream.c' ! -name 'sys_glue.c' -print0 | \
+  # Same exclusions as build_loke.sh once had, and the same consequence: sys_glue.c
+  # defines tk_sys_platform_w and friends, and llm_tool_glue.c calls into llm_tool.c,
+  # so leaving either out fails the link for any test that reaches them. Only
+  # infer_stream.c genuinely does not build here.
+  if ! find "$STDLIB" -name '*.c' ! -name 'infer_stream.c' -print0 | \
     xargs -0 clang -std=c99 -D_GNU_SOURCE -O1 -iquote "$STDLIB" \
     -I"$VENDOR/cmark/src" -I"$VENDOR/tomlc99" \
     -I/opt/homebrew/include -L/opt/homebrew/lib \
