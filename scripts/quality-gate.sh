@@ -156,10 +156,18 @@ step_checks() {
   fi
 
   if [[ -f benchmarks/toon/run.py ]]; then
+    # Print the harness's own summary rather than swallowing it: the self-test
+    # passes both when the token guards ran and when they were skipped for want of a
+    # tokeniser, and those are different facts about this run.
     echo "  serialisation baseline harness"
-    python3 benchmarks/toon/run.py --self-test >/dev/null \
-      || { echo "  the token harness no longer measures correctly, so every ratio it" >&2
-           echo "  produced is suspect" >&2; failed=1; }
+    if toon_out=$(python3 benchmarks/toon/run.py --self-test 2>&1); then
+      echo "    ${toon_out##*$'\n'}"
+    else
+      printf '%s\n' "$toon_out" >&2
+      echo "  the token harness no longer measures correctly, so every ratio it" >&2
+      echo "  produced is suspect" >&2
+      failed=1
+    fi
   fi
 
   if [[ -f tests/fixtures/adversarial/score.py ]]; then
