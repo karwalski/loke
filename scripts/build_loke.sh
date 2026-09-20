@@ -104,6 +104,31 @@ cd "$BROWSERDIR"
 rm -rf build/ooke build/main.ll build/loke
 mkdir -p build/ooke
 
+# Order matters and was wrong. The page handlers and main used to be compiled BEFORE
+# the interface pass, so every cross-module import in a page resolved against nothing
+# — and the interface pass did not cover packages/browser/pages either, so the pages
+# never contributed interfaces of their own. Both halves are fixed: interfaces first,
+# over the pages too, then everything is compiled.
+
+echo "Emitting module interfaces in dependency order..."
+MODULE_SRCS=$("$PROJECTDIR/scripts/module_order.py" \
+  "$PROJECTDIR/packages/core/src" "$PROJECTDIR/packages/shared/src" \
+  "$BROWSERDIR/extensions" "$BROWSERDIR/pages" 2>/dev/null)
+[ -n "$MODULE_SRCS" ] || { echo "ERROR: could not compute module order" >&2; exit 1; }
+# --emit-llvm matters here and is not cosmetic. Without it toke compiles a BINARY,
+# which requires a main function, so every library module failed with
+# "E9020 no main function defined" and emitted no interface. That single missing
+# flag was the whole reason only 33 of 179 interfaces appeared — it read as a
+# dependency-order problem and was not one. ooke's own Makefile pairs the two flags.
+# --out is a DIRECTORY here, so toke names the .tki by module path
+# (core.privacy.ner.tki). The .ll lands beside it and is ignored; the compile pass
+# in step 4b emits the IR that actually gets linked.
+for tkfile in $MODULE_SRCS; do
+  "$TOKE" -I "$IFACE_DIR" --emit-interface --emit-llvm \
+    --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
+done
+echo "  $(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ') of $(echo "$MODULE_SRCS" | wc -l | tr -d ' ') interface(s) emitted"
+
 echo "Compiling page handlers..."
 for tkfile in $(find pages -name '*.tk' -type f | sort); do
   has_handler=0
@@ -135,25 +160,6 @@ compile_one _serve_main.tk --emit-llvm --out build/main.ll
 # exist, so alphabetical-plus-repeat stalled at 33 of 179: repetition cannot fix an
 # ordering problem, only a shallow one. scripts/module_order.py reads the m= and i=
 # lines, topologically sorts them (179 modules, no cycles) and prints the order.
-echo "Emitting module interfaces in dependency order..."
-MODULE_SRCS=$("$PROJECTDIR/scripts/module_order.py" \
-  "$PROJECTDIR/packages/core/src" "$PROJECTDIR/packages/shared/src" \
-  "$BROWSERDIR/extensions" 2>/dev/null)
-[ -n "$MODULE_SRCS" ] || { echo "ERROR: could not compute module order" >&2; exit 1; }
-# --emit-llvm matters here and is not cosmetic. Without it toke compiles a BINARY,
-# which requires a main function, so every library module failed with
-# "E9020 no main function defined" and emitted no interface. That single missing
-# flag was the whole reason only 33 of 179 interfaces appeared — it read as a
-# dependency-order problem and was not one. ooke's own Makefile pairs the two flags.
-# --out is a DIRECTORY here, so toke names the .tki by module path
-# (core.privacy.ner.tki). The .ll lands beside it and is ignored; the compile pass
-# in step 4b emits the IR that actually gets linked.
-for tkfile in $MODULE_SRCS; do
-  "$TOKE" -I "$IFACE_DIR" --emit-interface --emit-llvm \
-    --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
-done
-echo "  $(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ') of $(echo "$MODULE_SRCS" | wc -l | tr -d ' ') interface(s) emitted"
-
 echo "Compiling core modules..."
 for tkfile in $MODULE_SRCS; do
   modpath=$(grep '^m=' "$tkfile" | head -1 | sed 's/m=//; s/;//')
