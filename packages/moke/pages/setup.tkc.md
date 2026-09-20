@@ -1,0 +1,1 @@
+**setup.tk** — Page handler for the first-run setup wizard (`/setup`). Renders `templates/setup.tkt`. Part of story A4.1: guides new users through connectivity checks, LLM configuration, and privacy presets on first visit.
