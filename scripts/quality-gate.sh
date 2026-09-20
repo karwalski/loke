@@ -209,13 +209,16 @@ step_checks() {
            | xargs -0 grep -In '/Users/[a-z.]*/' 2>/dev/null \
            | grep -vFf <(grep -v '^#' scripts/known-defects.txt | awk 'NF{print $1}') || true)
   if [[ -n "$hits" ]]; then
-    printf '%s\n' "$hits" | head -5
+    printf '%s\n' "$hits" | sed -n '1,5p'
     echo "  hardcoded home directories found above — a fresh clone must build" >&2
     echo "  (known exceptions are listed in scripts/known-defects.txt)" >&2
     failed=1
   fi
 
   # The two-line Apache licence header is REQUIRED, not a comment to be removed.
+  # It is written in toke's own comment syntax, (* ... *). It used to be written as
+  # C-style "//", which the compiler flags W1020 on every line because toke has no
+  # C-style comment — 1040 warnings across 521 files, now none.
   # 520 of 692 committed .tk files carry it, and a destructive migration script
   # once stripped it from all of them (F10.6), so this check guards both
   # directions: no stray C-style comments, and no missing licence header.
@@ -229,14 +232,15 @@ step_checks() {
       || { echo "  the uncommitted toke work is not what F10.13 claims it is" >&2; failed=1; }
   fi
 
-  echo "  toke source carries its licence header and no stray comments"
+  echo "  toke source carries its licence header and no C-style comments"
   stray=$(git ls-files -z '*.tk' 2>/dev/null \
           | xargs -0 grep -ln '^//' 2>/dev/null \
           | while read -r f; do
               grep '^//' "$f" \
                 | grep -qv -e 'Copyright 2026 loke contributors' \
                            -e 'SPDX-License-Identifier' && echo "$f"
-            done | head -5)
+            done)
+  stray=$(printf '%s\n' "$stray" | sed -n '1,5p')
   if [[ -n "$stray" ]]; then
     printf '%s\n' "$stray"
     echo "  C-style comments other than the licence header found above;" >&2
@@ -248,9 +252,9 @@ step_checks() {
   # rule invented by this check rather than an invariant of the repository.
   missing=$(git ls-files -z '*.tk' 2>/dev/null \
             | tr '\0' '\n' | grep -v '^_archived-tests/' | tr '\n' '\0' \
-            | xargs -0 grep -L '^// Copyright 2026 loke contributors' 2>/dev/null \
-            | grep -vFf <(grep -v '^#' scripts/known-defects.txt | awk 'NF{print $1}') \
-            | head -5)
+            | xargs -0 grep -L 'Copyright 2026 loke contributors' 2>/dev/null \
+            | grep -vFf <(grep -v '^#' scripts/known-defects.txt | awk 'NF{print $1}') || true)
+  missing=$(printf '%s\n' "$missing" | sed -n '1,5p')
   if [[ -n "$missing" ]]; then
     printf '%s\n' "$missing"
     echo "  toke source above is missing its Apache 2.0 licence header." >&2
