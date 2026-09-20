@@ -1,7 +1,7 @@
 # loke — Epics & Stories
 
 **License:** Apache 2.0
-**Version:** v1.1 (partially blocked — see `TOOLCHAIN.lock`)
+**Version:** v1.2 (toolchain hold cleared 2026-09-20 — see `TOOLCHAIN.lock`; the build is mid-migration under F10)
 
 ---
 
@@ -21,7 +21,7 @@ Stories sourced from the platform requirements document are tagged with their R-
 
 Story status values: blank (not started) · **Spec done** · **Done** · **⏸ On hold**
 
-> **⏸ On hold** stories are blocked pending a dependency becoming ready for development. See the hold notice on each affected layer for detail.
+> **⏸ On hold** stories are blocked pending a dependency becoming ready for development. See the hold notice on each affected layer for detail. **The toolchain hold was cleared on 2026-09-20** — toke `6cc9061`+ and ooke `v3.0.0-rc.1` are published and the build runs — so the only remaining holds are hardware (LC1), a missing toke capability (zip/XLSX/OCR/PDF), or another story.
 
 ---
 
@@ -29,7 +29,7 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 > **Foundation layer — now in development**
 >
-> loke is built on **ooke** ([github.com/karwalski/ooke](https://github.com/karwalski/ooke)) — a lightweight CMS and web application framework written in the toke programming language. ooke Phase 1 and the native bindings loke needs are complete, and the toke criterion in [`TOOLCHAIN.lock`](../TOOLCHAIN.lock) is met. **The hold now rests on ooke 3.0.0 alone** — the local build is `3.0.0-dev`, and a `-dev` suffix does not satisfy the gate. Stories marked ⏸ cannot compile until it lands; the rest proceed.
+> loke is built on **ooke** ([github.com/karwalski/ooke](https://github.com/karwalski/ooke)) — a lightweight CMS and web application framework written in the toke programming language. **The toolchain hold was cleared on 2026-09-20:** toke `6cc9061`+ and ooke `v3.0.0-rc.1` are both published and fetchable, and CI builds loke for the first time. [`TOOLCHAIN.lock`](../TOOLCHAIN.lock) is the authority. **The build is not green** — 58 of 199 modules compile, and the remaining work is split into F10.14–F10.24. Stories that need a compiled binary are queued behind that rather than held; the only real holds left are hardware (LC1), a genuinely missing toke capability (zip, XLSX, OCR, PDF) or another story.
 >
 > **Architectural impact of ooke:**
 >
@@ -173,7 +173,7 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 *Extend local compute to nearby high-power devices over secure direct connections. Implemented in toke on ooke.*
 
-> The std.mdns and std.tls bindings are available; these stories still need a compiler, so they carry the ooke 3.0.0 hold like the rest of the Foundation layer.
+> The std.mdns and std.tls bindings are available and the compiler now is too. **F8.1–F8.4 are marked Done for behaviour that has never executed** — mDNS pairing, TLS 1.3 mutual auth with pinning, remote model execution and the Exo integration. They are in the RV1 re-verification set.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
@@ -536,7 +536,7 @@ Story status values: blank (not started) · **Spec done** · **Done** · **⏸ O
 
 ## Epic X4a.6: Live API Handler Implementations
 
-*loke builds and serves a native binary (X4a.1–X4a.5 complete). All 172 modules compile, 19/19 tests pass. But the API handlers return stub/placeholder data because the core module functions (`browser.extensions.core`, `core.models.ollama`) have placeholder implementations. This epic implements the real business logic so API endpoints return live data.*
+*loke builds and serves a native binary (X4a.1–X4a.5 complete). **Corrected 2026-09-20: this was false.** Measured against the current toolchain, 58 of 199 modules compile and the test suite has not run. The claim was written while the interface directory held a stale nested tree that toke never read, so modules were type-checked against four-month-old signatures. See F10 and RV1. But the API handlers return stub/placeholder data because the core module functions (`browser.extensions.core`, `core.models.ollama`) have placeholder implementations. This epic implements the real business logic so API endpoints return live data.*
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
@@ -989,7 +989,7 @@ loke is local-first and single-user by design. The companion device support (F8)
 | Memory Palace (M1–M2) | 2 | 11 | 7 |
 | Cross-cutting (X1–X5, W1) | 6 | 30 | 30 |
 | Demo — moke (MK1–MK7) | 7 | 34 | 34 |
-| Test Suite (T1–T14) | 14 | 53 | 0 |
+| Test Suite (T1–T14) | 14 | 65 | 65 marked Done, **0 verified** |
 | **Total** | **55** | **268** | **193** |
 
 ---
@@ -1041,16 +1041,29 @@ major version past loke's declared `ooke >= 1.0.0` without anyone noticing, beca
 
 ### The hold criterion, and why it is a commit and not a version
 
-**loke needs toke at commit `b66bd8e` or later — in practice a build of `main` — and ooke 3.0.0.**
+**loke needs toke at commit `6cc9061` or later — in practice a build of `main` — and ooke `v3.0.0-rc.1`.**
+`TOOLCHAIN.lock` is the authority; this section explains it.
 
-Upstream is explicit that **no tagged toke release works**. That is not a preference: toke's `VERSION`
-file still reads 2.8.0 well past the `v2.8.0` tag, so the tag predates the commit loke needs, and a
-semver comparison would happily accept a checkout that cannot build loke. So toke is gated on **commit
-ancestry** and its version is recorded as advisory only. ooke is gated on **released version**, and a
-`-dev` suffix does not satisfy it.
+Upstream is explicit that **no tagged toke release works** and that there is no version number to give.
+That is not a preference: toke's `VERSION` file still reads 2.8.0 well past the `v2.8.0` tag, so a semver
+comparison would happily accept a checkout that cannot build loke. toke is therefore gated on **commit
+ancestry** with its version recorded as advisory only. ooke is gated on a **tag**, which it now has.
 
-**Current position:** toke's criterion is **met** — `b66bd8e` is an ancestor of the local HEAD. ooke is
-**`3.0.0-dev`**, a pre-release. **The hold therefore rests on ooke 3.0.0 alone.**
+**Current position, 2026-09-20: the hold is CLEARED.** Both pins are published and fetchable, which was
+itself a blocker — neither was on a remote until now, so CI could not obtain a compiler at any migration
+status and no figure this project published was reproducible by anyone else. CI now builds loke and
+reproduces the local census exactly.
+
+Accepting a release candidate reverses the earlier decision to wait for a final 3.0.0. That reversal was
+deliberate and instructed. What does **not** move is the publication bar: a figure measured against an rc
+is labelled with the rc, so if the final tag changes, every affected number can be found again.
+
+**The build is not green.** 58 of 199 modules compile and 52 of 179 interfaces emit. Of the 291 errors,
+**226 are `E2030` cascade** from modules that have not compiled yet — so the real work is 65 errors in 19
+files, split into F10.14–F10.24 below. Three defects in the build itself were masking this and are fixed:
+the interface directory held a stale nested tree toke never read, the interface pass omitted
+`--emit-llvm` so every library failed on "no main function", and interfaces were emitted alphabetically
+rather than in dependency order.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
@@ -1060,15 +1073,26 @@ ancestry** and its version is recorded as advisory only. ooke is gated on **rele
 | F10.4 | S | **Done** | **Drift watch** — pinning alone would let loke drift silently again, which is how it fell four months behind. A scheduled job compares the lock against upstream HEAD weekly and warns without turning `main` red. |
 | F10.5 | M | **Done** | **Diagnostics-driven fixer** — `scripts/fix_diagnostics.py` applies mechanical fixes by byte offset from toke's own JSON diagnostics, so only spans the compiler itself flags are touched. This replaces the regex approach in the previous migration script, whose `^[ \t]*//.*\n` silently deleted the licence header from 520 files. 968 equality fixes applied; `packages/` type-check went 167 to 246 passing. |
 | F10.6 | S | **Done** | **Remove the destructive migration scripts** — their job is finished and a repo-wide destructive rewriter is a standing hazard whether or not its regex is fixed. |
-| F10.7 | L | ⏸ **On hold — ooke 3.0.0** | **Finish the migration** — the 74 remaining genuine type errors, and whatever the expression-`if` part of the v0.4 change requires. Boolean operators are already migrated (53 `&&`, 74 `\|\|`, zero `and(`/`or(` call sites) and the equality split is done, so this is the residual. |
-| F10.8 | M | ⏸ **On hold — ooke 3.0.0** | **Adopt ooke 3.x interfaces** — every shared interface but two had already drifted at 2.0.0 (`store` 40 changes, `template` 33, `router` 15), plus two new modules. A major version means more. Note `packages/browser/_serve_main.tk` is generated by a heredoc inside `build_loke.sh`, so the build script changes, not just source. |
-| F10.9 | M | ⏸ **On hold — ooke 3.0.0** | **Capability manifest** — toke has a capability broker with runtime traps for ungranted capabilities, and loke declares nothing. Add a `tkc.toml` with a **minimal, justified** grant set and document why each is granted. This is also an opportunity rather than a chore: a minimal audited grant set is a real, verifiable privacy property to replace some unverified claims. |
+| F10.7 | M | **In progress** — re-scoped 2026-09-20. The "74 type errors" figure was measured against stale interfaces and is wrong. Measured now: 58 of 199 modules compile, 291 errors of which **226 are E2030 cascade**, leaving 65 real errors in 19 files. The classes are split out as F10.14–F10.24 | **Finish the migration** — the 74 remaining genuine type errors, and whatever the expression-`if` part of the v0.4 change requires. Boolean operators are already migrated (53 `&&`, 74 `\|\|`, zero `and(`/`or(` call sites) and the equality split is done, so this is the residual. |
+| F10.8 | M | | **Adopt ooke 3.x interfaces** — every shared interface but two had already drifted at 2.0.0 (`store` 40 changes, `template` 33, `router` 15), plus two new modules. A major version means more. Note `packages/browser/_serve_main.tk` is generated by a heredoc inside `build_loke.sh`, so the build script changes, not just source. |
+| F10.9 | M | | **Capability manifest** — toke has a capability broker with runtime traps for ungranted capabilities, and loke declares nothing. Add a `tkc.toml` with a **minimal, justified** grant set and document why each is granted. This is also an opportunity rather than a chore: a minimal audited grant set is a real, verifiable privacy property to replace some unverified claims. |
 | F10.10 | M | **Done** | **Consolidate the upstream gap docs** — four existed, addressed to the toke and ooke teams and filed nowhere. All re-verified and archived under `docs/archive/` with a do-not-file banner, superseded by [`UPSTREAM.md`](../UPSTREAM.md). The verification was the point: **every historical gap has closed.** `linker-gaps.md` has 0 genuine gaps of its 131 symbols (115 now exist, 14 were prose fragments, and the 2 that looked real are loke bugs — `str.nowiso8601` should be `std.time`, and `str.between` composes from `str.indexof` and `str.slice`). `ooke-gaps.md` has 0 of 6 remaining. The `<a<b` parser ambiguity is fixed. Had these been filed as written, loke would have reported about 137 already-fixed problems to its own upstream. |
-| F10.11 | S | | **File the genuine gaps upstream** — after F10.10's verification the list is short: the document and image library asks in [`toke-libraries-required.md`](toke-libraries-required.md), and the three toke documents that still state "toke has no comment syntax" after `(* *)` shipped (`companion-file-spec.md`, `companion-fidelity-methodology.md`, `conventions.md`). Nothing else survives verification. Cross-reference into toke's own progress tracker so they are scheduled rather than noted. |
+| F10.11 | S | | **File the genuine gaps upstream** — after F10.10's verification the list is short: the document and image library asks in [`toke-libraries-required.md`](toke-libraries-required.md), and the three toke documents that still state "toke has no comment syntax" after `(* *)` shipped (`companion-file-spec.md`, `companion-fidelity-methodology.md`, `conventions.md`). Two further asks were found on 2026-09-20, both tool hazards rather than niceties. **(1) `toke --lint --fix` deletes imports that are needed.** The `unused-import` rule looks only at alias usage (`t.foo`) and ignores **type** references, so it removes `i=t:shared.types;` from a file whose only use of that module is `$lokeerr`. Applied here it dropped 197 imports across 119 files and produced 265 `identifier 'lokeerr' is not declared` errors. Worth filing with the observation that this is the same class of hazard F10.6 removed loke's own destructive rewriter for — a `--fix` flag that breaks a correct file is worse than no `--fix`. **(2) `http.post` is declared twice in `http.tki`**, once as a `route` taking `(str, funcdecl)` and once as a `func` taking `(httpclient, str, [byte], str)`. toke resolves the route, so the diagnostic reports "the implementation takes 2 arguments" for a four-parameter function; the arity in that message is misleading. Cross-reference into toke's own progress tracker so they are scheduled rather than noted. |
 | F10.12 | M | | **Resolve the two source trees** — `packages/**` declares 344 modules and a legacy root `src/**` declares 102. The only genuine cross-tree dependency is five CLI files importing `loke.platform.i18n` from `src/platform/i18n/`; the apparent auth dependency is a red herring, since `packages/core/src/auth/pkce.tk` declares `m=loke.core.auth.pkce` itself. So about 99 of the 102 legacy files are dead weight. Move i18n into a package, rename the four stray `loke.core.auth.*` modules, archive the rest. |
-| F10.12a | S | ⏸ **On hold — ooke 3.0.0** | **Call `std.time` instead of the nonexistent `str.nowiso8601`** — surfaced by F10.10. Five files call it (`agents/types.tk`, `governance/gateway.tk`, `governance/dashboard.tk`, `governance/trace.tk`, `shared/src/log.tk`). The capability exists in the wrong module: `std.time` has `time.now`, `time.format`, `time.parse` and more. Worth fixing for its own sake — `storage/audit.tk` writes the literal string `'now()'` into `created_at` (GA5.1), and a missing timestamp helper is a plausible reason why. |
-| F10.12b | S | ⏸ **On hold — ooke 3.0.0** | **Add a local `between` helper** — `privacy/content.tk` calls the nonexistent `str.between` at two sites. `str.indexof` and `str.slice` both exist, so compose it in `packages/core/src/util/strings.tk`, which already exists untracked. Not an upstream ask. |
+| F10.12a | S | | **Call `std.time` instead of the nonexistent `str.nowiso8601`** — surfaced by F10.10. Five files call it (`agents/types.tk`, `governance/gateway.tk`, `governance/dashboard.tk`, `governance/trace.tk`, `shared/src/log.tk`). The capability exists in the wrong module: `std.time` has `time.now`, `time.format`, `time.parse` and more. Worth fixing for its own sake — `storage/audit.tk` writes the literal string `'now()'` into `created_at` (GA5.1), and a missing timestamp helper is a plausible reason why. |
+| F10.12b | S | Superseded by F10.16, which collapses this and five other stdlib drifts into one shim | **Add a local `between` helper** — `privacy/content.tk` calls the nonexistent `str.between` at two sites. `str.indexof` and `str.slice` both exist, so compose it in `packages/core/src/util/strings.tk`, which already exists untracked. Not an upstream ask. |
 | F10.13 | S | | **Commit and push the held work** — 521 `.tk` files are uncommitted pending this epic, including the 968 mechanical fixes. **`packages/browser/pages/api/pipeline.tk` must not be committed as it stands** — it carries a privacy regression that fails open, tracked as NC1.9. Push only once the build and tests are green locally, so CI's first honest run is meaningful. |
+| F10.14 | S | | **Unblock the two root modules** — 7 errors in 2 files transitively block ~130 modules. `packages/shared/src/log.tk` has 4 `str.format` calls and **`str.format` reverses its arguments** in the new runtime — `(val, fmt)`, not `(fmt, ...values)` — and drops varargs, so these become `str.concat` or interpolation. `packages/core/src/privacy/regex.tk` has 3 struct-offset errors from `arrayget` type erasure. `shared.log` alone accounts for 115 of the 226 cascade errors. **Re-run `scripts/build_census.py` immediately after: every estimate below was written against a number this story changes.** |
+| F10.15 | S | | **Close the build-script interface gaps** — `scripts/build_loke.sh` step 4a runs `module_order.py` over `packages/core/src`, `packages/shared/src` and `extensions` but **not `packages/browser/pages`**, and step 4 compiles the pages *before* 4a runs at all. 32 of the E2030 errors are this, with zero source change. Also fix the inconsistent page module naming — `pages/api/approve.tk` declares `m=page.api.approve` while `pages/api/health.tk` declares `m=browser.pages.api.health`, and the generated `_handlers.tk` imports both spellings. |
+| F10.16 | M | | **One stdlib compatibility shim, `shared.strcompat`** — six drifts, none of them mechanical. `str.between` does not exist at all (needs an `indexof`+`slice` helper; supersedes F10.12b). `replacere`/`countre`/`containsre` lost their trailing flags argument, so each `"gi"`/`"g"`/`"i"` has to be folded into the pattern — a per-site regex judgement. `str.format` reverses its arguments and drops varargs (9 sites, 4 files). `json.obj` takes a raw JSON string, not key/value pairs (9 sites, 5 files). `json.try*` each need a second argument (5 sites in `optimiser/toon.tk`). `str.pad`/`padleft`/`padright` take `(s, width, padchar)`; 3 sites pass 2 and are latent. |
+| F10.17 | L | | **`std.string` → `std.str` across 71 files** — `std.string` does not exist and never did; it is `std.str`. 46 of the files are in `packages/moke` and 35 in legacy `src/`, which is why the build has never reported it: neither tree is compiled. Also seven other imported-but-absent modules — `std.arr` (2 files), `std.fs` (9), `std.io` (3), `std.shell` (2), `std.clipboard` (1), `std.webview` (1). Each needs a decision: shim, replace, or delete the caller. Depends on F10.23. |
+| F10.18 | S | | **`ooke.template.renderfile` → `tplrenderfile`** — renamed in 3.0.0-rc.1 and gained a third parameter. 7 identical sites (`pages/approve.tk:9`, `chat.tk`, `pipeline.tk`, `privacy.tk`, `savings.tk`, `setup.tk`, `tabs.tk`). One decision first, made once and applied seven times: ooke's `tplrenderfile(str, [str:str], str)` or `std.template`'s surviving `tpl.renderfile(str, tmplvars)`. **Decision taken: ooke's**, because the page layer is ooke's and `std.template` being still-present looks like the stale half of the same split. |
+| F10.19 | S | | **Delete six of the seven `padright` definitions** — loke declares its own `padright` **seven times** with two different width types: `i32` in `governance/scorecard.tk:58`, `governance/value.tk:127` and `mcp/discovery.tk:176`; `u32` in `memory/mining.tk:166`, `governance/monitoring.tk:153`, `governance/incidents.tk:131` and `governance/dashboard.tk:229`. All 16 int-width errors are integer literals hitting the `i32` variants. One shared definition taking `i64` removes the errors and six copies; adding 16 `as i32` casts would keep all seven. |
+| F10.20 | S | | **Declare the real return types in `policy/regulations.tk`** — 8 functions are declared `:i64` and return a `$regulation` or `$policyset`. Note the compiler's own `fix` field says "cast return value to i64 using 'as'", which is **wrong advice** — casting a struct to an integer would compile and destroy the value. Declare the type the function actually returns. |
+| F10.21 | S | | **`void` sweep** — 205 `f=name(...):void` declarations and 25 `<void` returns across 58 files. toke functions return `i64`; the compiler warns `C keyword 'void' detected` on each, twice per function. `):void{` → `):i64{` and `<void` → `<0`, scriptable from the diagnostics. Warnings only, so this is hygiene rather than a blocker — but it is 122 of the report's noise. Note upstream's own `str.tki` still declares `str.add`/`str.addbyte` as `-> void`, so the keyword is not gone from the toolchain. |
+| F10.22 | M | | **`arrayget` type erasure** — `str.arrayget` is typed `(i64,i64) -> i64`, so it throws away the element type even where the array is declared correctly: `privacy/regex.tk:67` declares `patterns:@$patterndef` and still breaks. 152 call sites in 58 files, plus 23 `:@i64` placeholder params in 8 files that need a per-site judgement about the real element type. **Produces zero errors today** — the diagnostics do not mention it — so it is invisible to the census and 128 of the 152 sites sit in modules that have never been type-checked. Size this after F10.14; the 4 E4034 struct-offset errors are the leading indicator. |
+| F10.23 | S | | **Extend the build to the other 320 files** — `build_loke.sh` compiles 212 of the repo's 532 non-archived `.tk` files. Entirely outside it: `packages/moke` (96), legacy `src/` (102), `packages/cli` (26), `packages/mcp-broker` (6), `packages/mcp-toke` (4), `tests/` (86). Until this lands, "the build is green" means 40% of the repo and the census is not a measure of the project. |
+| F10.24 | S | | **Two parse errors** — unbalanced parentheses in `packages/browser/pages/api/settings.tk:100` (one `)` too many in a nested `str.concat`) and `packages/core/src/governance/dsar.tk:143`. Pre-existing, nothing to do with the migration. |
 
 
 ---
@@ -1414,8 +1438,8 @@ never leaves, not even for categorisation.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| RG1.1 | M | Partial — policy specification written as [`apra-cps-234.yaml`](specifications/policy-examples/apra-cps-234.yaml); the `.tk` preset module and `regulations.tk` entry are ⏸ on hold for the toolchain | **APRA CPS 234 preset** — Currently the standard exists as a single string in `packages/moke/tests/test_governance.tk:41` and nowhere else: no preset module, no entry in `packages/core/src/policy/regulations.tk`, no specification section, no UI option. Build it as a real preset with information-security control mapping. |
-| RG1.2 | M | Partial — policy specification written as [`apra-cps-230.yaml`](specifications/policy-examples/apra-cps-230.yaml); the `.tk` preset module is ⏸ on hold for the toolchain | **APRA CPS 230 preset** — Absent from the codebase entirely. Operational risk and service-provider management are precisely what a third-party model dependency engages, so this is the more consequential of the two for the primary market. |
+| RG1.1 | M | Partial — policy specification written as [`apra-cps-234.yaml`](specifications/policy-examples/apra-cps-234.yaml); the `.tk` preset module and `regulations.tk` entry are queued behind the green build | **APRA CPS 234 preset** — Currently the standard exists as a single string in `packages/moke/tests/test_governance.tk:41` and nowhere else: no preset module, no entry in `packages/core/src/policy/regulations.tk`, no specification section, no UI option. Build it as a real preset with information-security control mapping. |
+| RG1.2 | M | Partial — policy specification written as [`apra-cps-230.yaml`](specifications/policy-examples/apra-cps-230.yaml); the `.tk` preset module is queued behind the green build | **APRA CPS 230 preset** — Absent from the codebase entirely. Operational risk and service-provider management are precisely what a third-party model dependency engages, so this is the more consequential of the two for the primary market. |
 | RG1.3 | M | | **Australian Privacy Act reforms** — Named at `docs/specifications/regulatory-defaults.md:272` with zero implementation. Add the preset fields and rules the reforms require. |
 | RG1.4 | S | **Done** | **Reword "makes you compliant" to "ships a preset for"** — Three statements cross the line: `docs/specifications/regulatory-defaults.md:58` (anonymisation "removes the need for" a lawful basis), `docs/privacy-filters.md:226` (the pipeline "satisfies" Article 25), and `docs/privacy-filters.md:227` (deleting the local mapping "enables Article 17" — factually wrong, since it does nothing about data already transmitted and retained). |
 | RG1.5 | S | **Done** | **Withdraw the absolutes** — `docs/specifications/regulatory-defaults.md:456` claims all eighteen HIPAA identifier categories are detected and replaced "No exceptions", which `docs/threat-model.md:751` directly contradicts ("no combination of layers guarantees 100% detection"). The threat model is right. |
@@ -1449,17 +1473,18 @@ never leaves, not even for categorisation.
 *The controls that documents describe as protections and that do not operate. Cited in thirteen files
 before this epic existed, which is why it is written now.*
 
-> **⏸ Most of this epic is on hold for the toolchain.** Encryption needs `std.encrypt`, which is a toke
-> library. The exception is X8.1, which is a documentation correction and should be done immediately.
+> **Unblocked 2026-09-20.** `std.encrypt` is a toke library and the toolchain is available, so this epic
+> is live. X8.5 stays held behind NC1.9 because `pipeline.tk` must not be edited until the fail-open is
+> fixed. The stories still queue behind a compiling build — see F10.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
 | X8.1 | S | | **Reverse the GA2.2 "Done" marking** — GA2.2 "Enable SQLCipher encryption" is marked **Done** in this document while `packages/core/src/governance/compliance.tk:91-95`, `docs/claims.md` A10, `docs/threat-model.md:181`, `docs/metrics-baseline.md:162`, `docs/security-audit-checklist.md:111` and both APRA presets correctly state the opposite. `packages/core/src/storage/db.tk:37-43` issues `PRAGMA key`; the toolchain links plain `-lsqlite3`, which ignores it and returns success. Mark GA2.2 not done and point it here. A story marked Done for a control that does not operate is the most dangerous kind of backlog entry. |
-| X8.2 | L | ⏸ On hold — toolchain | **Encrypt the mapping table at rest** — The placeholder↔value mapping is the highest-value data in the system (`docs/threat-model.md:181` rates it Maximum) and is plaintext on disk. SQLCipher is not available and may never be: toke links plain SQLite and there is no sqlcipher anywhere in the toolchain. Use field-level encryption via `std.encrypt` (`aes256gcmencrypt`/`decrypt`/`keygen`/`noncegen`, `hkdfsha` — verified present) with a per-record nonce, applied in `packages/core/src/privacy/placeholder_store.tk`. Do not reinstate a database-level claim. |
-| X8.3 | M | ⏸ On hold — toolchain | **Keychain-only key handling** — The key is derived through the OS keychain and exists nowhere else: no key file, no environment-variable fallback, no default. A missing key fails the operation rather than falling back to plaintext. Test that removing the keychain entry makes the store unreadable rather than transparently readable. |
-| X8.4 | M | ⏸ On hold — toolchain | **Verifiable deletion** — "Delete everything" is proven by filesystem inspection, not asserted in the interface: after deletion, no file under `~/.loke` contains any mapping value or imported record, verified by a test that greps the tree for known fixture values. Applies to MK21's workspace as well as the mapping table. |
+| X8.2 | L | | **Encrypt the mapping table at rest** — The placeholder↔value mapping is the highest-value data in the system (`docs/threat-model.md:181` rates it Maximum) and is plaintext on disk. SQLCipher is not available and may never be: toke links plain SQLite and there is no sqlcipher anywhere in the toolchain. Use field-level encryption via `std.encrypt` (`aes256gcmencrypt`/`decrypt`/`keygen`/`noncegen`, `hkdfsha` — verified present) with a per-record nonce, applied in `packages/core/src/privacy/placeholder_store.tk`. Do not reinstate a database-level claim. |
+| X8.3 | M | | **Keychain-only key handling** — The key is derived through the OS keychain and exists nowhere else: no key file, no environment-variable fallback, no default. A missing key fails the operation rather than falling back to plaintext. Test that removing the keychain entry makes the store unreadable rather than transparently readable. |
+| X8.4 | M | | **Verifiable deletion** — "Delete everything" is proven by filesystem inspection, not asserted in the interface: after deletion, no file under `~/.loke` contains any mapping value or imported record, verified by a test that greps the tree for known fixture values. Applies to MK21's workspace as well as the mapping table. |
 | X8.5 | S | ⏸ On hold — `pipeline.tk` must not be edited until NC1.9 is resolved | **Remove the two hardcoded home directories** — `packages/browser/pages/api/pipeline.tk` and `settings.tk` both hardcode the original developer's home path, so the settings file silently resolves nowhere for anyone else. Tolerated in `scripts/known-defects.txt:20-21`; both lines come out when this lands. |
-| X8.6 | L | ⏸ On hold — toolchain | **Router strategies: implement or withdraw** — `docs/claims.md` D3: "cheapest-adequate, fastest, best-quality, local-first" has zero matches across `packages/` and `src/`. One fixed selection path exists in `packages/core/src/router/selector.tk`. F5.3 is marked **Done** and must be reopened. Either implement the four named strategies as selectable and configurable, or remove the names from `docs/features-loke.md:86`. Note decision **R** in the open-decisions register: sensitivity-scored provider routing is claimed by US 12,556,533 and wants a professional read before the router is promoted outwardly. |
+| X8.6 | L | | **Router strategies: implement or withdraw** — `docs/claims.md` D3: "cheapest-adequate, fastest, best-quality, local-first" has zero matches across `packages/` and `src/`. One fixed selection path exists in `packages/core/src/router/selector.tk`. F5.3 is marked **Done** and must be reopened. Either implement the four named strategies as selectable and configurable, or remove the names from `docs/features-loke.md:86`. Note decision **R** in the open-decisions register: sensitivity-scored provider routing is claimed by US 12,556,533 and wants a professional read before the router is promoted outwardly. |
 
 Related and deliberately **not** duplicated here: fail-closed on detection unavailability is **NC1.9**;
 the ten orphaned multi-layer modules including `consensus` are **AD1.7**; the audit chain is **GA5.2**
@@ -1473,15 +1498,16 @@ reason that was tolerated no longer exists.*
 > **Why now:** the stub pattern existed because the linker gap made cross-module imports fail. That gap
 > closed upstream — `UPSTREAM.md:77` records the verification. The excuse is dead; the stubs are not.
 >
-> **⏸ Execution is on hold for the toolchain**, since a de-stubbed test has to compile to be worth
-> anything. X7.1 can be done now.
+> **Unblocked 2026-09-20.** The toolchain is available, so execution queues behind the green build
+> rather than upstream: a de-stubbed test has to compile to be worth anything. X7.1 needs nothing and is
+> overdue.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
 | X7.1 | S | | **Inventory and triage the 54** — Of 86 test files, 54 carry an explicit stub marker and re-declare the module under test; about 12 import real production code (`docs/test-coverage.md`, corrected under X6.4). Classify each: de-stub, rewrite, or delete as testing nothing worth testing. Publish the list so the count cannot drift. |
-| X7.2 | XL | ⏸ On hold — toolchain | **De-stub the tests that guard a privacy or governance path first** — Priority order by what a passing stub currently misrepresents: the privacy pipeline, the governance gateway, the placeholder store, the router, then everything else. A test that re-declares its subject cannot fail when the subject breaks, which is how A13 came to be marked complete while the browser handler posted raw text. |
-| X7.3 | M | ⏸ On hold — toolchain | **Make a stubbed test a gate failure** — Add the stub-marker check to `scripts/quality-gate.sh` with `scripts/known-defects.txt` as the shrinking allowlist, so the count can only go down. |
-| X7.4 | S | ⏸ On hold — toolchain | **Restate coverage once** — Re-measure and update `docs/test-coverage.md` and the claims register with both numbers (files carrying a test, modules actually exercised) and what each means. |
+| X7.2 | XL | Queued behind the green build (§F10) — a de-stubbed test has to compile to be worth anything | **De-stub the tests that guard a privacy or governance path first** — Priority order by what a passing stub currently misrepresents: the privacy pipeline, the governance gateway, the placeholder store, the router, then everything else. A test that re-declares its subject cannot fail when the subject breaks, which is how A13 came to be marked complete while the browser handler posted raw text. |
+| X7.3 | M | Queued behind X7.2 | **Make a stubbed test a gate failure** — Add the stub-marker check to `scripts/quality-gate.sh` with `scripts/known-defects.txt` as the shrinking allowlist, so the count can only go down. |
+| X7.4 | S | Queued behind X7.2 | **Restate coverage once** — Re-measure and update `docs/test-coverage.md` and the claims register with both numbers (files carrying a test, modules actually exercised) and what each means. |
 
 ## Epic LC1: Local Compute Validation on Target Hardware
 
@@ -1536,7 +1562,72 @@ closes.*
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| BG1.1 | S | ⏸ On hold — needs a running binary | **Confirm the dashboard returns DDL JSON, not plain text** — Retired as BUG-4. MK3.2 and MK4.8.1 are both marked Done and the NC1.5/NC1.6 provenance work changed what the dashboard renders, so this is a re-verification rather than a fix. If it still returns plain text, MK4.8.1 reopens. |
-| BG1.2 | S | ⏸ On hold — needs a running binary | **Confirm the sysmon widget reports real figures** — Retired as BUG-5, which reported zeros and dashes. `packages/core/src/monitoring/sysmon.tk` exists; whether it is reached from the browser widget is unverified. A widget that displays dashes is a cosmetic defect; one that displays plausible zeros is a misreporting defect, so distinguish which it is. |
-| BG1.3 | S | ⏸ On hold — needs a running binary | **Confirm the multi-phase DDL flow end to end** — Retired as FEAT-4. Overlaps MK3.2 (Done) and BG1.1; close as a duplicate if BG1.1 passes. |
+| BG1.1 | S | Queued behind the green build | **Confirm the dashboard returns DDL JSON, not plain text** — Retired as BUG-4. MK3.2 and MK4.8.1 are both marked Done and the NC1.5/NC1.6 provenance work changed what the dashboard renders, so this is a re-verification rather than a fix. If it still returns plain text, MK4.8.1 reopens. |
+| BG1.2 | S | Queued behind the green build | **Confirm the sysmon widget reports real figures** — Retired as BUG-5, which reported zeros and dashes. `packages/core/src/monitoring/sysmon.tk` exists; whether it is reached from the browser widget is unverified. A widget that displays dashes is a cosmetic defect; one that displays plausible zeros is a misreporting defect, so distinguish which it is. |
+| BG1.3 | S | Queued behind the green build | **Confirm the multi-phase DDL flow end to end** — Retired as FEAT-4. Overlaps MK3.2 (Done) and BG1.1; close as a duplicate if BG1.1 passes. |
 
+
+## Epic LS1: Canonical Form Sweep
+
+*toke publishes a measured pattern catalogue and a linter that enforces it. loke has never been run
+through either.*
+
+> **Why this is not bikeshedding.** `docs/guide/11-patterns-and-efficiency.md` in the toke repository
+> picks one form for each everyday construct **by measurement** — the form that costs the fewest tokens
+> under the decision tokenizer *and* runs as fast in as little memory as any alternative. For a project
+> whose premise is reducing what is spent on a model, the canonical form is the product, not a style
+> preference.
+>
+> Measured across 223 loke source files on 2026-09-20: **1,668 violations**.
+>
+> | Rule | Count | Files | Category |
+> |---|---|---|---|
+> | `single-use-let` | 974 | 145 | hint |
+> | `string-concat-chain` | 407 | 101 | warning |
+> | `unused-import` | 232 | 127 | warning |
+> | **`discarded-value-result`** | **30** | **11** | **error** |
+> | `loop-rebuilds-array` | 8 | 7 | hint |
+> | `unused-let` | 7 | 3 | warning |
+> | `mut-flag-if` | 6 | 4 | warning |
+> | `mutable-never-mutated` | 3 | 2 | warning |
+> | `empty-fn-body` | 1 | 1 | warning |
+>
+> **Token efficiency here means canonical constructs, not minified source.** `toke --fmt` is the
+> canonical *source* form and makes files slightly larger; `--min` is the shipped form. Do not minify
+> source to chase a byte count — the catalogue's verdicts are what count.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| LS1.1 | S | | **The 30 `discarded-value-result`, first and on their own** — This is a defect story, not hygiene. The rule is **error** category and its rationale is blunt: *"the discarded value is a bug in every case"*. Arrays and maps have value semantics, so a bare `arr.push(v);` or `trace.steps.push(...)` statement **returns a new collection and throws it away**, and the syntax card notes a bare push *can crash at runtime*. 30 sites in 11 files, worst `agents/observability.tk:222`. The program does not do what it says it does; fix before anything cosmetic. |
+| LS1.2 | M | | **407 `string-concat-chain` → interpolation** — The token-efficiency win, and the one the catalogue measures most starkly. For a 3-part string: nested `concat` costs 20 proxy tokens, 95 minified bytes, 104 ms and 76,784 KB RSS; interpolation `"\(a)-\(b)-\(c)"` costs 13, 47, 82 ms and 39,136 KB. Roughly half the memory and a third fewer tokens, for the same output. 101 files. Prefer interpolation; `str.join` where the parts are already an array. |
+| LS1.3 | S | | **232 `unused-import`** — By hand, or by a script that understands type references. **Never with `toke --lint --fix`** until the upstream bug in F10.11 is fixed: its `unused-import` rule ignores `$type` references and deleted 197 needed imports here. Cross-check each removal against `$typename` usage in the same file before deleting. |
+| LS1.4 | M | | **The remaining 999 hints and warnings** — 974 `single-use-let`, 8 `loop-rebuilds-array`, 7 `unused-let`, 6 `mut-flag-if`, 3 `mutable-never-mutated`, 1 `empty-fn-body`. Lowest value per change and the largest diff, so it goes last and in reviewable batches by directory. `mut-flag-if` and `flag-soup` are pattern rules with measured verdicts behind them; the `single-use-let` hints are taste and may be declined with a reason. |
+| LS1.5 | S | | **Hold the line in the gate** — Add a lint step to `scripts/quality-gate.sh` that fails on any **error**-category rule (`discarded-value-result`, `unreachable-code`) and on `string-concat-chain`, with `scripts/known-defects.txt` as a shrinking allowlist and a story ID required per line. Hints stay advisory. Without this the sweep is a one-off and the count grows back. |
+
+## Epic RV1: Re-verify the Done Markers That Need a Binary
+
+*The build was red for four months. Roughly 120 stories were marked Done by reading code.*
+
+> **The problem, stated plainly.** A story marked Done for behaviour that has never executed is worse
+> than one marked not-started: it is an assertion with no evidence, and this document is the input to
+> `claims.md`, which is the input to everything the project says publicly. Two examples already found and
+> corrected show the shape — the X4a.6 preamble asserted *"All 172 modules compile, 19/19 tests pass"*
+> (it is 58 of 199), and GA2.2 was Done for SQLCipher encryption that the toolchain cannot do at all.
+>
+> Every row in scope gets exactly one of three outcomes. **Holds** — exercised and true, with the
+> command that showed it. **Reopened** — exercised and false. **Untestable** — names what is missing.
+> "Done" without one of those three is not an acceptable result for any row here.
+
+| Story | Size | Status | Summary |
+|-------|------|--------|---------|
+| RV1.1 | M | | **The 65 T1–T14 rows** — Every one is marked Done under an epic preamble that demands runtime evidence: *"Tests verify runtime correctness — not just that files compile, but that functions return expected values for known inputs."* Several assert specific outcomes, e.g. T4.5 (*"gateway blocks RESTRICTED request when kill switch engaged"*), T10.1, T14.2 (*"POST to `/api/pipeline` with email in body returns anonymised prompt"*). Run them and record per-assertion results. Depends on the green build and on X7. |
+| RV1.2 | M | | **The X4a verification claims** — X4a.3 and X4a.4 (*"Verify loke/moke API handlers compile and execute"*), X4a.5.1–5.8 (each claims a named module now passes semantic checks — cheap to re-check against the current 141 failures), X4a.6.1–6.5 (live Ollama health, model list, `/api/pipeline` proxy) and X4a.7.1–7.4 (runtime CORS behaviour; X4a.7.4 is literally titled *"Verified implementation"*). X4a.4 is also the cited evidence for retiring BUG-7, so a failure reopens that too. |
+| RV1.3 | M | | **X4b.3–X4b.18 and T15.1–T15.10** — 13 test suites each claimed to compile independently and return 0, written under that epic's own blocker note that *"a standalone `--no-web-glue` compilation mode is needed in toke before any test binary can be produced"*. Plus the runner, the CI badge and `docs/test-coverage.md`'s assertion counts — F10.2 already established the badge was meaningless. T15.9 claims *"100% of existing tests passing"* and T15.10 *">80% of source modules have at least one test file"*. |
+| RV1.4 | M | | **The governance and privacy runtime claims** — GA1.1–GA1.4 and GA1.8 (pipeline, restoration, kill switch, audit logging, policy evaluation wired into the browser handler; GA1.5–GA1.7 and GA1.9 are already reopened), GA2.1 (keychain-only keys *"never written to disk, never appear in logs"*), GA2.4 (*"no PII appears in any log, console output, or error message"*), GA2.5 (binds `127.0.0.1` only), GA3.1–GA3.7 (ARIA, graduated warnings, cost estimate, cancel in-flight, thumbs-down), NC1.4–NC1.6 (schema actually sent, no fabricated values rendered, per-card provenance — BG1.1 and BG1.3 exist to re-verify exactly this). |
+| RV1.5 | S | | **The measurement claims** — F3.1 (*"10MB/s target"* regex detector), F3.9 (*"100% coverage"* privacy test harness, which AD1.8 records has never run because `run_tests.sh:25` skips it), F10.1 (the build refuses to link an incomplete build — confirm it fires at 141 failures rather than silently linking), F10.5 (*"type-check went 167 to 246 passing"*, re-measurable and contradicted by 58/199), X6.4 (the corrected coverage statement, honest only once tests run), VM1.5 (numbers out of CI, needs a CI run that gets past compilation). |
+| RV1.6 | S | | **F8.1–F8.4** — mDNS pairing, TLS 1.3 mutual auth with certificate pinning, remote model execution and the Exo integration, all four Done under an epic notice that simultaneously said they *"still need a compiler"*. TLS mutual auth with pinning is a security claim; it does not get to stay Done on inspection. |
+| RV1.7 | S | | **Reconcile the document with itself** — The SUMMARY table and the story rows disagreed on the test suite (`53 \| 0` against 65 individually Done). Add a rule to the top of this document: the SUMMARY is derived, never hand-maintained, and a Done marker for runtime behaviour must name the command that exercised it. Consider a `scripts/check_backlog.py` that fails when the two disagree — the reconciliation script the retired `progress.json` was supposed to have and never got. |
+
+> **Out of scope, deliberately:** F2.1–F2.9 (the throughput and tier claims) stay with epic **LC1**. They
+> are blocked on Apple Silicon hardware, not on the compiler, and moving them here would imply the build
+> can settle them.
