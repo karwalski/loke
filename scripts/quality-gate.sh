@@ -155,6 +155,13 @@ step_checks() {
     failed=1
   fi
 
+  if [[ -f benchmarks/toon/run.py ]]; then
+    echo "  serialisation baseline harness"
+    python3 benchmarks/toon/run.py --self-test >/dev/null \
+      || { echo "  the token harness no longer measures correctly, so every ratio it" >&2
+           echo "  produced is suspect" >&2; failed=1; }
+  fi
+
   if [[ -f tests/fixtures/adversarial/score.py ]]; then
     echo "  adversarial corpus scorer discriminates"
     python3 tests/fixtures/adversarial/score.py --self-test >/dev/null \

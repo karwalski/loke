@@ -63,11 +63,65 @@ python3 tests/fixtures/pii-corpus/score_patterns.py
 
 ---
 
+### Serialisation baselines, input tokens only — 2026-09-20
+
+The second measurement. It is a **baseline**, not a result for any compression technique: it says what
+deleting whitespace is worth, so that a later claim has something honest to beat.
+
+Ratios are `tokens(indented JSON) / tokens(format)`, geometric mean over `cl100k_base` and
+`o200k_base`. Above 1.0 is a saving.
+
+| Payload | Minified JSON | YAML |
+|---|---|---|
+| Uniform tabular, 100 rows | **1.80x** | 1.50x |
+| Uniform tabular, 1000 rows | **1.80x** | 1.50x |
+| Nested, 100 | **1.78x** | 1.42x |
+| Mixed types, 100 | **1.66x** | 1.38x |
+| Wide, 40 columns | **1.35x** | 1.21x |
+| Sparse, 70% null | **1.54x** | 1.40x |
+| BITRE road fatalities, 500 rows — real data, CC BY | **1.59x** | 1.47x |
+
+**What this changes for every future token claim.** Deleting whitespace alone is worth 1.35x to 1.80x
+— a 26% to 44% token reduction. So a figure quoted against pretty-printed JSON is mostly measuring
+indentation. **The baseline for any token-optimisation claim in this project is minified JSON**, and a
+technique that only matches it has demonstrated `json.dumps(separators=(",",":"))`.
+
+YAML is worse than minified JSON on every payload measured. A less verbose markup does not get there on
+its own.
+
+The real dataset lands at 1.59x, inside the synthetic range, so the generated shapes are not flattering
+the result.
+
+**Caveat, which travels with the number:** input token count only. No model was called, so this says
+nothing about accuracy — a format that halves the tokens and halves the accuracy is worse, not better.
+
+**Not measured, and not approximated.** Anthropic's tokeniser is not public and counting requires an
+API call; Google's likewise. Neither is substituted with `cl100k_base`, because a fabricated Claude
+figure for the provider this project sends most of its traffic to would be worse than a gap.
+
+**TOON itself is not measured.** No faithful encoder is available here: the methodology specifies the
+`toon-format/toon` implementation, no package is installed, and loke's own encoder is toke and needs the
+compiler. An encoder written from the format's description would measure something of this harness's
+own invention under TOON's name. So the withdrawn "30-60% TOON" figure stays withdrawn.
+
+Reproduce:
+
+```
+python3 benchmarks/toon/run.py --self-test
+python3 benchmarks/toon/run.py
+```
+
+Harness and full method: [`benchmarks/toon/README.md`](../benchmarks/toon/README.md). Payload checksums
+are verified on every run.
+
+---
+
 ## Status: no *performance* figure is published
 
-The detection measurement above is the only entry. **No performance figure — latency, throughput,
-token reduction, compression ratio or cache hit rate — has been measured at all**, so none is
-published. That is the honest position, stated rather than filled with estimates.
+Two measurements exist: detection recall for the regex layer, and the serialisation baselines above.
+**No figure for latency, throughput, cache hit rate or any compression technique has been measured**,
+so none is published. The serialisation entry is a baseline for future token claims, not a result for
+any technique loke implements.
 
 The apparatus needed to change this is specified and tracked:
 
@@ -77,7 +131,7 @@ The apparatus needed to change this is specified and tracked:
 | No pinned model versions, seeds, repetition or confidence intervals | VM1.2, VM1.3 |
 | No container, so no reproducible environment | VM1.4 |
 | CI uploads pass/fail counts only, never numbers | VM1.5 |
-| The token-optimisation methodology is written but not implemented | VM1.7 |
+| ~~The token-optimisation methodology is written but not implemented~~ — **baselines done**, see above; the accuracy half needs model spend | VM1.7 |
 | No disclosure accounting on any request | DA1 |
 | ~~No labelled PII corpus and no ground truth~~ — **done**, see the measurement above | AD1.1 |
 

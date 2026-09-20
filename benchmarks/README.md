@@ -55,13 +55,22 @@ docker build -t loke-bench .         # pinned environment
 benchmarks/
   lib/result.py     numeric result sink and its guards (VM1.1)
   results/          recorded measurements, JSON Lines, git-ignored
-  toon/             token-optimisation harness — not yet implemented (VM1.7)
+  toon/             serialisation baselines — B1/B2/B3 measured with real tokenisers (VM1.7)
 ```
 
 `toon/` is specified in full in `docs/research/toon-benchmark-methodology.md`, which is already at
 publishable standard: named baselines, twelve task types, four data shapes, a licensed dataset table,
 N with warm-up discard, bootstrap intervals, Wilcoxon signed-rank, multiple-comparison correction and
-checksummed snapshots. Implementing it is VM1.7. It does not need redesigning.
+checksummed snapshots. It does not need redesigning.
+
+The **baseline half is implemented and measured** — see [`toon/README.md`](toon/README.md). It counts
+input tokens for indented JSON, minified JSON and YAML with real provider tokenisers, offline, and
+records through `lib/result.py`. The accuracy half needs an LLM-as-judge and repeated frontier-model
+calls across every configuration, which is recurring spend nobody has budgeted, so it is unstarted
+rather than half-started.
+
+Worth knowing before quoting anything about tokens: **deleting whitespace alone is worth 1.35x to
+1.80x**. Any compression claim has to beat minified JSON, not pretty-printed JSON.
 
 ## Interval method
 
