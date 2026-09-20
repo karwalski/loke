@@ -1,6 +1,18 @@
 (* Copyright 2026 loke contributors
    SPDX-License-Identifier: Apache-2.0 *)
 
+(* MLX inference pool over std.mlx.
+
+   std.mlx is a stub: isavailable returns 0 unconditionally — including on Apple
+   Silicon, where its own comment says availability depends on a framework that is
+   not linked — load returns 0, and generate returns the literal
+   "[mlx: not available]". So this pool reports unavailable and loads nothing,
+   which is the truth. No MLX throughput figure can be measured through it.
+
+   The previous version tested `!$pool.available`, a type sigil on a local, so the
+   availability guard never read the flag; and it rebound `result` and `found` with
+   `let` inside the loop, so generate always returned "". *)
+
 m=core.models.mlx;
 
 i=time:std.time;
@@ -13,32 +25,46 @@ t=$mlxpool{ models:@$mlxloaded; datadir:str; available:bool };
 
 f=newpool(datadir:str):$mlxpool{
   let available=mlx.isavailable();
-  log.info(str.concat("MLX available: ";str.frombool(available));"mlx";"system");
+  log.info("MLX available: \(available)";"mlx";"system");
   <$mlxpool{ models:@(); datadir:datadir; available:available }
 };
 
 f=load(pool:$mlxpool;modelid:str):$mlxpool{
-  if(!$pool.available){ <pool }el{
-    let path=str.concat(pool.datadir;str.concat("/models/";str.concat(modelid;".mlx")));
-    let handle=mlx.load(path);
-    let entry=$mlxloaded{ modelid:modelid; handle:handle; loadedat:time.now() };
-    <$mlxpool{ models:pool.models.append(entry); datadir:pool.datadir; available:pool.available }
+  if(!pool.available){
+    log.warn("MLX unavailable, \(modelid) not loaded";"mlx";"system");
+    <pool
+  }el{
+    let handle=mlx.load("\(pool.datadir)/models/\(modelid).mlx");
+    if(handle==0){
+      log.warn("MLX load returned no handle for \(modelid)";"mlx";"system");
+      <pool
+    }el{
+      <$mlxpool{
+        models:pool.models.push($mlxloaded{ modelid:modelid; handle:handle; loadedat:time.now() });
+        datadir:pool.datadir;
+        available:pool.available
+      }
+    }
   }
 };
 
+f=handlefor(pool:$mlxpool;modelid:str):i64{
+  let handle=mut.0;
+  lp(let i=0;i<pool.models.len;i=i+1){
+    let m:$mlxloaded=pool.models.get(i);
+    if(str.eq(m.modelid;modelid)){
+      handle=m.handle
+    }el{}
+  };
+  <handle
+};
+
 f=generate(pool:$mlxpool;modelid:str;prompt:str;maxtokens:i32):str{
-  if(!$pool.available){ <"" }el{
-    let found=false;
-    let result="";
-    lp(let i=0;i<str.arraylen(pool.models);i=i+1){ let m=str.arrayget(pool.models;i);
-      if(!$found){
-        if(str.eq(m.modelid;modelid)){
-          let result=mlx.generate(m.handle;prompt;maxtokens);
-          let found=true
-        }
-      }
-    };
-    <result
+  let handle=handlefor(pool;modelid);
+  if(handle==0){
+    <""
+  }el{
+    <mlx.generate(handle;prompt)
   }
 };
 

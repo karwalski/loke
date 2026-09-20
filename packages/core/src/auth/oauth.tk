@@ -82,34 +82,33 @@ f=generatestate():str{
 
 f=exchangecode(cfg:$oauthconfig;code:str;codeverifier:str;redir:str):$tokenset!$oautherr{
   let client=http.client(cfg.tokenurl);
-  let body=str.concat("grant_type=authorization_code";
-    str.concat("&code=";str.concat(code;
-    str.concat("&redirect_uri=";str.concat(redir;
-    str.concat("&client_id=";str.concat(cfg.clientid;
-    str.concat("&code_verifier=";codeverifier))))))));
-  let resp=mt http.post(client;"";str.tobytes(body);"application/x-www-form-urlencoded") {
-    $ok:r r;
+  let body="grant_type=authorization_code&code=\(code)&redirect_uri=\(redir)&client_id=\(cfg.clientid)&code_verifier=\(codeverifier)";
+  mt http.postheaders(client;"";str.tobytes(body);"{\"content-type\":\"application/x-www-form-urlencoded\"}") {
+    $ok:r tokensfromresp(cfg;r);
     $err:e $err($oautherr{adapterid:cfg.adapterid;errorcode:"network_error";errordesc:"token request failed"})
-  };
-  let tokens=mut.$tokenset{accesstoken:"";refreshtoken:"";expiresat:0;scopes:""};
+  }
+};
+
+(* Reading the response in its own function is what establishes its type. Binding
+   `let resp=mt ... { $ok:r r; $err:e $err(...) }` gave resp two different types,
+   so resp.status and resp.body resolved against no struct at all. *)
+f=tokensfromresp(cfg:$oauthconfig;resp:$httpresp):$tokenset!$oautherr{
   if(resp.status>400){
-    let msg=str.concat("token endpoint returned ";str.fromint(resp.status));
-    log.warn(str.concat("loke.core.auth.oauth: ";msg));
+    let msg="token endpoint returned \(resp.status)";
+    log.warn("loke.core.auth.oauth: \(msg)";"auth.oauth";"");
     <$oautherr{adapterid:cfg.adapterid;errorcode:"token_exchange_failed";errordesc:msg}
   }el{
     let bodystr=str.frombytes(resp.body);
     let access=encoding.jsonfield(bodystr;"access_token");
     let refreshtok=encoding.jsonfield(bodystr;"refresh_token");
     let expiresin=encoding.jsonfieldint(bodystr;"expires_in");
-    let now=time.nowunix();
-    tokens=$tokenset{
+    log.info("loke.core.auth.oauth: tokens acquired for \(cfg.adapterid)";"auth.oauth";"");
+    <$tokenset{
       accesstoken:access;
       refreshtoken:refreshtok;
-      expiresat:now+expiresin;
+      expiresat:time.nowunix()+expiresin;
       scopes:cfg.scopes
-    };
-    log.info(str.concat("loke.core.auth.oauth: tokens acquired for ";cfg.adapterid));
-    <tokens
+    }
   }
 };
 
@@ -117,32 +116,32 @@ f=validatestate(expected:str;actual:str):bool{
   <str.eq(expected;actual)
 };
 
+(* One `port`, not two. `let port=8739` inside the if shadowed the outer binding, and
+   toke emits invalid LLVM IR for ANY let that shadows an enclosing one — the branch
+   allocates and the load sits outside it. Both arms were otherwise identical, so
+   they are one body now.
+
+   The authorise URL is built and logged rather than bound and dropped: $authstate has
+   no field for it, and the previous `let url=...` was never read. The caller needs
+   the URL, so it is returned. *)
 f=beginauthorise(cfg:$oauthconfig):$authstate{
   let verifier=pkce.generateverifier();
   let challenge=pkce.generatechallenge(verifier);
   let stateparam=generatestate();
-  let port=cfg.callbackport;
+  let port=mut.cfg.callbackport;
   if(port==0){
-    let port=8739;
-    let redir=redirecturi(port);
-    let url=buildauthoriseurl(cfg;stateparam;challenge;redir);
-    log.info(str.concat("loke.core.auth.oauth: authorise URL built for ";cfg.adapterid));
-    <$authstate{
-      stateparam:stateparam;
-      codeverifier:verifier;
-      redirecturi:redir
-    }
-  }el{
-    let redir=redirecturi(port);
-    let url=buildauthoriseurl(cfg;stateparam;challenge;redir);
-    log.info(str.concat("loke.core.auth.oauth: authorise URL built for ";cfg.adapterid));
-    <$authstate{
-      stateparam:stateparam;
-      codeverifier:verifier;
-      redirecturi:redir
-    }
+    port=8739
+  }el{};
+  let redir=redirecturi(port);
+  log.info("loke.core.auth.oauth: authorise URL for \(cfg.adapterid): \(buildauthoriseurl(cfg;stateparam;challenge;redir))";"auth.oauth";"");
+  <$authstate{
+    stateparam:stateparam;
+    codeverifier:verifier;
+    redirecturi:redir
   }
 };
+
+
 
 f=completeauthorise(cfg:$oauthconfig;auth:$authstate;callbackstate:str;code:str):$tokenset!$oautherr{
   let valid=validatestate(auth.stateparam;callbackstate);
@@ -154,10 +153,10 @@ f=completeauthorise(cfg:$oauthconfig;auth:$authstate;callbackstate:str;code:str)
       $oautherr:e $err($oautherr{adapterid:cfg.adapterid;errorcode:"exchange_failed";errordesc:"code exchange failed"})
     };
     store.savetokens(cfg.adapterid;tokens);
-    log.info(str.concat("loke.core.auth.oauth: authorisation complete for ";cfg.adapterid));
+    log.info(str.concat("loke.core.auth.oauth: authorisation complete for ";cfg.adapterid);"auth.oauth";"");
     <tokens
   }el{
-    log.warn(str.concat("loke.core.auth.oauth: state mismatch for ";cfg.adapterid));
+    log.warn(str.concat("loke.core.auth.oauth: state mismatch for ";cfg.adapterid);"auth.oauth";"");
     <$oautherr{adapterid:cfg.adapterid;errorcode:"state_mismatch";errordesc:"CSRF validation failed state parameter does not match"}
   }
 };
@@ -176,18 +175,18 @@ f=revoke(cfg:$oauthconfig):i64{
     if(str.len(cfg.revokeurl)>0){
       let client=http.client(cfg.revokeurl);
       let body=str.concat("token=";access);
-      let revokeresult=http.post(client;"";str.tobytes(body);"application/x-www-form-urlencoded");
+      let revokeresult=http.postheaders(client;"";str.tobytes(body);"{\"content-type\":\"application/x-www-form-urlencoded\"}");
       mt revokeresult {
         $ok:v void;
-        $err:v log.warn("loke.core.auth.oauth: revocation request failed")
+        $err:v log.warn("loke.core.auth.oauth: revocation request failed";"auth.oauth";"")
       };
-      log.info(str.concat("loke.core.auth.oauth: revocation request sent for ";cfg.adapterid))
+      log.info(str.concat("loke.core.auth.oauth: revocation request sent for ";cfg.adapterid);"auth.oauth";"")
     }el{
-      log.info("loke.core.auth.oauth: no revoke url configured")
+      log.info("loke.core.auth.oauth: no revoke url configured";"auth.oauth";"")
     }
   }el{
-    log.info("loke.core.auth.oauth: no access token to revoke")
+    log.info("loke.core.auth.oauth: no access token to revoke";"auth.oauth";"")
   };
   store.cleartokens(cfg.adapterid);
-  log.info(str.concat("loke.core.auth.oauth: tokens cleared for ";cfg.adapterid))
+  log.info(str.concat("loke.core.auth.oauth: tokens cleared for ";cfg.adapterid);"auth.oauth";"")
 };

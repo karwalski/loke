@@ -1,18 +1,26 @@
 (* Copyright 2026 loke contributors
    SPDX-License-Identifier: Apache-2.0 *)
 
+(* In-process inference pool over std.infer.
+
+   std.infer is a STUB in toke: load and loadstreaming return 0, isloaded returns
+   0, embed returns an empty array, and generate returns the literal string
+   "[infer: not available]". So this module's job today is to report that
+   truthfully rather than to hide it.
+
+   A zero handle means the model did not load, and a model that did not load is
+   not added to the pool. isloaded is then honestly false, and a caller that
+   depends on local inference — privacy/ner_local is one — sees an unavailable
+   layer instead of receiving the stub's sentinel string as if it were output.
+   Returning "[infer: not available]" to a privacy detector would read as
+   "no entities found", which is a fail-open. *)
+
 m=core.models.infer;
 
 i=time:std.time;
 i=str:std.str;
 i=log:shared.log;
 i=inf:std.infer;
-
-t=$inferopts{
-  ngpulayers:i32;
-  nthreads:i32;
-  seed:i32
-};
 
 t=$infermodel{
   handle:i64;
@@ -31,81 +39,75 @@ f=newpool(datadir:str):$inferpool{
 };
 
 f=modelpath(pool:$inferpool;modelid:str):str{
-  let base=str.concat(pool.datadir;"/models/");
-  let withid=str.concat(base;modelid);
-  <str.concat(withid;".gguf")
+  <"\(pool.datadir)/models/\(modelid).gguf"
 };
 
 f=load(pool:$inferpool;modelid:str):$inferpool{
   let path=modelpath(pool;modelid);
-  let opts=$inferopts{ngpulayers:99;nthreads:4;seed:0};
-  let handle=inf.load(path;opts);
-  let entry=$infermodel{
-    handle:handle;
-    modelid:modelid;
-    modelpath:path;
-    loadedat:time.now()
-  };
-  let updatedmodels=pool.models.append(entry);
-  log.info(str.concat("loaded in-process: ";modelid);"infer";"");
-  <$inferpool{models:updatedmodels;datadir:pool.datadir}
+  let handle=inf.load(path);
+  if(handle==0){
+    log.warn("in-process inference unavailable, \(modelid) not loaded";"infer";"");
+    <pool
+  }el{
+    log.info("loaded in-process: \(modelid)";"infer";"");
+    <$inferpool{
+      models:pool.models.push($infermodel{
+        handle:handle;
+        modelid:modelid;
+        modelpath:path;
+        loadedat:time.now()
+      });
+      datadir:pool.datadir
+    }
+  }
 };
 
 f=unload(pool:$inferpool;modelid:str):$inferpool{
-  let remaining=@();
-  lp(let i=0;i<str.arraylen(pool.models);i=i+1){ let m=str.arrayget(pool.models;i);
+  (* `let remaining=remaining.append(m)` inside the loop declared a new binding each
+     pass instead of assigning, so unload dropped every model in the pool. *)
+  let remaining=mut.@();
+  lp(let i=0;i<pool.models.len;i=i+1){
+    let m:$infermodel=pool.models.get(i);
     if(str.eq(m.modelid;modelid)){
       inf.unload(m.handle)
     }el{
-      let remaining=remaining.append(m)
+      remaining=remaining.push(m)
     }
   };
   <$inferpool{models:remaining;datadir:pool.datadir}
 };
 
-f=generate(pool:$inferpool;modelid:str;prompt:str;maxtokens:i32):str{
-  let foundopt=false;
-  let result="";
-  lp(let ii62=0;ii62<pool.models.len;ii62=ii62+1){
-    let m=pool.models.get(ii62);
-    if(!$foundopt){
-      if(str.eq(m.modelid;modelid)){
-        let result=inf.generate(m.handle;prompt;maxtokens);
-        let foundopt=true
-      };
-    };
-
+f=handlefor(pool:$inferpool;modelid:str):i64{
+  let handle=mut.0;
+  lp(let i=0;i<pool.models.len;i=i+1){
+    let m:$infermodel=pool.models.get(i);
+    if(str.eq(m.modelid;modelid)){
+      handle=m.handle
+    }el{}
   };
-  <result
+  <handle
+};
+
+(* Returns "" when the model is not loaded. The caller must distinguish that from a
+   real empty generation; isloaded is the check for it. *)
+f=generate(pool:$inferpool;modelid:str;prompt:str;maxtokens:i32):str{
+  let handle=handlefor(pool;modelid);
+  if(handle==0){
+    <""
+  }el{
+    <inf.generate(handle;prompt)
+  }
 };
 
 f=embed(pool:$inferpool;modelid:str;text:str):@f32{
-  let foundopt=false;
-  let result=@();
-  lp(let ii78=0;ii78<pool.models.len;ii78=ii78+1){
-    let m=pool.models.get(ii78);
-    if(!$foundopt){
-      if(str.eq(m.modelid;modelid)){
-        let result=inf.embed(m.handle;text);
-        let foundopt=true
-      }
-    }
-
-  };
-  <result
+  let handle=handlefor(pool;modelid);
+  if(handle==0){
+    <@()
+  }el{
+    <inf.embed(handle;text)
+  }
 };
 
 f=isloaded(pool:$inferpool;modelid:str):bool{
-  let found=false;
-  lp(let ii93=0;ii93<pool.models.len;ii93=ii93+1){
-    if(str.eq(pool.models.get(ii93).modelid;modelid)){
-      let found=true
-    }
-
-  };
-  <found
-};
-
-f=embedtext(text:str):i64{
-  <0
+  <handlefor(pool;modelid)!=0
 };

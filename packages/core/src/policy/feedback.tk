@@ -4,6 +4,7 @@
 m=core.policy.feedback;
 
 i=db:core.storage.db;
+i=sdb:std.db;
 i=str:std.str;
 i=log:shared.log;
 
@@ -26,52 +27,71 @@ t=$compliancesummary{
   topregulations:@str
 };
 
-f=record(event:$complianceevent):bool{
-  let result=db.exec("INSERT INTO compliance_events (request_id, policy_id, regulation, violated, user_override, timestamp) VALUES (?, ?, ?, ?, ?, ?)";@(event.requestid;event.policyid;event.regulation;db.boolval(event.violated);db.boolval(event.useroverride);db.i64val(event.timestamp)));
-  let ok=mt result {
+(* Every function here takes the store explicitly.
+
+   The module previously called `db.exec(sql;params)` and `db.queryone(sql;params)`,
+   which match the ARITY of core.storage.db's `exec(store;sql)` and
+   `queryone(store;sql)` but not their meaning: a SQL string was being passed where a
+   store handle belongs, and the parameters where the SQL belongs. It compiled.
+   Three other functions referenced a bare `store` that was declared nowhere — that
+   resolves to std.db's `store` TYPE and reaches codegen unreported (T-4).
+
+   The query helpers return @$row!$lokeerr, so each result is matched rather than
+   indexed directly. *)
+f=record(store:$store;event:$complianceevent):bool{
+  let ok=mt db.execparams(store;
+    "INSERT INTO compliance_events (request_id, policy_id, regulation, violated, user_override, timestamp) VALUES (?, ?, ?, ?, ?, ?)";
+    @(event.requestid;event.policyid;event.regulation;db.boolval(event.violated);db.boolval(event.useroverride);db.i64val(event.timestamp))) {
     $ok:v true;
     $err:e false
   };
-  if(!ok){
+  if(ok){}el{
     log.warn("compliance: failed to record event";"policy.feedback";"")
-  }el{};
+  };
   <ok
 };
 
-f=summarise(fromts:i64;tots:i64):$compliancesummary{
-  let totalresult=db.queryone(
-    "SELECT COUNT(*) AS n FROM compliance_events WHERE timestamp >= ? AND timestamp <= ?";
-    @(db.i64val(fromts);db.i64val(tots))
-  );
-  let total=db.rowi32(totalresult;"n");
+f=countevents(store:$store;sql:str;fromts:i64;tots:i64):i32{
+  mt db.queryparams(store;sql;@(db.i64val(fromts);db.i64val(tots))) {
+    $ok:rows firstn(rows);
+    $err:e 0 as i32
+  }
+};
 
-  let violationsresult=db.queryone(
-    "SELECT COUNT(*) AS n FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND violated = 1";
-    @(db.i64val(fromts);db.i64val(tots))
-  );
-  let violations=db.rowi32(violationsresult;"n");
+f=firstn(rows:@$row):i32{
+  if(rows.len==0){
+    <0 as i32
+  }el{
+    <db.rowi32(rows.get(0);"n")
+  }
+};
 
-  let overridesresult=db.queryone(
-    "SELECT COUNT(*) AS n FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND user_override = 1";
-    @(db.i64val(fromts);db.i64val(tots))
-  );
-  let overrides=db.rowi32(overridesresult;"n");
+f=regulationsfromrows(rows:@$row):@str{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    out=out.push(db.rowstr(rows.get(i);"regulation"))
+  };
+  <out
+};
+
+f=summarise(store:$store;fromts:i64;tots:i64):$compliancesummary{
+  let total=countevents(store;
+    "SELECT COUNT(*) AS n FROM compliance_events WHERE timestamp >= ? AND timestamp <= ?";fromts;tots);
+  let violations=countevents(store;
+    "SELECT COUNT(*) AS n FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND violated = 1";fromts;tots);
+  let overrides=countevents(store;
+    "SELECT COUNT(*) AS n FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND user_override = 1";fromts;tots);
 
   let rate=mut.0.0;
-  if(total > 0){
+  if(total > 0 as i32){
     rate=str.tofloat(str.fromint(violations)) / str.tofloat(str.fromint(total))
   }el{};
 
-  let topresult=db.queryparams(
-    store;
+  let topregs=mt db.queryparams(store;
     "SELECT regulation FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? AND violated = 1 GROUP BY regulation ORDER BY COUNT(*) DESC LIMIT 5";
-    @(db.i64val(fromts);db.i64val(tots))
-  );
-  let topregs=mut.@();
-  let ri=mut.0;
-  lp(let lv=0;ri<db.rowslen(topresult);lv=lv){
-    topregs=topregs.push(db.rowstr(topresult.get(ri);"regulation"));
-    ri=ri+1
+    @(db.i64val(fromts);db.i64val(tots))) {
+    $ok:rows regulationsfromrows(rows);
+    $err:e @()
   };
 
   <$compliancesummary{
@@ -85,40 +105,44 @@ f=summarise(fromts:i64;tots:i64):$compliancesummary{
   }
 };
 
-f=exportevents(store:$store;fromts:i64;tots:i64):@$complianceevent{
-  let rows=db.queryparams(
-    store;
-    "SELECT request_id, policy_id, regulation, violated, user_override, timestamp FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC";
-    @(db.i64val(fromts);db.i64val(tots))
-  );
+f=eventsfromrows(rows:@$row):@$complianceevent{
   let events=mut.@();
-  let i=mut.0;
-  lp(let lv=0;i<db.rowslen(rows);lv=lv){
-    let ev=$complianceevent{
-      requestid:db.rowstr(rows.get(i);"request_id");
-      policyid:db.rowstr(rows.get(i);"policy_id");
-      regulation:db.rowstr(rows.get(i);"regulation");
-      violated:db.rowbool(rows.get(i);"violated");
-      useroverride:db.rowbool(rows.get(i);"user_override");
-      timestamp:db.rowi64(rows.get(i);"timestamp")
-    };
-    events=events.push(ev);
-    i=i+1
+  lp(let i=0;i<rows.len;i=i+1){
+    let r:$row=rows.get(i);
+    events=events.push($complianceevent{
+      requestid:db.rowstr(r;"request_id");
+      policyid:db.rowstr(r;"policy_id");
+      regulation:db.rowstr(r;"regulation");
+      violated:db.rowbool(r;"violated");
+      useroverride:db.rowbool(r;"user_override");
+      timestamp:db.rowi64(r;"timestamp")
+    })
   };
   <events
 };
 
-f=topviolations(limit:i32):@str{
-  let rows=db.queryparams(
-    store;
-    "SELECT policy_id FROM compliance_events WHERE violated = 1 GROUP BY policy_id ORDER BY COUNT(*) DESC LIMIT ?";
-    @(db.i32val(limit))
-  );
-  let ids=mut.@();
-  let i=mut.0;
-  lp(let lv=0;i<db.rowslen(rows);lv=lv){
-    ids=ids.push(db.rowstr(rows.get(i);"policy_id"));
-    i=i+1
+f=exportevents(store:$store;fromts:i64;tots:i64):@$complianceevent{
+  mt db.queryparams(store;
+    "SELECT request_id, policy_id, regulation, violated, user_override, timestamp FROM compliance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC";
+    @(db.i64val(fromts);db.i64val(tots))) {
+    $ok:rows eventsfromrows(rows);
+    $err:e @()
+  }
+};
+
+f=policyidsfromrows(rows:@$row):@str{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    out=out.push(db.rowstr(rows.get(i);"policy_id"))
   };
-  <ids
+  <out
+};
+
+f=topviolations(store:$store;limit:i32):@str{
+  mt db.queryparams(store;
+    "SELECT policy_id FROM compliance_events WHERE violated = 1 GROUP BY policy_id ORDER BY COUNT(*) DESC LIMIT ?";
+    @(db.i32val(limit))) {
+    $ok:rows policyidsfromrows(rows);
+    $err:e @()
+  }
 };

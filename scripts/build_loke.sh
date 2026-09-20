@@ -89,9 +89,33 @@ i=config:ooke.config;
 i=serve:ooke.serve;
 i=handlers:ooke.handlers;
 
+(* ooke.config exports configload and nothing else: cfgdefault is named in ooke's own
+   cli.tkc.md as BLOCKED on a toke codegen bug and is not in ooke.config.tki. Calling
+   it produced an undefined `_ooke_config_cfgdefault` at link time, which is the only
+   place it was reported. The fallback config is built here instead, from the field
+   list in ooke.config.tki. loke's own server port is 11430. *)
+f=lokedefaultcfg():$ookecfg{
+  <$ookecfg{
+    sitename:"loke";
+    siteurl:"http://127.0.0.1:11430";
+    sitelanguage:"en-AU";
+    buildoutput:"build";
+    buildminify:false;
+    buildinlinecss:false;
+    serverport:11430;
+    serverworkers:4;
+    servercorsorigins:"";
+    storebackend:"sqlite";
+    logaccessformat:"combined";
+    logmaxlines:100000;
+    logmaxagedays:30;
+    apiprefix:"/api"
+  }
+};
+
 f=main():i64{
   let projectdir=mt args.get(1 as u64) {$ok:v v;$err:e "."};
-  let cfg=mt config.configload(path.join(projectdir;"ooke.toml")) {$ok:v v;$err:e config.cfgdefault()};
+  let cfg=mt config.configload(path.join(projectdir;"ooke.toml")) {$ok:v v;$err:e lokedefaultcfg()};
   let handledpaths=handlers.registerall();
   (log.info(str.concat("registered ";str.concat(str.fromint(handledpaths.len);" handler routes"));@()));
   let r=mt serve.serverun(projectdir;cfg.serverport;cfg.serverworkers;cfg.buildoutput;"";"";cfg.sitename;cfg.siteurl;cfg.sitelanguage;cfg.apiprefix;cfg.servercorsorigins;handledpaths) {$ok:v 0;$err:e 1};
@@ -196,7 +220,19 @@ trap 'rm -f "$OBJLIST" "$CLIST"' EXIT INT TERM
 
 find build -name '*.o' > "$OBJLIST"
 find "$OOKE_DIR/src/ooke" -name '*.o' ! -name 'handlers.o' >> "$OBJLIST"
-find "$STDLIB" -name '*.c' ! -name 'llm_tool.c' ! -name 'infer_stream.c' ! -name 'sys_glue.c' > "$CLIST"
+# sys_glue.c and llm_tool.c are INCLUDED. It was excluded here from this script's first commit with
+# no recorded reason, alongside llm_tool.c and infer_stream.c, and the omission cost
+# the link: tk_sys_platform_w, tk_sys_isarm64_w, tk_sys_totalramgb_w, tk_sys_cpucount_w,
+# tk_sys_diskfreegb_w, tk_sys_chipname_w and tk_sys_datadir_w are all defined there and
+# nowhere else, and installer/detect, setup/wizard and pages/installer all call them.
+# It compiles clean and its eight symbols do not collide with sys.o's two.
+#
+# llm_tool.c was excluded the same way while llm_tool_glue.c was kept, so the glue's
+# calls to llm_chatwithtools, llm_parse_tool_calls, llm_submitresult and
+# llm_tool_result_msgs had no definitions. It compiles clean too.
+#
+# infer_stream.c stays out: it is the only one of the three that does not build here.
+find "$STDLIB" -name '*.c' ! -name 'infer_stream.c' > "$CLIST"
 find "$VENDOR/cmark/src" -name '*.c' ! -name 'main.c' >> "$CLIST"
 echo "$VENDOR/tomlc99/toml.c" >> "$CLIST"
 
@@ -211,4 +247,4 @@ clang -std=c99 -D_GNU_SOURCE -O1 -iquote "$STDLIB" \
   -o build/loke -lssl -lcrypto -lz -lm -lsqlite3 \
   -framework Security -framework CoreFoundation -lobjc
 
-echo "Done: build/loke ($(du -h build/loke | cut -f1))"
+echo "Done: $BROWSERDIR/build/loke ($(du -h build/loke | cut -f1))"

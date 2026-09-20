@@ -74,52 +74,87 @@ f=defaultcases():@$benchcase{
   )
 };
 
-f=runcase(bcase:$benchcase;model:str;dispatcher:i64):$benchresult{
-  log.info(str.concat("bench: running case ";str.concat(bcase.id;str.concat(" on model ";model)));"eval";"bench");
-  let startms=str.toint(str.fromint(t.nowms()));
-  let response=disp.dispatch(dispatcher;model;bcase.prompt);
-  let endms=str.toint(str.fromint(t.nowms()));
-  let elapsedms=endms-startms;
-  let resplower=t.strlower(response.text);
-  let matched=mut.0;
-  let total=bcase.expectedkeywords.len;
-  let i=mut.0;
-  lp(let lv=0;true;lv=lv){
-    if(i>total){
-      br
-    }el{
-      let kw=t.strlower(str.arrayget(bcase.expectedkeywords;i));
-      if(t.strcontains(resplower;kw)){
-        matched=matched+1
-      }el{
-        matched=matched
-      };
-      i=i+1
-    }
-  };
-  let scr=mut.0.0;
-  if(total>0){
-    let matchedf=str.tofloat(str.fromint(matched));
-    let totalf=str.tofloat(str.fromint(total));
-    scr=matchedf/totalf
+(* The provider is chosen from the model id. Benchmarking defaults to ollama so a
+   bench run cannot silently spend money on a hosted provider. *)
+f=providerformodel(model:str):$provider{
+  if(str.startswith(model;"claude")){
+    <$anthropic
   }el{
-    scr=0.0
+    if(str.startswith(model;"gpt")){
+      <$openai
+    }el{
+      <$ollama
+    }
+  }
+};
+
+f=scorekeywords(response:$completionresponse;bcase:$benchcase):i64{
+  let resplower=t.strlower(response.content);
+  let matched=mut.0;
+  (* `i>total` ran one iteration past the end and read out of bounds. *)
+  lp(let i=0;i<bcase.expectedkeywords.len;i=i+1){
+    if(t.strcontains(resplower;t.strlower(bcase.expectedkeywords.get(i)))){
+      matched=matched+1
+    }el{}
   };
-  let snippet=t.strslice(response.text;0;120);
+  <matched
+};
+
+f=casefailed(bcase:$benchcase;model:str;elapsedms:i64;total:i64):$benchresult{
+  log.warn("bench: case \(bcase.id) failed against \(model)";"eval";"bench");
   <$benchresult{
     caseid:bcase.id;
     model:model;
     latencyms:elapsedms;
-    tokensused:response.tokensused;
+    tokensused:0;
+    costusd:0.0;
+    keywordsmatched:0;
+    keywordstotal:total;
+    score:0.0;
+    responsesnippet:""
+  }
+};
+
+f=caseresult(bcase:$benchcase;model:str;elapsedms:i64;response:$completionresponse):$benchresult{
+  let total=bcase.expectedkeywords.len as i64;
+  let matched=scorekeywords(response;bcase);
+  let scr=mut.0.0;
+  if(total>0){
+    scr=str.tofloat(str.fromint(matched))/str.tofloat(str.fromint(total))
+  }el{};
+  <$benchresult{
+    caseid:bcase.id;
+    model:model;
+    latencyms:elapsedms;
+    tokensused:(response.inputtokens+response.outputtokens) as i64;
     costusd:response.costusd;
     keywordsmatched:matched;
     keywordstotal:total;
     score:scr;
-    responsesnippet:snippet
+    responsesnippet:t.strslice(response.content;0;120)
   }
 };
 
-f=runbenchmark(model:str;cases:@$benchcase;dispatcher:i64):$benchrun{
+f=runcase(bcase:$benchcase;model:str;dispatcher:$dispatcher):$benchresult{
+  log.info("bench: running case \(bcase.id) on model \(model)";"eval";"bench");
+  let startms=t.nowms();
+  let req=$completionrequest{
+    modelid:model;
+    messages:@(prov.usermsg(bcase.prompt));
+    systemprompt:"";
+    maxtokens:1024 as u32;
+    temperature:0.0;
+    stream:false
+  };
+  let outcome=disp.dispatch(dispatcher;req;providerformodel(model));
+  let elapsedms=t.nowms()-startms;
+  mt outcome {
+    $ok:response caseresult(bcase;model;elapsedms;response);
+    $err:e casefailed(bcase;model;elapsedms;bcase.expectedkeywords.len as i64)
+  }
+};
+
+f=runbenchmark(model:str;cases:@$benchcase;dispatcher:$dispatcher):$benchrun{
   log.info(str.concat("bench: starting benchmark for model ";model);"eval";"bench");
   let results=mut.@();
   let totalscore=mut.0.0;
@@ -131,7 +166,7 @@ f=runbenchmark(model:str;cases:@$benchcase;dispatcher:i64):$benchrun{
     if(i>n){
       br
     }el{
-      let r=runcase(str.arrayget(cases;i);model;dispatcher);
+      let r=runcase(cases.get(i);model;dispatcher);
       results=results.push(r);
       totalscore=totalscore+r.score;
       totallatency=totallatency+r.latencyms;
@@ -176,13 +211,13 @@ f=formatrun(run:$benchrun):str{
     }el{
       let r=run.results.get(i);
       let kwstr=str.concat(str.fromint(r.keywordsmatched);str.concat("/";str.fromint(r.keywordstotal)));
-      let row=str.concat(t.strpad(r.caseid;16);str.concat(t.strpad(t.f64tostr(r.score;2);8);str.concat(t.strpad(str.concat(str.fromint(r.latencyms);"ms");10);str.concat(t.strpad(str.concat("$";t.f64tostr(r.costusd;4));10);str.concat(kwstr;"
+      let row=str.concat(t.strpad(r.caseid;16);str.concat(t.strpad(t.f64fixed(r.score;2);8);str.concat(t.strpad(str.concat(str.fromint(r.latencyms);"ms");10);str.concat(t.strpad(str.concat("$";t.f64fixed(r.costusd;4));10);str.concat(kwstr;"
 ")))));
       rows=str.concat(rows;row);
       i=i+1
     }
   };
-  let summary=str.concat(sep;str.concat(t.strpad("AVERAGE";16);str.concat(t.strpad(t.f64tostr(run.avgscore;2);8);str.concat(t.strpad(str.concat(str.fromint(run.avglatencyms);"ms");10);str.concat(t.strpad(str.concat("$";t.f64tostr(run.totalcostusd;4));10);str.concat(str.fromint(run.casesrun);" cases
+  let summary=str.concat(sep;str.concat(t.strpad("AVERAGE";16);str.concat(t.strpad(t.f64fixed(run.avgscore;2);8);str.concat(t.strpad(str.concat(str.fromint(run.avglatencyms);"ms");10);str.concat(t.strpad(str.concat("$";t.f64fixed(run.totalcostusd;4));10);str.concat(str.fromint(run.casesrun);" cases
 "))))));
   <str.concat(header;str.concat(sep;str.concat(colhdr;str.concat(sep;str.concat(rows;summary)))))
 };

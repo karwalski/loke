@@ -1,6 +1,26 @@
 (* Copyright 2026 loke contributors
    SPDX-License-Identifier: Apache-2.0 *)
 
+(* Mutually-authenticated channel to a paired companion device.
+
+   IT IS NOT MUTUALLY AUTHENTICATED, AND IT IS NOT ENCRYPTED. Every function in
+   toke's std.tls is a stub that ignores its arguments and returns 0: tlsconfig,
+   connecttls, listentls and genselfsigned all return 0, and read/write/close act on
+   a handle that was never a connection. There is no TLS on this toolchain.
+
+   Two consequences are recorded here rather than left to be rediscovered:
+
+     1. `tlsconfig` now takes only (cert, key). The old call passed the companion's
+        certificate and a verify-peer flag as well — that is the mutual-auth half —
+        and the current signature has nowhere to put them. So peer verification
+        cannot be expressed through std.tls at all, not merely "is untested".
+     2. `genselfsigned` takes only a common name. The 3650-day validity loke asked
+        for is not passed to anything.
+
+   Every function therefore reports failure instead of returning a zero handle that
+   a caller would treat as a live socket. A channel that silently is not encrypted
+   is worse than one that refuses to open. *)
+
 m=core.companion.channel;
 
 i=tls:std.tls;
@@ -8,30 +28,61 @@ i=log:shared.log;
 i=str:std.str;
 i=t:core.companion.types;
 
+f=unavailable(what:str):i64{
+  log.error("companion channel unavailable: std.tls is not implemented, cannot \(what)";"companion";"channel");
+  <0
+};
+
 f=genidentity(devicename:str):i64{
-  let kp=tls.genselfsigned(str.concat("loke.";devicename);3650);
-  log.info(str.concat("generated identity cert for: ";devicename);"companion";"channel");
-  <kp
+  let kp=tls.genselfsigned("loke.\(devicename)");
+  if(kp==0){
+    <unavailable("generate an identity certificate for \(devicename)")
+  }el{
+    log.info("generated identity cert for: \(devicename)";"companion";"channel");
+    <kp
+  }
 };
 
-f=connect(companion:i64;ourkeypair:i64):i64{
-  let cfg=tls.tlsconfig(ourkeypair.certpem;ourkeypair.keypem;companion.certpem;true);
-  <tls.connecttls(companion.host;companion.port;cfg)
+f=connect(companion:$companion;ourkeypair:i64):i64{
+  (* The companion's certificate is deliberately not passed: std.tls.tlsconfig has
+     no parameter for it, so this connection cannot verify the peer. *)
+  let cfg=tls.tlsconfig("";"");
+  if(cfg==0){
+    <unavailable("verify \(companion.host) — peer authentication is not available")
+  }el{
+    <tls.connecttls(companion.host;companion.port)
+  }
 };
 
-f=listen(port:i32;keypair:i64;cb:i64):bool{
-  let cfg=tls.tlsconfig(keypair.certpem;keypair.keypem;"";false);
-  <tls.listentls(port;cfg;cb)
+f=listen(port:i32;keypair:i64):bool{
+  let cfg=tls.tlsconfig("";"");
+  if(cfg==0){
+    <unavailable("listen on \(port)")!=0
+  }el{
+    <tls.listentls(port;cfg)!=0
+  }
 };
 
 f=send(conn:i64;msg:str):bool{
-  <tls.write(conn;msg)
+  if(conn==0){
+    <false
+  }el{
+    <tls.write(conn;msg)
+  }
 };
 
 f=recv(conn:i64):str{
-  <tls.read(conn)
+  if(conn==0){
+    <""
+  }el{
+    <tls.read(conn)
+  }
 };
 
 f=close(conn:i64):bool{
-  <tls.close(conn)
+  if(conn==0){
+    <false
+  }el{
+    <tls.close(conn)
+  }
 };

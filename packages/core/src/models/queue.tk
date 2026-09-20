@@ -14,6 +14,21 @@ i=qt:core.models.queuetypes;
 
 
 
+(* The match is in its own function, not inline in the loop. toke emits duplicate
+   basic-block labels for an inline `mt` of three or more arms inside a loop body and
+   clang rejects the module ("Terminator found in the middle of a basic block!").
+   Two arms is fine, which is why $ok/$err matches are unaffected. See
+   docs/upstream/toke-issues.md T-2. *)
+f=jobispending(st:$jobstatus):bool{
+  mt st {
+    $pending:v true;
+    $running:v false;
+    $completed:v false;
+    $failed:v false;
+    $cancelled:v false
+  }
+};
+
 f=newqueue():$jobqueue{
   <$jobqueue{
     jobs:@();
@@ -63,13 +78,7 @@ f=nextpending(queue:$jobqueue):$queuejob!$lokeerr{
   let bestrank=mut.3;
   lp(let qi=0;qi<queue.jobs.len;qi=qi+1){
     let job=queue.jobs.get(qi);
-    let ispending=mt job.status {
-      $pending:v true;
-      $running:v false;
-      $completed:v false;
-      $failed:v false;
-      $cancelled:v false
-    };
+    let ispending=jobispending(job.status);
     if(ispending){
       let rank=priorityrank(job.priority);
       if(rank < bestrank){
@@ -90,133 +99,82 @@ f=nextpending(queue:$jobqueue):$queuejob!$lokeerr{
 
 
 
-f=markrunning(queue:$jobqueue;jobid:str):void{
-  let count=queue.jobs.len;
-  let i=0;
-  lp(let lv=0;true;lv=lv){
-    if(!(i<count)){
-      let lv=1
-    }el{
-      let job=queue.jobs.get(i);
-      if(str.eq(job.id;jobid)){
-        let njob=$queuejob{
-          id:job.id;
-          modelid:job.modelid;
-          prompt:job.prompt;
-          priority:job.priority;
-          status:$running;
-          createdat:job.createdat;
-          startedat:"now";
-          completedat:job.completedat;
-          result:job.result;
-          error:job.error;
-          estimatedtoks:job.estimatedtoks
-        };
-        queue.jobs.set(i;njob)
-      };
-      let i=i+1
-    }
+(* All four state transitions were the same broken shape and none of them worked.
+
+   `let lv=1` was meant as a break and `let i=i+1` as an increment; both declared a
+   new binding instead of assigning, so the loop neither advanced nor terminated —
+   every one of these was an infinite loop. `queue.jobs.set(i;njob)` then discarded
+   its result, and `void` gave the caller no way to receive the change, so even a
+   terminating version would have changed nothing.
+
+   They return the updated queue now, and share one rebuild helper. *)
+f=withstatus(job:$queuejob;status:$jobstatus;startedat:str;completedat:str;result:str;error:str):$queuejob{
+  <$queuejob{
+    id:job.id;
+    modelid:job.modelid;
+    prompt:job.prompt;
+    priority:job.priority;
+    status:status;
+    createdat:job.createdat;
+    startedat:startedat;
+    completedat:completedat;
+    result:result;
+    error:error;
+    estimatedtoks:job.estimatedtoks
   }
 };
 
-
-
-
-f=markcompleted(queue:$jobqueue;jobid:str;result:str):void{
-  let count=queue.jobs.len;
-  let i=0;
-  lp(let lv=0;true;lv=lv){
-    if(!(i<count)){
-      let lv=1
+f=markrunning(queue:$jobqueue;jobid:str):$jobqueue{
+  let jobs=mut.@();
+  lp(let i=0;i<queue.jobs.len;i=i+1){
+    let job:$queuejob=queue.jobs.get(i);
+    if(str.eq(job.id;jobid)){
+      jobs=jobs.push(withstatus(job;$running;"now";job.completedat;job.result;job.error))
     }el{
-      let job=queue.jobs.get(i);
-      if(str.eq(job.id;jobid)){
-        let njob=$queuejob{
-          id:job.id;
-          modelid:job.modelid;
-          prompt:job.prompt;
-          priority:job.priority;
-          status:$completed;
-          createdat:job.createdat;
-          startedat:job.startedat;
-          completedat:"now";
-          result:result;
-          error:job.error;
-          estimatedtoks:job.estimatedtoks
-        };
-        queue.jobs.set(i;njob)
-      };
-      let i=i+1
+      jobs=jobs.push(job)
     }
-  }
+  };
+  <$jobqueue{jobs:jobs}
 };
 
-
-
-
-f=markfailed(queue:$jobqueue;jobid:str;error:str):void{
-  let count=queue.jobs.len;
-  let i=0;
-  lp(let lv=0;true;lv=lv){
-    if(!(i<count)){
-      let lv=1
+f=markcompleted(queue:$jobqueue;jobid:str;result:str):$jobqueue{
+  let jobs=mut.@();
+  lp(let i=0;i<queue.jobs.len;i=i+1){
+    let job:$queuejob=queue.jobs.get(i);
+    if(str.eq(job.id;jobid)){
+      jobs=jobs.push(withstatus(job;$completed;job.startedat;"now";result;job.error))
     }el{
-      let job=queue.jobs.get(i);
-      if(str.eq(job.id;jobid)){
-        let njob=$queuejob{
-          id:job.id;
-          modelid:job.modelid;
-          prompt:job.prompt;
-          priority:job.priority;
-          status:$failed;
-          createdat:job.createdat;
-          startedat:job.startedat;
-          completedat:job.completedat;
-          result:job.result;
-          error:error;
-          estimatedtoks:job.estimatedtoks
-        };
-        queue.jobs.set(i;njob)
-      };
-      let i=i+1
+      jobs=jobs.push(job)
     }
-  }
+  };
+  <$jobqueue{jobs:jobs}
 };
 
-
-
-
-f=cancel(queue:$jobqueue;jobid:str):void{
-  let count=queue.jobs.len;
-  let i=0;
-  lp(let lv=0;true;lv=lv){
-    if(!(i<count)){
-      let lv=1
+f=markfailed(queue:$jobqueue;jobid:str;error:str):$jobqueue{
+  let jobs=mut.@();
+  lp(let i=0;i<queue.jobs.len;i=i+1){
+    let job:$queuejob=queue.jobs.get(i);
+    if(str.eq(job.id;jobid)){
+      jobs=jobs.push(withstatus(job;$failed;job.startedat;job.completedat;job.result;error))
     }el{
-      let job=queue.jobs.get(i);
-      if(str.eq(job.id;jobid)){
-        let njob=$queuejob{
-          id:job.id;
-          modelid:job.modelid;
-          prompt:job.prompt;
-          priority:job.priority;
-          status:$cancelled;
-          createdat:job.createdat;
-          startedat:job.startedat;
-          completedat:job.completedat;
-          result:job.result;
-          error:job.error;
-          estimatedtoks:job.estimatedtoks
-        };
-        queue.jobs.set(i;njob)
-      };
-      let i=i+1
+      jobs=jobs.push(job)
     }
-  }
+  };
+  <$jobqueue{jobs:jobs}
 };
 
-
-
+f=cancel(queue:$jobqueue;jobid:str):$jobqueue{
+  let jobs=mut.@();
+  lp(let i=0;i<queue.jobs.len;i=i+1){
+    let job:$queuejob=queue.jobs.get(i);
+    if(str.eq(job.id;jobid)){
+      jobs=jobs.push(withstatus(job;$cancelled;job.startedat;job.completedat;job.result;job.error))
+    }el{
+      jobs=jobs.push(job)
+    }
+  };
+  <$jobqueue{jobs:jobs}
+};
 
 f=listjobs(queue:$jobqueue):@$queuejob{
   <queue.jobs

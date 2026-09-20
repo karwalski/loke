@@ -7,6 +7,7 @@ i=http:std.http;
 i=json:std.json;
 i=log:shared.log;
 i=store:core.feedback.store;
+i=ft:core.feedback.types;
 i=str:std.str;
 i=t:shared.types;
 
@@ -32,15 +33,23 @@ t=$submissionresult{
 
 
 
-f=buildbatch(db:i64;periodlabel:str):$submissionbatch{
-  let summary=store.getsummary(db;7);
-  let topareas=summary.topissues.slice(0;3);
+(* store.getsummary returns a result, so the summary is read on the ok arm rather
+   than dereferenced directly. An empty batch is the honest answer when the query
+   fails: reporting zeros is better than reporting a summary nobody computed. *)
+f=batchfromsummary(summary:$feedbacksummary;periodlabel:str):$submissionbatch{
   <$submissionbatch{
     entriescount:summary.total;
     thumbsup:summary.thumbsup;
     thumbsdown:summary.thumbsdown;
-    topareas:topareas;
+    topareas:summary.topissues.slice(0;3);
     periodlabel:periodlabel
+  }
+};
+
+f=buildbatch(db:i64;periodlabel:str):$submissionbatch{
+  mt store.getsummary(db;7) {
+    $ok:summary batchfromsummary(summary;periodlabel);
+    $err:e $submissionbatch{entriescount:0;thumbsup:0;thumbsdown:0;topareas:@();periodlabel:periodlabel}
   }
 };
 
@@ -81,7 +90,7 @@ f=formatissuebody(batch:$submissionbatch):str{
 
 
 
-f=submitbatchok(r:i64):$submissionresult{
+f=submitbatchok(r:$httpresp):$submissionresult{
   let issueurl=json.str(json.parse(r.body);"html_url");
   <$submissionresult{
     ok:true;
@@ -92,30 +101,22 @@ f=submitbatchok(r:i64):$submissionresult{
 
 f=submitbatch(cfg:$githubconfig;batch:$submissionbatch):$submissionresult{
   let body=formatissuebody(batch);
-  let title=str.concat("Feedback: ";batch.periodlabel);
-  let payload=json.obj(@(
-    json.kv("title";json.str(title));
-    json.kv("body";json.str(body));
-    json.kv("labels";json.arr(@(json.str("feedback");json.str("auto"))))
-  ));
-  let url=str.concat(
-    str.concat(
-      str.concat(
-        str.concat("https://api.github.com/repos/";cfg.owner);
-      "/");
-    cfg.repo);
-  "/issues");
-  let authheader=str.concat("token ";cfg.token);
+  let title="Feedback: \(batch.periodlabel)";
+  (* json.obj takes a raw JSON string, json.kv builds a single pair and json.arr is
+     a getter — they do not compose into an object literal. json.enc escapes. *)
+  let payload="{\"title\":\(json.enc(title)),\"body\":\(json.enc(body)),\"labels\":[\"feedback\",\"auto\"]}";
+  let url="https://api.github.com/repos/\(cfg.owner)/\(cfg.repo)/issues";
+  let authheader="token \(cfg.token)";
   (* postheaders takes a headers JSON string, not an array of http.header values. *)
   let hdrs="{\"authorization\":\(json.enc(authheader)),\"content-type\":\"application/json\",\"accept\":\"application/vnd.github+json\"}";
   let hc=http.client(url);
-  let resp=http.postheaders(hc;"";str.tobytes(json.enc(payload));hdrs);
+  let resp=http.postheaders(hc;"";str.tobytes(payload);hdrs);
   mt resp {
     $ok:r submitbatchok(r);
     $err:e $submissionresult{
       ok:false;
       issueurl:"";
-      err:str.concat("http error: ";e.message)
+      err:"http error"
     }
   }
 };

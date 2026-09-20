@@ -59,47 +59,34 @@ f=memorytools():@($mcptool){
 
 
 
-f=handlesearchresults(rs:i64):i64{
-  let count=str.arraylen(rs);
-  let items="";
-  let i=0;
-  lp(let lv=0;true;lv=lv){
-    if(i > count){
-      br
-    }el{
-      let r=str.arrayget(rs;i);
-      let loc=str.concat(r.location.wing;str.concat("/";str.concat(r.location.hall;str.concat("/";r.location.room))));
-      let scores=str.fromfloat(r.relevancescore);
-      let excerptescaped=str.replace(r.contentexcerpt;"\"";"\\\"");
-      let entry=str.concat(
-        "{\"drawer_id\":\"";str.concat(
-        r.drawerid;str.concat(
-        "\",\"location\":\"";str.concat(
-        loc;str.concat(
-        "\",\"excerpt\":\"";str.concat(
-        excerptescaped;str.concat(
-        "\",\"score\":";str.concat(
-        scores;"}"
-      )))))))
-      );
-      if(i == 0){
-        let items=entry
-      }el{
-        let items=str.concat(items;str.concat(",";entry))
-      };
-      let i=i+1;
-    }
+(* Three defects in one loop, and they compiled: `let i=0` then `let i=i+1` inside
+   the body declared a new binding each pass so the counter never advanced — an
+   infinite loop, not a slow one; `let items=entry` inside the if-branch shadowed
+   rather than assigned, so the JSON array was always empty; and the escaping was a
+   single str.replace on double quotes, which leaves backslashes and newlines to
+   break the payload. json.enc does the escaping properly.
+
+   The branch-local `let items` was also what made clang reject the linked IR with
+   "Instruction does not dominate all uses": toke allocated items inside the branch
+   and loaded it after the branch closed. *)
+f=handlesearchresults(rs:@$searchresult):$toolresult{
+  let items=mut.@();
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$searchresult=rs.get(i);
+    let loc:$palacelocation=r.location;
+    let where="\(loc.wing)/\(loc.hall)/\(loc.room)";
+    items=items.push("{\"drawer_id\":\(json.enc(r.drawerid)),\"location\":\(json.enc(where)),\"excerpt\":\(json.enc(r.contentexcerpt)),\"score\":\(r.relevancescore)}")
   };
-  let resultjson=str.concat("[";str.concat(items;"]"));
-  <$toolresult{contenttype:"text";text:resultjson;iserror:false}
+  <$toolresult{contenttype:"text";text:"[\(str.join(items;","))]";iserror:false}
 };
 
-f=handlesearchfail():i64{
+
+f=handlesearchfail():$toolresult{
   log.warn("memory.search failed";"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr("search failed");iserror:true}
 };
 
-f=handlesearchobj(p:i64;obj:i64):i64{
+f=handlesearchobj(p:i64;obj:i64):$toolresult{
   let query=json.str(obj;"query");
   let limit=json.i64(obj;"limit");
   let wing=json.str(obj;"wing");
@@ -113,7 +100,7 @@ f=handlesearchobj(p:i64;obj:i64):i64{
   }
 };
 
-f=handlesearch(p:i64;argsjson:str):i64{
+f=handlesearch(p:i64;argsjson:str):$toolresult{
   let parsed=json.dec(argsjson);
   mt parsed {
     $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true};
@@ -122,18 +109,18 @@ f=handlesearch(p:i64;argsjson:str):i64{
 };
 
 
-f=handlestoreok():i64{
+f=handlestoreok():$toolresult{
   let drawerid=str.randhex(16);
   let result=str.concat("{\"ok\":true,\"drawer_id\":\"";str.concat(drawerid;"\"}"));
   <$toolresult{contenttype:"text";text:result;iserror:false}
 };
 
-f=handlestorefail():i64{
+f=handlestorefail():$toolresult{
   log.warn("memory.store failed";"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr("store failed");iserror:true}
 };
 
-f=handlestoreobj(p:i64;obj:i64):i64{
+f=handlestoreobj(p:i64;obj:i64):$toolresult{
   let content=json.str(obj;"content");
   let role=json.str(obj;"role");
   mt stor.storeturn(p;role;content;"manual";"user";0 as u32;$public) {
@@ -142,7 +129,7 @@ f=handlestoreobj(p:i64;obj:i64):i64{
   }
 };
 
-f=handlestore(p:i64;argsjson:str):i64{
+f=handlestore(p:i64;argsjson:str):$toolresult{
   let parsed=json.dec(argsjson);
   mt parsed {
     $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true};
@@ -151,7 +138,7 @@ f=handlestore(p:i64;argsjson:str):i64{
 };
 
 
-f=handlecontextobj(p:i64;obj:i64):i64{
+f=handlecontextobj(p:i64;obj:i64):$toolresult{
   let task=json.str(obj;"task");
   let tokenbudget=json.i64(obj;"token_budget");
   let ctx=context.loadcontext(p;task;"user";tokenbudget);
@@ -167,7 +154,7 @@ f=handlecontextobj(p:i64;obj:i64):i64{
   <$toolresult{contenttype:"text";text:result;iserror:false}
 };
 
-f=handlecontext(p:i64;argsjson:str):i64{
+f=handlecontext(p:i64;argsjson:str):$toolresult{
   let parsed=json.dec(argsjson);
   mt parsed {
     $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true};
@@ -176,7 +163,7 @@ f=handlecontext(p:i64;argsjson:str):i64{
 };
 
 
-f=handlestatusok(s:i64):i64{
+f=handlestatusok(s:i64):$toolresult{
   let drawerss=str.fromint(s.totaldrawers);
   let closetss=str.fromint(s.totalclosets);
   let wingss=str.fromint(s.totalwings);
@@ -192,12 +179,12 @@ f=handlestatusok(s:i64):i64{
   <$toolresult{contenttype:"text";text:result;iserror:false}
 };
 
-f=handlestatusfail():i64{
+f=handlestatusfail():$toolresult{
   log.warn("memory.status failed";"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr("status query failed");iserror:true}
 };
 
-f=handlestatus(p:i64):i64{
+f=handlestatus(p:i64):$toolresult{
   mt palace.status(p) {
     $ok:s handlestatusok(s);
     $err:e handlestatusfail()
@@ -205,38 +192,28 @@ f=handlestatus(p:i64):i64{
 };
 
 
-f=handlefactsresults(rs:i64):i64{
+(* Same three defects as handlesearchresults: a counter rebound with `let` so it
+   never advanced, an accumulator rebound inside the if-branch so it stayed empty,
+   and hand-rolled quote escaping. *)
+f=handlefactsresults(rs:@$searchresult):$toolresult{
   let level=aaak.defaultlevel();
-  let count=str.arraylen(rs);
-  let encodedparts="";
-  let i=0;
-  lp(let lv=0;true;lv=lv){
-    if(i > count){
-      br
-    }el{
-      let r=str.arrayget(rs;i);
-      let encoded=aaak.encodefact(r.contentexcerpt;level);
-      let loc=str.concat(r.location.wing;str.concat("/";r.location.hall));
-      let tagged=str.concat("[";str.concat(loc;str.concat("] ";encoded)));
-      if(i == 0){
-        let encodedparts=tagged
-      }el{
-        let encodedparts=str.concat(encodedparts;str.concat(" | ";tagged))
-      };
-      let i=i+1;
-    }
+  let parts=mut.@();
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$searchresult=rs.get(i);
+    let loc:$palacelocation=r.location;
+    parts=parts.push("[\(loc.wing)/\(loc.hall)] \(aaak.encodefact(r.contentexcerpt;level))")
   };
-  let escaped=str.replace(encodedparts;"\"";"\\\"");
-  let result=str.concat("{\"facts\":\"";str.concat(escaped;"\"}"));
-  <$toolresult{contenttype:"text";text:result;iserror:false}
+  let facts=str.join(parts;" | ");
+  <$toolresult{contenttype:"text";text:"{\"facts\":\(json.enc(facts))}";iserror:false}
 };
 
-f=handlefactsfail():i64{
+
+f=handlefactsfail():$toolresult{
   log.warn("memory.facts search failed";"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr("facts search failed");iserror:true}
 };
 
-f=handlefactsobj(p:i64;obj:i64):i64{
+f=handlefactsobj(p:i64;obj:i64):$toolresult{
   let query=json.str(obj;"query");
   mt search.search(p;query;5) {
     $ok:rs handlefactsresults(rs);
@@ -244,7 +221,7 @@ f=handlefactsobj(p:i64;obj:i64):i64{
   }
 };
 
-f=handlefacts(p:i64;argsjson:str):i64{
+f=handlefacts(p:i64;argsjson:str):$toolresult{
   let parsed=json.dec(argsjson);
   mt parsed {
     $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true};
@@ -253,12 +230,12 @@ f=handlefacts(p:i64;argsjson:str):i64{
 };
 
 
-f=handlediarywritefail(agentid:str):i64{
+f=handlediarywritefail(agentid:str):$toolresult{
   log.warn(str.concat("memory.diary_write failed for agent: ";agentid);"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr("diary write failed");iserror:true}
 };
 
-f=handlediarywriteobj(p:i64;obj:i64):i64{
+f=handlediarywriteobj(p:i64;obj:i64):$toolresult{
   let agentid=json.str(obj;"agent_id");
   let entry=json.str(obj;"entry");
 
@@ -281,7 +258,7 @@ f=handlediarywriteobj(p:i64;obj:i64):i64{
   }
 };
 
-f=handlediarywrite(p:i64;argsjson:str):i64{
+f=handlediarywrite(p:i64;argsjson:str):$toolresult{
   let parsed=json.dec(argsjson);
   mt parsed {
     $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true};
@@ -292,13 +269,13 @@ f=handlediarywrite(p:i64;argsjson:str):i64{
 
 
 
-f=unknownmemorytool(name:str):i64{
+f=unknownmemorytool(name:str):$toolresult{
   let msg=str.concat("unknown memory tool: ";name);
   log.warn(msg;"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
 };
 
-f=dispatchmemorytool(name:str;argsjson:str;p:i64):i64{
+f=dispatchmemorytool(name:str;argsjson:str;p:i64):$toolresult{
   if(str.eq(name;"memory.search")){
     <handlesearch(p;argsjson)
   }el{
@@ -326,13 +303,13 @@ f=dispatchmemorytool(name:str;argsjson:str;p:i64):i64{
   }
 };
 
-f=memorytoolopenfail(datadir:str):i64{
+f=memorytoolopenfail(datadir:str):$toolresult{
   let msg=str.concat("failed to open memory palace at: ";datadir);
   log.warn(msg;"mcp_server";"system");
   <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
 };
 
-f=handlememorytool(name:str;argsjson:str;datadir:str):i64{
+f=handlememorytool(name:str;argsjson:str;datadir:str):$toolresult{
   mt palace.open(datadir) {
     $ok:p dispatchmemorytool(name;argsjson;p);
     $err:e memorytoolopenfail(datadir)

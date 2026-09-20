@@ -226,6 +226,32 @@ step_checks() {
   # Note also that toke gained (* ... *) block comments on 2026-04-27, so
   # comment-freedom in this repository is a project choice for token density, not
   # a language constraint. Documentation still belongs in .tkc.md companions.
+  # Four sweeps for toke defects that compile cleanly and fail at LINK time, in
+  # LLVM's words, naming no toke file. Each is documented in
+  # docs/upstream/toke-issues.md with a minimal reproduction; until they are fixed
+  # upstream these keep them from coming back. Three of the four also catch a silent
+  # logic bug of their own — a shadowing `let` is how a broken accumulator looks, and
+  # a type name used as a value is how a missing parameter looks.
+  for sweep in find_shadowed_lets find_typename_values find_field_matches \
+               find_missing_return_semi; do
+    if [[ -f "scripts/$sweep.py" ]]; then
+      echo "  toke codegen hazard: $sweep"
+      python3 "scripts/$sweep.py" --check packages >/dev/null \
+        || { python3 "scripts/$sweep.py" packages >&2
+             echo "  see docs/upstream/toke-issues.md for why each of these breaks the link" >&2
+             failed=1; }
+    fi
+  done
+
+  # The same class, checked in the emitted IR rather than the source, because the
+  # source-side heuristic cannot see every shape toke miscompiles.
+  if [[ -f scripts/check_match_labels.py ]] \
+     && [[ -d packages/browser/build/ooke ]]; then
+    echo "  emitted IR has no duplicate match labels"
+    python3 scripts/check_match_labels.py --check >/dev/null \
+      || { python3 scripts/check_match_labels.py >&2; failed=1; }
+  fi
+
   if [[ -f scripts/verify_held_changes.py ]]; then
     echo "  held toke changes are an equality-only sweep"
     python3 scripts/verify_held_changes.py --quiet \

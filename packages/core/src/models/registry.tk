@@ -73,69 +73,80 @@ f=newregistry():$registry{
   <r
 };
 
+(* `let matches=matches.append(entry)` inside the branch declared a new binding, so
+   this returned an empty array for every task and model selection could never
+   succeed. *)
 f=findfortask(registry:$registry;task:$tasktype;localonly:bool):@$modelcapability{
-  let matches=@();
-  lp(let i=0;i<registry.entries.len;i=i+1){ let entry=registry.entries.get(i);
-    let taskmatches=entry.task == task;
+  let matches=mut.@();
+  lp(let i=0;i<registry.entries.len;i=i+1){
+    let entry:$modelcapability=registry.entries.get(i);
     let localok=mut.true;
     if(localonly){localok=entry.local}el{};
-    if(taskmatches){
+    if(entry.task == task){
       if(localok){
-        let matches=matches.append(entry)
-      };
-    };
+        matches=matches.push(entry)
+      }el{}
+    }el{}
   };
   <matches
 };
 
-f=findbest(registry:$registry;task:$tasktype;localonly:bool;tier:$modeltier):$modelcapability!$lokeerr{
-  let candidates=findfortask(registry;task;localonly);
-  let bestopt=false;
-  let best=$modelcapability{modelid:"";provider:$local;task:task;qualityscore:0.0;speedtoks:0.0;contextwindow:0;supportstools:false;local:false};
-  lp(let ii102=0;ii102<candidates.len;ii102=ii102+1){
-    let entry=candidates.get(ii102);
-    if(!$bestopt){
-      let tierok=mt tier {
-        $interactive:v entry.speedtoks > 40.0;
-        $considered:v entry.speedtoks > 8.0;
-        $background:v true
-      };
-      if(tierok){
-        let best=entry;
-        let bestopt=true
-      };
-    };
+(* Three defects: `!$bestopt` put a type sigil on a local so the guard never read
+   the flag; `let best=entry` and `let bestopt=true` inside the branch shadowed
+   rather than assigned, so nothing was ever selected; and the tier match was inline
+   in the loop, which toke miscompiles at three or more arms (T-2).
 
-  };
-  if(bestopt){
-    <$ok(best)
-  }el{
-    <$err($modelerr("findbest: no model found for task with given constraints"))
-  };
-};
-
-f=register(registry:$registry;entry:$modelcapability):void{
-};
-
-f=byid(registry:$registry;modelid:str):$modelcapability!$lokeerr{
-  let foundopt=false;
-  let found=$modelcapability{modelid:"";provider:$local;task:$chat;qualityscore:0.0;speedtoks:0.0;contextwindow:0;supportstools:false;local:false};
-  lp(let ii131=0;ii131<registry.entries.len;ii131=ii131+1){
-    let entry=registry.entries.get(ii131);
-    if(!$foundopt){
-      if(str.contains(entry.modelid;modelid)){
-        if(str.len(entry.modelid) == str.len(modelid)){
-          let found=entry;
-          let foundopt=true
-        }
-      }
-    }
-
-  };
-  if(foundopt){
-    <$ok(found)
-  }el{
-    let msg=str.concat("byid: model not found: ";modelid);
-    <$err($modelerr(msg))
+   It also took the FIRST acceptable candidate rather than the best one. It now
+   keeps the highest quality score among those that meet the tier's speed floor. *)
+f=meetstier(tier:$modeltier;speedtoks:f64):bool{
+  mt tier {
+    $interactive:v speedtoks > 40.0;
+    $considered:v speedtoks > 8.0;
+    $background:v true
   }
 };
+
+f=findbest(registry:$registry;task:$tasktype;localonly:bool;tier:$modeltier):$modelcapability!$lokeerr{
+  let candidates=findfortask(registry;task;localonly);
+  let bestidx=mut.0-1;
+  let bestscore=mut.0.0-1.0;
+  lp(let i=0;i<candidates.len;i=i+1){
+    let entry:$modelcapability=candidates.get(i);
+    if(meetstier(tier;entry.speedtoks)){
+      if(entry.qualityscore>bestscore){
+        bestscore=entry.qualityscore;
+        bestidx=i
+      }el{}
+    }el{}
+  };
+  if(bestidx<0){
+    <$err($modelerr("findbest: no model found for task with given constraints"))
+  }el{
+    <$ok(candidates.get(bestidx))
+  }
+};
+
+(* Returns the updated registry. The body was empty, so registering a model did
+   nothing at all, and a by-value parameter could not have carried the change out
+   even if it had appended. *)
+f=register(registry:$registry;entry:$modelcapability):$registry{
+  <$registry{entries:registry.entries.push(entry)}
+};
+
+(* Same shadowing and `!$foundopt` sigil as findbest. The two-step
+   contains-then-length-equal test is just string equality. *)
+f=byid(registry:$registry;modelid:str):$modelcapability!$lokeerr{
+  let foundidx=mut.0-1;
+  lp(let i=0;i<registry.entries.len;i=i+1){
+    let entry:$modelcapability=registry.entries.get(i);
+    if(str.eq(entry.modelid;modelid)){
+      foundidx=i
+    }el{}
+  };
+  if(foundidx<0){
+    <$err($modelerr("byid: no model with id \(modelid)"))
+  }el{
+    <$ok(registry.entries.get(foundidx))
+  }
+};
+
