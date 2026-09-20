@@ -122,6 +122,18 @@ step_checks() {
       || { echo "  provenance tests failed — a card could claim a number it did not compute" >&2; failed=1; }
   fi
 
+  if [[ -f packages/moke/static/js/tests/test-moke-flow.js ]] && command -v node >/dev/null; then
+    echo "  demo flow interpreter"
+    node packages/moke/static/js/tests/test-moke-flow.js >/dev/null \
+      || { echo "  flow tests failed — a walkthrough step could show the wrong instruction" >&2; failed=1; }
+  fi
+
+  if [[ -f packages/moke/static/js/tests/test-moke-relationships.js ]] && command -v node >/dev/null; then
+    echo "  cross-dataset joins hold against real columns"
+    node packages/moke/static/js/tests/test-moke-relationships.js >/dev/null \
+      || { echo "  a declared join names a column the data does not have" >&2; failed=1; }
+  fi
+
   # Two checks for the defect class MK20.4 fixed: presentation mode rendered
   # Math.random() figures under a "computed locally" caption, because the NC1.5
   # rule lived in one template and it had no access to it.
