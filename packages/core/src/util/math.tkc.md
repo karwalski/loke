@@ -1,0 +1,1 @@
+Integer math utility functions for loke. Provides maxint, minint, clampint, and absval. All operate on i64 values with no imports required. Generated via toke API with manual v3 syntax corrections.

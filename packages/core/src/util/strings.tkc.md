@@ -1,0 +1,1 @@
+String utility functions for loke. Provides startswith, endswith, trimprefix, joinpair, isempty, and maskstr. All functions use std.str for string operations. maskstr returns the first 4 characters followed by "****" for display masking of sensitive values. Generated via toke API with manual v3 syntax corrections. Depends on std.str.

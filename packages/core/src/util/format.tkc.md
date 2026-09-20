@@ -1,0 +1,1 @@
+Cost formatting utility for loke. Provides formatcost which converts microdollars (i64) to a display string like "$0.03". Used for displaying LLM API costs in the governance dashboard and session stats. Depends on std.str.

@@ -209,6 +209,30 @@ def split_top(s: str) -> list[str]:
     return parts
 
 
+def return_type(block: str, diag: dict) -> str | None:
+    """A function declared :i64 that returns a struct.
+
+    The compiler's own `fix` field says "cast return value to i64 using 'as'". That
+    advice is wrong and worth naming: casting a struct to an integer would compile
+    and destroy the value. The declaration is what is wrong, not the return.
+
+    This pass is handled specially by run(), which passes the whole enclosing
+    function declaration line rather than the erroring line — see RETURN_TYPE_PASS.
+    """
+    msg = diag.get("message", "")
+    if "expected 'i64', got '" not in msg:
+        return None
+    got = msg.split("got '")[1].rstrip("'")
+    if not got or " " in got:
+        return None
+    # :i64{  ->  :$type{     and  :i64!$err{ -> :$type!$err{
+    if "):i64!" in block:
+        return block.replace("):i64!", f"):${got}!", 1)
+    if "):i64{" in block:
+        return block.replace("):i64{", f"):${got}{{", 1)
+    return None
+
+
 def db_redesign(line: str, diag: dict) -> str | None:
     """std.db lost its connection argument.
 
@@ -277,6 +301,10 @@ PASSES = {
     "str-concat": ("str.concat is binary", "str-concat-arity",
                    lambda d: "std.str.concat" in d.get("message", ""),
                    str_concat_arity),
+    "return-type": ("a function declared :i64 that returns a struct", "return-type",
+                    lambda d: d.get("error_code") == "E4031"
+                    and "expected 'i64', got '$" not in d.get("message", "")
+                    and "expected 'i64', got '" in d.get("message", ""), return_type),
     "http-post": ("std.http.post* arity — reports only, does not guess a client",
                   "http-post-arity",
                   lambda d: "std.http.post" in d.get("message", ""), http_post_arity),
@@ -319,10 +347,23 @@ def run(pass_name: str, dry: bool) -> int:
             ln = d["pos"]["line"] - 1
             if ln in seen or ln < 0 or ln >= len(lines):
                 continue
-            span_end = span_of(lines, ln)
-            if span_end is None:
-                declined += 1
-                continue
+            if pass_name == "return-type":
+                # Walk back to the enclosing `f=` declaration: the defect is there,
+                # not on the line that returns.
+                decl = None
+                for k in range(ln, -1, -1):
+                    if lines[k].startswith("f="):
+                        decl = k
+                        break
+                if decl is None:
+                    declined += 1
+                    continue
+                ln, span_end = decl, decl
+            else:
+                span_end = span_of(lines, ln)
+                if span_end is None:
+                    declined += 1
+                    continue
             block = "\n".join(lines[ln:span_end + 1])
             new_block = fn(block, d)
             if new_block is None or new_block == block:
