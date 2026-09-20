@@ -157,9 +157,48 @@ eq(F.stepNarration(flow, 2, ctx).prompt, 'Show servers with expired warranties',
    'a prompt step exposes its prompt for the chip');
 eq(F.stepNarration(flow, 1, ctx).prompt, null, 'a non-prompt step exposes no chip');
 
-// ── Report ────────────────────────────────────────────────────────────────
+
+// ── MK20.3: the cross-domain flow must actually contrast ──────────────────
+// Its whole point is one pipeline over two datasets with opposite redaction
+// outcomes. A flow that loaded two similar datasets would look the same and
+// demonstrate nothing, so the contrast is asserted rather than assumed.
+const cross = FLOWS.flows.find(function (f) { return f.id === 'cross-domain'; });
+ok(!!cross, 'a cross-domain flow exists');
+if (cross) {
+  ok(F.validateFlow(cross).length === 0, 'the cross-domain flow is valid');
+  const loads = cross.steps.filter(function (s) { return s.kind === 'load'; });
+  eq(loads.length, 2, 'it loads exactly two datasets');
+  ok(loads[0].dataset !== loads[1].dataset, 'and they are different datasets');
+
+  // One public, one with people in it. Checked on the narration, because that is
+  // what the presenter says out loud and what a viewer will hold us to.
+  const all = cross.steps.map(function (s) { return s.narration; }).join(' ');
+  ok(/CC BY|public/i.test(all), 'the first half is identified as public data');
+  ok(/SYNTHETIC/.test(all),
+     'the patient fixture is called synthetic in capitals — it imitates MBS claims '
+     + 'and must never read as real health data');
+  ok(/fabricated/i.test(all), 'and the narration says the values are fabricated');
+
+  // The flow must not overclaim. These are the exact phrases withdrawn from the
+  // website, and a demo script is as public as a web page.
+  ['architecturally impossible', 'never sees real data', 'cannot be bypassed',
+   'no data leaves'].forEach(function (phrase) {
+    ok(all.toLowerCase().indexOf(phrase) === -1,
+       'the narration does not contain the withdrawn claim "' + phrase + '"');
+  });
+  ok(/bypass/i.test(all), 'and it names the bypass limitation rather than omitting it');
+
+  // Every flow needs a duration for the picker to list.
+  FLOWS.flows.forEach(function (f) {
+    ok(typeof f.duration_mins === 'number' && f.duration_mins > 0,
+       'flow ' + f.id + ' states a duration the picker can show');
+    ok(typeof f.title === 'string' && f.title.length > 10,
+       'flow ' + f.id + ' has a title worth listing');
+  });
+}
+
 if (failures) {
   console.error('\ntest-moke-flow: ' + failures + ' of ' + checks + ' checks FAILED');
   process.exit(1);
 }
-console.log('test-moke-flow: ' + checks + ' checks passed');
+console.log('test-moke-flow: ' + checks + ' checks passed (including the cross-domain flow)');
