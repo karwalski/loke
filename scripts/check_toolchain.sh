@@ -83,27 +83,38 @@ else
   ooke_v="unknown"
   [ -f "$OOKE_DIR/VERSION" ] && ooke_v=$(tr -d ' \n' < "$OOKE_DIR/VERSION")
 
-  # A pre-release suffix does not satisfy a released-version requirement.
-  case "$ooke_v" in
-    *-*)
-      echo "ERROR: ooke is $ooke_v, which is a pre-release. loke requires released" >&2
-      echo "       $OOKE_MIN. The toolchain migration stays on hold until it ships." >&2
-      STATUS=1
-      ;;
-    unknown)
-      echo "ERROR: ooke VERSION not readable at $OOKE_DIR/VERSION" >&2
-      STATUS=1
-      ;;
-    *)
-      # Numeric compare on major.minor.patch, so 3.0.10 > 3.0.9.
-      if [ "$(printf '%s\n%s\n' "$OOKE_MIN" "$ooke_v" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$OOKE_MIN" ]; then
-        echo "  ooke: OK   $ooke_v at $ooke_head (requires $OOKE_MIN or later)"
-      else
-        echo "ERROR: ooke is $ooke_v, which is older than the required $OOKE_MIN." >&2
-        STATUS=1
-      fi
-      ;;
-  esac
+  # The requirement is now a named pre-release, v3.0.0-rc.1, so a pre-release
+  # suffix no longer disqualifies a build. What still has to hold is that the
+  # version is at least the pinned one, and an rc ordering needs its own
+  # comparison: 3.0.0-rc.2 is newer than 3.0.0-rc.1, and plain 3.0.0 is newer
+  # than any rc of it.
+  #
+  # Accepting an rc is a deliberate reversal of the earlier decision to wait for a
+  # final release. It does not relax the publication bar: a figure measured here is
+  # labelled with the exact version it was measured against, so if the final tag
+  # moves, every affected number can be found again.
+  ooke_core=${ooke_v%%-*}
+  ooke_pre=${ooke_v#*-}
+  [ "$ooke_pre" = "$ooke_v" ] && ooke_pre=""
+  min_core=${OOKE_MIN%%-*}
+  min_pre=${OOKE_MIN#*-}
+  [ "$min_pre" = "$OOKE_MIN" ] && min_pre=""
+
+  if [ "$ooke_v" = "unknown" ]; then
+    echo "ERROR: ooke VERSION not readable at $OOKE_DIR/VERSION" >&2
+    STATUS=1
+  elif [ "$(printf '%s\n%s\n' "$min_core" "$ooke_core" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" != "$min_core" ]; then
+    echo "ERROR: ooke is $ooke_v, older than the required $OOKE_MIN." >&2
+    STATUS=1
+  elif [ "$ooke_core" = "$min_core" ] && [ -n "$min_pre" ] && [ -n "$ooke_pre" ] \
+       && [ "$(printf '%s\n%s\n' "$min_pre" "$ooke_pre" | sort -V | head -1)" != "$min_pre" ]; then
+    echo "ERROR: ooke is $ooke_v, an earlier pre-release than the required $OOKE_MIN." >&2
+    STATUS=1
+  else
+    note=""
+    [ -n "$ooke_pre" ] && note="  (pre-release: any figure measured here is labelled $ooke_v)"
+    echo "  ooke: OK   $ooke_v at $ooke_head (requires $OOKE_MIN or later)$note"
+  fi
 fi
 
 # A pin nobody else can fetch is not a pin. CI dies on this with git exit 128 and

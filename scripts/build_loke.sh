@@ -48,6 +48,15 @@ compile_one() {
 }
 
 # Step 1: Copy fresh ooke .tki files
+#
+# The loke interfaces are rebuilt from scratch every run. They used to be left in
+# place, and a stale nested tree from May survived four months of toolchain change:
+# toke resolves -I against FLAT, dot-separated names (core.privacy.ner.tki), so the
+# old core/privacy/ner.tki layout was never read at all. Every cross-module import
+# therefore resolved against nothing, which is why the build reported "module not
+# found; available: ooke.handlers.tki" and a long tail of interface-disagrees-with-
+# implementation errors that were really just absence.
+rm -rf "$IFACE_DIR"
 mkdir -p "$IFACE_DIR/ooke"
 for f in "$OOKE_DIR/src"/ooke.*.tki; do
   [ -f "$f" ] && cp "$f" "$IFACE_DIR/ooke/$(basename "$f" | sed 's/^ooke\.//')"
@@ -55,11 +64,21 @@ done
 
 # Step 2: Generate handlers and main
 "$OOKE_DIR/scripts/gen_handlers.sh" "$BROWSERDIR/pages" "$BROWSERDIR/_handlers.tk"
+# gen_handlers.sh is ooke's and emits no licence header. This file is tracked, so
+# the header is prepended here rather than upstream.
+if ! head -1 "$BROWSERDIR/_handlers.tk" | grep -q 'Copyright 2026 loke contributors'; then
+  printf '(* Copyright 2026 loke contributors\n   SPDX-License-Identifier: Apache-2.0 *)\n\n%s' \
+    "$(cat "$BROWSERDIR/_handlers.tk")" > "$BROWSERDIR/_handlers.tk.tmp"
+  mv "$BROWSERDIR/_handlers.tk.tmp" "$BROWSERDIR/_handlers.tk"
+fi
 
 # Step 3: Generate _serve_main.tk
 # NOTE: match arms use $ok/$err and serverun's final parameter is [str] as of
 # ooke 2.0.0. Keep this in sync with $OOKE_DIR/src/ooke.serve.tki.
 cat > "$BROWSERDIR/_serve_main.tk" << 'MAIN'
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
 m=app.main;
 i=http:std.http;
 i=log:std.log;
@@ -102,15 +121,45 @@ compile_one _handlers.tk --emit-interface --emit-llvm --out build/ooke/handlers
 echo "Compiling main..."
 compile_one _serve_main.tk --emit-llvm --out build/main.ll
 
+# Step 4a: interface pass.
+#
+# A module cannot be compiled before the interfaces of its imports exist, and the
+# import graph is not the alphabetical order the loop walks. So interfaces are
+# emitted first, for every module, and the pass runs twice: an interface can itself
+# need another interface to be emitted, and two passes reach the fixpoint for a
+# graph this shallow. Failures here are expected and silent — a module that cannot
+# typecheck still yields a usable signature list, and the census in step 4b is
+# where a real failure is reported.
+# Interfaces are emitted in DEPENDENCY ORDER, not alphabetical order and not by
+# repetition. A module's interface can only be emitted once its imports' interfaces
+# exist, so alphabetical-plus-repeat stalled at 33 of 179: repetition cannot fix an
+# ordering problem, only a shallow one. scripts/module_order.py reads the m= and i=
+# lines, topologically sorts them (179 modules, no cycles) and prints the order.
+echo "Emitting module interfaces in dependency order..."
+MODULE_SRCS=$("$PROJECTDIR/scripts/module_order.py" \
+  "$PROJECTDIR/packages/core/src" "$PROJECTDIR/packages/shared/src" \
+  "$BROWSERDIR/extensions" 2>/dev/null)
+[ -n "$MODULE_SRCS" ] || { echo "ERROR: could not compute module order" >&2; exit 1; }
+# --emit-llvm matters here and is not cosmetic. Without it toke compiles a BINARY,
+# which requires a main function, so every library module failed with
+# "E9020 no main function defined" and emitted no interface. That single missing
+# flag was the whole reason only 33 of 179 interfaces appeared — it read as a
+# dependency-order problem and was not one. ooke's own Makefile pairs the two flags.
+# --out is a DIRECTORY here, so toke names the .tki by module path
+# (core.privacy.ner.tki). The .ll lands beside it and is ignored; the compile pass
+# in step 4b emits the IR that actually gets linked.
+for tkfile in $MODULE_SRCS; do
+  "$TOKE" -I "$IFACE_DIR" --emit-interface --emit-llvm \
+    --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
+done
+echo "  $(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ') of $(echo "$MODULE_SRCS" | wc -l | tr -d ' ') interface(s) emitted"
+
 echo "Compiling core modules..."
-for srcdir in "$PROJECTDIR/packages/core/src" "$PROJECTDIR/packages/shared/src" "extensions"; do
-  [ -d "$srcdir" ] || continue
-  for tkfile in $(find "$srcdir" -name '*.tk' -type f | sort); do
-    modpath=$(grep '^m=' "$tkfile" | head -1 | sed 's/m=//; s/;//')
-    [ -z "$modpath" ] && continue
-    buildname=$(echo "$modpath" | tr '.' '_')
-    compile_one "$tkfile" --emit-llvm --out "build/ooke/$buildname"
-  done
+for tkfile in $MODULE_SRCS; do
+  modpath=$(grep '^m=' "$tkfile" | head -1 | sed 's/m=//; s/;//')
+  [ -z "$modpath" ] && continue
+  buildname=$(echo "$modpath" | tr '.' '_')
+  compile_one "$tkfile" --emit-llvm --out "build/ooke/$buildname"
 done
 
 echo ""

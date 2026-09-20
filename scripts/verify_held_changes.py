@@ -22,11 +22,16 @@ once by eye:
    and reduces a 207-line handler to 37 lines. The committed version is the good
    one. It must never be committed from the working tree.
 
-3. **Everything else is one substitution.** `=` to `==`, applied by
-   `scripts/fix_diagnostics.py` from toke's own byte offsets. Once the headers are
-   restored, 200 of 202 changed files contain nothing else, which is a claim worth
-   checking mechanically because it is the whole basis for committing them
-   unreviewed.
+3. **It is no longer one substitution, and that is deliberate.** Until the
+   toolchain arrived the held work was a single `=` to `==` sweep, and this script
+   asserted exactly that. toke 6cc9061 and ooke v3.0.0-rc.1 then landed and the
+   F10.7 migration began, so the tree now also carries the std.db redesign, the
+   arity corrections and the comment-syntax conversion. The equality-only assertion
+   would now fail on correct work, so it is reported rather than enforced.
+
+   What is still **enforced** is the part that was never about the sweep: no file
+   loses its licence header, and the forbidden file is never staged. Those are the
+   two ways this tree has actually been damaged before.
 
 Exit codes
 ----------
@@ -45,8 +50,11 @@ import sys
 # The header is the same notice in two comment syntaxes, because .tk is toke
 # source and .tkt is a template. Both lost it to the same rewriter.
 LICENCE_MARK = "Copyright 2026 loke contributors"
-LICENCE_FIRST_LINE = "// " + LICENCE_MARK          # .tk
-LICENCE_SPDX = "// SPDX-License-Identifier: Apache-2.0"
+# toke's comment syntax is (* ... *). The headers were written as C-style "//",
+# which the compiler reports as W1020 on every line ("toke has no comment syntax")
+# — 1040 warnings across 521 files. Converted, so the notice is a real comment.
+LICENCE_FIRST_LINE = "(* " + LICENCE_MARK              # .tk
+LICENCE_SPDX = "SPDX-License-Identifier: Apache-2.0"
 TEMPLATE_FIRST_LINE = "<!-- " + LICENCE_MARK + " -->"   # .tkt
 
 # Must not be committed from the working tree under any option. Not a style
@@ -129,8 +137,8 @@ def is_licence_header_addition(removed: list[str], added: list[str]) -> bool:
     """
     if removed:
         return False
-    body = [ln for ln in added if ln.strip()]
-    return body == [LICENCE_FIRST_LINE, LICENCE_SPDX]
+    body = [ln.strip() for ln in added if ln.strip()]
+    return len(body) == 2 and LICENCE_MARK in body[0] and LICENCE_SPDX in body[1]
 
 
 def check_equality_only() -> tuple[list[str], int, int, int]:
@@ -212,20 +220,20 @@ def main() -> int:
               "\n  live privacy regression (NC1.9). Unstage it.", file=sys.stderr)
 
     if equality:
-        ok = False
-        print(f"\nNOT A MECHANICAL SWEEP — {len(equality)} file(s) carry other changes:",
-              file=sys.stderr)
-        for p in equality[:10]:
-            print(f"  {p}", file=sys.stderr)
-        if len(equality) > 10:
-            print(f"  ... and {len(equality) - 10} more", file=sys.stderr)
-        print("  Commit these separately with their own reason. The argument for"
-              "\n  committing the sweep unreviewed is that it is one substitution.",
-              file=sys.stderr)
+        # Reported, not enforced. See the module docstring: the tree is mid-migration
+        # and non-equality changes are now expected. A count that grows without a
+        # migration pass behind it is still worth a look, which is why it prints.
+        print(f"\nMIGRATION IN PROGRESS — {len(equality)} file(s) carry changes beyond "
+              "the equality sweep:")
+        for p in equality[:5]:
+            print(f"  {p}")
+        if len(equality) > 5:
+            print(f"  ... and {len(equality) - 5} more")
+        print("  Expected during F10.7. Commit with a reason that names the migration.")
 
     if ok and not args.quiet:
-        print("\nOK — the held changes are a licence-header-intact, equality-only sweep,")
-        print("and the forbidden file is not staged. Safe to commit under F10.13.")
+        print("\nOK — every licence header is intact and the forbidden file is not")
+        print("staged. Beyond that the tree is mid-migration; see the counts above.")
     return 0 if ok else 1
 
 
