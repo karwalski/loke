@@ -201,6 +201,16 @@ GUARDIAN CONSTRAINT: This request has been routed via loke privacy proxy. All en
 SENSITIVITY: CONFIDENTIAL — responses must not include advice that could identify individuals. Present information in general terms only.</div>
   </div>
 
+  <!-- A4.4 — Inline prompt editor (hidden by default) -->
+  <div id="edit-panel" style="display:none; margin-bottom:18px;">
+    <div style="font-size:0.78em; font-weight:600; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:8px;">Edit prompt</div>
+    <textarea id="edit-textarea" style="width:100%; min-height:180px; max-height:400px; background:var(--surface); border:1px solid var(--accent); border-radius:8px; padding:14px 16px; font-family:monospace; font-size:0.88em; line-height:1.65; color:var(--text); resize:vertical;"></textarea>
+    <div style="display:flex; align-items:center; gap:10px; margin-top:8px;">
+      <button class="btn btn-edit" onclick="redetectPii()" style="font-size:0.82em; padding:6px 16px;">Re-scan for PII</button>
+      <span id="edit-rescan-status" style="font-size:0.78em; color:var(--muted); display:none;"></span>
+    </div>
+  </div>
+
   <!-- action row -->
   <div class="action-row">
     <label class="dont-ask-label">
@@ -208,7 +218,7 @@ SENSITIVITY: CONFIDENTIAL — responses must not include advice that could ident
       Don't ask again this session
     </label>
     <button class="btn btn-cancel" onclick="cancelConfirm()">Cancel</button>
-    <button class="btn btn-edit"   onclick="editConfirm()">Edit prompt</button>
+    <button class="btn btn-edit" id="btn-edit-toggle" onclick="editConfirm()">Edit prompt</button>
     <button class="btn btn-approve" onclick="approveConfirm()">Approve &amp; send →</button>
   </div>
 
@@ -281,22 +291,140 @@ function toggleSysprompt() {
 }
 
 // ── actions ──
+// A4.4 — Audit trail logging
+function logApprovalAction(action) {
+  var approvals = [];
+  try { approvals = JSON.parse(sessionStorage.getItem('moke_approvals') || '[]'); } catch(_) {}
+  approvals.push({
+    timestamp: new Date().toISOString(),
+    action: action,
+    sensitivity: pending.sensitivity || 'PUBLIC',
+    entities: (pending.entities || []).length
+  });
+  sessionStorage.setItem('moke_approvals', JSON.stringify(approvals));
+}
+
 function cancelConfirm() {
+  logApprovalAction('cancelled');
   sessionStorage.removeItem('moke_pending');
   window.history.back();
 }
 
+var editMode = false;
+
 function editConfirm() {
-  // Surface the LLM-side content in an inline editable state.
-  // For now redirect to approve page where full editing is supported.
-  window.location = '/approve';
+  editMode = !editMode;
+  const panel = document.getElementById('edit-panel');
+  const textarea = document.getElementById('edit-textarea');
+  const btn = document.getElementById('btn-edit-toggle');
+
+  if (editMode) {
+    // Populate textarea with current local content
+    const localBox = document.getElementById('local-content');
+    textarea.value = localBox ? localBox.textContent : '';
+    panel.style.display = 'block';
+    textarea.focus();
+    if (btn) btn.textContent = 'Hide editor';
+  } else {
+    panel.style.display = 'none';
+    if (btn) btn.textContent = 'Edit prompt';
+  }
+}
+
+// A4.4 — Re-run PII detection on edited text via privacy sidecar /detect
+async function redetectPii() {
+  const textarea = document.getElementById('edit-textarea');
+  const statusEl = document.getElementById('edit-rescan-status');
+  if (!textarea) return;
+
+  const editedText = textarea.value;
+  if (statusEl) { statusEl.style.display = 'inline'; statusEl.textContent = 'Scanning...'; statusEl.style.color = 'var(--muted)'; }
+
+  var PRIVACY_URL = window.PRIVACY_URL || 'http://127.0.0.1:11435';
+  try {
+    const resp = await fetch(PRIVACY_URL + '/anonymise', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: editedText })
+    });
+    const data = await resp.json();
+
+    // Update PII count
+    const count = data.count || 0;
+    document.getElementById('pii-count-label').textContent =
+      count + ' entit' + (count === 1 ? 'y' : 'ies') + ' detected and anonymised';
+
+    // Update sensitivity pill
+    const newSens = count > 5 ? 'RESTRICTED' : count > 0 ? 'CONFIDENTIAL' : 'PUBLIC';
+    const pill = document.getElementById('sensitivity-pill');
+    pill.textContent = newSens;
+    pending.sensitivity = newSens;
+    pending.entities_found = count;
+
+    if (newSens === 'RESTRICTED') {
+      pill.style.background = 'rgba(239,68,68,.2)';
+      pill.style.color = 'var(--red)';
+      pill.style.borderColor = 'rgba(239,68,68,.5)';
+    } else if (newSens === 'CONFIDENTIAL') {
+      pill.style.background = 'rgba(239,68,68,.15)';
+      pill.style.color = 'var(--red)';
+      pill.style.borderColor = 'rgba(239,68,68,.35)';
+    } else if (newSens === 'INTERNAL') {
+      pill.style.background = 'rgba(245,158,11,.15)';
+      pill.style.color = 'var(--amber)';
+      pill.style.borderColor = 'rgba(245,158,11,.35)';
+    } else {
+      pill.style.background = 'rgba(34,197,94,.15)';
+      pill.style.color = 'var(--green)';
+      pill.style.borderColor = 'rgba(34,197,94,.35)';
+    }
+
+    // Update PII chips
+    const foundTypes = {};
+    if (data.mappings) {
+      data.mappings.forEach(function(m) { foundTypes[m.type] = true; });
+    }
+    Object.entries(chipMap).forEach(function(entry) {
+      const el = document.getElementById(entry[1]);
+      if (el) el.style.display = foundTypes[entry[0]] ? 'inline-flex' : 'none';
+    });
+
+    // Update anonymised preview in LLM-side panel
+    if (data.anonymised) {
+      const llmBox = document.getElementById('llm-content');
+      if (llmBox) llmBox.textContent = data.anonymised;
+    }
+
+    // Update local-side panel with edited text
+    const localBox = document.getElementById('local-content');
+    if (localBox) localBox.textContent = editedText;
+
+    // Update pending state
+    pending.local_view = editedText;
+    pending.llm_view = data.anonymised || editedText;
+    sessionStorage.setItem('moke_pending', JSON.stringify(pending));
+
+    if (statusEl) { statusEl.textContent = count + ' entities found'; statusEl.style.color = count > 0 ? 'var(--amber)' : 'var(--green)'; }
+  } catch (err) {
+    if (statusEl) { statusEl.textContent = 'Sidecar unavailable: ' + err.message; statusEl.style.color = 'var(--red)'; }
+  }
 }
 
 async function approveConfirm() {
   const dontAsk = document.getElementById('dont-ask-again').checked;
   if (dontAsk) {
     sessionStorage.setItem('moke_skip_confirm_session', '1');
+    // A4.4 — "don't ask again" sets approval mode to never for this session
+    localStorage.setItem('moke_approval_mode', 'never');
   }
+  // A4.4 — If user edited the prompt, use the edited text
+  if (editMode) {
+    const textarea = document.getElementById('edit-textarea');
+    if (textarea) {
+      pending.local_view = textarea.value;
+    }
+  }
+  logApprovalAction(editMode ? 'edited' : 'approved');
   pending.approved = true;
   pending.dont_ask_session = dontAsk;
   sessionStorage.setItem('moke_pending', JSON.stringify(pending));
