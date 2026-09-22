@@ -51,12 +51,26 @@ already had and discarded.
 | **T-18** | **Correctness, silent** | **`mt` on an `X!$userErr` takes the FIRST arm whatever the value is** | none |
 | **T-19** | Blocks, silent | E4071 misses a trailing bare `mt` when the function returns a sum or struct | none |
 | **T-20** | **Correctness, silent** | **An `f64` returned across a module boundary is corrupted** | none |
+| **T-21** | Correctness, silent | A string returned by `std.homedir()` is truncated when interpolated | none |
+| **T-22** | Blocks, silent | `row.f64` is declared as a result but returns a bare `i64` | none |
+| **T-23** | **Correctness, silent** | **Arguments of different declared types but the same ABI are accepted reversed** (`str.join`) | none — segfault |
+| **T-24** | **Correctness, silent** | **`@(array; element)` nests instead of appending** | none — intermittent segfault |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
-right. **T-13 to T-20 were found later, getting loke's test suite to run against real
-modules rather than stubs, and two of them are worse than anything above: T-18 and
-T-20 are silent, they affect every module in the codebase, and nothing in the language
-or the tooling reports them.**
+right. **T-13 to T-24 were found later, getting loke's test suite to run against real
+modules rather than stubs, and four of them are worse than anything above: T-18, T-20,
+T-23 and T-24 are silent, they affect every module in the codebase, and nothing in the
+language or the tooling reports them.**
+
+T-23 and T-24 share a shape worth naming on its own. Both are cases where the **declared
+type is right there** — `str.join(str, [str])` in the `.tki`, `@$entry` on the field —
+and the call site is simply not checked against it, because at the ABI everything is an
+`i64` handle. The failure mode is the worst available: it compiles clean, it runs clean
+until that exact line executes, and then it segfaults. T-24 in particular crashed one of
+our tests in 19 runs out of 20, which means a green CI run was not evidence of
+anything. Between them they account for **99 defective call sites across 53 files**
+in this repository — 70 `str.join` calls in 40 files and 29 nesting appends in 14 —
+every one of which read as obviously correct.
 
 **Verified fixed in 445f519 (thank you): T-1, T-3, T-4, T-5 and T-6.** T-6 also gained
 `W3013`, the shadowing warning this document asked for, which is exactly right. T-2 and
@@ -507,15 +521,28 @@ the table wins.
 
 ## What we would ask for, in order
 
-1. **T-6**, and a warning on shadowing `let`. One fix, two classes of bug caught.
-2. **T-2**, the label counter. 17 sites in one project, each needing IR archaeology.
-3. **T-4 and T-7** — the two silent ones. Both have a diagnostic that already exists
-   and simply is not reached.
-4. **T-1, T-3, T-5** — three narrow lowering bugs with clear fixes.
-5. **T-11** — make stub status visible at the call site.
-6. **A source location on codegen failures.** Even a "while compiling `f=x` at
+This list was written against T-1 to T-12 and is now reordered: five of those are fixed
+in 445f519, and the four found since are more damaging than anything that remains.
+
+1. **T-18** — `mt` on an `X!$userErr` takes the first arm whatever the value is. Every
+   error path in this codebase is dead code, 182 functions' worth, and we have had to
+   write around it by returning sentinels instead of results. Nothing else on this list
+   distorts a program's control flow.
+2. **T-20** — an `f64` returned across a module boundary is corrupted. No figure this
+   project computes across a module boundary can be published until this is fixed.
+3. **T-23 and T-24** — call sites not checked against a declared type where the ABI
+   representation coincides. 99 latent segfaults here, and T-24's crash is
+   *intermittent*, so a green test run is not evidence.
+4. **T-2**, the label counter. 17 sites in one project, each needing IR archaeology.
+5. **T-7** — the remaining silent one from the original set. The diagnostic already
+   exists and simply is not reached.
+6. **T-12 and T-22** — generate the stdlib `.tki` files from the builtin table, or check
+   them against it in CI. Four disagreements found so far, each one a crash.
+7. **T-11** — make stub status visible at the call site.
+8. **A source location on codegen failures.** Even a "while compiling `f=x` at
    `file.tk:120`" prefix on E9003 would change these from a day of bisection into a
-   minute of reading.
+   minute of reading. This remains the single highest-leverage item in the document:
+   T-23 took a day to find and five minutes to fix.
 
 ## Reproducing
 
@@ -631,6 +658,115 @@ boundary, and nothing reports it.
 
 We are converting the affected functions to return scaled integers — hundredths of a
 percent — because an integer crosses correctly and is exact.
+
+---
+
+## T-21 — a string returned by `std.homedir()` is truncated when interpolated
+
+**Severity: correctness, silent, and it only affects one stdlib call's return value.**
+
+```toke
+i=std:std;
+i=str:std.str;
+f=main():i64{
+  let a=str.len("\(std.homedir())/x");        (* -> 12 *)
+  let b=str.len(str.concat(std.homedir();"/x"));  (* -> 21, correct *)
+  <a
+};
+```
+
+Interpolating a local or a parameter is fine; it is specifically the value this call
+returns. Every path built the interpolated way pointed at a directory that does not
+exist, so `db.open` failed on it — which is how four of our tests came to open a
+database in a directory that was never there. We now use `str.concat` for this one call
+and interpolation everywhere else, which is an unsatisfying rule to have to remember.
+
+---
+
+## T-22 — `row.f64` is declared as a result but does not return one
+
+**Severity: correctness, crashes. Same family as T-12.**
+
+`stdlib/db.tki` declares `row.f64` as returning `f64!DbErr`. `tk_row_f64_w` returns a
+plain `i64` carrying the f64 bit pattern, and `0` on error — with no tag. So matching
+the "result" reads a tag that was never written, and it crashed for us.
+
+This is the fourth `.tki`-disagrees-with-implementation case we have hit (T-12 covers
+the other three), which is why the ask in T-12 — generate the `.tki` files from the
+builtin table, or check them against it in CI — matters more than any individual fix.
+
+We work around it by reading the column as TEXT and parsing it, which also sidesteps
+T-20.
+
+---
+
+## T-23 — arguments of different declared types but the same ABI are accepted reversed
+
+**Severity: correctness, silent, segfaults at run time. This one cost us a whole day.**
+
+`str.join` is declared `(str, [str]) -> str`. Passing them the other way round compiles
+with no diagnostic and segfaults when the call is reached:
+
+```toke
+i=str:std.str;
+f=main():i64{
+  let a=@("x";"yy";"zzz");
+  <str.len(str.join(a;"|"))      (* SIGSEGV; str.join("|";a) -> 8 *)
+};
+```
+
+`str` and `[str]` are both an i64 handle at the ABI, so nothing in the type checker
+separates them at the call site. Every one of the **70 `str.join` call sites in loke,
+across 40 files**, was written the wrong way round, and each was a latent segfault that
+only fired when that line was actually executed. We found it by bisecting a crashing
+audit-log write, not by any diagnostic.
+
+The reason all 70 were wrong is worth saying too: **the stdlib is not consistent with
+itself.** `fmt.strs([str], str)` and `fmt.arr([i64], str)` take the array first;
+`str.join(str, [str])` takes it second. A reader has no way to guess, and the compiler
+does not correct the guess.
+
+Two asks, either of which would have prevented this:
+
+1. Check declared types at the call site even where the ABI representation coincides —
+   `str` is not `[str]`, and the `.tki` already says so.
+2. Make the stdlib's own argument order consistent, or at least make `str.join` agree
+   with `fmt.strs`.
+
+This is the same class as T-4, T-7 and T-22: something the interface file already
+knows,
+which the call site is not checked against.
+
+---
+
+## T-24 — `@(array; element)` nests silently where an append was meant
+
+**Severity: correctness, silent, intermittent segfault.**
+
+```toke
+t=$entry{ scope:str; target:str };
+t=$state{ items:@$entry };
+
+f=add(st:$state;e:$entry):$state{
+  <$state{ items:@(st.items;e) }    (* [[...], e] — length 2, whatever st.items held *)
+};
+```
+
+`@(a;b)` is a two-element array literal, so where `a` is itself an array the result is a
+**heterogeneous** array holding an array and an element. Reading element 0 back as the
+element type dereferences an array handle as a struct. In our case
+`tests/unit/governance/test_kill_switch.tk` crashed in **19 runs out of 20** — the
+surviving run is what makes this so unpleasant, because a green CI proves nothing.
+
+`@$entry` is a declared element type, and `@(st.items;e)` mixes `@$entry` with `$entry`.
+A homogeneity check on array literals whose element type is known would catch this
+outright.
+
+We found **29 live sites** in loke this way, including the privacy filter registry, the
+enabled-privacy-layer list, the local NER entity list, the provider registry, the
+pipeline hook registry and the OpenAI system-prompt prepend. Each silently held at most
+one element or nested on the first append. `.push()` is the correct append and now
+appears at all 29.
 
 ---
 

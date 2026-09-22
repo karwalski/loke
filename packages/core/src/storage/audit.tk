@@ -8,6 +8,7 @@ m=core.storage.audit;
 
 
 i=db:std.db;
+i=crypto:std.crypto;
 i=str:std.str;
 i=json:std.json;
 i=t:shared.types;
@@ -34,53 +35,121 @@ t=$auditevent{
    module with "void type only allowed for function results". Filed as T-5 in
    docs/upstream/toke-issues.md, same family as T-1 ($ok(<bool>)): only an i64-width
    success type survives the `!$err` lowering today. *)
+(* The row accessors are core.storage.db's, not std.json's. db.many returns [$row] and
+   this module read every field with json.str / json.i64 / json.getfloat against those
+   rows, so every retrieved audit event came back with empty strings and zeros — the
+   tamper-proof audit trail recorded events and could not read one back. Found by
+   tests/integration/test_audit_trail_e2e.tk once it could run.
+
+   cost_usd comes back as HUNDREDTHS in an i64: an f64 returned across a module
+   boundary is corrupted (T-20), so the exact integer is the only trustworthy form. *)
+(* GA5.1 and the tamper-evidence claim, both fixed here.
+
+   created_at used to be written as the SQL literal 'now()' — a quoted string, not a
+   function call — so every row in the audit log carried the identical text "now()".
+   `ORDER BY created_at DESC, rowid DESC` was therefore meaningless: the hash chain read an
+   arbitrary predecessor and `getrecent` returned rows in no particular order. It is a
+   millisecond epoch integer now, which orders correctly and is comparable. rowid breaks
+   ties: two events logged in the same millisecond would otherwise come back in an
+   arbitrary order, and for a hash chain "the previous row" has to be exact.
+
+   The hash was `correlationid + eventtype`. That is not a hash and not a chain: it
+   covers two of eleven fields, so changing the model, the cost or the sensitivity left
+   it unchanged, and it did not include the previous row's hash, so nothing bound the
+   rows together. An audit trail described as tamper-proof has to be at least
+   tamper-EVIDENT, and that needs the predecessor and the whole record in the digest.
+   sha256 over prev_hash plus every field gives that: altering any field or removing any
+   row breaks every hash after it. *)
+f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
+  (* The separator keeps two different field splits from hashing alike. A pipe is
+     enough here because no field is free text — the closest is the correlation id,
+     which is generated. *)
+  let fields=str.join("|";@(
+    prevhash;
+    id;
+    event.eventtype;
+    event.usecase;
+    event.modelid;
+    event.provider;
+    event.sensitivity;
+    event.risktier;
+    str.fromint(event.tokensin);
+    str.fromint(event.tokensout);
+    str.fromfloat(event.costusd);
+    str.fromint(event.durationms);
+    event.correlationid;
+    str.fromi64(created)
+  ));
+  (* sha256 takes [byte], not str — str.tobytes first. Passing the string directly
+     type-checked and crashed at run time. *)
+  <crypto.tohex(crypto.sha256(str.tobytes(fields)))
+};
+
 f=logevent(store:i64;event:$auditevent):i64!$lokeerr{
   let id=str.randhex(16);
+  let created=db.nowms(0);
 
-  
-  let prevhashval=mt db.one("SELECT hash FROM audit_log ORDER BY created_at DESC LIMIT 1";@()) {
-    $ok:row json.str(row;"hash");
+  (* The newest row by timestamp is the chain's tail. *)
+  let prevhashval=mt db.one("SELECT hash FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT 1";@()) {
+    $ok:row s.rowstr(row;"hash");
     $err:v ""
   };
 
-  
-  
-  let hash=str.concat(event.correlationid;event.eventtype);
+  let hash=eventdigest(prevhashval;id;event;created);
 
-  let tokensins=str.fromint(event.tokensin);
-  let tokensouts=str.fromint(event.tokensout);
-  let costs=str.fromfloat(event.costusd);
-  let durations=str.fromint(event.durationms);
-
-  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'now()')";@(id;event.eventtype;event.usecase;event.modelid;event.provider;event.sensitivity;event.risktier;tokensins;tokensouts;costs;durations;event.correlationid;prevhashval;hash)) {
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";@(
+    id;
+    event.eventtype;
+    event.usecase;
+    event.modelid;
+    event.provider;
+    event.sensitivity;
+    event.risktier;
+    str.fromint(event.tokensin);
+    str.fromint(event.tokensout);
+    str.fromfloat(event.costusd);
+    str.fromint(event.durationms);
+    event.correlationid;
+    prevhashval;
+    hash;
+    str.fromi64(created))) {
     $ok:v $ok(0);
     $err:e $err($storageerr("failed to insert audit event"))
   }
 };
 
-f=getrecent(store:i64;limit:u32):@$auditevent!$lokeerr{
-  let limits=str.fromint(limit);
-  let sql=str.concat("SELECT event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id FROM audit_log ORDER BY created_at DESC LIMIT ";limits);
-  let queryresult=mt db.many(sql;@()) {
-    $ok:rows rows;
-    $err:e $err($storageerr("failed to query audit log"))
-  };
+
+(* The rows are mapped in their own function, which is what establishes their type.
+   Binding `let queryresult=mt db.many(...) { $ok:rows rows; $err:e $err(...) }` gave
+   queryresult two different types — @$row on one arm and an error on the other — so
+   indexing it read whatever was there. With an empty table that happened to be
+   harmless; with rows present it segfaulted. *)
+f=eventsfromrows(rows:@$row):@$auditevent{
   let events=mut.@();
-  lp(let ii=0;ii<queryresult.len;ii=ii+1){
-    let row=queryresult.get(ii);
+  lp(let i=0;i<rows.len;i=i+1){
+    let row:$row=rows.get(i);
     events=events.push($auditevent{
-      eventtype:json.str(row;"event_type");
-      usecase:json.str(row;"use_case");
-      modelid:json.str(row;"model_id");
-      provider:json.str(row;"provider");
-      sensitivity:json.str(row;"sensitivity");
-      risktier:json.str(row;"risk_tier");
-      tokensin:json.i64(row;"tokens_in");
-      tokensout:json.i64(row;"tokens_out");
-      costusd:json.getfloat(row;"cost_usd");
-      durationms:json.i64(row;"duration_ms");
-      correlationid:json.str(row;"correlation_id")
+      eventtype:s.rowstr(row;"event_type");
+      usecase:s.rowstr(row;"use_case");
+      modelid:s.rowstr(row;"model_id");
+      provider:s.rowstr(row;"provider");
+      sensitivity:s.rowstr(row;"sensitivity");
+      risktier:s.rowstr(row;"risk_tier");
+      tokensin:s.rowi64(row;"tokens_in") as u32;
+      tokensout:s.rowi64(row;"tokens_out") as u32;
+      costusd:(s.rowf64hundredths(row;"cost_usd") as f64) / 100.0;
+      durationms:s.rowi64(row;"duration_ms") as u32;
+      correlationid:s.rowstr(row;"correlation_id")
     })
   };
   <events
 };
+
+f=getrecent(store:i64;limit:u32):@$auditevent!$lokeerr{
+  let sql=str.concat("SELECT event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT ";str.fromint(limit));
+  <mt db.many(sql;@()) {
+    $ok:rows $ok(eventsfromrows(rows));
+    $err:e $err($storageerr("failed to query audit log"))
+  }
+};
+
