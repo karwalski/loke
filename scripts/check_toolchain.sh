@@ -59,6 +59,18 @@ else
     STATUS=1
   elif git -C "$TOKE_DIR" merge-base --is-ancestor "$TOKE_MIN" HEAD 2>/dev/null; then
     echo "  toke: OK   $toke_head is at or after $TOKE_MIN (version $toke_v, advisory)"
+    # A minimum is not a pin. toke moved from 1bc4a44 to 445f519 between two loke
+    # sessions; the new compiler added E4071 and broke 157 of 217 modules, and this
+    # check passed both before and after because a descendant satisfies a minimum.
+    # That is the right gate — loke should track main — but a silent change is not,
+    # so say when the working compiler is not the one the lock was verified against.
+    TOKE_VERIFIED=$(lockval toke_commit)
+    if [ -n "$TOKE_VERIFIED" ] && [ "$toke_head" != "$TOKE_VERIFIED" ]; then
+      echo "  note: toke is $toke_head; TOOLCHAIN.lock was verified against $TOKE_VERIFIED."
+      echo "        Newer is allowed and expected. If the build breaks, read"
+      echo "        git -C $TOKE_DIR log --oneline $TOKE_VERIFIED..HEAD first —"
+      echo "        a new diagnostic upstream is a likelier cause than anything local."
+    fi
   else
     echo "ERROR: toke at $toke_head is BEFORE the required commit $TOKE_MIN." >&2
     echo "       loke needs a build of main at or after $TOKE_MIN. No tagged" >&2

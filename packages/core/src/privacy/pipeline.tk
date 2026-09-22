@@ -54,173 +54,130 @@ f=newconfig(presidiourl:str;ollamaurl:str):$pipelineconfig{
 };
 
 
+(* Ranked, not a chain of == comparisons. `levela==$restricted` is false even when
+   levela IS restricted, because == on a sum compares the handle and the level came
+   from another function. See shared.types.sensrank and docs/upstream/toke-issues.md
+   T-14. The old chain also returned false for every (public, anything) pair, which
+   meant maxsensitivity never escalated past its initial value. *)
 f=ishighersensitivity(levela:$sensitivitylevel;levelb:$sensitivitylevel):bool{
-  if(levela==$restricted){
-    <true
-  }el{
-    if(levela==$confidential){
-      if(levelb==$restricted){
-        <false
-      }el{
-        <true
-      }
-    }el{
-      if(levela==$internal){
-        if(levelb==$restricted){
-          <false
-        }el{
-          if(levelb==$confidential){
-            <false
-          }el{
-            <true
-          }
-        }
-      }el{
-        <false
-      }
-    }
-  }
+  <t.senshigher(levela;levelb)
 };
 
 
 
+
+(* Dedup is by VALUE, and also drops a lower-confidence overlapping span.
+
+   Deduping by span alone was wrong for how anonymisation actually works:
+   anonymisetext replaces with str.replace(text; entity.value; entity.placeholder),
+   which substitutes EVERY occurrence of that value. So two entities carrying the same
+   value produced two placeholders, the first str.replace consumed both occurrences,
+   and the second entity's placeholder never appeared in the text at all — while still
+   being reported in the entity count and written to the restoration map. One entity
+   per distinct value is what the replacement strategy needs, and it is what makes the
+   same value get the same placeholder.
+
+   The previous version also treated `start==0` as "position unknown" and skipped the
+   overlap test for it, which silently exempted every entity at offset 0 — a real
+   offset, and the commonest one in a short prompt. *)
+f=seenvalue(kept:@$piientity;value:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<kept.len;i=i+1){
+    let e:$piientity=kept.get(i);
+    if(str.eq(e.value;value)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+(* True when `candidate` overlaps an already-kept span that is at least as confident,
+   in which case the candidate adds nothing. *)
+f=overlapsbetter(kept:@$piientity;candidate:$piientity):bool{
+  let shadowed=mut.false;
+  lp(let i=0;i<kept.len;i=i+1){
+    let e:$piientity=kept.get(i);
+    if(candidate.start<e.end){
+      if(candidate.end>e.start){
+        if(e.confidence>=candidate.confidence){
+          shadowed=true
+        }el{}
+      }el{}
+    }el{}
+  };
+  <shadowed
+};
+
 f=dedupentities(entities:@$piientity):@$piientity{
   let kept=mut.@();
-  let count=entities.len;
-  let i=mut.0;
-  lp(let lv=0;true;lv=lv){
-    if(i>count){
-      br
-    }el{
-      let candidate=entities.get(i);
-      let overlaps=mut.false;
-      let ki=mut.0;
-      let keptcount=str.arraylen(kept);
-      lp(let lv2=0;true;lv2=lv2){
-        if(ki>keptcount){
-          br
-        }el{
-          let existing:$piientity=kept.get(ki);
-          
-          
-          
-          
-          if(candidate.start==0){
-            
-            ki=keptcount
-          }el{
-            if(existing.start==0){
-              
-              ki=ki+1
-            }el{
-              if(candidate.start<existing.end){
-                if(candidate.end>existing.start){
-                  
-                  if(candidate.confidence>existing.confidence){
-                    
-                    let newkept=mut.@();
-                    let ri=mut.0;
-                    lp(let lv3=0;true;lv3=lv3){
-                      if(ri>keptcount){
-                        br
-                      }el{
-                        let re=str.arrayget(kept;ri);
-                        if(ri==ki){
-                          
-                          ri=ri+1
-                        }el{
-                          newkept=newkept.push(re);
-                          ri=ri+1
-                        }
-                      }
-                    };
-                    kept=newkept;
-                    overlaps=false;
-                    ki=keptcount
-                  }el{
-                    overlaps=true;
-                    ki=keptcount
-                  }
-                }el{
-                  ki=ki+1
-                }
-              }el{
-                ki=ki+1
-              }
-            }
-          }
-        }
-      };
-      if(overlaps){
-        
-        i=i+1;
-      }el{
-        kept=kept.push(candidate);
-        i=i+1;
+  lp(let i=0;i<entities.len;i=i+1){
+    let candidate:$piientity=entities.get(i);
+    if(seenvalue(kept;candidate.value)){}el{
+      if(overlapsbetter(kept;candidate)){}el{
+        kept=kept.push(candidate)
       }
     }
   };
   <kept
 };
 
-
 f=maxsensitivity(entities:@$piientity):$sensitivitylevel{
-  let level=mut.$public;
+  let level=mut.t.public();
   let count=entities.len;
   let i=mut.0;
   lp(let lv=0;true;lv=lv){
-    if(i>count){
+    if(i>=count){
       br
     }el{
       let entity=entities.get(i);
       
       
       if(str.eq(entity.entitytype;"CREDIT_CARD")){
-        level=$restricted
+        level=t.restricted()
       }el{
         if(str.eq(entity.entitytype;"US_SSN")){
-          level=$restricted
+          level=t.restricted()
         }el{
           if(str.eq(entity.entitytype;"AU_TFN")){
-            level=$restricted
+            level=t.restricted()
           }el{
             if(str.eq(entity.entitytype;"credit_card")){
-              level=$restricted
+              level=t.restricted()
             }el{
               if(str.eq(entity.entitytype;"au_tfn")){
-                level=$restricted
+                level=t.restricted()
               }el{
                 if(str.eq(entity.entitytype;"ssn_us")){
-                  level=$restricted
+                  level=t.restricted()
                 }el{
                   if(str.eq(entity.entitytype;"api_key")){
-                    level=$restricted
+                    level=t.restricted()
                   }el{
-                    if(ishighersensitivity($confidential;level)){
+                    if(ishighersensitivity(t.confidential();level)){
                       if(str.eq(entity.entitytype;"PERSON")){
-                        level=$confidential
+                        level=t.confidential()
                       }el{
                         if(str.eq(entity.entitytype;"EMAIL_ADDRESS")){
-                          level=$confidential
+                          level=t.confidential()
                         }el{
                           if(str.eq(entity.entitytype;"PHONE_NUMBER")){
-                            level=$confidential
+                            level=t.confidential()
                           }el{
                             if(str.eq(entity.entitytype;"MEDICAL")){
-                              level=$confidential
+                              level=t.confidential()
                             }el{
                               if(str.eq(entity.entitytype;"FINANCIAL")){
-                                level=$confidential
+                                level=t.confidential()
                               }el{
                                 if(str.eq(entity.entitytype;"email")){
-                                  if(ishighersensitivity($confidential;level)){
-                                    level=$confidential
+                                  if(ishighersensitivity(t.confidential();level)){
+                                    level=t.confidential()
                                   }el{
                                     
                                   }
                                 }el{
-                                  if(ishighersensitivity($internal;level)){
-                                    level=$internal
+                                  if(ishighersensitivity(t.internal();level)){
+                                    level=t.internal()
                                   }el{
                                     
                                   }
@@ -252,7 +209,7 @@ f=anonymisetext(text:str;entities:@$piientity):str{
   let count=entities.len;
   let i=mut.0;
   lp(let lv=0;true;lv=lv){
-    if(i>count){
+    if(i>=count){
       br
     }el{
       let entity=entities.get(i);
@@ -269,7 +226,7 @@ f=countrestricted(entities:@$piientity):u32{
   let count=entities.len;
   let i=mut.0;
   lp(let lv=0;true;lv=lv){
-    if(i>count){
+    if(i>=count){
       br
     }el{
       let entity=entities.get(i);
@@ -313,7 +270,7 @@ f=countconfidential(entities:@$piientity):u32{
   let count=entities.len;
   let i=mut.0;
   lp(let lv=0;true;lv=lv){
-    if(i>count){
+    if(i>=count){
       br
     }el{
       let entity=entities.get(i);
@@ -369,7 +326,7 @@ f=summariserun(run:$pipelinerun):str{
      nothing had been detected and nothing had been anonymised. A match arm is an
      expression, so the label is the value of the conditional. *)
   let anonymisedlabel=mut."Anonymised.";
-  if(res.sensitivity==$public){
+  if(t.senseq(res.sensitivity;t.public())){
     anonymisedlabel="No PII detected."
   }el{};
   <"Privacy pipeline: \(total) entities detected (\(str.fromu32(countrestricted(res.entities))) RESTRICTED, \(str.fromu32(countconfidential(res.entities))) CONFIDENTIAL) across \(str.fromu32(run.stages.len)) stages. \(anonymisedlabel)"
@@ -381,7 +338,7 @@ f=summariserun(run:$pipelinerun):str{
 f=pipelinenerskip(requestid:str):$stageresult{
   log.warn("NER scan failed -- skipping";"pipeline";requestid);
   <$stageresult{
-    stage:$nerscan;
+    stage:$pipelinestage{$nerscan:0};
     entitiesfound:0;
     durationms:0;
     skipped:true;
@@ -400,7 +357,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let regexresult=regex.detect(text);
   let regexentitycount=str.arraylen(regexresult.entities);
   let regexstage=$stageresult{
-    stage:$regexscan;
+    stage:$pipelinestage{$regexscan:0};
     entitiesfound:regexentitycount;
     durationms:0;
     skipped:false;
@@ -409,7 +366,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   stages=stages.push(regexstage);
   let ei=mut.0;
   lp(let lv=0;true;lv=lv){
-    if(ei>regexentitycount){
+    if(ei>=regexentitycount){
       br
     }el{
       let entity=regexresult.entities.get(ei);
@@ -436,7 +393,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
         let nercount=str.arraylen(nerentities);
         let ni=mut.0;
         lp(let lv2=0;true;lv2=lv2){
-          if(ni>nercount){
+          if(ni>=nercount){
             br
           }el{
             let entity=str.arrayget(nerentities;ni);
@@ -445,7 +402,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
           }
         };
         let nerstage=$stageresult{
-          stage:$nerscan;
+          stage:$pipelinestage{$nerscan:0};
           entitiesfound:nercount;
           durationms:0;
           skipped:false;
@@ -459,7 +416,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     }el{
       log.warn("NER unavailable -- skipping NER scan";"pipeline";requestid);
       let nerstage=$stageresult{
-        stage:$nerscan;
+        stage:$pipelinestage{$nerscan:0};
         entitiesfound:0;
         durationms:0;
         skipped:true;
@@ -469,7 +426,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     }
   }el{
     let nerstage=$stageresult{
-      stage:$nerscan;
+      stage:$pipelinestage{$nerscan:0};
       entitiesfound:0;
       durationms:0;
       skipped:true;
@@ -502,7 +459,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
           pri=pri+1
         };
         let presidiostage=$stageresult{
-          stage:$presidioscan;
+          stage:$pipelinestage{$presidioscan:0};
           entitiesfound:presidiocount;
           durationms:0;
           skipped:false;
@@ -512,7 +469,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
       }el{
         log.warn("Presidio scan failed -- degraded mode";"pipeline";requestid);
         let presidiostage=$stageresult{
-          stage:$presidioscan;
+          stage:$pipelinestage{$presidioscan:0};
           entitiesfound:0;
           durationms:0;
           skipped:true;
@@ -523,7 +480,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     }el{
       log.warn("Presidio unavailable -- running in degraded mode";"pipeline";requestid);
       let presidiostage=$stageresult{
-        stage:$presidioscan;
+        stage:$pipelinestage{$presidioscan:0};
         entitiesfound:0;
         durationms:0;
         skipped:true;
@@ -533,7 +490,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     }
   }el{
     let presidiostage=$stageresult{
-      stage:$presidioscan;
+      stage:$pipelinestage{$presidioscan:0};
       entitiesfound:0;
       durationms:0;
       skipped:true;
@@ -546,7 +503,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let deduped=dedupentities(allentities);
   let dedupcount=str.arraylen(deduped);
   let dedupstage=$stageresult{
-    stage:$dedup;
+    stage:$pipelinestage{$dedup:0};
     entitiesfound:dedupcount;
     durationms:0;
     skipped:false;
@@ -556,12 +513,12 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
 
   
   let anonymisedtext=mut.text;
-  let sensitivity=mut.$public;
+  let sensitivity=mut.t.public();
   if(config.dryrun){
     
     sensitivity=maxsensitivity(deduped);
     let anonstage=$stageresult{
-      stage:$anonymise;
+      stage:$logstage{$anonymise:0};
       entitiesfound:dedupcount;
       durationms:0;
       skipped:true;
@@ -572,7 +529,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     anonymisedtext=anonymisetext(text;deduped);
     sensitivity=maxsensitivity(deduped);
     let anonstage=$stageresult{
-      stage:$anonymise;
+      stage:$logstage{$anonymise:0};
       entitiesfound:dedupcount;
       durationms:0;
       skipped:false;
@@ -584,7 +541,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   
   let finalsystemprompt=guardian.buildsystemprompt(basesystemprompt);
   let guardianstage=$stageresult{
-    stage:$guardianinject;
+    stage:$pipelinestage{$guardianinject:0};
     entitiesfound:0;
     durationms:0;
     skipped:false;
