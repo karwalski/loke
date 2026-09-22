@@ -6,6 +6,9 @@ DIR="${1:-.}"
 # Accept TOKE_DIR (what CI exports) or legacy TOKEDIR; default to $HOME/tk/toke.
 TOKEDIR="${TOKE_DIR:-${TOKEDIR:-$HOME/tk/toke}}"
 TOKE=$TOKEDIR/toke
+# The capability manifest, as in build_loke.sh: without it a test binary traps CAP001
+# the first time the code under test writes a log line.
+TKCONFIG="--config=$(cd "$(dirname "$0")/.." && pwd)/tkc.toml"
 STDLIB=$TOKEDIR/src/stdlib
 BUILDDIR="/tmp/loke-tests"
 SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -92,7 +95,7 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   ORIGDIR=$(pwd)
 
   # Step 1: emit LLVM IR
-  if ! $TOKE -I "$IFACE_DIR" --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null; then
+  if ! $TOKE $TKCONFIG -I "$IFACE_DIR" --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null; then
     echo "COMPILE_ERROR $SRC"
     FAIL=$((FAIL+1))
     ERRORS="$ERRORS\n  $SRC (compile)"

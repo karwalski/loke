@@ -15,6 +15,10 @@ BROWSERDIR="$PROJECTDIR/packages/browser"
 OOKE_DIR="${OOKE_DIR:-$HOME/tk/toke-ooke}"
 TOKE_DIR="${TOKE_DIR:-$HOME/tk/toke}"
 TOKE="$TOKE_DIR/toke"
+# loke's capability manifest (F10.9). toke looks for ./tkc.toml in the CURRENT
+# directory and this script cds to packages/browser, so the path is passed explicitly.
+# Without it every compiled binary traps CAP001 on its first log line.
+TKCONFIG="--config=$PROJECTDIR/tkc.toml"
 STDLIB="$TOKE_DIR/src/stdlib"
 VENDOR="$TOKE_DIR/stdlib/vendor"
 IFACE_DIR="$PROJECTDIR/build/interfaces"
@@ -38,7 +42,7 @@ COMPILED=0
 # compile <label> <outflag-and-args...> — records failure, never aborts the census
 compile_one() {
   _src="$1"; shift
-  if "$TOKE" -I "$IFACE_DIR" "$@" "$_src" 2>>"$REPORT"; then
+  if "$TOKE" $TKCONFIG -I "$IFACE_DIR" "$@" "$_src" 2>>"$REPORT"; then
     COMPILED=$((COMPILED + 1))
   else
     FAILED=$((FAILED + 1))
@@ -148,7 +152,7 @@ MODULE_SRCS=$("$PROJECTDIR/scripts/module_order.py" \
 # (core.privacy.ner.tki). The .ll lands beside it and is ignored; the compile pass
 # in step 4b emits the IR that actually gets linked.
 for tkfile in $MODULE_SRCS; do
-  "$TOKE" -I "$IFACE_DIR" --emit-interface --emit-llvm \
+  "$TOKE" $TKCONFIG -I "$IFACE_DIR" --emit-interface --emit-llvm \
     --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
 done
 echo "  $(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ') of $(echo "$MODULE_SRCS" | wc -l | tr -d ' ') interface(s) emitted"

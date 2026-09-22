@@ -30,66 +30,68 @@ f=newconfig(presidiourl:str;ollamaurl:str):$executorconfig{
 
 
 
-f=execute(agent:i64;context:str;config:$executorconfig;cid:str):i64{
-  let sandbox=sb.newsandbox(agent);
+(* NC1.9. An agent run reaches a provider, so the pipeline result is obtained through
+   pipeline.runchecked and the refusal path is a sibling arm of the success path rather
+   than a flag tested afterwards. A match arm is an expression, so each arm calls a
+   function; that is what makes "refused because nothing scanned it" impossible to fall
+   through by accident. *)
+f=refuseunscanned(sandbox:$sandbox;agentid:str;cid:str):i64{
+  let violation="privacy pipeline unavailable: no detection layer scanned the prompt";
+  log.error("executor refused \(agentid) — \(violation)";"executor";cid);
+  <sb.toresult(sb.recordviolation(sandbox;violation);violation;false)
+};
 
-  
-  let costok=sb.checkcostlimit(sandbox;0.0);
-  if(costok==false){
-    log.error(str.concat("agent cost limit exceeded before run: ";agent.id);"executor";cid);
-    let violation="cost limit exceeded";
-    sandbox.violations==@(sandbox.violations;violation);
-    <sb.toresult(sandbox;"cost limit exceeded";false)
-  }el{};
-
-  
-  let prompt=str.concat(agent.prompttemplate;str.concat(" Context: ";context));
-  let pipelinerun=pipeline.run(prompt;"";config.pipelineconfig);
-
-  
-  let entitycount=str.fromu32(pipelinerun.totalentities);
-  (* The subject is bound with a declared type before the match. toke emits duplicate
-     basic-block labels for a 3+-arm `mt` on a struct field and clang then rejects the
-     whole module; the annotation is what makes it link. See docs/upstream/toke-issues.md T-2. *)
-  let resultv:$piidetectionresult=pipelinerun.result;
-  let sensitivityv:$sensitivitylevel=resultv.sensitivity;
-  let sensitivitylabel=mt sensitivityv {
+f=sensitivitylabel(s:$sensitivitylevel):str{
+  <mt s {
     $public:v "PUBLIC";
     $internal:v "INTERNAL";
     $confidential:v "CONFIDENTIAL";
     $restricted:v "RESTRICTED"
-  };
-  let logmsg=str.concat(
-    str.concat(
-      str.concat("pipeline complete — entities=";entitycount);
-      " sensitivity=");
-    sensitivitylabel);
-  log.info(logmsg;"executor";cid);
+  }
+};
 
-  
-  
-  let resultv:$piidetectionresult=pipelinerun.result;
-  let sensitivityv:$sensitivitylevel=resultv.sensitivity;
-  let isrestricted=mt sensitivityv {
+f=isrestricted(s:$sensitivitylevel):bool{
+  <mt s {
     $public:v false;
     $internal:v false;
     $confidential:v false;
     $restricted:v true
-  };
-  if(isrestricted){
+  }
+};
+
+f=runwithscan(agent:$agentdef;sandbox:$sandbox;pipelinerun:$pipelinerun;cid:str):i64{
+  let resultv:$piidetectionresult=pipelinerun.result;
+  let sensitivityv:$sensitivitylevel=resultv.sensitivity;
+  log.info("pipeline complete — entities=\(pipelinerun.totalentities) sensitivity=\(sensitivitylabel(sensitivityv)) layers=\(pipelinerun.layerscompleted) degraded=\(pipelinerun.layersdegraded)";"executor";cid);
+
+  if(isrestricted(sensitivityv)){
     let modelperm=$agentpermission{model:agent.modelpreference};
-    let hasmodelperm=sb.checkpermission(sandbox;modelperm);
-    if(hasmodelperm==false){
+    if(sb.checkpermission(sandbox;modelperm)){}el{
       let violation="RESTRICTED data detected but agent lacks explicit model permission";
-      sandbox.violations==@(sandbox.violations;violation);
-      log.error(str.concat("executor denied — ";violation);"executor";cid);
-      <sb.toresult(sandbox;violation;false)
-    }el{}
+      log.error("executor denied — \(violation)";"executor";cid);
+      <sb.toresult(sb.recordviolation(sandbox;violation);violation;false)
+    }
   }el{};
 
-  
-  log.info(str.concat("agent execution complete (LLM stubbed): ";agent.id);"executor";cid);
+  log.info("agent execution complete (LLM stubbed): \(agent.id)";"executor";cid);
+  <sb.toresult(sandbox;resultv.anonymised;true)
+};
 
-  
-  <sb.toresult(sandbox;pipelinerun.result.anonymised;true)
+f=execute(agent:$agentdef;context:str;config:$executorconfig;cid:str):i64{
+  let sandbox=sb.newsandbox(agent);
+
+  if(sb.checkcostlimit(sandbox;0.0)){}el{
+    let violation="cost limit exceeded";
+    log.error("agent cost limit exceeded before run: \(agent.id)";"executor";cid);
+    (* Recorded through sb.recordviolation. `sandbox.violations==@(...)` was a
+       discarded comparison around a nesting literal, so the violation this branch
+       exists to record was never recorded. LS1.1a. *)
+    <sb.toresult(sb.recordviolation(sandbox;violation);violation;false)
+  };
+
+  let prompt="\(agent.prompttemplate) Context: \(context)";
+  mt pipeline.runchecked(prompt;"";config.pipelineconfig) {
+    $ok:r runwithscan(agent;sandbox;r;cid);
+    $err:e refuseunscanned(sandbox;agent.id;cid)
+  }
 };

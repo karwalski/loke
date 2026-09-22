@@ -38,7 +38,14 @@ t=$pipelinerun{
   stages:@$stageresult;
   totalentities:u32;
   finalsystemprompt:str;
-  requestid:str
+  requestid:str;
+  (* NC1.9. layerscompleted is how many detection layers actually scanned the text.
+     Zero means nothing looked at it, which is not the same as finding nothing, and
+     the two were previously indistinguishable to a caller: both came back as
+     totalentities:0 with a $pipelinerun that looked like a clean result.
+     layersdegraded counts layers the operator enabled that were unavailable. *)
+  layerscompleted:u32;
+  layersdegraded:u32
 };
 
 
@@ -352,6 +359,9 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
 
   let stages=mut.@();
   let allentities=mut.@();
+  (* NC1.9: a layer counts as completed only when it actually scanned the text. *)
+  let completed=mut.0;
+  let degraded=mut.0;
 
   
   let regexresult=regex.detect(text);
@@ -364,6 +374,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     skipreason:""
   };
   stages=stages.push(regexstage);
+  completed=completed+1;
   let ei=mut.0;
   lp(let lv=0;true;lv=lv){
     if(ei>=regexentitycount){
@@ -408,12 +419,15 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
           skipped:false;
           skipreason:""
         };
-        stages=stages.push(nerstage)
+        stages=stages.push(nerstage);
+        completed=completed+1
       }el{
         let skipstage=pipelinenerskip(requestid);
-        stages=stages.push(skipstage)
+        stages=stages.push(skipstage);
+        degraded=degraded+1
       }
     }el{
+      degraded=degraded+1;
       log.warn("NER unavailable -- skipping NER scan";"pipeline";requestid);
       let nerstage=$stageresult{
         stage:$pipelinestage{$nerscan:0};
@@ -465,8 +479,10 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
           skipped:false;
           skipreason:""
         };
-        stages=stages.push(presidiostage)
+        stages=stages.push(presidiostage);
+        completed=completed+1
       }el{
+        degraded=degraded+1;
         log.warn("Presidio scan failed -- degraded mode";"pipeline";requestid);
         let presidiostage=$stageresult{
           stage:$pipelinestage{$presidioscan:0};
@@ -478,6 +494,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
         stages=stages.push(presidiostage)
       }
     }el{
+      degraded=degraded+1;
       log.warn("Presidio unavailable -- running in degraded mode";"pipeline";requestid);
       let presidiostage=$stageresult{
         stage:$pipelinestage{$presidioscan:0};
@@ -518,7 +535,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     
     sensitivity=maxsensitivity(deduped);
     let anonstage=$stageresult{
-      stage:$logstage{$anonymise:0};
+      stage:$pipelinestage{$anonymise:0};
       entitiesfound:dedupcount;
       durationms:0;
       skipped:true;
@@ -529,7 +546,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     anonymisedtext=anonymisetext(text;deduped);
     sensitivity=maxsensitivity(deduped);
     let anonstage=$stageresult{
-      stage:$logstage{$anonymise:0};
+      stage:$pipelinestage{$anonymise:0};
       entitiesfound:dedupcount;
       durationms:0;
       skipped:false;
@@ -563,11 +580,52 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     stages:stages;
     totalentities:dedupcount;
     finalsystemprompt:finalsystemprompt;
-    requestid:requestid
+    requestid:requestid;
+    layerscompleted:completed as u32;
+    layersdegraded:degraded as u32
   }
 };
 
 
+
+(* NC1.9 — the fail-closed entry point. Every path that reaches an external provider
+   must come through here, not through run().
+
+   `run` always returns a $pipelinerun, marking unavailable layers as skipped. That is
+   the right shape for a diagnostic view of the pipeline, and the wrong shape for a
+   gate: a caller reading totalentities:0 cannot tell "no PII in this text" from
+   "nothing examined this text", and the second is a leak waiting to happen. So the
+   decision is made here and returned as a result the caller cannot ignore.
+
+   The rule: if no detection layer completed a scan, the request fails. It does not
+   degrade, and it does not return an empty entity list that looks like a clean bill
+   of health. A degraded run — some enabled layer unavailable, at least one still
+   scanning — is allowed and recorded, because the alternative is that a Presidio
+   sidecar being down takes the whole product offline, and loke is local-first.
+
+   The distinction the old code could not express, and this does:
+
+     layerscompleted == 0   ->  $err. Nothing looked. Refuse.
+     layerscompleted >= 1   ->  $ok, with layersdegraded saying what was missing. *)
+f=runchecked(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun!$lokeerr{
+  let r=run(text;basesystemprompt;config);
+  if(r.layerscompleted==0 as u32){
+    log.error("privacy pipeline failed closed: no detection layer completed a scan, so the request is refused";"pipeline";r.requestid);
+    <$err($privacyerr("no privacy detection layer is available — request refused rather than sent unscanned"))
+  }el{
+    if(r.layersdegraded>0 as u32){
+      log.warn("privacy pipeline degraded: \(r.layersdegraded) enabled layer(s) unavailable, \(r.layerscompleted) completed";"pipeline";r.requestid)
+    }el{};
+    <$ok(r)
+  }
+};
+
+(* True when this run is safe to forward. Kept separate so a caller that already holds
+   a $pipelinerun — a page handler rendering the privacy review, say — can ask the
+   question without re-running the pipeline. *)
+f=issafetoforward(r:$pipelinerun):bool{
+  <r.layerscompleted>0 as u32
+};
 
 f=rundry(text:str;config:$pipelineconfig):$pipelinerun{
   let dryconfig=$pipelineconfig{
