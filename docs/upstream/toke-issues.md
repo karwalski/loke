@@ -43,9 +43,26 @@ already had and discarded.
 | **T-10** | Hazard | `http.post` is declared twice in `http.tki`, so the function form is unreachable | misleading arity error |
 | **T-11** | Correctness | `std.tls`, `std.mdns`, `std.infer`, `std.mlx` are stubs that return 0 or a sentinel string | none |
 | **T-12** | Docs | Four stdlib `.tki` files disagree with the compiler's own builtin table | none |
+| **T-13** | Blocks, silent | A bare sum variant in a value position crashes when matched | none |
+| **T-14** | Correctness, silent | `==` on two sums compares the handle, not the variant | none |
+| **T-15** | Correctness, silent | `http.get` on a closed port returns `$ok` with a NIL response | none |
+| **T-16** | Testability | No way to construct an http request or read a response body from source | n/a |
+| **T-17** | Blocks, silent | `json.parse` binds to an unrelated runtime function | none |
+| **T-18** | **Correctness, silent** | **`mt` on an `X!$userErr` takes the FIRST arm whatever the value is** | none |
+| **T-19** | Blocks, silent | E4071 misses a trailing bare `mt` when the function returns a sum or struct | none |
+| **T-20** | **Correctness, silent** | **An `f64` returned across a module boundary is corrupted** | none |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
-right.
+right. **T-13 to T-20 were found later, getting loke's test suite to run against real
+modules rather than stubs, and two of them are worse than anything above: T-18 and
+T-20 are silent, they affect every module in the codebase, and nothing in the language
+or the tooling reports them.**
+
+**Verified fixed in 445f519 (thank you): T-1, T-3, T-4, T-5 and T-6.** T-6 also gained
+`W3013`, the shadowing warning this document asked for, which is exactly right. T-2 and
+T-7 remain. `std.tls` is now a real TLS 1.3 implementation with `tls.mutualconfig`,
+which closed the gap that had forced us to reopen two stories — that is the single most
+useful change for this project in the release.
 
 ---
 
@@ -530,3 +547,154 @@ when the left operand is a void call, and then it arrives as
 `void type only allowed for function results` from clang. A warning on a discarded
 comparison would catch it — the `discarded-value-result` rule already covers the
 neighbouring case.
+
+---
+
+## T-18 — `mt` on a result with a user-declared error type always takes the first arm
+
+**Severity: correctness, silent, and it affects every error path in this codebase.**
+If one item here gets attention, this is the one.
+
+```toke
+m=g;
+t=$e{ $bad:str };
+f=check():i64!$e{ <$err($bad("no")) };
+f=main():i64{ <mt check() { $ok:v 5; $err:e 7 } };
+```
+
+Returns **5**. Swap the arms and it returns 7 — for the same `$err` value. The match
+runs the first arm regardless of the tag, and binds the arm's payload from whatever is
+there, so `$ok:v v` on an errored call yields garbage (we measured 96 for a function
+that never returns a success).
+
+**Stdlib results are unaffected.** `file.read` on a missing path correctly takes `$err`;
+on a real path it correctly takes `$ok`. So the defect is specific to a result whose
+error side is a sum declared in user code.
+
+loke has **182 functions returning `X!$lokeerr`**. Every one of them has a dead error
+path, and because `$ok` is written first by convention, every error was being read as a
+success. It would have defeated the fail-closed privacy gate we were building at the
+time: the refusal was returned as `$err` and both call sites matched `$ok` first, so
+unscanned text would have been forwarded. We converted that gate to a plain bool.
+
+There is no arm order that works, so the workaround is to avoid result types for
+anything that matters and return an explicit struct or bool instead.
+
+---
+
+## T-19 — E4071 misses a trailing bare `mt` when the function returns a sum or a struct
+
+```toke
+f=pick(x:$s):i64{
+  mt x { $a:v 7; $b:v 9 }        (* -> E4071, correctly refused *)
+};
+
+f=pick(x:$s):$d{
+  mt x { $a:v $yes("y"); $b:v $no("n") }    (* -> compiles, returns garbage *)
+};
+```
+
+The scalar case is caught. The sum or struct case compiles and the function returns
+whatever was in the return slot, so the caller receives a value that is not of the
+declared type and crashes when it matches on it.
+
+**104 functions in loke were in that hole**, including `db.exec`, `db.query`,
+`db.queryone`, every `sync_queue` operation, `dispatcher.dispatch` and
+`governance.policy.evaluate`. Each computed the correct answer and discarded it. The
+diagnostic already exists and is good — it just needs to fire for the other return
+kinds.
+
+---
+
+## T-20 — an `f64` returned across a module boundary is corrupted
+
+**Severity: correctness, silent, and it invalidates every published figure.**
+
+```toke
+(* shared/types.tk *)
+f=f64abs(n:f64):f64{ if(n<0.0){ <0.0-n }el{ <n } };
+
+(* another module *)
+<t.f64abs(0.0-50.0) as i64      (* -> 1, not 50 *)
+```
+
+A second, independent case: a savings function computing `50.0` inside its own module
+is received as `5` by a caller in another module. Within a single module the same
+expression is correct, and f64 **parameters** cross intact — only returns are affected.
+
+In loke this reaches **23 functions**, and the list is the worst possible one:
+`computeprecision`, `computerecall`, `computef1` (the detection-recall figures),
+`calccost` for both hosted providers (the cost figures), both `measuresavings`
+implementations (the compression figures), and the three confidence mappers. So every
+headline number this project could publish is wrong the moment it crosses a module
+boundary, and nothing reports it.
+
+We are converting the affected functions to return scaled integers — hundredths of a
+percent — because an integer crosses correctly and is exact.
+
+---
+
+## T-13 — a bare sum variant in a value position produces a value that crashes
+
+```toke
+t=$lvl{ $public:i64; $internal:i64 };
+f=name(s:$lvl):i64{ <mt s { $public:v 0; $internal:v 1 } };
+f=main():i64{ let l=mut.$public; <name(l) };     (* SIGTRAP *)
+```
+
+`$public` in a value position — `mut.$public`, `<$public`, `x==$public`,
+`field:$public` inside a struct literal — has to be constructed as `$lvl{$public:0}`.
+The bare form compiles with no diagnostic and produces a value that crashes when
+matched. loke had **280 of them**, including every pattern definition in the privacy
+detector, which is why that detector crashed on the first text that matched.
+
+## T-14 — `==` on two sums compares the handle, not the variant
+
+Two locally constructed values compare correctly. A value returned from a function does
+**not** compare equal to an identically constructed local:
+
+```toke
+f=mk():$lvl{ <$lvl{$restricted:0} };
+let x=mk();
+x==$lvl{$restricted:0}        (* false *)
+```
+
+Every `sensitivity==$restricted` in loke's privacy and governance decisions was
+therefore false. We replaced them with a ranking function that matches once and
+compares integers.
+
+## T-15 — `http.get` against a closed port returns `$ok` with a nil response
+
+The `$err` arm never runs, and reading `.status` on the nil response is a dereference a
+toke program cannot guard — `if(r==0)` is a type error against `$httpresp`. So a
+program cannot distinguish "the service replied" from "nothing is listening".
+
+Both of loke's sidecar health checks returned **available** for a dead port because of
+this, which is how the privacy pipeline came to call layers that were not running and
+crash. We now probe with `net.portavailable`, which answers honestly for a local
+service because it tries to bind.
+
+## T-16 — no way to construct an http request or read a response body from source
+
+`http.res(status, body)` builds a response; nothing reads one back. Nothing constructs a
+request. So a page handler with the signature `get(req:i64):i64` cannot be unit-tested
+at all. Ten test files in loke had been written against `str.mockhttpreq` and
+`str.httpbody` — helpers that exist in no module — and had never compiled.
+
+`http.mockreq(method, path, body)` and `http.resbody(res)` would make handler tests
+possible. We worked around it by splitting each handler's body-building into a function
+that takes no request, which is better structure anyway, but the plumbing itself remains
+untestable.
+
+## T-17 — `json.parse` binds to an unrelated function
+
+`json.parse` mangles to `tk_json_parse_w`, which does not exist. The linker resolves it
+to `tk_json_parse` — a runtime helper in `tk_runtime.c` that parses an int array, a
+boolean or a number and returns an `int64`, not a `Json*`. So every `json.parse` in a
+toke program returns something that `json.getopt` and `json.str` then read as a
+document. It links silently.
+
+loke had 14 call sites: config parsing, the Ollama response parsers, the dashboard
+preferences and the ephemeral placeholder map. `json.decode` is correct and is what we
+now use. Either alias `parse` to `dec` or remove the name.
+

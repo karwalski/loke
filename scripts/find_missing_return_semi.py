@@ -42,8 +42,12 @@ def scan(path: pathlib.Path) -> list[tuple[int, str, str]]:
         cur = lines[i].rstrip()
         if not cur or cur.lstrip().startswith("(*"):
             continue
-        # must look like a completed call or expression, not an opening brace/paren
-        if not cur.endswith(")"):
+        # must look like a completed call, not a comment or a block opener. A comment
+        # ends in `*)` and an `el{` branch ends in `}`; neither is a statement missing
+        # its semicolon, and both matched the naive "ends with )" rule.
+        if not cur.endswith(")") or cur.endswith("*)"):
+            continue
+        if cur.lstrip().startswith(("(*", "*", "el", "}")):
             continue
         nxt = lines[i + 1]
         if not OPENS_RETURN.match(nxt):
