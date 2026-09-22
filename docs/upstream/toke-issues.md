@@ -1,7 +1,7 @@
 # toke — issues found building loke
 
 **Reported by:** the loke project (`github.com/karwalski/loke`)
-**Toolchain under test:** toke `1bc4a44` (on `feat/type-flow-bytes-redesign`, `toke_min_commit = 6cc9061`), ooke `v3.0.0-rc.1`
+**Toolchain under test:** toke `445f519` (mechanisms re-verified against `c4e4704`) (on `feat/type-flow-bytes-redesign`, `toke_min_commit = 6cc9061`), ooke `v3.0.0-rc.1`
 **Date:** 2026-09-20
 **Context:** migrating 217 toke modules from a four-month-old API to the current one, and getting them to link for the first time
 
@@ -55,6 +55,7 @@ already had and discarded.
 | **T-22** | Blocks, silent | `row.f64` is declared as a result but returns a bare `i64` | none |
 | **T-23** | **Correctness, silent** | **Arguments of different declared types but the same ABI are accepted reversed** (`str.join`) | none — segfault |
 | **T-24** | **Correctness, silent** | **`@(array; element)` nests instead of appending** | none — intermittent segfault |
+| **T-25** | Blocks | `max_funcs` counts imported signatures; E9010 names neither the limit, the cause, nor that it is configurable | E9010, no line number |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
 right. **T-13 to T-24 were found later, getting loke's test suite to run against real
@@ -528,8 +529,12 @@ in 445f519, and the four found since are more damaging than anything that remain
    error path in this codebase is dead code, 182 functions' worth, and we have had to
    write around it by returning sentinels instead of results. Nothing else on this list
    distorts a program's control flow.
-2. **T-20** — an `f64` returned across a module boundary is corrupted. No figure this
-   project computes across a module boundary can be published until this is fixed.
+2. **T-20** — an `f64` returned across a module boundary is corrupted. **We have found the
+   mechanism and it looks like a one-line fix**: `llvm.c:1641` registers a literal `"i64"`
+   return for every imported function, discarding the correct `"double"` that line 1629
+   just computed, while the definition side emits a real `double` — and the bitcast the
+   comment at 1639 promises is performed by neither side. Either half fixes it. Until it
+   lands, no figure this project computes across a module boundary can be published.
 3. **T-23 and T-24** — call sites not checked against a declared type where the ABI
    representation coincides. 99 latent segfaults here, and T-24's crash is
    *intermittent*, so a green test run is not evidence.
@@ -656,8 +661,74 @@ implementations (the compression figures), and the three confidence mappers. So 
 headline number this project could publish is wrong the moment it crosses a module
 boundary, and nothing reports it.
 
+### The mechanism, found 2026-09-23 against `c4e4704`
+
+This is a one-line disagreement between two halves of the same ABI, and we think it is
+cheap to fix.
+
+The **definition** side maps `f64` correctly. `resolve_llvm_type` (`llvm.c:680`) returns
+`"double"`, so `shared/src/types.tk` emits:
+
+```llvm
+define dso_local fastcc double @shared_types_f64abs(double %n.arg)
+```
+
+The **cross-module declaration** side does not. `llvm.c:1629` computes the correct
+`"double"` via `tki_type_to_llvm`, and then `llvm.c:1641` **discards it** and registers
+the signature with a literal `"i64"`:
+
+```c
+/* Cross-module ABI: all non-void returns use i64 (pointers via
+ * ptrtoint, bools via zext, floats via bitcast). Only void stays void. */
+FnSig *sig = register_fn(c, mangled_fn,
+                          !strcmp(ret_type, "void") ? "void" : "i64");
+```
+
+so every importer emits:
+
+```llvm
+declare fastcc i64 @shared_types_f64abs(double)
+```
+
+The comment states the intent — a uniform i64 cross-module ABI with **floats via
+bitcast** — and that design would be fine. But neither side performs the bitcast. The
+callee returns a `double` in `xmm0`; the caller reads an `i64` from `rax`. The
+**parameter** is `double` on both sides, which is exactly why f64 parameters cross intact
+and only returns are affected.
+
+Either half alone fixes it: emit the bitcast the comment promises, or use the `"double"`
+that line 1629 already computed.
+
+Two corrections to what we reported above, both from asserting this rather than eyeballing
+it:
+
+- **The corrupted value is not `1`, and is not consistent.** `f64abs(-50.0)` arrives as the
+  bit pattern 1 (4.94e-324, which is why it prints as `4.940`); `f64abs(50.0)` and
+  `f64abs(-1.5)` both arrive as `0`. It is whatever was in the integer return register,
+  so "arrives as 1" was one observation of undefined behaviour.
+- **Stdlib builtins are exempt, and correctly so.** A `tk_*_w` wrapper really does return
+  the f64 bit pattern in an `i64` and really is bitcast back — both halves of *that* ABI
+  agree, by way of `tki_type_to_llvm_abi` (`llvm.c:1115`). So `json.getfloat` and friends
+  are fine. Only toke-to-toke module calls are affected. We had wrongly suspected 15
+  `json.getfloat` sites; they are exonerated.
+
+This narrowed the blast radius a long way. Across loke's built tree there turned out to be
+exactly **one** live corrupting call site rather than 23 — `shared.types.f64abs` from
+`eval/compare.tk:56`, which was reporting a score delta and a cost delta that were neither
+of them the measured value. The other 22 f64-returning functions are called only within
+their own module, or have no caller at all because their consumers are unwired; they become
+live the moment those consumers land.
+
 We are converting the affected functions to return scaled integers — hundredths of a
-percent — because an integer crosses correctly and is exact.
+percent — because an integer crosses correctly and is exact, and that workaround is now
+asserted too (`f64hundredths`, arm D). Where a caller only wants the value for display we
+return a `str` instead, which crosses safely — `f64absfixed` does the abs and the
+formatting in one call so the f64 never leaves its own module.
+
+**The assertion, if you want it as a regression test.** `tests/unit/shared/test_f64_boundary.tk`
+in loke, four arms: a module-local control, the loke-boundary case, the stdlib-builtin case,
+and the integer workaround. Arm B is written as a tripwire that asserts the defect is still
+present, so it fails on the day you fix this.
 
 ---
 
@@ -767,6 +838,44 @@ enabled-privacy-layer list, the local NER entity list, the provider registry, th
 pipeline hook registry and the OpenAI system-prompt prepend. Each silently held at most
 one element or nested on the first append. `.push()` is the correct append and now
 appears at all 29.
+
+---
+
+## T-25 — `max_funcs` counts imported signatures, and E9010 does not say it is a setting
+
+**Severity: blocks the build, and reads as a compiler bug rather than as configuration.**
+
+A module compiled fine one hour and not the next, with:
+
+```
+E9010 compiler limit exceeded: too many functions
+```
+
+No line number, no file position beyond the first line, no statement of what the limit is,
+and no hint that it is configurable. We went looking in the compiler source, which is not
+where a project should have to look for this.
+
+Three things would each have saved the trip:
+
+1. **Say the number and the key.** `"compiler limit exceeded: 129 functions, max_funcs is
+   128 — raise it in tkc.toml or with --max-funcs"`. Everything in that sentence is already
+   in scope at `register_fn` (`llvm.c:699`), except the count, which is `c->fn_count`.
+2. **Say that it counts imports.** The signature table holds every function the module can
+   *see*, not the ones it declares. The module that hit it,
+   `packages/core/memory/mcp_server.tk`, declares 25 functions and has eleven imports —
+   while `shared/src/types.tk` declares 35 and compiles. From the message alone the natural
+   conclusion is "this file is too big", which is wrong and leads to a pointless refactor.
+3. **Name the section.** `max_funcs` is a top-level key: `src/config.c` treats the
+   section-less part of `tkc.toml` as the limits block, so a limit written under
+   `[capabilities]` is rejected as *"capability 'max_funcs' wants true/false or a quoted
+   path"*. That diagnostic is good — it just arrives after you have guessed wrong, and
+   nothing says where limits go.
+
+The default is 128 (`TKC_MAX_FUNCS`, `src/tkc_limits.h:83`). loke crossed it by exactly one
+function, bisected with `--max-funcs`, and the fix was one line of `tkc.toml`. That is a
+perfectly reasonable design — we are not asking for a bigger default. We are asking for the
+diagnostic to be the thing that tells us, because this is the same shape as the ask at the
+bottom of this document: **the compiler knew the answer and printed something else.**
 
 ---
 

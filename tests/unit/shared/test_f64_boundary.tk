@@ -1,0 +1,115 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.shared.f64boundary;
+
+i=t:std.test;
+i=str:std.str;
+i=json:std.json;
+i=sh:shared.types;
+
+(* Where an f64 stops being itself.
+
+   T-20 in docs/upstream/toke-issues.md records that an f64 RETURNED across a module
+   boundary is corrupted: shared.types.f64abs(-50.0) arrives as 1. f64 parameters cross
+   intact; only returns are affected. That finding sized LS1.1h at XL across 23
+   functions and is the stated reason no figure this project computes across a module
+   boundary can be published.
+
+   It has never been asserted. It was measured once, by hand, against a toke that the
+   toolchain has since moved past. So the size of LS1.1h, the size of the ~62-site
+   json-on-a-row story, and whether AD1.2's recall floor can be stated at all, all rest
+   on a number nobody re-checks.
+
+   This file checks it, in four arms, deliberately ordered so that each one isolates a
+   single question. It must IMPORT shared.types — re-declaring f64abs here would move
+   the call inside this module and measure nothing, which is the failure mode that makes
+   67 of this repository's test files unable to fail.
+
+   MEASURED 2026-09-23 against toke c4e4704. The result, and the mechanism:
+
+     A  a module-local f64 round-trips          PASS  — the harness can observe an f64
+     B  sh.f64abs(-50.0) == 50.0                FAIL  — T-20 is live on loke boundaries
+     C  json.getfloat over a real JSON object   PASS  — stdlib builtins are EXEMPT
+     D  the integer-hundredths workaround       PASS  — the fallback crosses exactly
+
+   So T-20 is narrower than the backlog assumed and its mechanism is now known, which
+   between them collapse LS1.1h from XL:
+
+   - `json.getfloat` is exonerated. A stdlib builtin is a `tk_*_w` wrapper that really
+     does return the f64 bit pattern in an i64 and really is bitcast back, so both halves
+     of that ABI agree. The separate ~62-site defect where a $row is read with a json
+     accessor is a DIFFERENT bug (LS1.1i) — a row handle is not a JSON object — and it is
+     not about f64 corruption at all.
+   - Only loke's own cross-module f64 returns are affected, and the corrupted value is
+     not a consistent transform: f64abs(-50.0) arrives as the bit pattern 1 (4.94e-324),
+     f64abs(50.0) and f64abs(-1.5) both arrive as 0. The upstream doc's "arrives as 1" was
+     one observation of reading the wrong register, not a rule.
+
+   The mechanism, for the upstream report. `llvm.c:1639` declares the intent — "Cross-
+   module ABI: all non-void returns use i64 (pointers via ptrtoint, bools via zext,
+   floats via bitcast)" — and line 1641 passes a literal "i64", discarding the correct
+   "double" that line 1629 just computed via tki_type_to_llvm. But the DEFINITION side
+   uses resolve_llvm_type (llvm.c:680), which maps f64 to a real `double`. So
+   shared.types emits `define ... double @shared_types_f64abs(double)` while every
+   importer emits `declare ... i64 @shared_types_f64abs(double)`. Neither side performs
+   the bitcast the comment promises. The callee returns in xmm0, the caller reads rax.
+   The PARAMETER is `double` on both sides, which is exactly why f64 parameters cross
+   intact and only returns are affected.
+
+   f64hundredths below is the workaround and also the proof: it works only because its
+   declared return really is i64, so the two halves agree by construction rather than by
+   accident.
+
+   ARM B IS A TRIPWIRE, NOT A FAILING TEST. It asserts that the defect is STILL PRESENT,
+   so the suite stays green while the bug stands. The day it fails is the day T-20 is
+   fixed upstream — and that is the signal to re-measure, delete the scaled-integer
+   workarounds, and close LS1.1h. Do not "fix" arm B by relaxing it. *)
+
+f=arma():bool{
+  (* Control. Same-module arithmetic, no boundary crossed. If this fails, the other
+     three arms say nothing about T-20 and everything about the harness. *)
+  let v=0.0-50.0;
+  let abs=mut.v; if(v<0.0){abs=0.0-v}el{};
+  <t.assert(str.eq(str.fromfloat(abs);"50.000000") || str.eq(str.fromfloat(abs);"50.0") || str.eq(str.fromfloat(abs);"50");
+    "A: a module-local f64 survives (control — if this fails, ignore B/C/D)")
+};
+
+f=armb():bool{
+  (* The tripwire. shared.types is a different module, so this return crosses a loke
+     module boundary and is corrupted. Asserting the DEFECT, not the behaviour we want:
+     a green run here means T-20 still stands. See the header before changing this. *)
+  let crossed=sh.f64abs(0.0-50.0);
+  <t.assert((crossed as i64)!=50;
+    "B TRIPWIRE: an f64 returned across a loke module boundary is STILL corrupted (T-20). If this FAILS, T-20 is fixed — re-measure and close LS1.1h")
+};
+
+f=armc():bool{
+  (* The stdlib question, isolated. json.dec gives a genuine JSON object, so this tests
+     a builtin f64 return and NOT the separate defect where a $row is read with a json
+     accessor. Builtins cross the C ABI rather than toke's module lowering, so there is
+     real reason they may be exempt. *)
+  let obj=json.dec("{\"v\":1.5}");
+  let v=json.getfloat(obj;"v");
+  <t.assert(str.eq(sh.f64fixed(v;1);"1.5");
+    "C: f64 returned from a STDLIB builtin is intact (json.getfloat)")
+};
+
+f=armd():bool{
+  (* The workaround, proven before 62 call sites are committed to it. An integer crosses
+     exactly; the caller divides locally. storage/db.tk rowf64hundredths and
+     memory/aaak.tk measuresavingsbp are the two functions already migrated this way. *)
+  let hundredths=sh.f64hundredths(1.5);
+  <t.assert(hundredths==150;
+    "D: the integer-hundredths workaround crosses exactly")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  if(arma()){pass=pass+1}el{fail=fail+1};
+  if(armb()){pass=pass+1}el{fail=fail+1};
+  if(armc()){pass=pass+1}el{fail=fail+1};
+  if(armd()){pass=pass+1}el{fail=fail+1};
+  <fail
+};
