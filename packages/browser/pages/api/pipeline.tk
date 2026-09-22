@@ -6,74 +6,124 @@ i=http:std.http;
 i=str:std.str;
 i=json:std.json;
 i=file:std.file;
+i=std:std;
 i=log:shared.log;
 i=t:shared.types;
 i=pipe:core.privacy.pipeline;
-i=ph:core.privacy.placeholder;
 i=ks:core.governance.killswitch;
-i=audit:core.storage.audit;
-i=policy:core.governance.policy;
-i=keychain:core.storage.keychain;
 i=dbmod:core.storage.db;
 
-f=settingspath():str{ <"/Users/matthew.watt/.loke/settings.json" };
+(* NC1.9 — this handler is why that story existed, and this is the fix.
 
-f=post(req:i64):i64{
-  let rawbody=mt http.body(req) {$ok:v v; $err:e ""};
-  let parsed=json.dec(rawbody);
-  let text=json.str(parsed;"text");
-  let sysprompt=json.str(parsed;"system_prompt");
+   What it used to do: call a detection sidecar on port 11435, and if the sidecar was
+   down, fall back to five hardcoded substring checks —
 
-  let entities=mut.0;
-  let sensitivity=mut."PUBLIC";
-  let anonymised=mut.text;
-  let piifields=mut."";
+     if(str.contains(text;"patient_name")){entities=entities+1}
+     if(str.contains(text;"medicare_number")){entities=entities+1}
+     if(str.contains(text;"dob")){…}  if(str.contains(text;"contact_name")){…}
+     if(str.contains(text;"@")){…}
 
-  let sidecarup=mut.false;
-  let detectresp=mt http.posturl("http://127.0.0.1:11435/detect";str.concat("{\"text\":";str.concat(json.enc(text);"}"))) {$ok:v v; $err:e ""};
-  if(str.len(detectresp)>2){
-    sidecarup=true;
-    let dparsed=json.dec(detectresp);
-    let dentities=json.i64(dparsed;"entity_count");
-    entities=dentities;
-    if(dentities>0){
-      sensitivity="CONFIDENTIAL";
-      let anonresp=mt http.posturl("http://127.0.0.1:11435/anonymise";str.concat("{\"text\":";str.concat(json.enc(text);"}"))) {$ok:v v; $err:e ""};
-      if(str.len(anonresp)>2){
-        let aparsed=json.dec(anonresp);
-        anonymised=json.str(aparsed;"anonymised")
-      }el{}
-    }el{};
-    if(dentities>3){sensitivity="RESTRICTED"}el{}
-  }el{
-    if(str.contains(text;"patient_name")){entities=entities+1; sensitivity="CONFIDENTIAL"}el{};
-    if(str.contains(text;"medicare_number")){entities=entities+1; sensitivity="CONFIDENTIAL"}el{};
-    if(str.contains(text;"dob")){entities=entities+1}el{};
-    if(str.contains(text;"contact_name")){entities=entities+1}el{};
-    if(str.contains(text;"@")){entities=entities+1}el{};
-    if(entities>3){sensitivity="RESTRICTED"}el{}
-  };
+   — and then forward the text to Anthropic regardless. A request carrying a real
+   Medicare number, a real name and a real date of birth, none of which contain those
+   literal strings, was sent to a provider reported as entities_found:0,
+   sensitivity:"PUBLIC". It never called core.privacy.pipeline at all, so none of the
+   regex, NER or Presidio layers ran on this path, and the privacy review the UI showed
+   the user was computed from substring matching.
 
-  let entstr=str.fromint(entities);
-  piifields=str.concat(",\"entities_found\":";str.concat(entstr;str.concat(",\"sensitivity\":\"";str.concat(sensitivity;"\""))));
+   It now goes through pipe.runchecked, which refuses when no detection layer scanned
+   the text, and forwards the pipeline's own anonymised output. There is no fallback
+   path: "the detector is unavailable" returns 503, because the alternative is
+   forwarding unscanned text, and that is the thing this endpoint must never do. *)
 
+f=settingspath():str{ <"\(std.homedir())/.loke/settings.json" };
+
+f=pipelineconfig():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:5000";"http://127.0.0.1:11434")
+};
+
+f=refused(reason:str):i64{
+  log.error("pipeline endpoint refused a request: \(reason)";"api.pipeline";"");
+  <http.res(503;"{\"ok\":false,\"error\":\(json.enc(reason)),\"refused\":true}")
+};
+
+f=anthropickey():str{
   let settings=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
-  let sparsed=json.dec(settings);
-  let anthropickey=json.str(sparsed;"anthropic_api_key");
-  let hasanthropic=str.len(anthropickey)>20;
+  <json.str(json.dec(settings);"anthropic_api_key")
+};
 
-  if(hasanthropic){
-    let abody=str.concat("{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":";str.concat(json.enc(sysprompt);str.concat(",\"messages\":[{\"role\":\"user\",\"content\":";str.concat(json.enc(anonymised);"}]}"))));
-    let headers=str.concat("{\"x-api-key\":\"";str.concat(anthropickey;"\",\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}"));
-    let aresp=http.postheaders("https://api.anthropic.com/v1/messages";abody;headers);
-    <http.res(200;str.concat("{\"ok\":true,\"anthropic_raw\":";str.concat(aresp;str.concat(",\"model\":\"claude-sonnet-4-20250514\",\"provider\":\"anthropic\"";str.concat(piifields;"}")))))
-  }el{
-    let payload=str.concat("{\"model\":\"qwen2.5:3b\",\"prompt\":";str.concat(json.enc(anonymised);",\"stream\":false}"));
-    let ollamaresp=http.posturl("http://127.0.0.1:11434/api/generate";payload);
-    let ollamaparsed=json.dec(ollamaresp);
-    let response=json.str(ollamaparsed;"response");
-    <http.res(200;str.concat("{\"ok\":true,\"response\":";str.concat(json.enc(response);str.concat(",\"model\":\"qwen2.5:3b\",\"provider\":\"ollama\"";str.concat(piifields;"}")))))
+f=privacyfields(run:$pipelinerun):str{
+  let res:$piidetectionresult=run.result;
+  <",\"entities_found\":\(run.totalentities),\"sensitivity\":\(json.enc(t.senslabel(res.sensitivity))),\"layers_completed\":\(run.layerscompleted),\"layers_degraded\":\(run.layersdegraded),\"request_id\":\(json.enc(run.requestid))"
+};
+
+f=anthropicreply(r:$httpresp;piifields:str):i64{
+  <http.res(200;"{\"ok\":true,\"anthropic_raw\":\(str.frombytes(r.body)),\"model\":\"claude-sonnet-4-20250514\",\"provider\":\"anthropic\"\(piifields)}")
+};
+
+f=toanthropic(anonymised:str;sysprompt:str;key:str;piifields:str):i64{
+  let abody="{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
+  let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
+  mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
+    $ok:r anthropicreply(r;piifields);
+    $err:e http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
   }
 };
 
-f=get(req:i64):i64{ <http.res(200;"{\"ok\":true,\"status\":\"pipeline ready\"}") };
+f=toollama(anonymised:str;piifields:str):i64{
+  let payload="{\"model\":\"qwen2.5:3b\",\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
+  let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
+  let response=json.str(json.dec(raw);"response");
+  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(response)),\"model\":\"qwen2.5:3b\",\"provider\":\"ollama\"\(piifields)}")
+};
+
+(* Forwards the pipeline's anonymised text, never the original. *)
+f=forward(run:$pipelinerun;sysprompt:str):i64{
+  let res:$piidetectionresult=run.result;
+  let piifields=privacyfields(run);
+  let key=anthropickey();
+  if(str.len(key)>20){
+    <toanthropic(res.anonymised;sysprompt;key;piifields)
+  }el{
+    <toollama(res.anonymised;piifields)
+  }
+};
+
+(* The kill switch needs the store. If the store cannot be opened, the switch cannot
+   be read — and an unreadable kill switch is treated as ENGAGED, not as disengaged.
+   The same reasoning as NC1.9: the unknown state is the unsafe one. *)
+f=killswitchengaged():bool{
+  mt dbmod.openstore("\(std.homedir())/.loke") {
+    $ok:store ks.isengaged(store);
+    $err:e true
+  }
+};
+
+f=post(req:i64):i64{
+  if(killswitchengaged()){
+    <http.res(403;"{\"ok\":false,\"error\":\"kill switch engaged or unreadable\"}")
+  }el{};
+
+  let rawbody=mt http.body(req) {$ok:v v; $err:e ""};
+  let parsed=json.dec(rawbody);
+  let text=json.str(parsed;"text");
+  if(str.len(text)==0){
+    <http.res(400;"{\"ok\":false,\"error\":\"text field is required\"}")
+  }el{};
+
+  (* The only path to a provider. A refusal here is the point of NC1.9: no detection
+     layer scanned this text, so it does not leave the machine. *)
+  (* A bool, not a result arm: toke matches the first arm of an X!$lokeerr whatever
+     the value is (T-18), so a refusal returned as $err would be read here as success
+     and the text forwarded unscanned — the precise failure NC1.9 forbids. *)
+  let sysprompt=json.str(parsed;"system_prompt");
+  let run=pipe.runforward(text;sysprompt;pipelineconfig());
+  if(pipe.issafetoforward(run)){
+    <forward(run;sysprompt)
+  }el{
+    <refused("no privacy detection layer is available")
+  }
+};
+
+f=get(req:i64):i64{
+  <http.res(200;"{\"ok\":true,\"status\":\"pipeline ready\"}")
+};

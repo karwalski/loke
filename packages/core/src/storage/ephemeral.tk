@@ -9,30 +9,68 @@ i=str:std.str;
 
 t=$ephemeralmap{ buf:i64; sessionid:str; entrycount:i32 };
 
+(* json.decode, not json.parse. `json.parse` mangles to tk_json_parse_w, which does
+   not exist; the linker binds it to tk_json_parse — an unrelated runtime helper that
+   parses an int array, a boolean or a number and returns an int64, not a Json*. So
+   every json.parse in this repository returned garbage that json.getopt and json.str
+   then read as a document, silently. Filed as T-17 in docs/upstream/toke-issues.md. *)
 f=isavailable():bool{
   <true
 };
 
+(* The map's JSON is built and read as TEXT, not round-tripped through
+   json.set / json.stringify.
+
+   json.stringify is an alias for json.enc, which JSON-ESCAPES A STRING. Handed the
+   Json* that json.set returns, it escapes the pointer itself, so what went into
+   secure memory was garbage and the next json.parse produced a document that crashed
+   json.getopt. That is why a put followed by a get segfaulted.
+
+   Keys are flat, not paths: json.set builds a literal key "entries.[E1]" rather than
+   nesting under "entries", and json.getopt looks up the same flat key, so the two
+   agree. Storing them flat on purpose makes that explicit instead of accidental. *)
+f=emptydoc():str{
+  <"{}"
+};
+
 f=newmap(sessionid:str;ttlseconds:i32):$ephemeralmap{
   let buf=sm.alloc(65536;ttlseconds);
-  sm.write(buf;"{\"entries\":{}}");
+  sm.write(buf;emptydoc());
   <$ephemeralmap{ buf:buf; sessionid:sessionid; entrycount:0 }
 };
 
+f=entrykey(placeholder:str):str{
+  <"entries.\(placeholder)"
+};
+
+(* Inserts the pair immediately after the opening brace, so the newest entry wins on
+   a repeated placeholder — json.getopt returns the first match. *)
+f=withentry(doc:str;key:str;value:str):str{
+  let pair="\(json.enc(key)):\(json.enc(value))";
+  if(str.len(doc)<3){
+    <"{\(pair)}"
+  }el{
+    <"{\(pair),\(str.slice(doc;1;str.len(doc)))"
+  }
+};
+
 f=put(m:$ephemeralmap;placeholder:str;original:str):$ephemeralmap{
-  let raw=sm.read(m.buf);
-  let parsed=json.parse(raw);
-  let key=str.concat("entries.";placeholder);
-  let updated=json.set(parsed;key;original);
-  sm.write(m.buf;json.stringify(updated));
+  let doc=sm.read(m.buf);
+  sm.write(m.buf;withentry(doc;entrykey(placeholder);original));
   <$ephemeralmap{ buf:m.buf; sessionid:m.sessionid; entrycount:m.entrycount+(1 as i32) }
 };
 
+(* json.getopt returns a null POINTER for a missing key. Comparing that to the string
+   "(null)" is false — the harness only renders it that way — but str.len handles the
+   null and returns 0, so the absent case becomes the empty string callers expect. *)
 f=get(m:$ephemeralmap;placeholder:str):str{
-  let raw=sm.read(m.buf);
-  let parsed=json.parse(raw);
-  let key=str.concat("entries.";placeholder);
-  <json.getopt(parsed;key)
+  let parsed=json.decode(sm.read(m.buf));
+  let value=json.getopt(parsed;entrykey(placeholder));
+  if(str.len(value)==0){
+    <""
+  }el{
+    <value
+  }
 };
 
 f=wipe(m:$ephemeralmap):bool{
@@ -48,7 +86,7 @@ f=sweep():i32{
 
 f=torestoremap(m:$ephemeralmap):@str{
   let raw=sm.read(m.buf);
-  let parsed=json.parse(raw);
+  let parsed=json.decode(raw);
   let entries=json.entries(parsed);
   let out=mut.@();
   lp(let i=0;i<entries.len;i=i+1){

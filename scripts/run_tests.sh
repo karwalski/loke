@@ -59,14 +59,18 @@ if [ ! -f "$STDLIB_A" ] || [ -n "$NEWEST_C" ]; then
 fi
 
 # loke's own modules, so a test can call the real thing instead of a copy of it.
-# handlers* and main are excluded: each defines a main and the test supplies its own.
+# Everything in build/ooke is archived. handlers.o used to be excluded on the
+# assumption that it defines a main — it does not, `nm -g` shows neither _main nor
+# _tk_main — and excluding it made ooke.handlers.registerall unlinkable, so the two
+# tests that check route registration could not run. main.ll.o is the only object with
+# a main and it lives one directory up.
 if [ -d "$MODULE_DIR" ]; then
   NEWEST_O=$(find "$MODULE_DIR" -name '*.o' -newer "$LOKE_A" 2>/dev/null | head -1)
   if [ ! -f "$LOKE_A" ] || [ -n "$NEWEST_O" ]; then
     echo "Building $LOKE_A (once) ..."
     rm -f "$LOKE_A"
-    find "$MODULE_DIR" -name '*.o' ! -name 'handlers*' -print0       | xargs -0 ar rcs "$LOKE_A" 2>/dev/null
-    echo "  $(find "$MODULE_DIR" -name '*.o' ! -name 'handlers*' | wc -l | tr -d ' ') modules archived"
+    find "$MODULE_DIR" -name '*.o' -print0 | xargs -0 ar rcs "$LOKE_A" 2>/dev/null
+    echo "  $(find "$MODULE_DIR" -name '*.o' | wc -l | tr -d ' ') modules archived"
   fi
 else
   echo "NOTE: $MODULE_DIR not found — run scripts/build_loke.sh first, or tests that" >&2
@@ -85,6 +89,14 @@ if [ -d "$OOKE_DIR/src/ooke" ]; then
       | xargs -0 ar rcs "$OOKE_A" 2>/dev/null
   fi
 fi
+
+# A fixed database key for the suite.
+#
+# Without it, core.storage.db.ensuredbkey reads the macOS keychain, and
+# SecItemCopyMatching blocks on an authorisation dialog that a headless test process
+# can never answer — the run does not fail, it hangs. Two integration tests hung the
+# whole suite this way. This key is for tests only and is deliberately obvious.
+export LOKE_DB_KEY="${LOKE_DB_KEY:-0000000000000000000000000000000000000000000000000000000000000001}"
 
 PASS=0
 FAIL=0

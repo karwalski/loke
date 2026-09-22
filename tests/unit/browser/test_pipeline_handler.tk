@@ -4,68 +4,69 @@
 m=test.browser.pipelinehandler;
 i=t:std.test;
 i=str:std.str;
-i=json:std.json;
-i=pipe:browser.pages.api.pipeline;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=h:browser.pages.api.pipeline;
+
+(* The original test called str.mockhttpreq, str.httpbody and str.httpstatus, none of
+   which exist in any module, and referenced pipe.risktierstr, pipe.isdeny and
+   pipe.getpolicymessage, which the handler has never exported. It had never compiled.
+
+   It also wrote payload variants as `$deny:"blocked"`, which is not how a variant is
+   constructed — that form does not parse.
+
+   What this covers now is the property NC1.9 is about, at the level the handler
+   works at: the privacy fields it renders come from a real pipeline run, and a run
+   that scanned nothing is refused rather than forwarded. The request-level assertions
+   cannot be written until toke exposes a way to build an http request (T-16). *)
+
+f=configlocalonly():$pipelineconfig{
+  (* Unprivileged ports nothing listens on, so NER and Presidio are genuinely down and
+     only the in-process regex layer runs. *)
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* pipeline.get returns a valid response *)
-  let getreq=str.mockhttpreq("GET";"/api/pipeline");
-  let getres=pipe.get(getreq);
-  if(t.assert(getres>0;"pipeline.get returns nonzero response handle")){pass=pass+1}el{fail=fail+1};
-  let getbody=str.httpbody(getres);
-  if(t.assert(str.contains(getbody;"\"ok\":true");"get response contains ok true")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(getbody;"\"status\"");"get response contains status field")){pass=pass+1}el{fail=fail+1};
+  (* The handler renders privacy metadata from a $pipelinerun. With the sidecars down
+     the run must still complete on regex alone, and must say so. *)
+  let run=pipe.runforward("contact alice@example.com about the invoice";"";configlocalonly());
+  if(t.assert(str.contains(h.privacyfields(run);"\"entities_found\":1");"the rendered metadata reports the entity the regex layer found")){pass=pass+1}el{fail=fail+1};
 
-  (* post with empty text returns 400 *)
-  let emptybody="{\"text\":\"\",\"system_prompt\":\"\"}";
-  let emptyreq=str.mockhttpreqwithbody("POST";"/api/pipeline";emptybody);
-  let emptyres=pipe.post(emptyreq);
-  let emptystatus=str.httpstatus(emptyres);
-  if(t.asserteq(emptystatus;400;"empty text returns 400")){pass=pass+1}el{fail=fail+1};
-  let emptymsg=str.httpbody(emptyres);
-  if(t.assert(str.contains(emptymsg;"\"ok\":false");"empty text error has ok false")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(emptymsg;"text field is required");"empty text error mentions text required")){pass=pass+1}el{fail=fail+1};
+  let run=pipe.runforward("contact alice@example.com about the invoice";"";configlocalonly());
+  if(t.assert(str.contains(h.privacyfields(run);"\"layers_degraded\":2");"the rendered metadata reports both unavailable layers")){pass=pass+1}el{fail=fail+1};
 
-  (* post with missing body returns 400 *)
-  let nobodyreq=str.mockhttpreqwithbody("POST";"/api/pipeline";"{}");
-  let nobodyres=pipe.post(nobodyreq);
-  let nobodystatus=str.httpstatus(nobodyres);
-  if(t.asserteq(nobodystatus;400;"missing text field returns 400")){pass=pass+1}el{fail=fail+1};
+  let run=pipe.runforward("contact alice@example.com about the invoice";"";configlocalonly());
+  if(t.assert(str.contains(h.privacyfields(run);"\"sensitivity\":\"confidential\"");"an email is rendered as confidential")){pass=pass+1}el{fail=fail+1};
 
-  (* sensitivitylabel helper returns correct strings *)
-  if(t.assert(str.eq(pipe.sensitivitylabel($public);"PUBLIC");"public label")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.sensitivitylabel($internal);"INTERNAL");"internal label")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.sensitivitylabel($confidential);"CONFIDENTIAL");"confidential label")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.sensitivitylabel($restricted);"RESTRICTED");"restricted label")){pass=pass+1}el{fail=fail+1};
+  (* The metadata must never carry the detected value itself — it is shown in a
+     browser, and the whole point is that the value does not travel. *)
+  let run=pipe.runforward("contact alice@example.com about the invoice";"";configlocalonly());
+  if(t.assert(!str.contains(h.privacyfields(run);"alice@example.com");"the rendered metadata does not carry the detected value")){pass=pass+1}el{fail=fail+1};
 
-  (* parsetolerance helper returns correct variants *)
-  let tinstant=pipe.parsetolerance("instant");
-  if(t.assert(tinstant==$instant;"parsetolerance instant")){pass=pass+1}el{fail=fail+1};
-  let tpatient=pipe.parsetolerance("patient");
-  if(t.assert(tpatient==$patient;"parsetolerance patient")){pass=pass+1}el{fail=fail+1};
-  let tbackground=pipe.parsetolerance("background");
-  if(t.assert(tbackground==$background;"parsetolerance background")){pass=pass+1}el{fail=fail+1};
-  let tunknown=pipe.parsetolerance("xyz");
-  if(t.assert(tunknown==$instant;"parsetolerance unknown defaults to instant")){pass=pass+1}el{fail=fail+1};
+  (* Clean text: zero entities, still forwardable. *)
+  let run=pipe.runforward("the quarterly figures look fine";"";configlocalonly());
+  if(t.assert(str.contains(h.privacyfields(run);"\"entities_found\":0");"clean text reports no entities")){pass=pass+1}el{fail=fail+1};
 
-  (* risktierstr helper returns correct strings *)
-  if(t.assert(str.eq(pipe.risktierstr($low);"low");"risktier low")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.risktierstr($medium);"medium");"risktier medium")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.risktierstr($high);"high");"risktier high")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.risktierstr($critical);"critical");"risktier critical")){pass=pass+1}el{fail=fail+1};
-
-  (* isdeny helper *)
-  if(t.assert(!pipe.isdeny($allow);"allow is not deny")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(pipe.isdeny($deny:"blocked");"deny is deny")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!pipe.isdeny($allowwithwarning:"warn");"allowwithwarning is not deny")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!pipe.isdeny($requireapproval:"approve");"requireapproval is not deny")){pass=pass+1}el{fail=fail+1};
-
-  (* getpolicymessage helper *)
-  if(t.assert(str.eq(pipe.getpolicymessage($allow);"");"allow has empty message")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(pipe.getpolicymessage($deny:"nope");"nope");"deny returns reason")){pass=pass+1}el{fail=fail+1};
+  (* And the refusal path, which is the reason this endpoint was held back: a run that
+     scanned nothing is not safe to forward however empty it looks. *)
+  let nothingscanned=$pipelinerun{
+    result:$piidetectionresult{
+      original:"medicare 1234 56789 1";
+      anonymised:"medicare 1234 56789 1";
+      entities:@();
+      sensitivity:sh.public()
+    };
+    stages:@();
+    totalentities:0 as u32;
+    finalsystemprompt:"";
+    requestid:"test-unscanned";
+    layerscompleted:0 as u32;
+    layersdegraded:3 as u32
+  };
+  if(t.assert(!pipe.issafetoforward(nothingscanned);"an unscanned run is refused, not forwarded")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

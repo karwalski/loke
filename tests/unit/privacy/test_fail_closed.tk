@@ -17,7 +17,14 @@ i=pl:core.privacy.pipeline;
 
    The two states were previously indistinguishable. `run` returns a $pipelinerun with
    skipped stages either way, so totalentities:0 meant both "this text is clean" and
-   "nothing examined this text". runchecked separates them.
+   "nothing examined this text". The layer count separates them.
+
+   The gate is a plain bool, not a result. That is deliberate and the last assertion
+   below is why: toke does not discriminate a result whose error side is a
+   user-declared sum — `mt` on an X!$lokeerr takes the FIRST arm whatever the value is
+   — so a refusal returned as $err would be read as success by every caller (T-18).
+   An earlier version of this file matched runchecked's arms and passed for that
+   reason, which is the trap.
 
    Presidio and NER are configured off here, so the only layer is the in-process regex
    one, which cannot be unavailable — that is the healthy case. The refusal path is
@@ -32,34 +39,35 @@ f=configlocalonly():$pipelineconfig{
   <pl.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
 };
 
+(* Returns true while toke's defect is present: a function that unconditionally returns
+   $err, matched with the $ok arm written first, yields the $ok arm. *)
+f=alwayserrors():i64!$lokeerr{
+  <$err($privacyerr("this function never succeeds"))
+};
+
+f=firstarmwins():bool{
+  <mt alwayserrors() {
+    $ok:v true;
+    $err:e false
+  }
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
   (* 1. With the regex layer healthy, a scan completes and the run is forwardable. *)
-  mt pl.runchecked("contact alice@example.com today";"";configlocalonly()) {
-    $ok:r
-      if(t.assert(r.layerscompleted>0 as u32;"a healthy pipeline reports at least one completed layer")){pass=pass+1}el{fail=fail+1};
-    $err:e
-      if(t.assert(false;"a healthy pipeline should not refuse")){pass=pass+1}el{fail=fail+1}
-  };
+  let r=pl.runforward("contact alice@example.com today";"";configlocalonly());
+  if(t.assert(r.layerscompleted>0 as u32;"a healthy pipeline reports at least one completed layer")){pass=pass+1}el{fail=fail+1};
 
   (* 2. The entity it found is real, so "completed" is not merely a counter. *)
-  mt pl.runchecked("contact alice@example.com today";"";configlocalonly()) {
-    $ok:r
-      if(t.assert(r.totalentities>0 as u32;"the completed layer actually detected the email")){pass=pass+1}el{fail=fail+1};
-    $err:e
-      if(t.assert(false;"unexpected refusal")){pass=pass+1}el{fail=fail+1}
-  };
+  let r=pl.runforward("contact alice@example.com today";"";configlocalonly());
+  if(t.assert(r.totalentities>0 as u32;"the completed layer actually detected the email")){pass=pass+1}el{fail=fail+1};
 
   (* 3. Clean text is forwardable AND reports zero entities — the distinction that
         matters is between this and case 4, not between this and case 1. *)
-  mt pl.runchecked("the weather is nice today";"";configlocalonly()) {
-    $ok:r
-      if(t.assert(r.totalentities==0 as u32;"clean text scans clean")){pass=pass+1}el{fail=fail+1};
-    $err:e
-      if(t.assert(false;"clean text should not refuse")){pass=pass+1}el{fail=fail+1}
-  };
+  let r=pl.runforward("the weather is nice today";"";configlocalonly());
+  if(t.assert(r.totalentities==0 as u32;"clean text scans clean")){pass=pass+1}el{fail=fail+1};
 
   (* 4. A run where nothing scanned is NOT safe to forward, however empty its entity
         list looks. This is the fail-closed property. *)
@@ -97,6 +105,13 @@ f=main():i64{
     layersdegraded:2 as u32
   };
   if(t.assert(pl.issafetoforward(degraded);"a degraded run with one completed layer is still forwardable")){pass=pass+1}el{fail=fail+1};
+
+  (* 6. The reason the gate is a bool. If this project ever expresses the refusal as
+        an X!$lokeerr again, this assertion documents what goes wrong: toke takes the
+        first arm of such a match whatever the value is, so an $err refusal is read as
+        $ok. Demonstrated here on a local result type so the test is self-contained
+        and fails the day toke fixes it — at which point the workaround can go. *)
+  if(t.assert(firstarmwins();"toke still mis-discriminates a user-defined result, so the gate must stay a bool (T-18)")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

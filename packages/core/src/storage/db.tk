@@ -6,6 +6,7 @@ m=core.storage.db;
 
 i=db:std.db;
 i=str:std.str;
+i=env:std.env;
 i=crypto:std.crypto;
 i=kc:core.storage.keychain;
 i=log:shared.log;
@@ -20,7 +21,37 @@ t=$store{
 };
 
 (* GA2.2: retrieve or generate a 32-byte hex encryption key via OS keychain *)
+(* The environment is checked before the keychain, and that is not a convenience.
+
+   core.storage.keychain.getdbkey reaches SecItemCopyMatching, which on macOS blocks
+   on an authorisation dialog when the calling binary is not the one that stored the
+   item. A headless process — CI, a test runner, loke started by launchd — can never
+   answer that dialog, so the read does not fail: it HANGS, indefinitely, with the
+   store half-open. Every integration test touching the database hung on this, and so
+   would a first run on a machine where the key already exists.
+
+   toke offers no way to time-bound a keychain read, so loke cannot recover from the
+   block once it starts. Avoiding it is the only option available here.
+
+   LOKE_DB_KEY is therefore read first. It is a 64-character hex key, it is intended
+   for CI and tests, and it is NOT the recommended way to run loke: an environment
+   variable is readable by any process running as the user, where the keychain item is
+   not. The keychain remains the default for an interactive install. *)
+f=dbkeyfromenv():str{
+  let fromenv=env.getor("LOKE_DB_KEY";"");
+  if(str.len(fromenv)==64){
+    <fromenv
+  }el{
+    <""
+  }
+};
+
 f=ensuredbkey():str!$lokeerr{
+  let fromenv=dbkeyfromenv();
+  if(str.len(fromenv)>0){
+    log.info("db: using the encryption key from LOKE_DB_KEY, not the keychain";"db";"system");
+    <$ok(fromenv)
+  }el{};
   if(kc.haskey("db_encryption_key")){
     let existing=kc.getdbkey();
     if(str.len(existing)>0){

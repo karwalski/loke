@@ -1,115 +1,55 @@
 (* Copyright 2026 loke contributors
    SPDX-License-Identifier: Apache-2.0 *)
 
-m=tests.unit.storage.testephemeral;
+m=test.storage.ephemeral;
+
 i=t:std.test;
 i=str:std.str;
+i=eph:core.storage.ephemeral;
 
-t=$ephemeralentry{ key:str; value:str; ttl:i32; created:i64 };
+(* This file declared a $ephemeralstore with entries, TTLs and a created timestamp,
+   plus newstore, put, get, count, wipeid and wipeall — a design that was never
+   implemented. The real module is a $ephemeralmap backed by std.securemem, with no
+   count and no per-entry TTL. The copy and the module had nothing in common but the
+   word "ephemeral", and the test passed on the copy.
 
-t=$ephemeralstore{
-  entries:@$ephemeralentry;
-  sessionid:str
-};
-
-f=newstore(sessionid:str):$ephemeralstore{
-  <$ephemeralstore{ entries:@(); sessionid:sessionid }
-};
-
-f=put(store:$ephemeralstore;key:str;value:str;ttl:i32;now:i64):$ephemeralstore{
-  let entry=$ephemeralentry{ key:key; value:value; ttl:ttl; created:now };
-  <$ephemeralstore{ entries:store.entries.append(entry); sessionid:store.sessionid }
-};
-
-f=get(store:$ephemeralstore;key:str;now:i64):str{
-  lp(let i=0;i<store.entries.len;i=i+1){
-    let e=store.entries.get(i);
-    if(str.eq(e.key;key)){
-      let expiry=e.created + (e.ttl as i64);
-      if(now < expiry){
-        <e.value
-      }el{
-        <""
-      }
-    }el{}
-  };
-  <""
-};
-
-f=count(store:$ephemeralstore):i32{
-  <store.entries.len as i32
-};
-
-f=wipeid(store:$ephemeralstore;key:str):$ephemeralstore{
-  let next=mut.@($ephemeralentry);
-  lp(let i=0;i<store.entries.len;i=i+1){
-    let e=store.entries.get(i);
-    if(!str.eq(e.key;key)){
-      next=next.append(e)
-    }el{}
-  };
-  <$ephemeralstore{ entries:next; sessionid:store.sessionid }
-};
-
-f=wipeall(store:$ephemeralstore):$ephemeralstore{
-  <$ephemeralstore{ entries:@(); sessionid:store.sessionid }
-};
+   What it covers now is the round trip, which is the property the privacy pipeline
+   depends on: a placeholder stored here must come back, or response restoration
+   silently returns nothing. That path was broken until recently — `put` called
+   json.set and discarded its result, so the map stored nothing at all — and this is
+   the test that would have caught it. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let store=newstore("sess-001");
+  if(eph.isavailable()){}el{
+    (* securemem is not available in this environment; the assertions below would be
+       testing the failure path rather than the feature. Say so rather than pass. *)
+    if(t.assert(false;"std.securemem is unavailable, so the ephemeral map cannot be tested here")){pass=pass+1}el{fail=fail+1};
+    <fail
+  };
 
-  t.assert(str.eq(store.sessionid;"sess-001");"new store has correct session id");
-  pass=pass+1;
+  let m=eph.newmap("test-session";60 as i32);
 
-  t.assert(count(store)==(0 as i32);"new store is empty");
-  pass=pass+1;
+  (* A fresh map holds nothing. *)
+  if(t.asserteq(eph.get(m;"[EMAIL_1]");"";"a fresh map returns empty for an unknown placeholder")){pass=pass+1}el{fail=fail+1};
 
-  let store=put(store;"KEY_1";"secret_value";60;1000);
-  t.assert(count(store)==(1 as i32);"count after one put is 1");
-  pass=pass+1;
+  (* The round trip. put returns a NEW map — toke structs are values — so a caller
+     that drops the return stores nothing, which is exactly the bug this covers. *)
+  let m2=eph.put(m;"[EMAIL_1]";"alice@example.com");
+  if(t.asserteq(eph.get(m2;"[EMAIL_1]");"alice@example.com";"a stored placeholder round-trips")){pass=pass+1}el{fail=fail+1};
 
-  let val=get(store;"KEY_1";1010);
-  t.asserteq(val;"secret_value";"get before expiry returns value");
-  pass=pass+1;
+  let m3=eph.put(m2;"[PHONE_1]";"0412 345 678");
+  if(t.asserteq(eph.get(m3;"[PHONE_1]");"0412 345 678";"a second placeholder round-trips")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(eph.get(m3;"[EMAIL_1]");"alice@example.com";"the first placeholder survives the second put")){pass=pass+1}el{fail=fail+1};
 
-  let val2=get(store;"KEY_1";1070);
-  t.asserteq(val2;"";"get after expiry returns empty");
-  pass=pass+1;
+  (* An unknown placeholder must not return a neighbouring value. *)
+  if(t.asserteq(eph.get(m3;"[EMAIL_2]");"";"an unknown placeholder returns empty, not another entry")){pass=pass+1}el{fail=fail+1};
 
-  let val3=get(store;"NONEXIST";1010);
-  t.asserteq(val3;"";"get nonexistent key returns empty");
-  pass=pass+1;
-
-  let store=put(store;"KEY_2";"another_val";120;1000);
-  t.assert(count(store)==(2 as i32);"count after two puts is 2");
-  pass=pass+1;
-
-  let store=wipeid(store;"KEY_1");
-  t.assert(count(store)==(1 as i32);"wipe by id reduces count");
-  pass=pass+1;
-
-  let val4=get(store;"KEY_1";1010);
-  t.asserteq(val4;"";"wiped key returns empty");
-  pass=pass+1;
-
-  let val5=get(store;"KEY_2";1010);
-  t.asserteq(val5;"another_val";"non-wiped key still returns value");
-  pass=pass+1;
-
-  let store=put(store;"KEY_3";"third";30;1000);
-  t.assert(count(store)==(2 as i32);"count before wipe all");
-  pass=pass+1;
-
-  let store=wipeall(store);
-  t.assert(count(store)==(0 as i32);"wipe all clears everything");
-  pass=pass+1;
-
-  let val6=get(store;"KEY_2";1010);
-  t.asserteq(val6;"";"after wipe all no keys remain");
-  pass=pass+1;
+  (* Wiping is the point of a secure map: after it, nothing comes back. *)
+  if(t.assert(eph.wipe(m3);"wipe reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(eph.get(m3;"[EMAIL_1]");"";"nothing comes back after a wipe")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

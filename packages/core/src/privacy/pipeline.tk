@@ -588,43 +588,48 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
 
 
 
-(* NC1.9 — the fail-closed entry point. Every path that reaches an external provider
-   must come through here, not through run().
+(* NC1.9 — the fail-closed gate.
 
    `run` always returns a $pipelinerun, marking unavailable layers as skipped. That is
-   the right shape for a diagnostic view of the pipeline, and the wrong shape for a
-   gate: a caller reading totalentities:0 cannot tell "no PII in this text" from
-   "nothing examined this text", and the second is a leak waiting to happen. So the
-   decision is made here and returned as a result the caller cannot ignore.
+   the right shape for a diagnostic view and the wrong shape for a gate: a caller
+   reading totalentities:0 cannot tell "no PII in this text" from "nothing examined
+   this text", and the second is a leak waiting to happen.
 
-   The rule: if no detection layer completed a scan, the request fails. It does not
-   degrade, and it does not return an empty entity list that looks like a clean bill
-   of health. A degraded run — some enabled layer unavailable, at least one still
-   scanning — is allowed and recorded, because the alternative is that a Presidio
-   sidecar being down takes the whole product offline, and loke is local-first.
+   WHY THIS IS NOT A RESULT TYPE. The obvious design is
+   `runchecked(...):$pipelinerun!$lokeerr`, returning $err when nothing scanned. It is
+   not used, because toke does not discriminate a result whose error side is a
+   user-declared sum: `mt` on an `X!$lokeerr` value takes the FIRST ARM whatever the
+   value is. With $ok written first — as it conventionally is — an $err is matched as
+   $ok and its payload read as garbage. So a refusal expressed that way would be
+   silently ignored by every caller, which is the exact failure NC1.9 exists to
+   prevent. Verified against toke 445f519 and filed as T-18 in
+   docs/upstream/toke-issues.md; stdlib results (file.read, db.exec, http.get) are
+   unaffected and do discriminate.
 
-   The distinction the old code could not express, and this does:
+   The gate is therefore a plain bool, which toke gets right, and the caller cannot
+   confuse it with a payload:
 
-     layerscompleted == 0   ->  $err. Nothing looked. Refuse.
-     layerscompleted >= 1   ->  $ok, with layersdegraded saying what was missing. *)
-f=runchecked(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun!$lokeerr{
-  let r=run(text;basesystemprompt;config);
-  if(r.layerscompleted==0 as u32){
-    log.error("privacy pipeline failed closed: no detection layer completed a scan, so the request is refused";"pipeline";r.requestid);
-    <$err($privacyerr("no privacy detection layer is available — request refused rather than sent unscanned"))
-  }el{
-    if(r.layersdegraded>0 as u32){
-      log.warn("privacy pipeline degraded: \(r.layersdegraded) enabled layer(s) unavailable, \(r.layerscompleted) completed";"pipeline";r.requestid)
-    }el{};
-    <$ok(r)
-  }
-};
+     layerscompleted == 0   ->  issafetoforward is false. Nothing looked. Refuse.
+     layerscompleted >= 1   ->  true, with layersdegraded saying what was missing.
 
-(* True when this run is safe to forward. Kept separate so a caller that already holds
-   a $pipelinerun — a page handler rendering the privacy review, say — can ask the
-   question without re-running the pipeline. *)
+   A degraded run is allowed on purpose: a Presidio sidecar being down must not take a
+   local-first product offline. *)
 f=issafetoforward(r:$pipelinerun):bool{
   <r.layerscompleted>0 as u32
+};
+
+(* Runs the pipeline and says in one place whether the result may leave the machine.
+   Callers check the bool; there is no error arm to forget. *)
+f=runforward(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
+  let r=run(text;basesystemprompt;config);
+  if(issafetoforward(r)){
+    if(r.layersdegraded>0 as u32){
+      log.warn("privacy pipeline degraded: \(r.layersdegraded) enabled layer(s) unavailable, \(r.layerscompleted) completed";"pipeline";r.requestid)
+    }el{}
+  }el{
+    log.error("privacy pipeline failed closed: no detection layer completed a scan, so this text must not be forwarded";"pipeline";r.requestid)
+  };
+  <r
 };
 
 f=rundry(text:str;config:$pipelineconfig):$pipelinerun{
