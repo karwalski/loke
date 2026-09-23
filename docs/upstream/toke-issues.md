@@ -593,6 +593,9 @@ neighbouring case.
 
 ## T-18 — `mt` on a result with a user-declared error type always takes the first arm
 
+*See **T-31** first: arms bind by position for every result type, and T-18 is the case
+where the discriminant is not read at all.*
+
 **Severity: correctness, silent, and it affects every error path in this codebase.**
 If one item here gets attention, this is the one.
 
@@ -608,9 +611,17 @@ runs the first arm regardless of the tag, and binds the arm's payload from whate
 there, so `$ok:v v` on an errored call yields garbage (we measured 96 for a function
 that never returns a success).
 
-**Stdlib results are unaffected.** `file.read` on a missing path correctly takes `$err`;
-on a real path it correctly takes `$ok`. So the defect is specific to a result whose
-error side is a sum declared in user code.
+**Correction, 2026-09-23: the line that used to sit here said "stdlib results are
+unaffected". That is false, and see T-31.** A stdlib result does read its discriminant, but
+it then uses it as an *index into the arm list*, so `ok` runs arm 0 and `err` runs arm 1
+whatever the arms are labelled. Our original probe wrote `$ok` first, which is the single
+arrangement where positional binding and label binding give the same answer — so the probe
+could not distinguish them, and we generalised from it. Write the error arm first and a
+stdlib match is inverted rather than merely half-dead.
+
+What is specific to a **user-declared** error side is that the discriminant is not consulted
+at all: arm 0 always runs. A two-variant error sum returning its second variant still takes
+arm 0, so it is not the inner variant index being read either.
 
 loke has **182 functions returning `X!$lokeerr`**. Every one of them has a dead error
 path, and because `$ok` is written first by convention, every error was being read as a
@@ -1139,6 +1150,67 @@ back to `0`, so **every integer column read in this codebase conflates "the valu
 The same shape as T-22: a result whose error side is indistinguishable from a valid value.
 
 ---
+
+## T-31 — `mt` binds a result's arms by POSITION, not by label
+
+**Severity: correctness, silent, and it inverts every outcome of an affected match.**
+This is the general form of T-18, and it is worse than T-18 because the failure is not
+"the error path is dead" but "success and failure are swapped".
+
+One `mt` construct behaves three different ways depending on what it is matching. Measured
+at `0b0bc4e`, each row a separate program, the exit status being the arm body that ran:
+
+```toke
+(* 1. A PLAIN SUM — correct. Reordering the arms changes nothing. *)
+t=$s{ $a:i64; $b:i64; $c:i64 };
+f=pick():$s{ <$c(0) };
+mt pick() { $a:v 1; $b:v 2; $c:v 3 }     (* -> 3, correct *)
+mt pick() { $c:v 3; $b:v 2; $a:v 1 }     (* -> 3, correct: by LABEL *)
+
+(* 2. A STDLIB RESULT — the discriminant is read, then used as an INDEX. *)
+mt json.dec("{\"a\":1}") { $ok:o 1; $jsonerr:e 2 }   (* -> 1  ok  *)
+mt json.dec("{\"a\":1}") { $jsonerr:e 2; $ok:o 1 }   (* -> 2  THE ERROR BODY, on valid input *)
+mt json.dec("{{{nope")   { $ok:o 1; $jsonerr:e 2 }   (* -> 2  err *)
+mt json.dec("{{{nope")   { $jsonerr:e 2; $ok:o 1 }   (* -> 1  THE OK BODY, on invalid input *)
+
+(* 3. A RESULT WITH A USER-DECLARED ERROR TYPE — the discriminant is not read at all. *)
+t=$e{ $one:str; $two:str };
+f=check():i64!$e{ <$err($two("no")) };
+mt check() { $ok:v 1; $err:e 2 }         (* -> 1, arm[0], see T-18 *)
+```
+
+So for a stdlib result, `ok` selects arm **0** and `err` selects arm **1** by position, and
+the arm's own label is never checked against the tag it is bound to. Write the error arm
+first — which reads naturally, and which a guard-clause style encourages — and **every
+outcome of the match is exactly backwards**: valid input runs the error handler, invalid
+input runs the success handler and binds the error payload as if it were the parsed value.
+
+Case 3 is the same bug with the discriminant missing entirely, so `arm[0]` always wins. We
+had filed that separately as T-18, whose text says *"Stdlib results are unaffected"* — that
+sentence is wrong, and it was wrong because our probe happened to write `$ok` first, which
+is the one arrangement under which positional binding and label binding agree.
+
+**What it cost us.** 53 sites in 20 modules. The ones that had visible consequences:
+
+| module | effect |
+|---|---|
+| `mcp-toke/src/tools.tk`, `core/mcp/client.tk` | 16 sites. Every well-formed MCP request answered "Parse error"; `start()` logged "failed to listen" without accepting a connection. **The whole MCP server was unreachable**, with no diagnostic anywhere |
+| `core/privacy/presidio.tk` | `isavailable` matched `$err` first, so a *healthy* Presidio reported unavailable — the PII detection layer never ran |
+| `core/optimiser/llmlingua.tk` | the mirror image: `isavailable` returned TRUE for an **absent** sidecar. A fail-open on a privacy-adjacent layer, and no prompt had ever been compressed |
+| `core/mcp/discovery.tk` | server name and tool count silently defaulted for every server that answered |
+
+The `presidio` and `llmlingua` pair is the reason this is not merely a bug report. The same
+misuse of the same construct produced a fail-closed in one module and a **fail-open** in the
+other, and neither module's tests could see it, because the arms type-check either way.
+
+**Ask.** Bind arms by label and reject an arm whose label is not a variant of the matched
+type. If positional binding is deliberate, E-code an arm list whose labels are not in
+declaration order, because there is no way to read the current behaviour off the source.
+
+**Our workaround**, which we would rather not keep: `scripts/find_err_arm_first.py` in the
+gate, failing any `mt` over a result whose `$ok` arm is not written first, and
+`scripts/fix_err_arm_first.py` to reorder them. It is a lint rule standing in for a type
+rule, and it cannot see a match built by a macro or spread across a helper.
 
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 

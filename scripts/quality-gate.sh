@@ -272,8 +272,16 @@ step_checks() {
   # upstream these keep them from coming back. Three of the four also catch a silent
   # logic bug of their own — a shadowing `let` is how a broken accumulator looks, and
   # a type name used as a value is how a missing parameter looks.
+  #
+  # find_err_arm_first is the newest and the only one of these that catches an INVERSION
+  # rather than a dead path: `mt` binds a result's arms by position, so an `$ok` arm written
+  # second runs on failure and the error arm runs on success (T-31). 53 sites, and the pair
+  # that shows why it is gated rather than remembered is `privacy/presidio.isavailable`
+  # against `optimiser/llmlingua.isavailable` — the identical mistake, fail-closed in one
+  # module and fail-OPEN in the other.
   for sweep in find_shadowed_lets find_typename_values find_field_matches \
-               find_missing_return_semi find_offbyone_loops find_discarded_tail_expr; do
+               find_missing_return_semi find_offbyone_loops find_discarded_tail_expr \
+               find_err_arm_first; do
     if [[ -f "scripts/$sweep.py" ]]; then
       echo "  toke codegen hazard: $sweep"
       python3 "scripts/$sweep.py" --check packages >/dev/null \
