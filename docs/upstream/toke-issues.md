@@ -804,6 +804,33 @@ Two asks, either of which would have prevented this:
 2. Make the stdlib's own argument order consistent, or at least make `str.join` agree
    with `fmt.strs`.
 
+### The general form, which is worth fixing once rather than per-function
+
+T-23 and T-24 are two symptoms of one thing, and we have since hit a third. Any `.tki`
+signature typed in terms of `i64` — whether written that way or marked `"gen": "abi"` —
+**disables call-site checking for every argument**, because at the ABI a string, an array,
+a struct handle, a row handle and a JSON handle are all an `i64`.
+
+Three defects in loke, all of which compiled clean:
+
+| what was passed | to a parameter declared | result |
+|---|---|---|
+| `[str]` and `str`, reversed | `str.join(str, [str])` | segfault (T-23) |
+| an array plus an element | `@(…)` literal | heterogeneous array, intermittent segfault (T-24) |
+| a database row | `json.enc(str)` | garbage JSON in a subject-access export |
+| a parsed JSON object | `db.rowstr(i64, i64)` — `gen:"abi"` | every field read back empty |
+
+The last two are mirror images of each other and neither is detectable from the source,
+because both sides of the confusion are `i64`. We found **78 sites** in one sweep where a
+`$row` was read with a `json.*` accessor and silently returned empty strings and zeros —
+including one that made every float setting in the project read as `0.0`.
+
+So the ask is narrower than "check more things": **`gen: "abi"` should describe the
+lowering, not erase the type.** Keep the declared toke types in the `.tki` for checking and
+apply the uniform `i64` ABI only when emitting the call. `std.db`'s `row.str` already
+declares `(Row, str) -> str!DbErr` correctly in one place and `(i64, i64) -> i64` in
+another; the correct one exists and is not the one the call site is checked against.
+
 This is the same class as T-4, T-7 and T-22: something the interface file already
 knows,
 which the call site is not checked against.
