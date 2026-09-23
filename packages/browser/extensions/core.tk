@@ -5,20 +5,29 @@ m=browser.extensions.core;
 
 i=cfg:shared.config;
 i=log:shared.log;
+i=file:std.file;
 i=pipeline:core.privacy.pipeline;
 i=router:core.router.router;
 i=str:std.str;
+i=t:shared.types;
 i=gw:core.governance.gateway;
 i=disp:core.providers.dispatcher;
 
+(* Declared types, not i64.
+
+   Every one of these six fields used to be declared `i64` while `init()` assigned a STRUCT to
+   it. That compiles — a struct and a handle share an ABI (T-23) — and then the type says
+   nothing true about the field, so nothing downstream can read it without a cast that is a
+   guess. Declaring them honestly is free and it is what lets `getconfig` below return the
+   config that was actually loaded. *)
 t=$corestate{
-  config:i64;
-  pipelineconfig:i64;
-  router:i64;
+  config:$lokeconfig;
+  pipelineconfig:$pipelineconfig;
+  router:$router;
   cid:str;
-  gateway:i64;
-  dispatcher:i64;
-  apikeys:i64
+  gateway:$gateway;
+  dispatcher:$dispatcher;
+  apikeys:$apikeys
 };
 
 t=$lokecfgstate{
@@ -30,40 +39,92 @@ t=$lokecfgstate{
   defaultprovider:str
 };
 
+(* ── Loading the configuration, and the two reasons it never happened ─────────────
+
+   1. The path was the literal `"~/.loke/config.toml"`, and the tilde is NOT expanded by the
+      path layer — measured: `file.exists("~/.loke/x")` is false for a file that exists.
+   2. `cfg.loadconfig` returns `$lokeconfig!$lokeerr`, whose error side is a user-declared sum,
+      and toke never reads the discriminant of such a result: arm 0 always runs (T-18). This
+      module wrote `{$ok:v v; $err:e cfg.defaultconfig()}`, so on a FAILED load it bound the
+      error payload and returned it as a `$lokeconfig`. The fallback to defaults could not run.
+
+   Together: the user's configuration file was never read, and the defaults were not used
+   either — callers read fields off an error payload.
+
+   `file.exists` is the guard that makes arm 0 correct in practice rather than in principle:
+   when the file is there, `toml.loadfile` succeeds and arm 0 is the right arm; when it is not,
+   we never call it. A parse failure on a file that DOES exist is still undetectable, and that
+   is the residue of T-18 rather than something this function can fix — it is why
+   `configfromtoml` takes a per-key default for every field. *)
+f=loadedconfig():$lokeconfig{
+  let path=t.configpath();
+  if(file.exists(path)){
+    <mt cfg.loadconfig(path) {
+      $ok:v v;
+      $err:e cfg.defaultconfig()
+    }
+  }el{
+    <cfg.defaultconfig()
+  }
+};
+
 f=init(ookecfg:i64):$corestate{
-  let config=cfg.defaultconfig();
-  let pipelineconfig=pipeline.newconfig(config.presidiourl;config.ollamaurl);
-  let rtr=router.new(router.newconfig(config.ollamaurl));
+  (* This used to compute `config`, `pipelineconfig` and `rtr` from defaults, then immediately
+     recompute all three from the loaded config and discard the first set. The discarded work
+     is gone; only the loaded values are built. *)
+  let loaded=loadedconfig();
+  let pipelineconfig=pipeline.newconfig(loaded.presidiourl;loaded.ollamaurl);
+  let rtr=router.new(router.newconfig(loaded.ollamaurl));
   let cid=str.randhex(16);
-  let loaded=mt cfg.loadconfig("~/.loke/config.toml") {$ok:v v; $err:e cfg.defaultconfig()};
-  let pipelineconfig2=pipeline.newconfig(loaded.presidiourl;loaded.ollamaurl);
-  let rtr2=router.new(router.newconfig(loaded.ollamaurl));
   let gateway=gw.new();
   let apikeys=disp.getapikeys();
   let dispatcher=disp.new(apikeys;loaded.ollamaurl);
   log.info("loke core initialised";"core";cid);
-  <$corestate{config:loaded;pipelineconfig:pipelineconfig2;router:rtr2;cid:cid;gateway:gateway;dispatcher:dispatcher;apikeys:apikeys}
-};
-
-
-f=getconfig():$lokecfgstate{
-  <$lokecfgstate{
-    ollamaurl:"http://127.0.0.1:11434";
-    port:11430;
-    datadir:"~/.loke";
-    loglevel:"info";
-    presidiourl:"http://127.0.0.1:5002";
-    defaultprovider:"ollama"
+  <$corestate{
+    config:loaded;
+    pipelineconfig:pipelineconfig;
+    router:rtr;
+    cid:cid;
+    gateway:gateway;
+    dispatcher:dispatcher;
+    apikeys:apikeys
   }
 };
 
-f=getpipelineconfig():i64{ <0 };
-f=getrouter():i64{ <0 };
-f=getgateway():i64{ <0 };
-f=getdispatcher():i64{ <0 };
-f=getauditstore():i64{ <0 };
-f=getpreference(key:str):str{ <"" };
-f=setapikey(provider:str;key:str):i64{ <0 };
-f=setpreference(key:str;value:str):i64{ <0 };
-f=gettabstore():i64{ <0 };
-f=settabstore(store:i64):i64{ <0 };
+(* Reads the real configuration instead of returning hardcoded defaults.
+
+   This used to return a `$lokecfgstate` literal with six values written into the source — so
+   `browser/pages/installer.tk:39`, its only caller, asked for the configuration and got
+   constants. A user who changed `ollama_url` was shown a hardware summary computed against
+   127.0.0.1:11434 regardless.
+
+   It also duplicated `shared.config.defaultconfig()`'s values in a second place, which is the
+   drift this register of a function existed to cause: the two were already inconsistent about
+   `port` (u16 there, i64 here) and `$lokecfgstate` has no `llmlinguaurl` at all.
+
+   Kept as a function of no arguments returning `$lokecfgstate`, because that is what the caller
+   calls and the mapping to the narrower shape is this module's job. *)
+f=getconfig():$lokecfgstate{
+  let c=loadedconfig();
+  <$lokecfgstate{
+    ollamaurl:c.ollamaurl;
+    port:c.port as i64;
+    datadir:c.datadir;
+    loglevel:c.loglevel;
+    presidiourl:c.presidiourl;
+    defaultprovider:c.defaultprovider
+  }
+};
+
+(* ── Ten accessors deleted, not repaired ──────────────────────────────────────────
+   `getpipelineconfig`, `getrouter`, `getgateway`, `getdispatcher`, `getauditstore`,
+   `getpreference`, `setapikey`, `setpreference`, `gettabstore` and `settabstore` each had a
+   body of `<0` or `<""`. They were not stubs awaiting implementation: toke has no
+   module-level mutable state, so there is nowhere for `init()`'s `$corestate` to live between
+   calls and a no-argument getter has nothing it could read. They were unimplementable as
+   declared.
+
+   Nothing called any of them — `browser/pages/installer.tk` is this module's only importer and
+   uses `getconfig()` alone — so deleting them removes ten functions that would have returned a
+   confident zero to anyone who tried. A caller that needs the state should take `$corestate`
+   as a parameter; `init()` returns it, and a struct crosses a module boundary intact. *)

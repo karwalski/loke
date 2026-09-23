@@ -143,6 +143,29 @@ step_checks() {
            failed=1; }
   fi
 
+  # `~` is not expanded by toke's path layer. Measured: file.exists("~/.loke/x") is false for a
+  # file that exists, and file.appendline to a `~/` path writes nothing at all — neither to
+  # $HOME nor to a literal `~` directory.
+  #
+  # 29 literals in this repo began with `~/`. The two that mattered: shared/log.tk appended
+  # every log line to "~/.loke/loke.log", so LOKE HAS NEVER WRITTEN A LOG FILE at any level;
+  # and three call sites loaded "~/.loke/config.toml", so a user's configuration was never
+  # read — compounded by T-18, which meant the fallback to defaults could not run either.
+  #
+  # Gated on the built trees plus cli/mcp-broker/mcp-toke. moke has one more and legacy src/
+  # has three; both are filed rather than gated, because neither tree is in a state where a
+  # gate failure would tell anyone anything new.
+  if [[ -f ./scripts/find_tilde_path.py ]]; then
+    echo "  no unexpanded \`~/\` path literal"
+    python3 ./scripts/find_tilde_path.py --check \
+      packages/core packages/shared packages/browser packages/cli \
+      packages/mcp-broker packages/mcp-toke >/dev/null \
+      || { python3 ./scripts/find_tilde_path.py \
+             packages/core packages/shared packages/browser packages/cli \
+             packages/mcp-broker packages/mcp-toke >&2
+           failed=1; }
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1
