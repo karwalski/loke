@@ -155,6 +155,25 @@ step_checks() {
   # Gated on the built trees plus cli/mcp-broker/mcp-toke. moke has one more and legacy src/
   # has three; both are filed rather than gated, because neither tree is in a state where a
   # gate failure would tell anyone anything new.
+  # T-26 — `x.field == v` as a STATEMENT. toke has no assignment to a struct field, and
+  # E2002's advice for the parse error is to "use ==", which turns it into a legal expression
+  # whose value is discarded. 21 sites in 6 modules, every one silent: the gateway kill switch
+  # logged "activated" and left the flag false; the decision trace recorded nothing;
+  # agents/registry's enable and disable returned $ok(0) for work they had not done.
+  #
+  # No existing check covered this. find_field_matches.py sounds like it would and does not —
+  # that one is a `mt` over a struct field with 3+ arms (T-2).
+  if [[ -f ./scripts/find_discarded_field_compare.py ]]; then
+    echo "  no struct-field comparison used as a statement"
+    python3 ./scripts/find_discarded_field_compare.py --check \
+      packages/core packages/shared packages/browser packages/cli \
+      packages/mcp-broker packages/mcp-toke packages/moke >/dev/null \
+      || { python3 ./scripts/find_discarded_field_compare.py \
+             packages/core packages/shared packages/browser packages/cli \
+             packages/mcp-broker packages/mcp-toke packages/moke >&2
+           failed=1; }
+  fi
+
   if [[ -f ./scripts/find_tilde_path.py ]]; then
     echo "  no unexpanded \`~/\` path literal"
     python3 ./scripts/find_tilde_path.py --check \

@@ -1,0 +1,306 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.feedback.store;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=ft:core.feedback.types;
+i=fs:core.feedback.store;
+
+(* T12.1 — the test this row names has never run. The archived version
+   (_archived-tests/loke/unit/feedback/test_store.tk) is written against a pre-toke API —
+   `db.newmemorystore()`, `str.arraypush`, a hand-rolled $result list and no main() — and
+   `_archived-tests/` is excluded from discovery by run_tests.sh, so none of its
+   assertions has ever been executed. Two of them could not have passed anyway: it saved
+   one thumbs-down and asserted `summaryall.thumbsdown > 1`.
+
+   This file is fresh, against core.feedback.store and core.feedback.types as they are
+   today, through the real `feedback` table.
+
+   HOW THE ROW'S SEVEN BEHAVIOURS MAP ONTO TODAY'S MODULE.
+
+     row                                     module
+     --------------------------------------- ---------------------------------------
+     `append` adds a feedback entry          save() — asserted
+     `list` returns all entries              pendingsubmission() — asserted
+     filter by feature_area returns matching NO FILTER API (see below)
+     filter by thumbs_down returns negative  NO FILTER API; getsummary counts instead
+     entry has no prompt content             asserted against the TABLE's column list
+     `count` matches appended entries        getsummary().total — asserted
+     `clear` empties the store               NO EQUIVALENT — nothing deletes feedback
+
+   THE TWO FILTERS DO NOT EXIST. core.feedback.store exports ensuretable, save,
+   buildsummary, getsummary, buildpendingentries, pendingsubmission, marksubmitted and
+   formatsummary. The only selective read is pendingsubmission, whose predicate is
+   `submitted=0`, and the only window is getsummary's `created_at >= datetime('now',-N days)`.
+   Nothing takes a feature_area or a rating as an argument. The nearest equivalents are
+   asserted instead and named as such: the feature_area and rating a caller supplies
+   survive the round trip through the table (so a filter could be built on them), and
+   getsummary's thumbs-up/thumbs-down counts are the aggregate the product actually shows.
+   `clear` has no equivalent at all — no function in the module deletes a row.
+
+   THE PRIVACY INVARIANT IS THE ONE WORTH HAVING, so it is asserted against the schema
+   rather than against a struct. "This entry has no prompt in it" is trivially true of any
+   $feedbackentry the test constructs; what matters is that the TABLE has nowhere to put
+   one. The column list is pinned below, all ten of them, so adding a `prompt_text` or a
+   `response` column fails this test rather than passing review. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation — std.homedir()'s return is truncated when
+     interpolated (T-21). Its own directory, so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-feedback-store")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file per run: every count below is exact, and a leftover row from a
+     previous run would satisfy "after save the count is 1" without anything having been
+     saved. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+(* Row COUNTS. sdb.countquery returns `rows.len`, so countquery("SELECT COUNT(1) ...") is
+   1 whatever the count is — it answers "did this return a row". Measured: a
+   countquery("SELECT COUNT(1) AS cnt FROM pragma_table_info('feedback')") against a
+   ten-column table returns 1. *)
+f=nrows(sqltext:str):i64{
+  <mt db.many(sqltext;@()) {
+    $ok:rr rr.len as i64;
+    $err:e 0-1
+  }
+};
+
+f=firstcol(rows:@$row;col:str):str{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowstr(r;col)
+  }el{
+    <""
+  }
+};
+
+f=colof(id:str;col:str):str{
+  <mt db.many(str.concat("SELECT ";str.concat(col;" FROM feedback WHERE id=? LIMIT 1"));@(id)) {
+    $ok:rows firstcol(rows;col);
+    $err:e ""
+  }
+};
+
+f=hasid(list:@$feedbackentry;wanted:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<list.len;i=i+1){
+    let e:$feedbackentry=list.get(i);
+    if(str.eq(e.id;wanted)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+f=pendingof(store:i64):@$feedbackentry{
+  <mt fs.pendingsubmission(store) {
+    $ok:entries entries;
+    $err:e @()
+  }
+};
+
+f=summaryof(store:i64;days:u32):$feedbacksummary{
+  <mt fs.getsummary(store;days) {
+    $ok:sm sm;
+    $err:e $feedbacksummary{total:0;thumbsup:0;thumbsdown:0;thumbsuprate:0.0;topissues:@()}
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  mt fs.ensuretable(store) { $ok:v 1; $err:e 0 };
+
+  (* The return of ensuretable is deliberately not asserted. It is `i64!$lokeerr`, and
+     T-18 makes the `$err:` arm of a user-declared error sum dead code — arm 0 always
+     runs — so "it returned $ok" is a statement about the toolchain, not about the
+     database. The table itself is what is asserted. *)
+  if(t.assert(sdb.tableexists("feedback");"ensuretable really creates the feedback table")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM feedback")==0;"and it starts empty")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE PRIVACY INVARIANT ───────────────────────────────────────────────────
+     Feedback is a first-class feature of this product, which means it is collected on
+     every interaction, which means it is the most likely place for prompt text to end up
+     by accident. The table must have nowhere to put any.
+
+     Both directions are asserted: exactly ten columns, and none of them named for
+     anything that could hold a prompt, a response or a body. The first catches a column
+     being ADDED under any name; the second names the specific shapes that would be
+     reached for. `comment` is the user's own words about the interaction and is the only
+     free text here by design. *)
+  if(t.assert(nrows("SELECT name FROM pragma_table_info('feedback')")==10;"the feedback table has exactly ten columns")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT name FROM pragma_table_info('feedback') WHERE name IN ('id','rating','feature_area','request_id','model_id','use_case','risk_level','comment','submitted','created_at')")==10;"and they are exactly the ten expected: id, rating, feature_area, request_id, model_id, use_case, risk_level, comment, submitted, created_at")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT name FROM pragma_table_info('feedback') WHERE name LIKE '%prompt%' OR name LIKE '%text%' OR name LIKE '%content%' OR name LIKE '%response%' OR name LIKE '%body%' OR name LIKE '%message%'")==0;"NO COLUMN OF THIS TABLE CAN HOLD A PROMPT OR A RESPONSE — the entry references a request by id and carries none of it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── newentry ────────────────────────────────────────────────────────────────*)
+  let e1=ft.newentry($feedbackrating{$thumbsup:0};$featurearea{$chatresponse:0};"req-001";"claude-3-5-sonnet";"very helpful");
+  if(t.assert((str.len(e1.id) as i64)==32;"newentry mints a 32-character id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(e1.requestid;"req-001";"and carries the request id it was given — a REFERENCE to the request, not its text")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(e1.modelid;"claude-3-5-sonnet";"the model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(e1.comment;"very helpful";"and the user's comment")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(e1.createdat;"";"with an empty created_at: the timestamp is the database's, set in save(), not the caller's")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The labels, from the module rather than from the test ───────────────────
+     These strings are the contract between save() and every reader of the table:
+     getsummary's `rating='thumbs_up'` and learning's GROUP BY feature_area both match on
+     them exactly. A silent rename makes historical rows uncountable. *)
+  if(t.asserteq(ft.ratinglabel($feedbackrating{$thumbsup:0});"thumbs_up";"a thumbs-up is stored as 'thumbs_up' — the exact literal getsummary counts")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ft.ratinglabel($feedbackrating{$thumbsdown:0});"thumbs_down";"and a thumbs-down as 'thumbs_down'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ft.ratinglabel($feedbackrating{$neutral:0});"neutral";"and neutral as 'neutral', which is neither and must not be counted as either")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ft.arealabel($featurearea{$chatresponse:0});"Chat response";"feature areas are stored as their display labels")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ft.arealabel($featurearea{$routingdecision:0});"Routing decision";"'Routing decision', capitalised")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ft.arealabel($other("Widget X"));"Other: Widget X";"and a free-form area is prefixed 'Other: '")){pass=pass+1}el{fail=fail+1};
+
+  (* ── save, and the round trip ────────────────────────────────────────────────
+     The row's `append`. Asserted through the table, because what a filter or a report
+     would read is the row, not the struct that was handed in. *)
+  mt fs.save(store;e1) { $ok:v 1; $err:e 0 };
+  if(t.assert(nrows("SELECT id FROM feedback")==1;"save writes exactly one row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(e1.id;"rating");"thumbs_up";"with the rating label")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(e1.id;"feature_area");"Chat response";"the feature area label")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(e1.id;"request_id");"req-001";"the request id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(e1.id;"comment");"very helpful";"and the comment")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(e1.id;"submitted");"0";"a new entry is NOT submitted: `submitted` is set by the column default in the INSERT, not by the caller")){pass=pass+1}el{fail=fail+1};
+
+  (* created_at was the literal five characters `now()` until GA5.1, because a SQL
+     function passed as a bound parameter is stored as text. Every feedback row then
+     carried the same created_at, so nothing could be ordered or windowed by it — and
+     getsummary's whole predicate is a window on this column. Both halves are asserted:
+     the string is not the literal, and it is the 19 characters of `YYYY-MM-DD HH:MM:SS`
+     that `datetime('now')` produces. *)
+  if(t.assert(!str.eq(colof(e1.id;"created_at");str.concat("now";"()"));"NO ROW CARRIES THE LITERAL TEXT now() — GA5.1. Compared in toke rather than in SQL: the literal spelled inside a statement is exactly what scripts/find_sql_literal_now.py gates against, and a test that writes it is indistinguishable from a module that does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(colof(e1.id;"created_at")) as i64)==19;"created_at is a real 19-character datetime, which is what getsummary's window compares against")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Two more, so the counts below are not all 1 ─────────────────────────────*)
+  let e2=ft.newentry($feedbackrating{$thumbsdown:0};$featurearea{$routingdecision:0};"req-002";"gpt-4o";"wrong model chosen");
+  mt fs.save(store;e2) { $ok:v 1; $err:e 0 };
+  let e3=ft.newentry($feedbackrating{$thumbsdown:0};$other("Widget X");"req-003";"local";"noisy");
+  mt fs.save(store;e3) { $ok:v 1; $err:e 0 };
+  if(t.assert(nrows("SELECT id FROM feedback")==3;"three entries appended")){pass=pass+1}el{fail=fail+1};
+
+  (* ── `list` ──────────────────────────────────────────────────────────────────
+     pendingsubmission is the only listing the module has. It returns whole entries,
+     rebuilt from the row by buildpendingentries, so this is also the assertion that the
+     string labels map back to the sum variants they came from. *)
+  let pending=pendingof(store);
+  if(t.assert(pending.len==3;"pendingsubmission returns all three")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(pending;e1.id);"including the first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(pending;e2.id);"the second")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(pending;e3.id);"and the third")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The nearest thing to the row's two filters ──────────────────────────────
+     There is no listing that takes a feature_area or a rating. What exists is the label
+     on the row, so what is asserted is that the label is selective: a query BY feature
+     area returns one row of the three, and by rating two of the three. That is the
+     property a filter would be built on, and it is the only part of the row's "filter by
+     feature_area" / "filter by thumbs_down" that this module can answer today. *)
+  if(t.assert(nrows("SELECT id FROM feedback WHERE feature_area='Routing decision'")==1;"exactly one of the three entries is in the Routing decision area — the stored label is selective")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM feedback WHERE rating='thumbs_down'")==2;"and exactly two are thumbs-down")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM feedback WHERE rating='thumbs_up'")==1;"one thumbs-up")){pass=pass+1}el{fail=fail+1};
+
+  (* A free-form area is stored with its prefix already applied.
+
+     MEASURED DEFECT, REPORTED AND NOT FIXED HERE: the prefix is applied AGAIN on the way
+     back. buildpendingentries (store.tk:111) maps any label it does not recognise to
+     `$other(areas)` using the WHOLE stored string, and arealabel (types.tk:84) prepends
+     "Other: " to whatever $other carries. So ft.arealabel(entry.featurearea) for this
+     row is "Other: Other: Widget X", measured, and a label that round-trips twice gains
+     another prefix each time. The stored column is correct, which is why the assertion
+     is on the column: it is true now and stays true when the round trip is fixed. *)
+  if(t.asserteq(colof(e3.id;"feature_area");"Other: Widget X";"a free-form area is stored with its 'Other: ' prefix applied exactly once")){pass=pass+1}el{fail=fail+1};
+
+  (* ── `count` ─────────────────────────────────────────────────────────────────
+     getsummary over a window that contains everything. The counts are asserted
+     individually rather than through the rate, because the rate is a ratio and a ratio
+     cannot distinguish 1-of-3 from 10-of-30 — and the counts are what an incident is
+     opened on (core.governance.incidents.autoopenifdegraded takes this rate). *)
+  let sm=summaryof(store;1 as u32);
+  if(t.assert((sm.total as i64)==3;"getsummary counts all three entries")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((sm.thumbsup as i64)==1;"one thumbs-up")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((sm.thumbsdown as i64)==2;"two thumbs-down")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sm.thumbsuprate>0.333;"the rate is 1/3 (lower bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sm.thumbsuprate<0.334;"and 1/3 (upper bound) — thumbs-up over TOTAL, so a neutral rating dilutes the rate rather than being ignored")){pass=pass+1}el{fail=fail+1};
+
+  (* The formatted line an operator reads. Its three figures must be the summary's. *)
+  let line=fs.formatsummary(sm);
+  if(t.assert(str.contains(line;"3 total");"the formatted summary states the total")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"2 thumbs-down");"and the thumbs-down count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"33.3333%");"and the rate as a percentage")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The window is real in BOTH directions ───────────────────────────────────
+     A row older than the window must be excluded, and included when the window is widened
+     to reach it. Written with a direct INSERT because save() always stamps
+     datetime('now') and there is no way to ask it for an older row — the same reason the
+     elapsed auto-release in test_kill_switch.tk writes its settings row directly. Note
+     `datetime('now')` is unquoted and this literal is a plain date: a quoted SQL function
+     would store its own text (GA5.1). *)
+  mt db.exec("INSERT INTO feedback (id,rating,feature_area,request_id,model_id,use_case,risk_level,comment,submitted,created_at) VALUES (?,'thumbs_up','Chat response','req-old','claude','','','old',0,'2020-01-01 00:00:00')";@("00000000000000000000000000000old")) { $ok:v v; $err:e 0 };
+  if(t.assert(nrows("SELECT id FROM feedback")==4;"a row dated 2020 is in the table")){pass=pass+1}el{fail=fail+1};
+  let recent=summaryof(store;1 as u32);
+  if(t.assert((recent.total as i64)==3;"but a one-day window EXCLUDES it — the window is a real comparison, not a no-op")){pass=pass+1}el{fail=fail+1};
+  let wide=summaryof(store;3650 as u32);
+  if(t.assert((wide.total as i64)==4;"and a ten-year window INCLUDES it, so the exclusion was the date and not a broken query")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((wide.thumbsup as i64)==2;"with its thumbs-up counted")){pass=pass+1}el{fail=fail+1};
+
+  (* An empty result must report zero and a rate of ZERO, not a division by zero.
+     buildsummary guards `total == 0`; without the guard this is 0/0.
+
+     Asserted against buildsummary directly rather than through a zero-day window,
+     because a zero-day window is NOT empty: `datetime('now','-0 days')` is this instant,
+     created_at has one-second resolution, and the comparison is `>=` — so every row
+     written during the current second is inside a window of zero days. Measured: a
+     zero-day window over this table returns 3. That is a fact about the granularity of
+     the column, not a defect, and it is the reason the window assertions above use a
+     row dated 2020 rather than a narrow window over fresh ones. *)
+  let none=fs.buildsummary(@());
+  if(t.assert((none.total as i64)==0;"an empty result set summarises to a total of zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(none.thumbsuprate==0.0;"with a thumbs-up rate of exactly 0.0 — the empty case is guarded, not a divide by zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((none.thumbsup as i64)==0;"and no counts of either kind")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((none.thumbsdown as i64)==0;"neither up nor down")){pass=pass+1}el{fail=fail+1};
+
+  (* ── marksubmitted ───────────────────────────────────────────────────────────
+     The submission queue: pendingsubmission is `submitted=0`, and marksubmitted is what
+     takes an entry off it. One id at a time is the case asserted, because it is the case
+     that works.
+
+     MEASURED DEFECT, REPORTED AND NOT FIXED HERE: marksubmitted marks ONLY THE FIRST id
+     of the list it is given. store.tk:163 opens `lp(...)` and its body begins with `<mt
+     db.exec(...)`, and `<` is a return — so the loop executes one iteration and returns,
+     and the `<$ok(0)` after the loop is unreachable. Measured: three ids in, one row with
+     submitted=1, two still pending. Nothing calls marksubmitted today (grep for it outside
+     store.tk returns nothing), so it is latent; the day a reporter batches a submission,
+     every entry after the first stays queued and is sent again on the next run. The
+     single-id assertions below hold both before and after that is fixed. *)
+  mt fs.marksubmitted(store;@(e1.id)) { $ok:v 1; $err:e 0 };
+  if(t.asserteq(colof(e1.id;"submitted");"1";"marksubmitted marks the entry it is given")){pass=pass+1}el{fail=fail+1};
+  let after1=pendingof(store);
+  if(t.assert(!hasid(after1;e1.id);"and it leaves the pending list")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(after1;e2.id);"while the entries not named stay on it")){pass=pass+1}el{fail=fail+1};
+  mt fs.marksubmitted(store;@(e2.id)) { $ok:v 1; $err:e 0 };
+  if(t.asserteq(colof(e2.id;"submitted");"1";"a second call marks a second entry")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(e3.id;"submitted");"0";"and marking one entry does not mark the others — the UPDATE is keyed by id, not a blanket")){pass=pass+1}el{fail=fail+1};
+
+  (* Marking changes nothing else. A submission queue that dropped rows on submit would
+     take the history with it, and getsummary reads every row regardless of `submitted`. *)
+  if(t.assert(nrows("SELECT id FROM feedback")==4;"marking submits rather than deletes: every row is retained")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((summaryof(store;3650 as u32).total as i64)==4;"and the summary still counts them all")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

@@ -48,38 +48,57 @@ f=defaultflags():$installerflags{
     installdir:t.lokedir()
   }
 };
+(* ── The flag parser ignored every flag, three ways over ──────────────────────────
+   1. `let i=0; if(i<argc){ … }` is a LOOP BODY WITH NO LOOP. Only `args.get(0)` was ever
+      examined, so a flag in any other position could not be seen at all.
+   2. Each branch then did `flags.yes==true` — a COMPARISON, discarded. toke has no assignment
+      to a struct field (T-26), so even the one argument that WAS examined recorded nothing.
+   3. The value-taking flags read `args.get(i)` — the flag's OWN position — where they meant
+      `args.get(i+1)`. So `--model qwen2.5:7b` would have set the model to the string
+      `"--model"` had the assignment worked.
+
+   Net effect: `parseinstallerflags` returned `defaultflags()` for every input. `--yes`,
+   `--model`, `--skip-model`, `--ollama-url` and `--install-dir` were all silently ignored, and
+   an unattended install that passed `--yes` still waited for a prompt.
+
+   Rewritten as a real loop over a `mut` struct local, rebuilt each time a flag matches — which
+   is the only form toke allows — with the value read from `i+1` and the index advanced past it
+   so a value can never be re-read as the next flag. An unknown argument is skipped rather than
+   silently consuming the one after it. *)
 f=parseinstallerflags(args:@str):$installerflags{
-  let flags=defaultflags();
-  let i=0;
-  let argc=args.len;
-  if(i<argc){
+  let flags=mut.defaultflags();
+  let argc=args.len as i64;
+  let i=mut.0;
+  lp(let guard=0;i<argc;guard=guard){
     let arg=args.get(i);
+    let hasvalue=i+1<argc;
     if(str.eq(arg;"--yes")){
-      flags.yes==true
+      flags=$installerflags{ yes:true; model:flags.model; skipmodel:flags.skipmodel; ollamaurl:flags.ollamaurl; installdir:flags.installdir };
+      i=i+1
     }el{
-      if(str.eq(arg;"--model")){
-        if(i+1<argc){
-          flags.model==args.get(i)
-        }el{};
+      if(str.eq(arg;"--skip-model")){
+        flags=$installerflags{ yes:flags.yes; model:flags.model; skipmodel:true; ollamaurl:flags.ollamaurl; installdir:flags.installdir };
+        i=i+1
       }el{
-        if(str.eq(arg;"--skip-model")){
-          flags.skipmodel==true
+        if(str.eq(arg;"--model") && hasvalue){
+          flags=$installerflags{ yes:flags.yes; model:args.get(i+1); skipmodel:flags.skipmodel; ollamaurl:flags.ollamaurl; installdir:flags.installdir };
+          i=i+2
         }el{
-          if(str.eq(arg;"--ollama-url")){
-            if(i+1<argc){
-              flags.ollamaurl==args.get(i)
-            }el{};
+          if(str.eq(arg;"--ollama-url") && hasvalue){
+            flags=$installerflags{ yes:flags.yes; model:flags.model; skipmodel:flags.skipmodel; ollamaurl:args.get(i+1); installdir:flags.installdir };
+            i=i+2
           }el{
-            if(str.eq(arg;"--install-dir")){
-              if(i+1<argc){
-                flags.installdir==args.get(i)
-              }el{};
-            }el{};
-          };
-        };
-      };
-    };
-  }el{};
+            if(str.eq(arg;"--install-dir") && hasvalue){
+              flags=$installerflags{ yes:flags.yes; model:flags.model; skipmodel:flags.skipmodel; ollamaurl:flags.ollamaurl; installdir:args.get(i+1) };
+              i=i+2
+            }el{
+              i=i+1
+            }
+          }
+        }
+      }
+    }
+  };
   <flags
 };
 f=detecthw():$hwinfo{

@@ -1,0 +1,197 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.pipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=pl:core.privacy.pipeline;
+i=rx:core.privacy.regex;
+i=ph:core.privacy.placeholder;
+
+(* T1.5 — the round trip. A prompt goes in, an anonymised prompt goes out with no raw
+   identifier left in it, and the provider's reply restores to exactly what the user wrote.
+
+   WHY THIS FILE EXISTS AT ALL. The story was marked Done against
+   `tests/unit/privacy/test_pipeline.tk`, and no such file was in the live tree: the only
+   copy is `_archived-tests/loke/unit/privacy/test_pipeline.tk`, which sits under
+   `_archived-tests/` and is excluded from discovery by scripts/run_tests.sh's explicit
+   `-not -path '*/_archived-tests/*'`. So none of the assertions the row claims had ever
+   been executed.
+
+   The archived file cannot be revived. It builds its config with
+   `pipeline.newconfig("";"")` and then discards the result to hand-write a
+   `$pipelineconfig` literal, compares sums with `=` (T-14 — that is a handle comparison
+   and is false even for equal levels), reads `emailrun.result.anonymised` in one
+   expression (E4034 — `rows`/`reason`/`value` style ambiguity now requires the
+   intermediate to be annotated), and walks its own result list with `if(i>count)`, which
+   reads one past the end. It is read here for INTENT only.
+
+   THE ONE BEHAVIOUR THE ROW NAMES THAT THE ARCHIVED FILE NEVER TESTED IS RESTORE. Its
+   header promised "restore returns original" and its body asserted only that the
+   anonymised text lacked the address. Restore is the half of the promise that can fail
+   silently — a prompt that is anonymised but cannot be restored has not protected the
+   user, it has broken the product — and until PL1.1 it genuinely did not work: the only
+   `ph.addentry` call site in the repository was a local in `regex.rundetection` that was
+   never returned, so the restore table was built nowhere and restore handed back the
+   model's text with the placeholders still in it. That path is asserted here, through
+   `ph.mapfromentities` over the entity list the run actually anonymised with, which is
+   the live route from a $pipelinerun back to a restore map.
+
+   NO NETWORK. Presidio and NER are pointed at unprivileged ports nothing listens on,
+   following tests/unit/privacy/test_fail_closed.tk, so the only layer that runs is the
+   in-process regex one and no assertion waits on a timeout. Port 1 would be wrong: a
+   privileged bind fails with EACCES and the reachability probe reads a failed bind as
+   "something is listening".
+
+   tests/unit/privacy/test_pipeline_orchestrator.tk owns the config defaults, the
+   sensitivity ranking, dedup, the counters and the run summary, and
+   test_pipeline_full.tk owns anonymisetext and maxsensitivity over hand-built entities.
+   Neither performs a round trip through `run` and back through `restore`, which is what
+   this row specifies and what this file does. *)
+
+f=cfg():$pipelineconfig{
+  <pl.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+(* The placeholder assigned to the first entity of a type in this run, or "" when the type
+   was not detected. Empty is unambiguous: no pattern in the set matches the empty string
+   and assignplaceholders never produces an empty placeholder. *)
+f=placeholderoftype(entities:@$piientity;wanted:str):str{
+  let found=mut."";
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){
+      if(str.eq(found;"")){
+        found=e.placeholder
+      }el{}
+    }el{}
+  };
+  <found
+};
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){
+      n=n+1
+    }el{}
+  };
+  <n
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── A prompt containing an email address ────────────────────────────────────*)
+  let emailin="Contact alice@example.com for details";
+  let run:$pipelinerun=pl.run(emailin;"";cfg());
+  let res:$piidetectionresult=run.result;
+
+  (* NC1.9 first: a run that scanned nothing would satisfy every "no raw PII in the
+     output" assertion below by having produced no output worth checking. Zero entities
+     and zero layers are different facts, and this is what separates them. *)
+  if(t.assert(run.layerscompleted>0 as u32;"a layer actually SCANNED the prompt, so the assertions below are about detection rather than about nothing having run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(run);"and the run may therefore be forwarded")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(run.totalentities==1 as u32;"the pipeline reports exactly one entity")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(res.entities;"email")==1;"and it is the email address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(res.anonymised;"alice@example.com");"THE PROMISE: the anonymised prompt does not contain the address")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(res.original;emailin;"and .original still holds what the user typed, character for character")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The non-PII context around the replaced value ───────────────────────────
+     Asserted by EQUALITY rather than by two str.contains calls. "the output still
+     contains the word Contact" is satisfied by an output that also still contains the
+     address, or by one that has lost half the sentence; reconstructing the expected
+     string from the placeholder the run actually assigned is exact.
+
+     The placeholder is salted with the first four characters of the request id (PL1.1),
+     so its text is not known in advance — which is the point of the salt: a user who
+     types a literal `[EMAIL_1]` into their own prompt must not have it restored to some
+     other person's address. *)
+  let mailph=placeholderoftype(res.entities;"email");
+  if(t.asserteq(res.anonymised;str.concat(str.concat("Contact ";mailph);" for details");"the words either side of the address are preserved exactly; only the address is replaced")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(res.anonymised;mailph);"the placeholder is present in the text, not merely recorded on the entity")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mailph;str.concat(str.concat("[EMAIL_";str.substr(run.requestid;0;4));"_1]");"and it is the SALTED form: the request id's first four characters, then the per-type index")){pass=pass+1}el{fail=fail+1};
+
+  (* The same text through the regex layer alone gets the UNSALTED form. Both shapes are
+     live — a standalone caller has no request id — and asserting the pair is what shows
+     the pipeline is salting rather than that the salt is cosmetic. *)
+  let solo:$piidetectionresult=rx.detect(emailin);
+  if(t.asserteq(placeholderoftype(solo.entities;"email");"[EMAIL_1]";"the regex layer called standalone produces the unsalted [TYPE_N] form")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(mailph;"[EMAIL_1]");"so the pipeline's placeholder is genuinely salted and cannot collide with a literal the user typed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── RESTORE returns the original ────────────────────────────────────────────
+     The half of the round trip the archived file promised and never asserted. The map is
+     built from the entity list the run anonymised with, which is the only route from a
+     $pipelinerun back to a restore table. *)
+  let map=ph.mapfromentities(res.entities);
+  if(t.assert(map.entries.len==1;"the restore table has one entry, built from the run's own entity list")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore(res.anonymised;map);emailin;"restoring the anonymised prompt returns the original, exactly")){pass=pass+1}el{fail=fail+1};
+
+  (* Restore over a model's REPLY, which is what actually happens: the provider echoes the
+     placeholder back inside new prose, and the user must see the real address. *)
+  let reply=str.concat(str.concat("I have emailed ";mailph);" as requested.");
+  if(t.asserteq(ph.restore(reply;map);"I have emailed alice@example.com as requested.";"and a model reply that echoes the placeholder restores to the real address inside the reply")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Sensitivity escalates PUBLIC -> CONFIDENTIAL on email detection ─────────
+     The level decides which providers the prompt may reach, so this is a routing
+     statement, not a label. Both ends are asserted: the same pipeline on text with no
+     address stays PUBLIC, which is what makes the escalation an escalation rather than a
+     constant. *)
+  if(t.asserteq(sh.senslabel(res.sensitivity);"confidential";"an email address escalates the prompt to CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.ishighersensitivity(res.sensitivity;sh.public());"and CONFIDENTIAL genuinely outranks PUBLIC — the == chain this replaced answered false for every pair")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countconfidential(res.entities)==1 as u32;"the run counts one CONFIDENTIAL entity")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(res.entities)==0 as u32;"and no RESTRICTED one, so an address does not over-escalate to the level that forbids cloud routing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A prompt with no PII is left alone ──────────────────────────────────────*)
+  let cleanin="The weather is nice today";
+  let clean:$pipelinerun=pl.run(cleanin;"";cfg());
+  let cleanres:$piidetectionresult=clean.result;
+  if(t.assert(clean.layerscompleted>0 as u32;"the clean prompt was scanned — zero entities and zero layers are different facts (NC1.9)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(clean.totalentities==0 as u32;"and nothing was detected in it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cleanres.anonymised;cleanin;"so the text passes through unchanged, character for character")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(cleanres.sensitivity);"public";"and the prompt stays PUBLIC")){pass=pass+1}el{fail=fail+1};
+  let cleanmap=ph.mapfromentities(cleanres.entities);
+  if(t.assert(cleanmap.entries.len==0;"the restore table is empty")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore(cleanres.anonymised;cleanmap);cleanin;"and restoring an unchanged prompt is still the identity")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Two PII types in one prompt, both restored ──────────────────────────────
+     The chained case. Two entities of DIFFERENT types, so the per-type numbering and the
+     longest-value-first substitution both have to hold at once. Before PL1.1 the layers
+     each numbered from their own counter and `_1` could arrive from more than one of
+     them; restore then let the first map entry consume every occurrence, and one
+     person's identifier came back attached to another's. *)
+  let bothin="mail bob@example.com or ring 0412 345 678 today";
+  let both:$pipelinerun=pl.run(bothin;"";cfg());
+  let bothres:$piidetectionresult=both.result;
+  if(t.assert(both.totalentities==2 as u32;"two identifiers of two types are two entities")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(bothres.entities;"email")==1;"the address is one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(bothres.entities;"phone_au")==1;"and the phone number the other")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(bothres.anonymised;"bob@example.com");"neither raw value survives into the anonymised prompt: not the address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(bothres.anonymised;"0412 345 678");"nor the phone number")){pass=pass+1}el{fail=fail+1};
+
+  let bothph1=placeholderoftype(bothres.entities;"email");
+  let bothph2=placeholderoftype(bothres.entities;"phone_au");
+  if(t.assert(!str.eq(bothph1;bothph2);"the two placeholders are DISTINCT — the PL1.1 collision is what made restore attribute one identifier to the other")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bothres.anonymised;str.concat(str.concat(str.concat(str.concat("mail ";bothph1);" or ring ");bothph2);" today");"and the prose around both is preserved exactly")){pass=pass+1}el{fail=fail+1};
+
+  let bothmap=ph.mapfromentities(bothres.entities);
+  if(t.assert(bothmap.entries.len==2;"the restore table carries both entries")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore(bothres.anonymised;bothmap);bothin;"and restore returns the original prompt with BOTH identifiers back in their own places")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(bothres.sensitivity);"confidential";"two CONFIDENTIAL identifiers do not compound into RESTRICTED at this layer")){pass=pass+1}el{fail=fail+1};
+
+  (* A prompt that is RESTRICTED still round-trips. The level changes the route, not the
+     substitution, and a test that only ever restored CONFIDENTIAL text would not say so. *)
+  let cardin="Card 4111 1111 1111 1111 on file";
+  let card:$pipelinerun=pl.run(cardin;"";cfg());
+  let cardres:$piidetectionresult=card.result;
+  if(t.asserteq(sh.senslabel(cardres.sensitivity);"restricted";"a card number makes the prompt RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(cardres.anonymised;"4111 1111 1111 1111");"the card number does not reach the anonymised prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore(cardres.anonymised;ph.mapfromentities(cardres.entities));cardin;"and it restores exactly")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

@@ -1,0 +1,223 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.regex;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+
+(* T1.1 — the entity type, the sensitivity level and the placeholder format that
+   core.privacy.regex reports for each of the eight identifiers the story names.
+
+   WHY THIS FILE EXISTS AT ALL. The story was marked Done against
+   `tests/unit/privacy/test_regex.tk`, and no such file was in the live tree: the only
+   copy is `_archived-tests/loke/unit/privacy/test_regex.tk`, and scripts/run_tests.sh
+   excludes that directory from discovery with an explicit
+   `-not -path '*/_archived-tests/*'`. So the assertions the row claims had never run,
+   anywhere, in CI or locally.
+
+   The archived file could not simply be moved back. It is written against a pre-toke API
+   that no longer exists — `$piidetectionresult.sensitivity=$confidential` compares a sum
+   handle rather than a variant (T-14, and see the note in pipeline.tk:68 on what that cost),
+   `str.arraylen(detection.entities)` where `.len` is the live accessor, and a hand-rolled
+   `$result`/`logresult` harness in place of std.test. Its loop is also `if(i>count){br}`,
+   which reads ONE PAST the end of every list it walks. So it is read here for INTENT and
+   the behaviour is re-asserted against the module as it is today.
+
+   WHAT IS ASSERTED, and what deliberately is not. Every assertion goes through rx.detect
+   or rx.detectwithpatterns — the trap epic X7 is about is a test that redeclares its
+   subject, and 94 of 135 files in this suite did exactly that. tests/unit/privacy/
+   test_regex_spans.tk owns the SPANS and the PL1.10 digit-boundary rejection, and
+   test_regex_detector.tk owns the pattern inventory; neither asserts the placeholder
+   strings or walks the eight named fixtures, which is what this row specifies and what
+   this file does.
+
+   TWO OF THE ROW'S FIXTURES ARE NOT DETECTED BY TODAY'S MODULE. Both are asserted below
+   in the negative, with the measurement, rather than being quietly dropped or worked
+   around:
+
+     * `123 456 789` — the AU TFN the row names. PL1.10 gated au_tfn on the real TFN
+       checksum (weights 1,4,3,7,5,8,6,9,10, sum divisible by 11). 123 456 789 weighs 323,
+       which is not a multiple of 11, so it is NOT a tax file number and is no longer
+       detected as one. Measured: rx.detect("My TFN is 123 456 789") returns zero entities
+       and PUBLIC. A checksum-valid TFN is used for the positive case.
+
+     * `(555) 123-4567` — the US phone the row names. patphoneus requires the exchange code
+       to start [2-9], which is the NANP rule, and `123` does not. Measured: zero entities,
+       PUBLIC. The number in the row is not a dialable US number. `(555) 234-5678` is, and
+       is detected, so the negative is about the fixture rather than about the pattern. *)
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){
+      n=n+1
+    }el{}
+  };
+  <n
+};
+
+(* The matched VALUE for the first entity of a type, or "" when the type was not detected.
+   An empty string is unambiguous here: no pattern in the set can match the empty string. *)
+f=valueoftype(entities:@$piientity;wanted:str):str{
+  let found=mut."";
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){
+      if(str.eq(found;"")){
+        found=e.value
+      }el{}
+    }el{}
+  };
+  <found
+};
+
+(* The PLACEHOLDER for the nth entity of a type, counting from 1, or "" when there is no
+   such entity. Indexed per type because assignplaceholders numbers per type. *)
+f=placeholderoftype(entities:@$piientity;wanted:str;nth:i64):str{
+  let seen=mut.0;
+  let found=mut."";
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){
+      seen=seen+1;
+      if(seen==nth){
+        found=e.placeholder
+      }el{}
+    }el{}
+  };
+  <found
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── email ───────────────────────────────────────────────────────────────────
+     entity type, matched value, the sensitivity the whole detection carries, and the
+     placeholder. All four are load-bearing: the type names the detector, the value is
+     what applytotext substitutes, the sensitivity decides which providers the prompt may
+     reach, and the placeholder is what restore matches on. *)
+  let mail:$piidetectionresult=rx.detect("Contact john@example.com for details");
+  if(t.assert(countoftype(mail.entities;"email")==1;"an email address is detected exactly once")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(mail.entities;"email");"john@example.com";"and the matched value is the address itself, with no surrounding words")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(mail.sensitivity);"confidential";"an email address makes the prompt CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(mail.entities;"email";1);"[EMAIL_1]";"and the placeholder is the [TYPE_N] form the story specifies")){pass=pass+1}el{fail=fail+1};
+
+  (* ── AU phone ────────────────────────────────────────────────────────────────*)
+  let phau:$piidetectionresult=rx.detect("Ring 0412 345 678 today");
+  if(t.assert(countoftype(phau.entities;"phone_au")==1;"a spaced Australian mobile is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(phau.entities;"phone_au");"0412 345 678";"with the separators the user typed preserved in the value")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(phau.sensitivity);"confidential";"a phone number is CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(phau.entities;"phone_au";1);"[PHONE_AU_1]";"and its placeholder names the type")){pass=pass+1}el{fail=fail+1};
+  (* PL1.10, restated from the other side: an AU mobile must not ALSO be reported as a tax
+     file number. au_tfn is RESTRICTED and phone_au is CONFIDENTIAL, and the pipeline takes
+     the maximum, so the spurious match used to escalate every prompt with a phone number
+     in it to the level that forbids cloud routing. *)
+  if(t.assert(countoftype(phau.entities;"au_tfn")==0;"and is NOT also reported as a tax file number, which would escalate it to RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(phau.entities.len==1;"so the case yields exactly one entity")){pass=pass+1}el{fail=fail+1};
+
+  (* ── US phone ────────────────────────────────────────────────────────────────
+     The row names `(555) 123-4567`. See the header: `123` is not a legal NANP exchange
+     code and patphoneus requires [2-9] there, so that fixture detects nothing. Both the
+     negative and a working positive are asserted, because the negative alone would be
+     satisfied by a phone_us pattern that matched nothing at all. *)
+  let phusrow:$piidetectionresult=rx.detect("Ring (555) 123-4567 today");
+  if(t.assert(countoftype(phusrow.entities;"phone_us")==0;"(555) 123-4567 is NOT detected: an NANP exchange code cannot start with 1, and the pattern requires [2-9]")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(phusrow.sensitivity);"public";"so that text does not raise the prompt's sensitivity at all")){pass=pass+1}el{fail=fail+1};
+
+  let phus:$piidetectionresult=rx.detect("Ring (555) 234-5678 today");
+  if(t.assert(countoftype(phus.entities;"phone_us")==1;"a bracketed US number with a legal exchange code IS detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(phus.entities;"phone_us");"(555) 234-5678";"and the value includes the brackets, so the whole number is substituted rather than part of it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(phus.sensitivity);"confidential";"a US phone number is CONFIDENTIAL, the same as an Australian one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(phus.entities;"phone_us";1);"[PHONE_US_1]";"and it carries its own placeholder type, distinct from phone_au")){pass=pass+1}el{fail=fail+1};
+
+  (* ── credit card ─────────────────────────────────────────────────────────────*)
+  let cc:$piidetectionresult=rx.detect("Card 4111 1111 1111 1111 on file");
+  if(t.assert(countoftype(cc.entities;"credit_card")==1;"a spaced Visa number is detected as a credit_card")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(cc.entities;"credit_card");"4111 1111 1111 1111";"as the whole sixteen digits, not a four-digit group")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(cc.sensitivity);"restricted";"a card number is RESTRICTED, which is what removes cloud eligibility")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(cc.entities;"credit_card";1);"[CREDIT_CARD_1]";"and its placeholder")){pass=pass+1}el{fail=fail+1};
+
+  (* ── AU TFN ──────────────────────────────────────────────────────────────────
+     123 456 782 rather than the row's 123 456 789. See the header for the measurement. *)
+  let tfn:$piidetectionresult=rx.detect("My TFN is 123 456 782");
+  if(t.assert(countoftype(tfn.entities;"au_tfn")==1;"a checksum-valid tax file number is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(tfn.entities;"au_tfn");"123 456 782";"as the nine digits with their spacing")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(tfn.sensitivity);"restricted";"a tax file number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(tfn.entities;"au_tfn";1);"[AU_TFN_1]";"and its placeholder")){pass=pass+1}el{fail=fail+1};
+
+  let tfnrow:$piidetectionresult=rx.detect("My TFN is 123 456 789");
+  if(t.assert(countoftype(tfnrow.entities;"au_tfn")==0;"123 456 789, the number this story names, is NOT a valid TFN — weighted sum 323, not divisible by 11 — and PL1.10 no longer reports it as one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.tfnchecksumvalid("123 456 789");"the checksum predicate agrees, which is where the rejection comes from")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.tfnchecksumvalid("123 456 782");"and passes the number used above, so the gate is not simply refusing everything")){pass=pass+1}el{fail=fail+1};
+
+  (* ── AU ABN ──────────────────────────────────────────────────────────────────*)
+  let abn:$piidetectionresult=rx.detect("ABN 51 824 753 556 registered");
+  if(t.assert(countoftype(abn.entities;"au_abn")==1;"an eleven-digit ABN is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(abn.entities;"au_abn");"51 824 753 556";"across all four digit groups")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(abn.sensitivity);"confidential";"an ABN is CONFIDENTIAL — a public business number, not a personal identifier")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(abn.entities;"au_abn";1);"[AU_ABN_1]";"and its placeholder")){pass=pass+1}el{fail=fail+1};
+
+  (* ── API key ─────────────────────────────────────────────────────────────────
+     The prefix-anchored form. An unanchored "long alphanumeric run" would match most
+     base64 and most hashes, so the prefix is what keeps this a detector rather than a
+     nuisance. *)
+  let key:$piidetectionresult=rx.detect("key sk-ant-abcdefghijklmnopqrst here");
+  if(t.assert(countoftype(key.entities;"api_key")==1;"an sk-ant- prefixed key is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(key.entities;"api_key");"sk-ant-abcdefghijklmnopqrst";"including the prefix, so the whole secret is replaced")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(key.sensitivity);"restricted";"an API key is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(key.entities;"api_key";1);"[API_KEY_1]";"and its placeholder")){pass=pass+1}el{fail=fail+1};
+
+  (* ── IPv4 ────────────────────────────────────────────────────────────────────
+     INTERNAL rather than CONFIDENTIAL. An address is a weak identifier and the pattern
+     also matches version numbers, so raising the whole prompt on one would be the
+     over-detection PL1.10 exists to stop. *)
+  let ip:$piidetectionresult=rx.detect("Host is 192.168.1.1 on the LAN");
+  if(t.assert(countoftype(ip.entities;"ip_v4")==1;"an IPv4 address is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(ip.entities;"ip_v4");"192.168.1.1";"as all four octets")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(ip.sensitivity);"internal";"an IP address is INTERNAL, not CONFIDENTIAL — a weak identifier must not gate cloud routing on its own")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(ip.entities;"ip_v4";1);"[IP_V4_1]";"and its placeholder")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the placeholder FORMAT, as a format ─────────────────────────────────────
+     The story specifies `[TYPE_N]`. The N is per type and starts at 1, which is what
+     makes two addresses in one prompt distinguishable after restore: before PL1.1 the
+     NER layers hardcoded index 1, so two people in a sentence became the same
+     placeholder and restore attributed one person's words to the other. *)
+  let twomail:$piidetectionresult=rx.detect("mail john@example.com and also jane@example.com");
+  if(t.assert(countoftype(twomail.entities;"email")==2;"two addresses are two entities")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(twomail.entities;"email";1);"[EMAIL_1]";"the first is numbered 1")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(twomail.entities;"email";2);"[EMAIL_2]";"and the second 2 — not 1 again, which is what made restore swap identities before PL1.1")){pass=pass+1}el{fail=fail+1};
+
+  (* Numbering is per TYPE, so a second type in the same text starts at 1 rather than
+     continuing a global counter. A shared counter would make the index depend on which
+     other entities happened to be present. *)
+  let mixed:$piidetectionresult=rx.detect("mail john@example.com or ring 0412 345 678");
+  if(t.assert(mixed.entities.len==2;"one email and one phone number are two entities")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(mixed.entities;"email";1);"[EMAIL_1]";"the email is EMAIL_1")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placeholderoftype(mixed.entities;"phone_au";1);"[PHONE_AU_1]";"and the phone number is PHONE_AU_1 — numbering is per type, not a shared counter")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(mixed.sensitivity);"confidential";"and the sensitivity is the maximum over both")){pass=pass+1}el{fail=fail+1};
+
+  (* The placeholder must actually appear in the anonymised text, and the raw value must
+     not. A placeholder assigned but never substituted is the PL1.1 leak: the entity is
+     counted and written to the restore map while the real value goes to the provider. *)
+  if(t.assert(str.contains(mixed.anonymised;"[EMAIL_1]");"the anonymised text carries the placeholder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(mixed.anonymised;"[PHONE_AU_1]");"and the second one too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(mixed.anonymised;"john@example.com");"and does NOT carry the address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(mixed.anonymised;"0412 345 678");"nor the phone number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mixed.original;"mail john@example.com or ring 0412 345 678";"while .original still holds exactly what was passed in")){pass=pass+1}el{fail=fail+1};
+
+  (* ── clean text ──────────────────────────────────────────────────────────────
+     Zero entities and PUBLIC. Half of a detector is what it declines to match: a layer
+     that fires on ordinary prose trains the user to dismiss it. *)
+  let clean:$piidetectionresult=rx.detect("The weather is nice today");
+  if(t.assert(clean.entities.len==0;"clean text yields zero entities")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(clean.sensitivity);"public";"and PUBLIC sensitivity")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(clean.anonymised;"The weather is nice today";"and the text is returned unchanged, character for character")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(clean.original;"The weather is nice today";"with .original the same")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

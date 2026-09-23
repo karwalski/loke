@@ -10,6 +10,7 @@ i=std:std;
 i=sdb:core.storage.db;
 i=set:core.storage.settings;
 i=ks:core.governance.killswitch;
+i=h:browser.pages.api.pipeline;
 
 (* X7.2 — this file used to declare an ENTIRE parallel kill switch: its own
    $killswitchstate with a `switches` array, its own enableglobal / disableglobal /
@@ -33,7 +34,34 @@ i=ks:core.governance.killswitch;
 
    That is the regression this file now guards, and it is why the engage-then-read
    assertion below is the most important line in it: it goes through the real settings
-   table, with the real value_type, exactly as production does. *)
+   table, with the real value_type, exactly as production does.
+
+   ── T10.1, 2026-09-24 ───────────────────────────────────────────────────────────────
+   THE BACKLOG ROW SPECIFIES A KILL SWITCH THAT DOES NOT EXIST, AND IT IS NOT BEING BUILT
+   HERE. The row names `enable_global`, `disable_global`, `enable_provider("anthropic")`,
+   `is_blocked("anthropic","any")`, `list_active` and `fallback_message` — a switch with
+   PER-PROVIDER SCOPE, a list of active entries and a canned message for callers.
+   core.governance.killswitch has none of that. Its whole export list is settingkey,
+   loadstate, engage, release, checkautorelease, isengaged and formatwidget, over a
+   $killswitchstate of engaged / engagedat / engagedby / reason / autoreleaseat. There is
+   no provider argument anywhere in it, no second switch to list, and no fallback string:
+   it is ONE global flag in the settings table. Writing a test for per-provider scoping
+   would mean writing the scoping in the test, which is the X7.1 trap this file was
+   rewritten to escape.
+
+   So the row's equivalents are: `enable_global` → engage, `disable_global` → release,
+   `is_blocked` → isengaged, `fallback_message` → the consequence line in formatwidget
+   ("All LLM traffic blocked"), asserted above. `enable_provider` and `list_active` have
+   no equivalent and are reported absent.
+
+   WHAT WAS GENUINELY MISSING, AND IS NOW ASSERTED: nothing anywhere tested that the
+   switch BLOCKS anything. Every assertion above is about the flag's own state. The row's
+   first clause is "enable_global blocks all", and the code that does the blocking is
+   browser.pages.api.pipeline.killswitchengaged, the guard at the top of the only POST
+   that reaches a provider — which returns 403 before the body is even read. It is
+   exercised at the end of this file, including its fail-CLOSED behaviour on a store it
+   cannot open, because "the flag is set" and "requests stop" are different claims and
+   only the second one is the control. *)
 
 f=testdir():str{
   (* str.concat, not interpolation — std.homedir()'s return is truncated when
@@ -129,6 +157,26 @@ f=main():i64{
   mt set.setint(store;"governance.kill_switch.auto_release_at";1000;"governance") { $ok:v v; $err:e 0 };
   if(t.assert(ks.checkautorelease(store);"an auto-release deadline in the past DOES fire")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!ks.isengaged(store);"and the switch is released by it, without anyone calling release")){pass=pass+1}el{fail=fail+1};
+
+  (* ── T10.1: DOES IT ACTUALLY BLOCK ANYTHING? ─────────────────────────────────
+     The row's first clause. browser.pages.api.pipeline.killswitchengaged is the guard at
+     the top of post() — the one POST in this product that can reach an external provider
+     — and it returns 403 before the request body is read. Asserting the flag without
+     asserting this gate would be asserting a light bulb rather than a circuit.
+
+     THE FAIL-CLOSED CASE FIRST, because it is the one nobody would think to write. A
+     store of 0 is what openstore() returns when the database cannot be opened, and an
+     unreadable kill switch is treated as ENGAGED. The other way round — unreadable means
+     not engaged — is a kill switch that a corrupted or missing database silently
+     disables, which is precisely the situation in which an operator most needs it. *)
+  if(t.assert(h.killswitchengaged(0);"AN UNREADABLE STORE IS TREATED AS ENGAGED: the request path fails CLOSED, so a database that will not open blocks traffic rather than releasing it")){pass=pass+1}el{fail=fail+1};
+
+  ks.release(store);
+  if(t.assert(!h.killswitchengaged(store);"with a readable store and the switch disengaged, the request path does NOT block")){pass=pass+1}el{fail=fail+1};
+  ks.engage(store;"enforcement check";0 as i32);
+  if(t.assert(h.killswitchengaged(store);"AND ENGAGING THE SWITCH BLOCKS THE REQUEST PATH — the gate reads the same settings row this test wrote, so the flag and the refusal cannot drift apart")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+  if(t.assert(!h.killswitchengaged(store);"releasing it unblocks the request path again")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

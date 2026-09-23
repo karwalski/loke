@@ -27,7 +27,35 @@ i=inc:core.governance.incidents;
 
    The lifecycle is exercised against the real table, because the interesting assertion
    is not that a struct field changed — it is that a resolved incident LEAVES the open
-   list, which is a SQL predicate, not a field read. *)
+   list, which is a SQL predicate, not a field read.
+
+   ── T10.2, 2026-09-24 ───────────────────────────────────────────────────────────────
+   HOW THE BACKLOG ROW'S SEVEN BEHAVIOURS MAP ONTO THIS MODULE. Four have direct
+   equivalents and are asserted here; three do not exist and are not invented:
+
+     row                                     module
+     --------------------------------------- ---------------------------------------
+     `create` returns an incident with an id
+       and open status                       openincident — asserted
+     `append` makes it retrievable           NO SEPARATE APPEND: openincident is the
+                                             write; retrievability is asserted through
+                                             listopen and the row itself
+     `resolve` sets resolved=true            resolve sets status='resolved' and stamps
+                                             resolved_at — asserted
+     `list_open` excludes resolved           asserted, in both directions
+     `list_all` includes both                ABSENT — listopen is the only listing in
+                                             the module. What IS asserted is that a
+                                             resolved incident's ROW is retained, which
+                                             is what a list_all would read
+     `get` by unknown id returns none        ABSENT — there is no get()
+     `post_incident_template`                ABSENT — no template, no post-incident
+                                             review anywhere in the module
+
+   The exports are sevp0..sevp3, statusopen, statusinvestigating, statusresolved,
+   ensuretable, openincident, updatestatus, resolve, listopen, autoopenifdegraded and
+   formatincidents. Nothing reads a single incident by id, so "unknown id returns none"
+   has nothing to be asked of; the closest observable is that an update naming an unknown
+   id changes nothing, which is asserted at the end. *)
 
 f=testdir():str{
   <str.concat(std.homedir();"/.loke/test-incidents")
@@ -56,6 +84,13 @@ f=countof(rows:@$row):i64{
 f=totalincidents():i64{
   <mt db.many("SELECT COUNT(1) AS cnt FROM incidents";@()) {
     $ok:rows countof(rows);
+    $err:e 0-1
+  }
+};
+
+f=nrowsresolved():i64{
+  <mt db.many("SELECT id FROM incidents WHERE status='resolved'";@()) {
+    $ok:rr rr.len as i64;
     $err:e 0-1
   }
 };
@@ -162,6 +197,38 @@ f=main():i64{
   if(t.assert(str.contains(table;"Severity");"the formatted table has a Severity column")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(table;"P2");"and carries the severity of the incident in it")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(table;"claude-3.5-sonnet");"and the title")){pass=pass+1}el{fail=fail+1};
+
+  (* ── T10.2: an unknown id ────────────────────────────────────────────────────
+     The row asks for `get(unknown)` to return none. There is no get(), so the observable
+     equivalent is that naming an id the table does not hold changes nothing.
+
+     MEASURED, REPORTED AND NOT FIXED HERE: both resolve() and updatestatus() return TRUE
+     for an id that does not exist. sql.exec succeeds — an UPDATE matching no row is not
+     an error in SQLite — and neither function checks how many rows it touched, so a
+     caller resolving a mistyped id is told the incident is closed and it is still open.
+     The assertion is on the TABLE, because the table is the half that tells the truth,
+     and it holds both now and after that is fixed. *)
+  let beforeunknown=totalincidents();
+  inc.resolve(store;"no-such-incident-id";"closed in error");
+  inc.updatestatus(store;"no-such-incident-id";inc.statusinvestigating());
+  if(t.assert(totalincidents()==beforeunknown;"an update naming an unknown incident id changes no row and creates none")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(inc.listopen(store).len==1;"and leaves the open list exactly as it was")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The empty open list ─────────────────────────────────────────────────────
+     The state an operator most wants to see, and the one a WHERE clause is most likely to
+     get wrong in the quiet direction: `status != 'resolved'` over a table where every row
+     IS resolved must return nothing at all, not the whole table. The rows themselves stay
+     — an incident log that deletes on resolve has no history, and a list_all would read
+     these two. *)
+  inc.resolve(store;autoinc.id;"model recovered");
+  if(t.assert(inc.listopen(store).len==0;"with every incident resolved the open list is EMPTY")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==2;"while both incidents are still in the table — resolving closes an incident, it does not erase it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrowsresolved()==2;"and both are marked resolved")){pass=pass+1}el{fail=fail+1};
+
+  (* An empty list must still render a table. A blank string reads as a rendering failure
+     rather than as "nothing is on fire", and those are opposite messages. *)
+  let emptytable=inc.formatincidents(inc.listopen(store));
+  if(t.assert(str.contains(emptytable;"Severity");"an empty incident list still renders its header row, so 'no incidents' cannot be mistaken for 'the view is broken'")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

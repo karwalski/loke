@@ -1,0 +1,235 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.router.escalation;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=prov:core.providers.types;
+i=sens:core.router.sensitivity;
+i=esc:core.router.escalation;
+
+(* T2.4 — core.router.escalation: the ladder, the trigger record, and the formatted
+   message. Plus, recorded rather than worked around, the two things the story asks for
+   that this module does not do.
+
+   WHY THIS FILE EXISTS AT ALL. The story was marked Done against
+   `tests/unit/router/test_escalation.tk`, and no such file was in the live tree: the only
+   copy is `_archived-tests/loke/unit/router/test_escalation.tk`, excluded from discovery
+   by scripts/run_tests.sh's `-not -path '*/_archived-tests/*'`. None of its assertions had
+   ever been run. It cannot be revived either — `esc.defaultpolicy.minconfidence` reads
+   `defaultpolicy` as a value where it is a function, `=` is used for equality throughout
+   (T-14/E2002), and `trigger.reason` is read without annotating the intermediate, which
+   `reason` being declared by several structs at different offsets now makes ambiguous at
+   the READ (E4034). It is read here for intent only.
+
+   ── WHAT THE STORY ASKS FOR THAT IS NOT HERE ────────────────────────────────────────
+
+   The row specifies "escalation path selected when sensitivity is RESTRICTED;
+   non-escalation path selected for PUBLIC". **core.router.escalation has no sensitivity
+   input of any kind.** `shouldescalate(response, policy)` decides on RESPONSE QUALITY —
+   empty content, fewer than ten output tokens, or a short answer containing "I don't
+   know" / "I cannot" / "I'm not sure" — and `escalationtarget(currentmodel)` is a fixed
+   string ladder. Neither function takes a $sensitivitylevel, and neither module-level
+   function mentions one. So that behaviour is not asserted here, because there is nothing
+   in this module to assert it against; it is NOT invented, and no assertion is written
+   around it.
+
+   The sensitivity gate the product actually has lives elsewhere and is already tested:
+   `core.router.sensitivity.canusecloud` (tests/unit/router/test_sensitivity.tk) and the
+   route-level refusal in tests/unit/router/test_route_safety.tk. The one assertion below
+   that touches sensitivity does so to record that the two components DISAGREE, which is
+   a fact about today's code rather than a wish.
+
+   ── THREE MEASURED DEFECTS, ASSERTED AS THEY ARE ────────────────────────────────────
+
+   1. `shouldescalate` NEVER READS ITS `policy` PARAMETER. router/escalation.tk:41 takes
+      `policy:$escalationpolicy` and the body does not mention it once — `grep -n policy`
+      over the file returns the struct declaration, `defaultpolicy`, and the signature,
+      and nothing else. Measured: with `$escalationpolicy{minconfidence:0.9;maxretries:0;
+      allowcloudescalation:false}` the answer is identical to the default policy's on
+      every one of ten inputs. So all three fields of $escalationpolicy are read by
+      nothing, anywhere in the repository, and a configured policy is decoration.
+
+   2. `escalationtarget` TAKES NO POLICY, so `allowcloudescalation:false` cannot stop it.
+      Measured: `llama3.1:8b` -> `claude-3-5-haiku-20241022`, and EVERY unrecognised model
+      -> `claude-3-5-sonnet-20241022`. There is no local rung and no refusal: a ladder
+      consulted by a caller honouring a no-cloud policy would still be handed Anthropic.
+
+   3. The fallback SWALLOWS THE TOP OF THE LADDER. Measured:
+      `escalationtarget("claude-3-5-sonnet-20241022")` returns
+      `claude-3-5-sonnet-20241022` — itself. A retry loop driven by this ladder never
+      changes model once it reaches the top, and `escalationtarget("")` also answers
+      sonnet, so an empty model id escalates to a cloud provider.
+
+   All three are LATENT, and that is checked rather than assumed: `grep -rn
+   core.router.escalation` over packages/, src/ and tests/ finds no importer at all — only
+   the archived test and two comments recording that this module was entirely dead through
+   the LS1.1l wrapper bug. So nothing in the product calls any of it today. The assertions
+   below therefore record the no-op contract rather than the intended one, following the
+   precedent set for pipeline.applypreset in tests/unit/privacy/
+   test_pipeline_orchestrator.tk: when the policy is honoured they go RED, and that is the
+   signal to write the real assertions.
+
+   NO NETWORK. Every function here is pure except recordescalation, which writes one log
+   line and reads the clock. *)
+
+f=resp(content:str;outtok:i64;model:str):$completionresponse{
+  <$completionresponse{
+    content:content;
+    modelid:model;
+    inputtokens:10 as u32;
+    outputtokens:outtok as u32;
+    finishreason:"stop";
+    costusd:0.0
+  }
+};
+
+(* Long enough to clear the 100-character short-answer test, so the three phrase checks
+   cannot fire and the only thing under test is the branch named in each assertion. *)
+f=goodanswer():str{
+  <"Canberra is the capital of Australia, chosen as a compromise between Sydney and Melbourne and founded in 1913."
+};
+
+f=nocloud():$escalationpolicy{
+  <$escalationpolicy{minconfidence:0.9;maxretries:0;allowcloudescalation:false}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── defaultpolicy ───────────────────────────────────────────────────────────
+     Read by nothing (see defect 1), so these assert that the numbers cross the module
+     boundary intact rather than that they take effect. minconfidence is read through
+     shared.types.f64hundredths because an f64 PARAMETER crosses intact while a bare f64
+     RETURN does not (T-20), and 0.7 must not be asserted by sign or by "> 0": a denormal
+     is greater than zero, which is how a corrupt value passed a test in this repository
+     for months. 70 hundredths, by equality. *)
+  let p:$escalationpolicy=esc.defaultpolicy();
+  if(t.assert(sh.f64hundredths(p.minconfidence)==70;"the default minimum confidence is 0.70, exactly — asserted in hundredths because a bare f64 return is corrupted across a module boundary (T-20)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((p.maxretries as i64)==2;"the default retry budget is 2")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(p.allowcloudescalation;"and cloud escalation is permitted by default")){pass=pass+1}el{fail=fail+1};
+
+  (* A policy the caller builds itself round-trips, which is what makes the no-op
+     assertions further down statements about shouldescalate rather than about the struct
+     failing to carry its own fields. *)
+  let strict:$escalationpolicy=nocloud();
+  if(t.assert(sh.f64hundredths(strict.minconfidence)==90;"a caller's own policy carries its confidence threshold")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((strict.maxretries as i64)==0;"its retry budget")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!strict.allowcloudescalation;"and its refusal of cloud escalation")){pass=pass+1}el{fail=fail+1};
+
+  (* ── shouldescalate: the four branches that DO decide ────────────────────────
+     The control comes first. A complete answer must NOT escalate, or every request
+     escalates and the local-first promise is void. *)
+  let good=goodanswer();
+  if(t.assert(!esc.shouldescalate(resp(good;200;"qwen2.5:7b");p);"a long, complete answer does NOT escalate — the non-escalation path")){pass=pass+1}el{fail=fail+1};
+
+  (* Empty content. This is also the shape of core.providers.types.nocompletion, the
+     sentinel every provider answers a FAILED completion with (LS1.1j), so a failed call
+     escalates rather than being returned to the user as an empty reply. *)
+  if(t.assert(esc.shouldescalate(resp("";200;"qwen2.5:7b");p);"an EMPTY answer escalates — which is also what a failed provider call looks like")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(esc.shouldescalate(prov.nocompletion("connection refused");p);"and the nocompletion sentinel itself escalates, so a dead provider is retried rather than surfaced as silence")){pass=pass+1}el{fail=fail+1};
+
+  (* The token floor, by its exact boundary. "> 0" would be satisfied by any threshold at
+     all; the threshold is ten, and nine escalates while ten does not. *)
+  if(t.assert(esc.shouldescalate(resp(good;9;"qwen2.5:7b");p);"nine output tokens escalates")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!esc.shouldescalate(resp(good;10;"qwen2.5:7b");p);"and ten does not — the floor is strictly below 10, not around it")){pass=pass+1}el{fail=fail+1};
+
+  (* The three refusal phrases, and the length guard on them. The guard matters: without
+     it a long, genuinely useful answer that happens to contain "I cannot" in a subordinate
+     clause would be thrown away and re-run on a bigger model. *)
+  if(t.assert(esc.shouldescalate(resp("I don't know.";200;"qwen2.5:7b");p);"a short \"I don't know\" escalates")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(esc.shouldescalate(resp("I cannot answer that.";200;"qwen2.5:7b");p);"so does \"I cannot\"")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(esc.shouldescalate(resp("I'm not sure.";200;"qwen2.5:7b");p);"and \"I'm not sure\"")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!esc.shouldescalate(resp("Canberra.";200;"qwen2.5:7b");p);"a SHORT answer that is simply correct does not escalate: shortness alone is not a fault")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!esc.shouldescalate(resp(str.concat("I don't know who asked, but ";good);200;"qwen2.5:7b");p);"and a LONG answer containing the phrase does not escalate — the phrase test is guarded by the 100-character length test")){pass=pass+1}el{fail=fail+1};
+
+  (* ── DEFECT 1, recorded: the policy parameter is ignored ─────────────────────
+     Identical answers under a policy that forbids cloud escalation, sets the retry budget
+     to zero and raises the confidence floor to 0.9. Both directions are asserted, because
+     a single case would be satisfied by a policy that happened to agree. *)
+  if(t.assert(!esc.shouldescalate(resp(good;200;"qwen2.5:7b");strict);"shouldescalate IGNORES ITS POLICY: a good answer under a no-cloud, zero-retry policy answers exactly as under the default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(esc.shouldescalate(resp("";200;"qwen2.5:7b");strict);"and an empty answer STILL says escalate under a policy that forbids escalating anywhere")){pass=pass+1}el{fail=fail+1};
+
+  (* ── escalationtarget: the ladder ────────────────────────────────────────────
+     Asserted by exact model id. A ladder is a routing decision — which provider the next
+     attempt reaches — so "some larger model" is not the assertion worth having. *)
+  if(t.asserteq(esc.escalationtarget("qwen2.5:7b");"qwen2.5:72b";"a small local model escalates to a LARGER LOCAL one, keeping the request on the machine")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.escalationtarget("llama3.2:3b");"llama3.1:8b";"and so does the smallest llama")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.escalationtarget("llama3.1:8b");"claude-3-5-haiku-20241022";"the 8b rung is where the ladder LEAVES THE MACHINE, to the cheapest hosted model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.escalationtarget("qwen2.5:72b");"claude-3-5-sonnet-20241022";"and the largest local model escalates to the strongest hosted one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── DEFECTS 2 AND 3, recorded ───────────────────────────────────────────────
+     The ladder takes no policy, so there is no argument by which a caller could forbid
+     the cloud rungs, and its fallback answers a cloud model for everything it does not
+     recognise — including a cloud model, and including an empty model id. *)
+  if(t.asserteq(esc.escalationtarget("some-unknown-model");"claude-3-5-sonnet-20241022";"an UNRECOGNISED model escalates straight to a cloud provider — there is no local rung and no refusal in the fallback")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.escalationtarget("");"claude-3-5-sonnet-20241022";"and so does an EMPTY model id, which is what a failed completion carries in .modelid")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.escalationtarget("claude-3-5-sonnet-20241022");"claude-3-5-sonnet-20241022";"the top of the ladder escalates to ITSELF, so a retry loop driven by this never changes model")){pass=pass+1}el{fail=fail+1};
+
+  (* THE DISAGREEMENT, asserted rather than described. core.router.sensitivity says a
+     RESTRICTED prompt must not reach a cloud provider; this ladder hands out a cloud
+     model for the 8b rung and for everything it does not recognise, with no sensitivity
+     argument by which it could know. Nothing in the product calls escalationtarget today,
+     which is the only reason this is latent — see the header. *)
+  if(t.assert(!sens.canusecloud(sh.restricted());"core.router.sensitivity forbids a RESTRICTED prompt from reaching a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(esc.escalationtarget("llama3.1:8b");"claude");"yet the escalation ladder returns a cloud model with no sensitivity input and no policy argument, so the two components cannot agree")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sens.canusecloud(sh.public());"and the boundary is real: a PUBLIC prompt may use the cloud, so the refusal above is about RESTRICTED and not about the cloud being unreachable")){pass=pass+1}el{fail=fail+1};
+
+  (* ── recordescalation: the trigger record ───────────────────────────────────
+     The row asks for a reason field on the result, and for the message to name the model.
+     Both hold. The intermediate is annotated because `reason` is declared by several
+     structs at different offsets and toke reports the ambiguity at the READ (E4034). *)
+  let trig:$escalationtrigger=esc.recordescalation("qwen2.5:7b";"qwen2.5:72b";"low token count");
+  if(t.asserteq(trig.frommodel;"qwen2.5:7b";"the record names the model that was escalated FROM")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(trig.tomodel;"qwen2.5:72b";"and the model escalated TO")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(trig.reason;"low token count";"and it carries the REASON field the story specifies, verbatim")){pass=pass+1}el{fail=fail+1};
+
+  (* A real clock, not a zero and not a placeholder. "> 0" is not enough: a created_at of
+     0 read as 1970 is how the memory sweep came within one story of deleting the user's
+     whole palace (tests/unit/memory/test_decay.tk), so a timestamp is bounded at both
+     ends. These bounds are 2023-11-14 and 2033-05-18 in Unix MILLISECONDS, which also
+     catches the commonest error in this field: seconds written where ms were meant. *)
+  if(t.assert(trig.triggeredat>1700000000000;"the trigger is stamped with a real clock reading, not 0 — and in MILLISECONDS, so a seconds value would fail this lower bound")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(trig.triggeredat<2000000000000;"and one this side of 2033, so a microsecond or nanosecond reading would fail too")){pass=pass+1}el{fail=fail+1};
+
+  (* Two records taken in order must not go backwards. A monotonicity failure here would
+     make an escalation trail unorderable, which is what a reviewer reads it for. *)
+  let trig2:$escalationtrigger=esc.recordescalation("llama3.1:8b";"claude-3-5-haiku-20241022";"empty response");
+  if(t.assert(trig2.triggeredat>=trig.triggeredat;"a later escalation is stamped no earlier than an earlier one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(trig2.reason;"empty response";"and each record keeps its OWN reason — the second is not the first's")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(trig2.tomodel;"claude-3-5-haiku-20241022";"and its own destination")){pass=pass+1}el{fail=fail+1};
+
+  (* An empty reason is passed through rather than defaulted. A caller that forgets to say
+     why must produce a visibly empty trail entry, not a plausible invented one. *)
+  let trigblank:$escalationtrigger=esc.recordescalation("a";"b";"");
+  if(t.asserteq(trigblank.reason;"";"an empty reason is recorded as empty, not substituted with a plausible default")){pass=pass+1}el{fail=fail+1};
+
+  (* ── formattrigger: the message a person reads ───────────────────────────────
+     The story asks that the escalation message contain the model name. It contains both,
+     and the whole string is asserted by equality: "contains the model name" is satisfied
+     by a message that has lost the reason, or the direction, or names the two models the
+     wrong way round. *)
+  let msg=esc.formattrigger(trig);
+  if(t.asserteq(msg;"Escalated: qwen2.5:7b → qwen2.5:72b (low token count)";"the whole message, by equality — direction, both model names and the reason, in order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(msg;"qwen2.5:7b");"it names the model escalated from")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(msg;"qwen2.5:72b");"and the model escalated to")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(msg;"low token count");"and the reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(msg;"→");"with an arrow, so the direction is unambiguous to a reader")){pass=pass+1}el{fail=fail+1};
+
+  (* Formatting is a pure function of the record, so a hand-built trigger formats the
+     same way. This is what says the message is built from the fields rather than from
+     whatever recordescalation happened to be called with. *)
+  let manual:$escalationtrigger=$escalationtrigger{
+    reason:"test reason";
+    frommodel:"model-a";
+    tomodel:"model-b";
+    triggeredat:1000
+  };
+  if(t.asserteq(esc.formattrigger(manual);"Escalated: model-a → model-b (test reason)";"a hand-built record formats from its own fields")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.formattrigger(trigblank);"Escalated: a → b ()";"and an empty reason leaves visibly empty brackets rather than being hidden")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

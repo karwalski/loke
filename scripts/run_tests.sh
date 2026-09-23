@@ -10,7 +10,11 @@ TOKE=$TOKEDIR/toke
 # the first time the code under test writes a log line.
 TKCONFIG="--config=$(cd "$(dirname "$0")/.." && pwd)/tkc.toml"
 STDLIB=$TOKEDIR/src/stdlib
-BUILDDIR="/tmp/loke-tests"
+# Overridable so two runs can proceed at once. The archives (libloke.a, libmoke.a,
+# libtokestd.a) are built INTO this directory, so a hardcoded path meant a second
+# concurrent run rebuilt the first one's archives underneath it — which shows up as a
+# test that fails to link for no reason anybody can reproduce afterwards.
+BUILDDIR="${BUILDDIR:-/tmp/loke-tests}"
 SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECTDIR="$(cd "$SCRIPTDIR/.." && pwd)"
 IFACE_DIR="$PROJECTDIR/build/interfaces"

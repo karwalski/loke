@@ -1,0 +1,277 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.feedback.learning;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=ft:core.feedback.types;
+i=fs:core.feedback.store;
+i=fl:core.feedback.learning;
+
+(* T12.2 — the test this row names has never run. The archived version
+   (_archived-tests/loke/unit/feedback/test_learning.tk) is written against a pre-toke API
+   (`str.arraypush`, `str.arrayget`, no main()) and sits in `_archived-tests/`, which
+   run_tests.sh excludes from discovery.
+
+   THE ROW SPECIFIES A DIFFERENT MODULE FROM THE ONE THAT EXISTS. Its five behaviours are:
+
+     row                                                    module
+     ------------------------------------------------------ ------------------------------
+     thumbs-down on a model decrements ITS score            ABSENT — no per-model score
+     a false-positive PII report reduces that pattern's
+       confidence                                           ABSENT — nothing in
+                                                            core.feedback reaches
+                                                            core.privacy at all
+     high thumbs-down on a warning type raises a
+       sensitivity review flag                              ABSENT — no flag, no review
+     `list_adaptations` describes each change               ABSENT — formatlearningstate
+                                                            renders a state held in memory,
+                                                            not a list of applied changes
+     `revert` removes an adaptation                         ABSENT — nothing deletes one
+
+   core.feedback.learning exports exactly four functions — computesignals,
+   deriveadjustments, applylearning, formatlearningstate — over three types. There is no
+   per-model score: every $routingadjustment this module can produce carries
+   `model:"router"`, a literal, so "which model was thumbed down" is not represented. No
+   part of it touches privacy patterns or governance warning types; the only input is the
+   `feedback` table and the only output is a settings key. So four of the five specified
+   behaviours have no equivalent to assert, and they are reported as absent rather than
+   asserted around.
+
+   The nearest thing to the first — feedback lowering a routing weight — is
+   deriveadjustments, which turns a low thumbs-up rate on a routing feature area into an
+   adjustment of -0.2. That IS in the module, it is what the row is reaching for, and it
+   DOES NOT WORK. Two assertions below are deliberately RED for it; see the marked
+   sections. Everything else in this file asserts what does hold: the signal arithmetic
+   over the real feedback table, the confidence bands, and the operator's view.
+
+   WHAT IS ASSERTED GOES THROUGH THE REAL TABLE. computesignals takes a $store and runs a
+   GROUP BY over `feedback`, so the seventy entries below are saved with
+   core.feedback.store.save and read back through the module — the labels, the grouping
+   and the rate are all the product's own. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation — std.homedir()'s return is truncated when
+     interpolated (T-21). Its own directory, so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-feedback-learning")
+};
+
+(* computesignals and applylearning take a $store STRUCT, not the i64 the governance
+   modules take, so the store is opened once here and threaded as itself. T-30: std.db has
+   a single global connection and only conn id 0 resolves, so this must be the only
+   database opened in the process — it is. *)
+f=openfreshstore():$store{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file per run. The sample sizes below are exact and the confidence
+     bands are decided by them: leftover rows from a previous run would push a 9-row area
+     over the band boundary and make "low" fail for a reason that has nothing to do with
+     the code. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:v v;
+    $err:e $store{conn:$dbconn{handle:0};datadir:dir}
+  }
+};
+
+f=nrows(sqltext:str):i64{
+  <mt db.many(sqltext;@()) {
+    $ok:rr rr.len as i64;
+    $err:e 0-1
+  }
+};
+
+(* A sentinel rather than a result: T-18 makes the error arm of a user-declared sum dead
+   code, so "no signal for this area" returned as an $err would be read as a signal. An
+   empty featurearea is a value no real signal can take — computesignals fills it from a
+   GROUP BY key that is NOT NULL. *)
+f=signalfor(sigs:@$learningsignal;area:str):$learningsignal{
+  let found=mut.$learningsignal{featurearea:"";thumbsuprate:0.0;samplesize:0 as i32;confidence:""};
+  lp(let i=0;i<sigs.len;i=i+1){
+    let sg:$learningsignal=sigs.get(i);
+    if(str.eq(sg.featurearea;area)){
+      found=sg
+    }el{}
+  };
+  <found
+};
+
+f=saveup(store:i64;area:$featurearea;n:i64):i64{
+  lp(let i=0;i<n;i=i+1){
+    mt fs.save(store;ft.newentry($feedbackrating{$thumbsup:0};area;"req";"model";"")) { $ok:v 1; $err:e 0 }
+  };
+  <n
+};
+
+f=savedown(store:i64;area:$featurearea;n:i64):i64{
+  lp(let i=0;i<n;i=i+1){
+    mt fs.save(store;ft.newentry($feedbackrating{$thumbsdown:0};area;"req";"model";"")) { $ok:v 1; $err:e 0 }
+  };
+  <n
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let st=openfreshstore();
+  (* The i64 zero is the store argument core.feedback.store takes. Both spellings reach
+     the same single global connection (T-30); the struct is needed only by
+     core.feedback.learning, whose signatures ask for it. *)
+  mt fs.ensuretable(0) { $ok:v 1; $err:e 0 };
+  if(t.assert(sdb.tableexists("feedback");"the feedback table exists — computesignals reads it and a missing table would give an empty GROUP BY that looks like 'no feedback yet'")){pass=pass+1}el{fail=fail+1};
+
+  (* ── No feedback, no signals ─────────────────────────────────────────────────
+     The empty case has to be a definite zero rather than one signal with a zero rate: a
+     rate of 0.0 is "everybody hated it" and is exactly what would trip the negative
+     adjustment below. *)
+  let nosigs=fl.computesignals(st);
+  if(t.assert(nosigs.len==0;"an empty feedback table yields NO signals — not one signal with a 0.0 rate, which would read as universal disapproval")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Seventy entries, three areas, three sample sizes ────────────────────────
+     Saved through core.feedback.store so the feature_area labels are the product's own.
+     The three counts are chosen to sit on the two confidence boundaries:
+     `total < 10` is low, `!(total > 50)` is medium, the rest is high. *)
+  saveup(0;$featurearea{$chatresponse:0};3);
+  savedown(0;$featurearea{$chatresponse:0};6);
+  saveup(0;$featurearea{$privacydetection:0};9);
+  savedown(0;$featurearea{$privacydetection:0};1);
+  savedown(0;$featurearea{$routingdecision:0};51);
+  if(t.assert(nrows("SELECT id FROM feedback")==70;"seventy entries are in the table")){pass=pass+1}el{fail=fail+1};
+
+  let sigs=fl.computesignals(st);
+  if(t.assert(sigs.len==3;"computesignals returns ONE signal per feature area, not one per entry")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The arithmetic ──────────────────────────────────────────────────────────
+     Rate is thumbs-up over TOTAL. Asserted by bounds tight enough to distinguish 3/9 from
+     any other ratio of small integers, and by exact equality where the value is exact. *)
+  let chat=signalfor(sigs;"Chat response");
+  if(t.asserteq(chat.featurearea;"Chat response";"a signal is keyed by the stored feature-area LABEL, which is what save() writes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((chat.samplesize as i64)==9;"nine entries in that area")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(chat.thumbsuprate>0.333;"3 up of 9 is a rate of one third (lower bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(chat.thumbsuprate<0.334;"one third (upper bound)")){pass=pass+1}el{fail=fail+1};
+
+  let routing=signalfor(sigs;"Routing decision");
+  if(t.assert((routing.samplesize as i64)==51;"fifty-one entries in the routing area")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(routing.thumbsuprate==0.0;"none of them positive: the rate is exactly 0.0, so SUM(CASE WHEN rating='thumbs_up') matched nothing rather than failing to parse")){pass=pass+1}el{fail=fail+1};
+
+  let privacy=signalfor(sigs;"Privacy detection");
+  if(t.assert((privacy.samplesize as i64)==10;"ten in the privacy area")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(privacy.thumbsuprate>0.899;"9 up of 10 is 0.9 (lower bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(privacy.thumbsuprate<0.901;"0.9 (upper bound)")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The confidence bands, both boundaries ───────────────────────────────────
+     `if(total<10){low} el{ if(!(total>50)){medium} el{high} }`. Nine is the largest low,
+     ten the smallest medium, fifty-one the smallest high. These three assertions pin both
+     boundaries exactly, which a "> 0" style assertion could not.
+
+     Worth knowing while reading them: `confidence` is computed here and read NOWHERE.
+     deriveadjustments gates on samplesize > 10 directly and never looks at this field, so
+     the band is presentational today — it appears in formatlearningstate and nothing
+     else. *)
+  if(t.asserteq(chat.confidence;"low";"nine samples is LOW confidence — the band is `total < 10`")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(privacy.confidence;"medium";"ten samples is MEDIUM: the boundary is inclusive on this side")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routing.confidence;"high";"fifty-one is HIGH — the band is `!(total > 50)` for medium, so fifty would still be medium")){pass=pass+1}el{fail=fail+1};
+
+  (* ── deriveadjustments: the empty case ───────────────────────────────────────*)
+  if(t.assert(fl.deriveadjustments(@()).len==0;"no signals, no adjustments")){pass=pass+1}el{fail=fail+1};
+
+  (* ── MARKER 1, DELIBERATELY RED ──────────────────────────────────────────────
+     DEFECT: deriveadjustments RETURNS AN EMPTY ARRAY FOR EVERY INPUT.
+
+     learning.tk:76 declares `let result=@();` — not `mut.` — and every branch then does
+     `result.push($routingadjustment{...})` as a statement. `.push` RETURNS a new array
+     and does not mutate; the returned value is discarded, and `<result` at the end
+     returns the empty array it started with. Every other loop in this codebase that
+     appends writes `xs=xs.push(x)`; this one does not.
+
+     MEASURED. Three inputs, each a single signal, each of which the code's own branches
+     say should produce exactly one adjustment:
+       featurearea "routing_decision", rate 0.30, n 20  -> 0 adjustments (expected 1, -0.2)
+       featurearea "chat",             rate 0.92, n 30  -> 0 adjustments (expected 1, +0.1)
+       the three real signals above                     -> 0 adjustments
+     The function has no other observable effect, so it is inert: nothing this module can
+     learn ever reaches its output.
+
+     This is the closest thing the module has to the row's "thumbs-down on a model
+     decrements its score", which is why it is asserted as it should behave rather than as
+     it does. It goes green when the three pushes are assigned.
+
+     A SECOND DEFECT SITS BEHIND IT, and fixing the push alone will not surface it. The
+     branch that produces the NEGATIVE adjustment is guarded by
+     `str.contains(signal.featurearea;"routing")`, lower case. The featurearea of a real
+     signal is the label save() wrote — "Routing decision", capitalised — and
+     str.contains is case-sensitive (std.str has a separate containsignorecase).
+     Measured: str.contains("Routing decision";"routing") is false. So with the push
+     repaired, a signal built from real feedback still takes the else branch, where the
+     only outcome is a POSITIVE adjustment for a high rate. There would be no way for
+     thumbs-down to lower anything. The assertion below uses the lower-case spelling the
+     code expects, so it isolates the push defect; the label assertion after it is what
+     pins the mismatch. *)
+  let lowrouting=$learningsignal{featurearea:"routing_decision";thumbsuprate:0.3;samplesize:20 as i32;confidence:"medium"};
+  let penalties=fl.deriveadjustments(@(lowrouting));
+  if(t.assert(penalties.len==1;"RED MARKER — a routing area with a 0.30 thumbs-up rate must yield exactly one adjustment; deriveadjustments discards the result of .push and returns nothing (learning.tk:76)")){pass=pass+1}el{fail=fail+1};
+
+  (* The label mismatch, asserted from both ends so the fix cannot be half-made. *)
+  if(t.asserteq(ft.arealabel($featurearea{$routingdecision:0});"Routing decision";"the routing area is LABELLED 'Routing decision' — capitalised, and this is the exact string computesignals groups by and returns")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routing.featurearea;"Routing decision";"so a signal built from real feedback carries that capitalised label, NOT the lower-case 'routing_decision' deriveadjustments matches on")){pass=pass+1}el{fail=fail+1};
+
+  (* ── MARKER 2, DELIBERATELY RED ──────────────────────────────────────────────
+     DEFECT: applylearning REPORTS SUCCESS WHILE PERSISTING NOTHING.
+
+     Two independent faults, and both have to be fixed for an adjustment to survive:
+
+     1. THE WRITE CANNOT SUCCEED. learning.tk:126 is
+          INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
+        and `settings` is created by migration 2 (storage/migrations.tk:118) as
+          key TEXT PRIMARY KEY, value TEXT NOT NULL, value_type TEXT NOT NULL,
+          namespace TEXT NOT NULL DEFAULT 'loke', updated_at TEXT NOT NULL
+        so value_type and updated_at are NOT NULL with no default and the insert is
+        rejected every time. core.storage.settings.setstr writes all five columns; this
+        one bypasses it.
+
+     2. THE FAILURE CANNOT BE SEEN. The write goes through core.storage.db.execparams,
+        which returns `i64!$lokeerr` — a user-declared error sum, so T-18 applies and arm
+        0 always runs. The match binds `$ok:v true` unconditionally, `saved` is
+        incremented for every adjustment, and `saved > 0` is returned. The log.warn in the
+        else branch is unreachable.
+
+     MEASURED: applylearning with one adjustment returns TRUE and writes ZERO rows —
+     `SELECT key FROM settings WHERE key LIKE 'learning.%'` returns nothing, and so does
+     `SELECT key FROM settings` on this database.
+
+     The assertion is on the ROW, not on the return value, because the return value is the
+     half that lies. It goes green when the INSERT names all five columns. *)
+  let adj=$routingadjustment{model:"router";adjustment:0.0-0.2;reason:"low thumbs-up rate on routing area"};
+  let state=$learningstate{signals:sigs;adjustments:@(adj);computedat:0};
+  fl.applylearning(state;st);
+  if(t.assert(nrows("SELECT key FROM settings WHERE key='learning.adjustment.router'")==1;"RED MARKER — applylearning must persist the adjustment it reports having saved; the INSERT omits settings.value_type and updated_at, both NOT NULL, so nothing is written and T-18 hides the failure (learning.tk:126)")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The operator's view ─────────────────────────────────────────────────────
+     formatlearningstate is the only thing resembling the row's `list_adaptations`, and
+     the difference matters: it renders the state it is handed, in memory, for this run.
+     It cannot list what was applied earlier, because nothing records that — which is also
+     why there is nothing for a `revert` to remove. *)
+  let rendered=fl.formatlearningstate(state);
+  if(t.assert(str.contains(rendered;"=== Learning Signals ===");"the rendered state has a signals section")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rendered;"=== Routing Adjustments ===");"and an adjustments section")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rendered;"Routing decision");"it names each feature area")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rendered;"n=51");"with its sample size, so a reader can tell a trend from a coincidence")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rendered;"confidence=high");"and its confidence band")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rendered;"delta=-0.2");"an adjustment shows its signed delta")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rendered;"low thumbs-up rate on routing area");"and the reason it was made — the row's 'description of each change', and the only description there is")){pass=pass+1}el{fail=fail+1};
+
+  (* No adjustments must render as an explicit "(none)". An empty section reads as a
+     rendering failure, and the distinction is the whole of what this view tells an
+     operator today: whether anything was adjusted at all. *)
+  let quiet=fl.formatlearningstate($learningstate{signals:sigs;adjustments:@();computedat:0});
+  if(t.assert(str.contains(quiet;"(none)");"a state with no adjustments says '(none)' rather than leaving the section blank")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(quiet;"=== Learning Signals ===");"while still showing the signals it was derived from")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

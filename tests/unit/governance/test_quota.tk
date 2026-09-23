@@ -1,0 +1,270 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.quota;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=q:core.governance.quota;
+
+(* T4.2 — the test this row names has never run. It was written against a pre-toke API
+   (`db.newmemorystore`, `str.arraypush`) and lives in `_archived-tests/`, which
+   scripts/run_tests.sh excludes from discovery by an explicit
+   `-not -path '*/_archived-tests/*'`. This file is a fresh one against
+   core.governance.quota as it exists today, and everything below goes through the real
+   quota_rules / quota_usage tables.
+
+   HOW THE ROW'S SIX BEHAVIOURS MAP ONTO TODAY'S MODULE. Five of the six have a direct
+   equivalent, and they are asserted here by equality:
+
+     row                                         module
+     ------------------------------------------- -------------------------------------
+     not exceeded when usage below limit         check().exceeded == false
+     exceeded when usage EQUALS the limit        check().exceeded == true  (the boundary)
+     exceeded when usage above the limit         check().exceeded == true
+     `remaining` returns the correct value       check().remainingpct, a PERCENTAGE
+     quota for a non-existent namespace          check() on an unknown scope
+     `reset` zeros the counter                   NO EQUIVALENT — see below
+
+   `remaining` is a percentage here, not a token count: $quotastatus carries
+   remainingpct, usedtokens and usedcost and no absolute remainder. The percentage is the
+   figure asserted, and the used counters are asserted alongside it so a reviewer can
+   derive the remainder.
+
+   THERE IS NO `reset`, AND NOTHING ELSE ZEROES A COUNTER. core.governance.quota exports
+   ensuretables, periodkey, defaultrule, parserulerows, findrule,
+   computequotastatusrow, check, recordusage, setrule and listrules. No function clears
+   quota_usage, and no function decrements it. What the design has instead is PERIOD
+   ROLLOVER: usage is keyed (rule_id, period_key), so a daily rule's counter starts again
+   when periodkey() begins returning tomorrow's date. That is the behaviour the row's
+   `reset` asks for, so it is what is asserted — by moving an existing usage row's
+   period_key into the past, because the test cannot wait a day and the module offers no
+   way to ask for a different period key. The same technique, and the same reason, as the
+   elapsed auto-release in tests/unit/governance/test_kill_switch.tk.
+
+   TWO MEASUREMENTS THAT ARE NOT ASSERTIONS, BOTH REPORTED RATHER THAN FIXED HERE.
+
+   1. `check(store;scope;tokens;cost)` DISCARDS its `tokens` and `cost` arguments.
+      quota.tk:140 binds them in the signature and the body never reads them: it looks up
+      the rule, then reads the usage row already in the table. Measured against a
+      1000-token quota with nothing recorded yet, `check(store;"team-a";5000;0.0)` returns
+      exceeded=false and usedtokens=0 — so a request five times the size of the whole
+      quota is answered "fine". The two parameters read as a pre-authorisation API and
+      there is none: a caller must recordusage first and ask afterwards, by which point
+      the tokens are already spent. Nothing calls check() today (the only mention of
+      core.governance.quota outside the module is a comment in packages/shared/src/types.tk),
+      so this is latent, and it is the first thing to settle before it is wired.
+
+   2. A scope with no rule is UNLIMITED, and so is a rule whose limits are both zero.
+      Both are asserted below, because they are the module's behaviour and a reader needs
+      to know which way it fails. It fails OPEN. For a spend control that is the
+      dangerous direction, and it is the opposite of how the kill switch treats an
+      unreadable flag (browser.pages.api.pipeline.killswitchengaged returns true — blocked —
+      when it cannot read the store). Stated here so that the asymmetry is a decision
+      somebody makes rather than one nobody noticed. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation — std.homedir()'s return is truncated when
+     interpolated (T-21). Its own directory, so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-quota")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file per run. Usage counters are persistent and additive: a
+     leftover quota_usage row from a previous run would make the at-limit assertion below
+     pass for the wrong reason, or the below-limit one fail for no reason at all. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+(* Row COUNTS, not sdb.countquery. countquery returns `rows.len`, so
+   countquery("SELECT COUNT(1) ...") is 1 for every input — it answers "did the query
+   return a row", which is what tableexists needs and not what this needs. *)
+f=nrows(sqltext:str):i64{
+  <mt db.many(sqltext;@()) {
+    $ok:rr rr.len as i64;
+    $err:e 0-1
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+
+  (* ── The two tables ─────────────────────────────────────────────────────────
+     Asserted to EXIST, not merely that ensuretables returned true: GA5.12 and M1.7 are
+     both cases of a module querying a table no migration creates, where the failed read
+     was mapped to an empty result and reported as zero. *)
+  if(t.assert(q.ensuretables(store);"ensuretables reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("quota_rules");"quota_rules really exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("quota_usage");"quota_usage really exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM quota_usage")==0;"and no usage has been recorded yet")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A non-existent namespace ────────────────────────────────────────────────
+     The row's last case. There is no rule, so there is no limit, and the answer is a
+     definite "not exceeded, 100% remaining" rather than an error the caller has to
+     interpret. findrule's sentinel is an EMPTY id — not a result type, because T-18
+     makes the error arm of a user-declared sum dead code, so a `$quotarule!$err` would
+     have reported every miss as a hit. *)
+  let unknown=q.check(store;"no-such-scope";0;0.0);
+  if(t.assert(!unknown.exceeded;"a scope with no rule is NOT exceeded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unknown.remainingpct==100.0 as f32;"and reports the full quota remaining")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(unknown.ruleid;"";"with an empty rule id, which is how a caller can tell there was no rule at all")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.findrule(store;"no-such-scope").id;"";"findrule agrees: the sentinel for a missing rule is an empty id, not an error")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!q.recordusage(store;"no-such-scope";100;0.0);"and usage cannot be recorded against a scope with no rule")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM quota_usage")==0;"so no usage row is written for it — 'returns false' and 'wrote nothing' are different claims")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A token rule ────────────────────────────────────────────────────────────*)
+  if(t.assert(q.setrule(store;$quotarule{id:"rule-team-a";scope:"team-a";limittokens:1000;limitcostusd:0.0;period:"all-time"});"a rule can be set")){pass=pass+1}el{fail=fail+1};
+  let rulea=q.findrule(store;"team-a");
+  if(t.asserteq(rulea.id;"rule-team-a";"and read back by scope")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rulea.limittokens==1000;"with the token limit it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rulea.period;"all-time";"and the period")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Below the limit ─────────────────────────────────────────────────────────
+     250 of 1000. The percentage is asserted by EQUALITY rather than "> 0": 75% is the
+     figure an operator is shown, and an off-by-something in the arithmetic is exactly
+     what a sign test would let through. 250/1000 is exact in binary, so this is a fair
+     equality. *)
+  if(t.assert(q.recordusage(store;"team-a";250;0.0);"usage is recorded against a scope that has a rule")){pass=pass+1}el{fail=fail+1};
+  let below=q.check(store;"team-a";0;0.0);
+  if(t.assert(below.usedtokens==250;"the recorded tokens read back exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(below.remainingpct==75.0 as f32;"250 of a 1000-token quota leaves 75% — the row's `remaining`")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!below.exceeded;"and usage BELOW the limit is not exceeded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM quota_usage")==1;"one usage row, not one per call: (rule_id,period_key) is UNIQUE and the insert upserts")){pass=pass+1}el{fail=fail+1};
+
+  (* Additive, which is the property the whole control rests on. A second call must not
+     replace the first — ON CONFLICT DO UPDATE SET used_tokens=used_tokens+excluded. *)
+  q.recordusage(store;"team-a";500;0.0);
+  let mid=q.check(store;"team-a";0;0.0);
+  if(t.assert(mid.usedtokens==750;"a second recording ACCUMULATES: 250+500=750, it does not overwrite")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(mid.remainingpct==25.0 as f32;"leaving 25%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!mid.exceeded;"still not exceeded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── EXACTLY at the limit ────────────────────────────────────────────────────
+     The boundary the row names, and the one that decides whether a quota is a limit or a
+     suggestion. exceeded is `!(remainingpct > 0.0)`, so 0% counts as exceeded: the
+     thousandth token is the last one allowed, and the next request is refused. *)
+  q.recordusage(store;"team-a";250;0.0);
+  let at=q.check(store;"team-a";0;0.0);
+  if(t.assert(at.usedtokens==1000;"usage reaches exactly the limit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(at.remainingpct==0.0 as f32;"which is 0% remaining")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(at.exceeded;"AND USAGE EQUAL TO THE LIMIT IS EXCEEDED — the test is `!(remaining > 0)`, so the boundary is inclusive")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Above the limit ─────────────────────────────────────────────────────────
+     recordusage does not refuse an overrun — nothing consults check() before it writes —
+     so the percentage goes NEGATIVE, and it must keep reporting exceeded rather than
+     wrapping or clamping back into range. *)
+  q.recordusage(store;"team-a";500;0.0);
+  let over=q.check(store;"team-a";0;0.0);
+  if(t.assert(over.usedtokens==1500;"usage can exceed the limit: nothing enforces it at write time")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(over.remainingpct==(0.0-50.0) as f32;"1500 of 1000 is -50% remaining, reported as a negative rather than clamped to zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(over.exceeded;"and usage ABOVE the limit is exceeded")){pass=pass+1}el{fail=fail+1};
+
+  (* One scope's overrun must not exceed another's quota. The usage row is keyed by
+     rule_id, so this is really an assertion that the key is being used. *)
+  q.setrule(store;$quotarule{id:"rule-team-b";scope:"team-b";limittokens:2000;limitcostusd:0.0;period:"all-time"});
+  let other=q.check(store;"team-b";0;0.0);
+  if(t.assert(!other.exceeded;"team-a's overrun leaves team-b unaffected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(other.remainingpct==100.0 as f32;"with its own quota untouched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(other.usedtokens==0;"and no usage of its own")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A cost rule ─────────────────────────────────────────────────────────────
+     The money path is separate arithmetic and it is the one that ends up on an invoice.
+     Cost crosses into the database as TEXT and comes back through
+     sdb.rowf64hundredths, which parses the text and rounds to the nearest cent rather
+     than truncating — `x * 100.0 as i64` turned 0.29 into 28. *)
+  q.setrule(store;$quotarule{id:"rule-team-c";scope:"team-c";limittokens:0;limitcostusd:1.0;period:"all-time"});
+  let rulec=q.findrule(store;"team-c");
+  if(t.assert(rulec.limitcostusd==1.0 as f32;"a cost limit survives the round trip through the rules table")){pass=pass+1}el{fail=fail+1};
+  q.recordusage(store;"team-c";0;0.25);
+  let cost1=q.check(store;"team-c";0;0.0);
+  if(t.assert(cost1.usedcost==0.25 as f32;"a recorded cost reads back to the cent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cost1.remainingpct==75.0 as f32;"$0.25 of a $1.00 quota leaves 75%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cost1.exceeded;"and is not exceeded")){pass=pass+1}el{fail=fail+1};
+  q.recordusage(store;"team-c";0;0.80);
+  let cost2=q.check(store;"team-c";0;0.0);
+  if(t.assert(cost2.usedcost==1.05 as f32;"costs accumulate in cents: 0.25+0.80=1.05")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cost2.exceeded;"and a cost above the limit is exceeded, with no token limit set at all")){pass=pass+1}el{fail=fail+1};
+  (* Bracketed rather than pinned to -5.0 exactly, and the reason is the one place in
+     this module where money is NOT exact. $1.05 has no f32 representation: the nearest is
+     1.0499999523, so ((1.0-1.0499999523)/1.0)*100 is -4.9999952 and an equality against
+     -5.0 fails. The cents themselves are exact — usedcost==1.05 as f32 above is the same
+     rounded value on both sides — it is only the PERCENTAGE that drifts, by 5e-6 of a
+     point. A tenth of a point either side is far inside anything an operator would act on
+     and far outside anything the arithmetic could drift by. *)
+  if(t.assert(cost2.remainingpct<(0.0-4.9) as f32;"about -5% remaining (upper bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cost2.remainingpct>(0.0-5.1) as f32;"about -5% remaining (lower bound) — the overrun is reported as a small negative, not as a wrapped or clamped figure")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A rule whose limits are both zero is UNLIMITED ──────────────────────────
+     Not a zero allowance. computequotastatusrow guards both divisions with
+     `limit > 0`, so a zero limit leaves the percentage at 100 and nothing is ever
+     exceeded. Written down because "limit: 0" reads like "nothing allowed" and means the
+     opposite, and because a rule created by a form left blank would be exactly this. *)
+  q.setrule(store;$quotarule{id:"rule-team-z";scope:"team-z";limittokens:0;limitcostusd:0.0;period:"all-time"});
+  q.recordusage(store;"team-z";999999;500.0);
+  let zero=q.check(store;"team-z";0;0.0);
+  if(t.assert(zero.usedtokens==999999;"a zero-limit rule still records usage")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!zero.exceeded;"but is NEVER exceeded: limittokens 0 means UNLIMITED, not zero allowance")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(zero.remainingpct==100.0 as f32;"and reports 100% remaining after 999999 tokens")){pass=pass+1}el{fail=fail+1};
+
+  (* ── setrule is an upsert, keyed by id ───────────────────────────────────────*)
+  q.setrule(store;$quotarule{id:"rule-team-b";scope:"team-b";limittokens:4000;limitcostusd:0.0;period:"all-time"});
+  if(t.assert(q.findrule(store;"team-b").limittokens==4000;"setrule with an existing id UPDATES the rule")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM quota_rules WHERE scope='team-b'")==1;"and does not leave a second rule for the same scope behind — findrule takes LIMIT 1 and would silently read whichever came first")){pass=pass+1}el{fail=fail+1};
+  let rules=q.listrules(store);
+  if(t.assert(rules.len==4;"listrules returns every rule: team-a, team-b, team-c, team-z")){pass=pass+1}el{fail=fail+1};
+  let first:$quotarule=rules.get(0);
+  if(t.asserteq(first.scope;"team-a";"ordered by scope, so the listing is stable between calls")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The period key ──────────────────────────────────────────────────────────
+     The key is the whole of the reset mechanism, so the four cases are pinned. An
+     unrecognised period falls back to "all-time", which means a typo in a rule's period
+     gives a quota that NEVER resets rather than one that resets constantly — the safe
+     direction for a spend control, and worth knowing which way it goes. *)
+  if(t.asserteq(q.periodkey("junk");"all-time";"an unrecognised period is all-time, so a typo gives a quota that never resets")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.periodkey("all-time");"all-time";"and all-time is itself")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(q.periodkey("daily")) as i64)==10;"a daily key is a ten-character date, YYYY-MM-DD")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(q.periodkey("monthly")) as i64)==7;"a monthly key is YYYY-MM")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(q.periodkey("daily");q.periodkey("monthly"));"and the three periods do not share a key, or a daily quota would be spent by the month")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(q.periodkey("weekly");q.periodkey("daily"));"weekly is distinct too")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE ROW'S `reset`: PERIOD ROLLOVER ──────────────────────────────────────
+     A daily rule, spent to its limit, then its usage row's period_key moved into the
+     past — which is what happens to yesterday's row when the clock passes midnight and
+     periodkey() starts returning a new date. The counter must start again from zero.
+
+     Written with direct SQL because there is no other way in: periodkey() reads the
+     clock and takes no argument, so a test cannot ask for a different key, and the
+     elapsed case would otherwise go untested. This is the same reasoning as the
+     auto-release assertion in test_kill_switch.tk. The row is not deleted — yesterday's
+     usage stays on record, which is the point of keying rather than clearing. *)
+  q.setrule(store;$quotarule{id:"rule-team-d";scope:"team-d";limittokens:100;limitcostusd:0.0;period:"daily"});
+  q.recordusage(store;"team-d";100;0.0);
+  let spent=q.check(store;"team-d";0;0.0);
+  if(t.assert(spent.exceeded;"a daily quota spent to its limit is exceeded today")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(spent.usedtokens==100;"with all 100 tokens used")){pass=pass+1}el{fail=fail+1};
+  mt db.exec("UPDATE quota_usage SET period_key='1999-01-01' WHERE rule_id=?";@("rule-team-d")) { $ok:v v; $err:e 0 };
+  let rolled=q.check(store;"team-d";0;0.0);
+  if(t.assert(rolled.usedtokens==0;"AFTER THE PERIOD ROLLS OVER THE COUNTER IS ZERO AGAIN — this is the row's `reset`, and the only thing in the module that performs one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rolled.remainingpct==100.0 as f32;"with the full quota available")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rolled.exceeded;"and no longer exceeded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM quota_usage WHERE rule_id='rule-team-d'")==1;"while the old period's row is RETAINED, not cleared: a rollover keys a new counter, it does not erase the history")){pass=pass+1}el{fail=fail+1};
+  q.recordusage(store;"team-d";40;0.0);
+  let newday=q.check(store;"team-d";0;0.0);
+  if(t.assert(newday.usedtokens==40;"and the new period counts from zero: 40 used, not 140")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM quota_usage WHERE rule_id='rule-team-d'")==2;"in a second row, one per period")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
