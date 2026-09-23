@@ -1047,12 +1047,12 @@ hand-edit produced a set of numbers that disagreed with them.*
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 65 | — | — | — | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
-| TOOLCHAIN | 1 | 41 | 15 | 3 | — | — | — | 1 | — | 22 |
+| TOOLCHAIN | 1 | 45 | 15 | 3 | — | — | — | 1 | — | 26 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 30 | 10 | 4 | — | — | — | — | — | 16 |
 | AUDIT-DRIVEN GAPS | 5 | 38 | 33 | — | 5 | — | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 15 | 1 | — | — | — | — | — | 16 |
-| VERIFICATION PROGRAMME | 14 | 101 | 40 | 8 | — | 6 | 6 | — | — | 41 |
-| **Total** | **88** | **632** | **498** | **16** | **8** | **6** | **6** | **1** | — | **97** |
+| VERIFICATION PROGRAMME | 14 | 103 | 40 | 8 | — | 6 | 6 | — | — | 43 |
+| **Total** | **88** | **638** | **498** | **16** | **8** | **6** | **6** | **1** | — | **103** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1119,7 +1119,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | T14 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | MK8 | 1 | 10 | 10 | — | — | — | — | — | — | — |
 | MK9 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| F10 | 1 | 41 | 15 | 3 | — | — | — | 1 | — | 22 |
+| F10 | 1 | 45 | 15 | 3 | — | — | — | 1 | — | 26 |
 | MK19 | 1 | 10 | 6 | 2 | — | — | — | — | — | 2 |
 | MK20 | 1 | 5 | 4 | 1 | — | — | — | — | — | — |
 | MK21 | 1 | 15 | — | 1 | — | — | — | — | — | 14 |
@@ -1140,15 +1140,15 @@ hand-edit produced a set of numbers that disagreed with them.*
 | RS | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | X6 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | X8 | 1 | 6 | 2 | — | — | — | — | — | — | 4 |
-| X7 | 1 | 4 | — | — | — | — | 3 | — | — | 1 |
+| X7 | 1 | 6 | — | — | — | — | 3 | — | — | 3 |
 | LC1 | 1 | 5 | — | — | — | 5 | — | — | — | — |
 | W2 | 1 | 4 | 3 | — | — | — | — | — | — | 1 |
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 17 | 8 | 1 | — | — | — | — | — | 8 |
 | RV1 | 1 | 10 | 2 | — | — | — | — | — | — | 8 |
-| **Total** | **88** | **632** | **498** | **16** | **8** | **6** | **6** | **1** | — | **97** |
+| **Total** | **88** | **638** | **498** | **16** | **8** | **6** | **6** | **1** | — | **103** |
 
-Rows parsed: **632**, across **88** epics and **16** level-1 headings.
+Rows parsed: **638**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
@@ -1270,6 +1270,10 @@ rather than in dependency order.
 | F10.28 | S |  | **Two conditionals mis-written as a `mt` on a comparison** — Found 2026-09-23 (F10.17a). `src/governance/dsar.tk:88,145` are `mt rows.len=0 { $ok:v …; $err:e … }`, meaning if/else on emptiness. Converting `=` to `==` is not enough: under T-18 the first arm always wins, so they would still return the empty-case value for every input. Rewrite as `if(rows.len==0){…}el{…}` |
 | F10.29 | L |  | **`std.str` is missing 130 call sites' worth of members, in six distinct groups** — Found 2026-09-23 (F10.17). Deliberately not guess-mapped, because each would change semantics: (1) **`str.uuid`, 10 sites — the one true regression this migration introduces.** It is the single member `std.string` had that `std.str` lacks, and every site generates a record id (`kill_switch.tk:36,59,73`, `sessions.tk:52`, `trail.tk:42`, `incidents.tk:34`, `mining.tk:50`, `tabs.tk:49,270`, `notifications.tk:26`). `hexid` and `randhex` are not UUIDs. Needs an upstream `str.uuid` or a loke-local helper. (2) **JSON reached for through `str.` — 72 sites** (`jsonencode` 38, `jsonescape` 24, and five others). `std.json` has the right functions but **7 of the 8 affected files do not import `std.json` at all**, so this is a refactor. (3) maths through `str.` — 5 sites (`sqrt`, `sortf32`). (4) default-on-failure and fixed-decimal numeric helpers — 24 sites; `std.str` has no `*or` default semantics. (5) array helpers — 7 sites (`insert`, `pushcopy`). (6) string helpers — 9 sites; `count` is literal-substring where `std.str` offers only regex `countre`, and the `code_preprocess.tk` secret scrubber wants both counting and replacing with different arities |
 | F10.30 | S |  | **BSD `grep -r` from the repo root silently skips `src/dist/`** — Found 2026-09-23 (F10.17). It walks 700 `.tk` where `find` sees 706: `grep -rl 'std.string' .` reports nothing in `src/dist`, while `grep -l 'std.string' src/dist/*.tk` returns four files. That is why a naive count gave 67 imports instead of 71, and it plausibly explains why **six files in `src/dist/` have no `Copyright 2026 loke contributors` header** — pre-existing gate violations that the repair sweep after the 520-file header-stripping migration never saw. Two jobs: restore the six headers, and audit every sweep script in `scripts/` that starts from `.` to use a `find`-driven file list instead. Any measurement this project has taken with a root `grep -r` is suspect until that is done |
+| F10.31 | M | | **The interface pass has no resilience to a mid-graph failure** — Found 2026-09-23 (F10.23). It is a single pass in dependency order, so one broken module blinds everything above it: a transient break in `core.privacy.regex` took **126 of 210** interfaces with it, which then presented as 126 modules' worth of `E2030 module not found`. Two consequences worth naming. It makes a census wildly misleading in exactly the situation where you most need it — the `N of M interface(s) emitted` line is the leading indicator and the census advice now says to read it first. And it nearly put a fabricated number into a baseline. The real fix is to iterate to a fixpoint, or to emit signatures without type-checking bodies; the latter is an upstream ask |
+| F10.32 | S | | **toke SIGSEGVs during the interface pass on two files under `packages/browser/src`** — Found 2026-09-23 (F10.23). Silent, because that pass is `\|\| true` for a deliberate reason (a module whose dependencies have not been emitted yet must not stop the pass), so the only trace is the shell printing `Segmentation fault: 11`. Isolate the two files to minimal repros and file upstream; the pass should also distinguish "did not compile" from "crashed the compiler", which it currently cannot |
+| F10.33 | S | | **moke cannot link even once its own modules are clean** — `packages/moke/src/_handlers.tk` fails to compile, so `ooke.handlers.registerall` is undefined and the moke binary cannot be produced regardless of the other 216 modules. Found by the undefined-symbol census (F10.23c), which named the symbol **before** the link, where `ld` would have said only "Undefined symbols". Blocks the moke target in F10.23 |
+| F10.34 | S | | **A bare `i=…:std` import mangles to a module that does not exist** — Found 2026-09-23 (F10.23c). `packages/moke/src/feedback.tk` and `memory.tk` call `std.nowms()` against a bare `std` import; toke mangles that to `_tk_std_nowms_w` while the real symbol is `_tk_time_nowms_w` from `std.time`. A link-time failure with no compile diagnostic (T-7), and a candidate upstream ask in its own right: a bare `std` import that resolves member calls to a non-existent module should be rejected at compile time |
 
 
 ---
@@ -1696,6 +1700,8 @@ reason that was tolerated no longer exists.*
 | X7.2 | XL | Queued behind the green build (§F10) — a de-stubbed test has to compile to be worth anything | **De-stub the tests that guard a privacy or governance path first** — Priority order by what a passing stub currently misrepresents: the privacy pipeline, the governance gateway, the placeholder store, the router, then everything else. A test that re-declares its subject cannot fail when the subject breaks, which is how A13 came to be marked complete while the browser handler posted raw text. |
 | X7.3 | M | Queued behind X7.2 | **Make a stubbed test a gate failure** — Add the stub-marker check to `scripts/quality-gate.sh` with `scripts/known-defects.txt` as the shrinking allowlist, so the count can only go down. |
 | X7.4 | S | Queued behind X7.2 | **Restate coverage once** — Re-measure and update `docs/test-coverage.md` and the claims register with both numbers (files carrying a test, modules actually exercised) and what each means. |
+| X7.5 | S | | **`test_regex_detector.tk` tests nothing about the detector** — Found 2026-09-23. Every assertion is `str.len` or `str.contains` over a **literal** — e.g. `str.len("123456789")==9` — and the file imports neither `core.privacy.regex` nor `core.privacy.patterns`. It passes, and it always will, whatever the detector does. This is X7's problem statement in miniature and the sharpest single example to quote: the module it is named for was carrying an unanchored pattern that reported every Australian mobile as a Tax File Number (PL1.10), and this test was green throughout. Replace it with assertions against the real module, or delete it — `tests/unit/privacy/test_regex_spans.tk` now exercises the detector properly and is the model |
+| X7.6 | S | | **The privacy harness declares expected entity types and throws them away** — Found 2026-09-23 (AD1.8). `core.privacy.testharness`'s `$testcase` carries `expectpiitypes` for all seven cases and `runtestcase` never asserts it: only the count, the sensitivity and guardian presence are checked. And it would **fail on arrival** if added, because two cases expect `"phone"` while the detector emits `"phone_au"`. That gap is why the phone case passed its count assertion at both 2 and 3 entities — `>=` against `expectentities` — and the over-detection was caught only by the sensitivity assertion. Assert the types, and settle the naming |
 
 ## Epic LC1: Local Compute Validation on Target Hardware
 

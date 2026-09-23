@@ -58,6 +58,7 @@ already had and discarded.
 | **T-25** | Blocks | `max_funcs` counts imported signatures; E9010 names neither the limit, the cause, nor that it is configurable | E9010, no line number |
 | **T-26** | **Blocks, and the fix advice creates a silent bug** | **No assignment to a struct field or array element, and E2002 recommends `==`, which compiles to a no-op** | E2002, with wrong advice |
 | **T-27** | **Silent code deletion** | **Comments nest, so `(*` inside a comment (e.g. `COUNT(*)`) swallows the rest of the file** | none at all |
+| **T-28** | Silent segfault | **`str.isdigit` crashes on a `str.charat` result** — the only producer of a character cannot feed the only classifier of one | none — SIGSEGV |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
 right. **T-13 to T-24 were found later, getting loke's test suite to run against real
@@ -1001,6 +1002,47 @@ Either treatment would be fine, and we have no preference:
   unclosed delimiter` already exists and would be exactly right here.
 
 The current combination — nesting plus silence — is the one that loses code.
+
+---
+
+## T-28 — `str.isdigit` segfaults on a character code, which is the only thing you have to give it
+
+**Severity: silent segfault. A fourth instance of T-23's root cause, and this one is a
+closed loop inside one module's own API.**
+
+```toke
+i=str:std.str;
+f=main():i64{
+  let c=str.charat("a5b";1);        (* -> 53, the byte value of '5' *)
+  if(str.isdigit(c)){ <1 }el{ <0 }  (* SIGSEGV *)
+};
+```
+
+`str.isdigit("5")` works and returns 1. Passing a character code crashes. The two
+declarations explain why, and they are in the same `.tki`:
+
+```json
+{"name": "str.charat",  "params": ["str", "i64"], "return": "i64", "note": "byte value at index i"}
+{"name": "str.isdigit", "params": ["i64"],        "return": "i64", "gen": "abi"}
+```
+
+`charat` returns a byte value as `i64`. `isdigit` declares its parameter `i64` because
+`gen: "abi"` erases it — the real expectation is a `str` handle. So the ONE function that
+produces a character and the ONE function that classifies one cannot be composed, the type
+checker cannot see it because both sides are `i64`, and the failure is a segfault rather
+than a diagnostic.
+
+We worked around it by comparing against 48 and 57 directly, which is fine but means the
+predicate has no callable form for the case it exists to serve.
+
+This is the same mechanism as T-23, T-24 and the `json.enc(row)` / `db.rowstr(json)` pair —
+**four defects from one property** — and it is the clearest argument for the ask in T-23:
+`gen: "abi"` should describe the lowering and keep the declared toke type for checking. Here
+the correct type is knowable, is not written down, and its absence turns a two-function
+composition into a crash.
+
+If `isdigit` is genuinely meant to take a character code, the fix is smaller still: declare
+it `(u8) -> bool` or document the unit. Either way the current pair cannot both be right.
 
 ---
 
