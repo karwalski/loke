@@ -42,7 +42,13 @@ f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
 
 
 
-f=complete(client:$openaiclient;req:$completionrequest):$completionresponse!$lokeerr{
+(* LS1.1j — completeplain is the form the dispatcher can act on. complete returns
+   $completionresponse!$lokeerr, whose error side is a user-declared sum, and toke takes
+   the FIRST arm of a match on such a result whatever the value is (T-18) — so no caller
+   could tell an answer from a failure, and reading a field off the mis-bound value
+   segfaults. The two inner matches below are on STDLIB results (std.http, std.json), which
+   DO discriminate correctly; that distinction is the whole design. *)
+f=completeplain(client:$openaiclient;req:$completionrequest):$completionresponse{
   let hc=http.client("https://api.openai.com");
   (* `@(sys;req.messages)` is a two-element array literal — [message, array] — not a
      prepend. The body sent to OpenAI carried the system message and then a nested
@@ -69,20 +75,40 @@ f=complete(client:$openaiclient;req:$completionrequest):$completionresponse!$lok
   );
   let result=http.postheaders(hc;"/v1/chat/completions";str.tobytes(body);headers);
   <mt result {
-    $httperr:e $err($networkerr(str.concat("openai complete: HTTP error — ";json.enc(e))));
-    $ok:raw openaiparseraw(raw)
+    $ok:raw openaiparseplain(raw);
+    $httperr:e pt.nocompletion(str.concat("openai complete: HTTP error — ";json.enc(e)))
+  }
+};
+
+f=openaiparseplain(raw:str):$completionresponse{
+  <mt json.dec(raw) {
+    $ok:obj openaibuildobj(obj);
+    $jsonerr:e pt.nocompletion("openai complete: failed to parse response JSON")
+  }
+};
+
+(* Kept for callers that already match this result, delegating as
+   core.storage.audit.logevent does. New callers use completeplain and
+   core.providers.types.iscompletion. *)
+f=complete(client:$openaiclient;req:$completionrequest):$completionresponse!$lokeerr{
+  let resp=completeplain(client;req);
+  if(pt.iscompletion(resp)){
+    <$ok(resp)
+  }el{
+    <$err($networkerr(pt.completionerror(resp)))
   }
 };
 
 f=openaiparseraw(raw:str):$completionresponse!$lokeerr{
-  let parsed=json.dec(raw);
-  <mt parsed {
-    $jsonerr:e $err($modelerr("openai complete: failed to parse response JSON"));
-    $ok:obj openaiparseobj(obj)
+  let parsed=openaiparseplain(raw);
+  if(pt.iscompletion(parsed)){
+    <$ok(parsed)
+  }el{
+    <$err($modelerr(pt.completionerror(parsed)))
   }
 };
 
-f=openaiparseobj(obj:i64):$completionresponse!$lokeerr{
+f=openaibuildobj(obj:i64):$completionresponse{
   let choices=json.getarr(obj;"choices");
   let message=json.str(choices.get(0);"message");
   let msgobj=json.dec(message);
@@ -112,6 +138,11 @@ f=openaiparseobj(obj:i64):$completionresponse!$lokeerr{
   };
   log.info(str.concat("openai complete: ok model=";modelout);"openai";"");
   <resp
+};
+
+(* Kept: it never had a failure path of its own. *)
+f=openaiparseobj(obj:i64):$completionresponse!$lokeerr{
+  <$ok(openaibuildobj(obj))
 };
 
 

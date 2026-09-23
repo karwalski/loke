@@ -1,0 +1,183 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.router.testselectionoutcome;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=reg:core.models.registry;
+i=sel:core.router.selector;
+i=rtr:core.router.router;
+i=pt:core.providers.types;
+i=disp:core.providers.dispatcher;
+
+(* LS1.1j — the one assertion T-18 made impossible: that a FAILURE is distinguishable
+   from a SUCCESS.
+
+   This drives the real modules, not stubs. Every function under test here returns a plain
+   value, because a function returning X!$lokeerr cannot tell its caller anything: toke
+   takes the FIRST arm of a match on a result whose error side is a user-declared sum
+   whatever the value is (T-18), and reading a field off the mis-bound value segfaults. So
+   these tests are the contract for the sentinel-and-predicate pattern that replaces it —
+   core.storage.settings.getstror, core.mcp.discovery.probeport and
+   core.storage.audit.insertevent are the three that landed before this.
+
+   The safety case is the RESTRICTED one below. selector.select returns
+   $selectionresult!$lokeerr, so a caller that read it as a success would take the error
+   payload for a chosen model and name some arbitrary provider — and for
+   sensitivity-scored routing that means restricted data leaving for a cloud endpoint. It
+   is why GA1.7 was left unwired. The assertion is that a refused selection now reads as
+   refused. No network: every path exercised here is either pure or aimed at a closed
+   local port. *)
+
+f=registry():$registry{
+  <reg.newregistry()
+};
+
+(* A request no LOCAL model can serve: of the four local entries only qwen2.5:72b handles
+   code review, and at 8 tok/s it does not meet the interactive tier's speed floor. *)
+f=restrictedcriteria():$selectioncriteria{
+  <$selectioncriteria{
+    task:$tasktype{$codereview:0};
+    sensitivity:$sensitivitylevel{$restricted:0};
+    tolerance:$latencytolerance{$instant:0};
+    preferlocal:true;
+    maxcostper1k:0.05;
+    requiretools:false
+  }
+};
+
+f=servablecriteria():$selectioncriteria{
+  <$selectioncriteria{
+    task:$tasktype{$chat:0};
+    sensitivity:$sensitivitylevel{$public:0};
+    tolerance:$latencytolerance{$instant:0};
+    preferlocal:false;
+    maxcostper1k:0.05;
+    requiretools:false
+  }
+};
+
+f=realresponse():$completionresponse{
+  <$completionresponse{
+    content:"the answer";
+    modelid:"claude-3-5-sonnet-20241022";
+    inputtokens:10 as u32;
+    outputtokens:20 as u32;
+    finishreason:"stop";
+    costusd:0.0
+  }
+};
+
+f=realdecision():$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:"gpt-4o";
+      provider:$provider{$openai:0};
+      contextwindow:128000 as u32;
+      costper1kinput:0.005;
+      costper1koutput:0.015;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"test";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:500 as u32
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let r=registry();
+
+  (* ── Layer 1: core.models.registry ──────────────────────────────────────────── *)
+  let found=reg.bestfortask(r;$tasktype{$chat:0};false;$modeltier{$interactive:0});
+  if(t.assert(reg.iscapability(found);"a servable request yields a capability")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(found.modelid)>0;"and that capability names a model")){pass=pass+1}el{fail=fail+1};
+
+  let missing=reg.bestfortask(r;$tasktype{$codereview:0};true;$modeltier{$interactive:0});
+  if(t.assert(!reg.iscapability(missing);"an unservable request yields no capability")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(missing.modelid)==0;"and its modelid is the empty sentinel")){pass=pass+1}el{fail=fail+1};
+
+  (* The point of the whole story, at the lowest layer: the two outcomes differ. *)
+  if(t.assert(reg.iscapability(found)!=reg.iscapability(missing);"found and not-found are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(!reg.iscapability(reg.capabilitybyid(r;"no-such-model"));"capabilitybyid reports an unknown id as not found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reg.iscapability(reg.capabilitybyid(r;"gpt-4o"));"capabilitybyid finds a known id")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Layer 2: core.router.selector ──────────────────────────────────────────── *)
+  let picked=sel.selectmodel(servablecriteria();r);
+  if(t.assert(sel.isselected(picked);"a PUBLIC chat request selects a model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(picked.provider)>0;"and the selection names a provider")){pass=pass+1}el{fail=fail+1};
+
+  (* The safety case. A RESTRICTED request that no local model can serve must be REFUSED,
+     and must be seen to be refused. Cloud fallback is forbidden here, so a caller that
+     could not tell this apart from a success would forward restricted data to whatever
+     provider string it read out of the error payload. *)
+  let refused=sel.selectmodel(restrictedcriteria();r);
+  if(t.assert(!sel.isselected(refused);"a RESTRICTED request with no local model is REFUSED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(refused.modelid)==0;"the refusal names no model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(refused.provider)==0;"the refusal names no provider, so nothing can be dispatched to it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(refused.reason;"RESTRICTED");"the refusal carries a reason the caller can log")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sel.isselected(picked)!=sel.isselected(refused);"selection and refusal are DISTINGUISHABLE — the assertion T-18 made impossible")){pass=pass+1}el{fail=fail+1};
+
+  (* The witness for why selectmodel had to exist. select's result reports SUCCESS for the
+     refusal above, because the first arm of the match is taken whatever the value is. Only
+     the arms are read here — reading a field off the mis-bound value segfaults.
+
+     If this assertion ever FAILS, T-18 has been fixed upstream and the delegating
+     result-returning wrappers kept across this change can be retired. That is the action
+     to take, not a repair to this file. *)
+  let claimsok=mt sel.select(restrictedcriteria();r) {
+    $ok:v true;
+    $lokeerr:e false
+  };
+  if(t.assert(claimsok;"T-18 witness: select's result still claims $ok for a refused selection")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Layer 3: core.router.router ────────────────────────────────────────────── *)
+  if(t.assert(rtr.isrouted(realdecision());"a real routing decision reads as routed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.isrouted(rtr.noroute("nothing available"));"noroute reads as NOT routed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.isrouted(realdecision())!=rtr.isrouted(rtr.noroute("x"));"routed and not-routed are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Layer 4: the completion sentinel shared by every provider ──────────────── *)
+  if(t.assert(pt.iscompletion(realresponse());"a response from a provider reads as a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pt.iscompletion(pt.nocompletion("boom"));"nocompletion reads as NOT a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(pt.completionerror(pt.nocompletion("boom"));"boom");"the failure message survives into the sentinel")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(pt.completionerror(realresponse());"");"a success has no failure message, so \"stop\" cannot be mistaken for a fault")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Layer 5: core.providers.dispatcher ─────────────────────────────────────── *)
+  let d=disp.new($apikeys{anthropic:"";openai:""};"http://127.0.0.1:59997");
+  let req=$completionrequest{
+    modelid:"qwen2.5:7b";
+    messages:@(pt.usermsg("hello"));
+    systemprompt:"";
+    maxtokens:16 as u32;
+    temperature:0.0;
+    stream:false
+  };
+
+  (* An unsupported provider. No network, and it used to fall through the match entirely:
+     $google had no arm at all and the bogus $ok arm caught nothing. *)
+  let unsupported=disp.trydispatch(d;req;$provider{$google:0});
+  if(t.assert(!disp.isdispatched(unsupported);"an unsupported provider is NOT dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(disp.dispatcherror(unsupported);"google");"and the dispatcher says WHICH provider was unsupported")){pass=pass+1}el{fail=fail+1};
+
+  (* A local provider on a port nothing is listening on. This is the case that reported
+     success for every call before this change, because ollama_provider matched
+     sendchat's result with the $lokeerr arm first. *)
+  let dead=disp.trydispatch(d;req;$provider{$local:0});
+  if(t.assert(!disp.isdispatched(dead);"a local dispatch to a closed port is NOT dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(disp.dispatcherror(dead))>0;"and it says why")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(dead.content)==0;"a failed dispatch carries no content to mistake for an answer")){pass=pass+1}el{fail=fail+1};
+
+  (* The guardian prompt still goes on, and reconstructs rather than assigns (T-26). *)
+  let guarded=disp.guardedrequest(req;"");
+  if(t.assert(str.contains(guarded.systemprompt;"LOKE_GUARDIAN_v");"the guardian prompt is applied to a request with no system prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(guarded.modelid;req.modelid);"and the rest of the request is carried across unchanged")){pass=pass+1}el{fail=fail+1};
+  let twice=disp.guardedrequest(guarded;guarded.systemprompt);
+  if(t.assert(str.eq(twice.systemprompt;guarded.systemprompt);"an already-guarded prompt is passed through unchanged, not guarded twice")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

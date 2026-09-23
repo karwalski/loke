@@ -106,7 +106,42 @@ f=meetstier(tier:$modeltier;speedtoks:f64):bool{
   }
 };
 
-f=findbest(registry:$registry;task:$tasktype;localonly:bool;tier:$modeltier):$modelcapability!$lokeerr{
+(* LS1.1j — the trustworthy form of findbest, and the sentinel it answers with.
+
+   findbest returns $modelcapability!$lokeerr, whose error side is a user-declared sum,
+   and toke takes the FIRST arm of a match on such a result whatever the value is
+   (T-18). So a caller writing the $ok arm first bound the success binding even on
+   failure, and a caller writing the $lokeerr arm first bound the error even on
+   success. Neither looked at the value.
+
+   That is not a silent wrong answer, which is the reason this had to be fixed before
+   anything was wired to it: reading ANY field off the mis-bound value SEGFAULTS. Two
+   probes this session confirmed it — binding is harmless, the first field access is
+   fatal. core.router.selector.select therefore could not tell success from failure,
+   and core.router.router.route crashed unconditionally.
+
+   bestfortask answers with a plain struct instead. An empty modelid means "no model met
+   the constraints": a caller tests it with iscapability, which is an `if` on a str
+   length rather than a match it cannot trust. Same shape as
+   core.storage.settings.getstror and core.mcp.discovery.probeport. *)
+f=nocapability():$modelcapability{
+  <$modelcapability{
+    modelid:"";
+    provider:$provider{$local:0};
+    task:$tasktype{$chat:0};
+    qualityscore:0.0;
+    speedtoks:0.0;
+    contextwindow:0 as u32;
+    supportstools:false;
+    local:true
+  }
+};
+
+f=iscapability(c:$modelcapability):bool{
+  <str.len(c.modelid)>0
+};
+
+f=bestfortask(registry:$registry;task:$tasktype;localonly:bool;tier:$modeltier):$modelcapability{
   let candidates=findfortask(registry;task;localonly);
   let bestidx=mut.0-1;
   let bestscore=mut.0.0-1.0;
@@ -120,9 +155,35 @@ f=findbest(registry:$registry;task:$tasktype;localonly:bool;tier:$modeltier):$mo
     }el{}
   };
   if(bestidx<0){
-    <$err($modelerr("findbest: no model found for task with given constraints"))
+    <nocapability()
   }el{
-    <$ok(candidates.get(bestidx))
+    <candidates.get(bestidx)
+  }
+};
+
+f=capabilitybyid(registry:$registry;modelid:str):$modelcapability{
+  let foundidx=mut.0-1;
+  lp(let i=0;i<registry.entries.len;i=i+1){
+    let entry:$modelcapability=registry.entries.get(i);
+    if(str.eq(entry.modelid;modelid)){
+      foundidx=i
+    }el{}
+  };
+  if(foundidx<0){
+    <nocapability()
+  }el{
+    <registry.entries.get(foundidx)
+  }
+};
+
+(* Kept for callers that already match its result. New callers should use bestfortask:
+   this signature cannot tell them whether a model was found, for the reason above. *)
+f=findbest(registry:$registry;task:$tasktype;localonly:bool;tier:$modeltier):$modelcapability!$lokeerr{
+  let best=bestfortask(registry;task;localonly;tier);
+  if(iscapability(best)){
+    <$ok(best)
+  }el{
+    <$err($modelerr("findbest: no model found for task with given constraints"))
   }
 };
 
@@ -134,19 +195,14 @@ f=register(registry:$registry;entry:$modelcapability):$registry{
 };
 
 (* Same shadowing and `!$foundopt` sigil as findbest. The two-step
-   contains-then-length-equal test is just string equality. *)
+   contains-then-length-equal test is just string equality. Kept for callers that
+   already match its result; capabilitybyid above is the form that can be trusted. *)
 f=byid(registry:$registry;modelid:str):$modelcapability!$lokeerr{
-  let foundidx=mut.0-1;
-  lp(let i=0;i<registry.entries.len;i=i+1){
-    let entry:$modelcapability=registry.entries.get(i);
-    if(str.eq(entry.modelid;modelid)){
-      foundidx=i
-    }el{}
-  };
-  if(foundidx<0){
-    <$err($modelerr("byid: no model with id \(modelid)"))
+  let found=capabilitybyid(registry;modelid);
+  if(iscapability(found)){
+    <$ok(found)
   }el{
-    <$ok(registry.entries.get(foundidx))
+    <$err($modelerr("byid: no model with id \(modelid)"))
   }
 };
 

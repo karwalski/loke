@@ -262,7 +262,7 @@ step_checks() {
   # logic bug of their own — a shadowing `let` is how a broken accumulator looks, and
   # a type name used as a value is how a missing parameter looks.
   for sweep in find_shadowed_lets find_typename_values find_field_matches \
-               find_missing_return_semi find_offbyone_loops; do
+               find_missing_return_semi find_offbyone_loops find_discarded_tail_expr; do
     if [[ -f "scripts/$sweep.py" ]]; then
       echo "  toke codegen hazard: $sweep"
       python3 "scripts/$sweep.py" --check packages >/dev/null \

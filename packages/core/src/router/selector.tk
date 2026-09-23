@@ -98,25 +98,54 @@ f=buildreason(modelid:str;localonly:bool;sensitivitystr:str;tierstr:str):str{
 
 
 
-f=select(criteria:$selectioncriteria;registry:i64):$selectionresult!$lokeerr{
-  
+(* LS1.1j / GA1.7 — selectmodel is the form a caller can trust; select cannot be.
+
+   select returns $selectionresult!$lokeerr. toke takes the FIRST arm of a match on a
+   result whose error side is a user-declared sum, whatever the value is (T-18), so no
+   caller of select could tell a chosen model from a failed selection. For
+   sensitivity-scored routing that is the worst failure available: a failed selection read
+   as a success names a garbage provider, and restricted data would be sent to whatever
+   endpoint that turned out to be. It is why nothing was ever wired to this function.
+
+   Worse than a wrong answer, in fact. Reading any field off the mis-bound value
+   segfaults rather than returning nonsense, verified with a probe this session. And
+   select had a second bug on top of T-18: its internal `mt` on reg.findbest was written
+   with the $lokeerr arm FIRST, so `foundok` was false even when a model had been found,
+   every path fell through, and select returned $err for EVERY input. Both halves of the
+   request path downstream of it were dead.
+
+   selectmodel answers with a plain struct. An empty modelid means "nothing was
+   selected", tested with isselected, and the reason string carries the message the
+   caller can log even though it cannot match on it. The capability lookup now goes
+   through reg.bestfortask, which is plain for the same reason. *)
+f=noselection(reason:str):$selectionresult{
+  <$selectionresult{
+    modelid:"";
+    provider:"";
+    reason:reason;
+    islocal:false;
+    estimatedcost:0.0;
+    tier:$modeltier{$interactive:0}
+  }
+};
+
+f=isselected(r:$selectionresult):bool{
+  <str.len(r.modelid)>0
+};
+
+f=selectmodel(criteria:$selectioncriteria;registry:i64):$selectionresult{
+
   (* senseq, not ==: a sensitivity that arrived through $routingcriteria compares
      unequal to a locally constructed $restricted (T-14). *)
   let isrestricted=t.senseq(criteria.sensitivity;t.restricted());
   let localonly=mut.criteria.preferlocal;
   if(isrestricted){localonly=true}el{};
 
-  
   let tier=tierfromtolerance(criteria.tolerance);
 
-  
-  let found=reg.findbest(registry;criteria.task;localonly;tier);
-  let foundok=mt found {
-    $lokeerr:e false;
-    $ok:v true
-  };
-  if(foundok){
-    let cap=mt found { $ok:cap cap; $lokeerr:e 0 };
+  let found=reg.bestfortask(registry;criteria.task;localonly;tier);
+  if(reg.iscapability(found)){
+    let cap:$modelcapability=found;
     let providerstr=providertostr(cap.provider);
     let sensstr=senstostr(criteria.sensitivity);
     let tierstr=tiertostr(tier);
@@ -131,21 +160,21 @@ f=select(criteria:$selectioncriteria;registry:i64):$selectionresult!$lokeerr{
       tier:tier
     }
   }el{};
+
+  (* A cloud-eligible request that found nothing has nowhere left to look. Only a
+     local-only request has a fallback, and a RESTRICTED one must not take it. *)
   if(!localonly){
-    <$err($modelerr("selector: no model available for task"))
+    <noselection("selector: no model available for task")
   }el{};
   if(isrestricted){
-    <$err($modelerr("selector: no local model available for RESTRICTED sensitivity"))
+    <noselection("selector: no local model available for RESTRICTED sensitivity")
   }el{};
-  let retry=reg.findbest(registry;criteria.task;false;tier);
-  let retryok=mt retry {
-    $lokeerr:e2 false;
-    $ok:v true
+
+  let retry=reg.bestfortask(registry;criteria.task;false;tier);
+  if(reg.iscapability(retry)){}el{
+    <noselection("selector: no model available after cloud fallback")
   };
-  if(!retryok){
-    <$err($modelerr("selector: no model available after cloud fallback"))
-  }el{};
-  let cap2=mt retry { $ok:cap cap; $lokeerr:e 0 };
+  let cap2:$modelcapability=retry;
   let providerstr2=providertostr(cap2.provider);
   let sensstr2=senstostr(criteria.sensitivity);
   let tierstr2=tiertostr(tier);
@@ -162,17 +191,38 @@ f=select(criteria:$selectioncriteria;registry:i64):$selectionresult!$lokeerr{
   }
 };
 
+(* Kept so that callers already matching this result keep compiling, and so the change
+   to them can be a separate diff. It delegates, exactly as
+   core.storage.audit.logevent does — but note that it can only ever hand back a value
+   its caller cannot discriminate. New callers use selectmodel and isselected. *)
+f=select(criteria:$selectioncriteria;registry:i64):$selectionresult!$lokeerr{
+  let picked=selectmodel(criteria;registry);
+  if(isselected(picked)){
+    <$ok(picked)
+  }el{
+    <$err($modelerr(picked.reason))
+  }
+};
 
 
 
+
+(* Three defects here, all found while converting select.
+
+   1. T-18 again. `foundok` read the FIRST arm of a match on reg.byid's result, which was
+      the $lokeerr arm, so foundok was false for every model that exists and estimatecost
+      returned 0.0 unconditionally. The lookup now goes through reg.capabilitybyid, which
+      answers with a plain struct.
+   2. `(inputtokens/1000) as f64` divided two u32s BEFORE the cast, so any request under a
+      thousand tokens costed at exactly zero — the cast was applied to an integer quotient
+      that was already 0. The cast now comes first.
+   3. T-20: an f64 RETURNED across a module boundary is corrupted. Nothing outside this
+      module calls estimatecost today, so the f64 return is not currently a live defect,
+      but it is a trap for the first caller in another module. estimatecosthundredths
+      below is the form to cross with. *)
 f=estimatecost(modelid:str;inputtokens:u32;outputtokens:u32;registry:i64):f64{
-  let found=reg.byid(registry;modelid);
-  let foundok=mt found {
-    $lokeerr:e false;
-    $ok:v true
-  };
-  if(!foundok){ <0.0 }el{};
-  let cap=mt found { $ok:c c; $lokeerr:e 0 };
+  let cap=reg.capabilitybyid(registry;modelid);
+  if(reg.iscapability(cap)){}el{ <0.0 };
   if(cap.local){ <0.0 }el{};
   let costin=mut.0.001;
   if(str.contains(modelid;"claude-3-5-sonnet")){costin=0.003}el{
@@ -190,5 +240,13 @@ f=estimatecost(modelid:str;inputtokens:u32;outputtokens:u32;registry:i64):f64{
       }
     }
   };
-  <(((inputtokens/1000) as f64)*costin)+(((outputtokens/1000) as f64)*costout)
+  <(((inputtokens as f64)/1000.0)*costin)+(((outputtokens as f64)/1000.0)*costout)
+};
+
+(* The cross-module form of estimatecost: an f64 parameter crosses a module boundary
+   intact, an f64 return does not (T-20), so the crossing carries hundredths of a cent as
+   an exact integer and the caller divides locally. Same reason
+   shared.types.f64hundredths exists. *)
+f=estimatecosthundredths(modelid:str;inputtokens:u32;outputtokens:u32;registry:i64):i64{
+  <t.f64hundredths(estimatecost(modelid;inputtokens;outputtokens;registry))
 };

@@ -136,27 +136,60 @@ f=generate(client:$ollamaclient;opts:$generateopts):str!$lokeerr{
   <$ok(response)
 };
 
-f=sendchat(client:$ollamaclient;opts:$chatopts):str!$lokeerr{
+(* LS1.1j — sendchatplain is the form core.providers.ollamaprovider can act on.
+
+   Two defects were stacked here. The obvious one is T-18: sendchat returns str!$lokeerr,
+   toke takes the FIRST arm of a match on a result whose error side is a user-declared sum
+   whatever the value is, and ollama_provider.complete matched it with the $lokeerr arm
+   FIRST — so every ollama and every local dispatch reported "chat call failed" even when
+   the model had answered. That is the whole local path, which is the path loke exists to
+   prefer.
+
+   The quieter one was in this body. Each of the three inner matches on a STDLIB result —
+   those do discriminate correctly — used the match as an EXPRESSION assigned to a binding
+   and put an $err(...) in the failure arm, rather than returning early. So on an HTTP
+   failure `body` was bound to a $lokeerr handle and the very next line called
+   json.dec(body) on it. The failure path parsed the error value as a response.
+
+   The plain form returns the content, and "" for every failure. An ollama answer with no
+   content is not a usable success either, so collapsing the two is safe in the direction
+   that matters: a caller is told "nothing came back" rather than handed an empty answer
+   as though the model had produced it. Each failure is logged before it is collapsed, so
+   the distinction survives where an operator can see it. *)
+f=sendchatplain(client:$ollamaclient;opts:$chatopts):str{
   let hc=http.client(client.baseurl);
   let bodyobj="{\"model\":\(json.enc(opts.model)),\"messages\":\(json.enc(opts.messages)),\"system\":\(json.enc(opts.system)),\"numgpu\":\(opts.numgpu),\"stream\":false}";
   let result=http.postheaders(hc;"/api/chat";str.tobytes(bodyobj);"{\"content-type\":\"application/json\"}");
   let body=mt result {
     $ok:body body;
-    $httperr:e $err($networkerr("ollama chat: failed to reach /api/chat"))
+    $httperr:e ""
   };
+  if(str.len(body)==0){ <"" }el{};
   let parsed=json.dec(body);
   let obj=mt parsed {
     $ok:obj obj;
-    $jsonerr:e $err($modelerr("ollama chat: failed to parse JSON response"))
+    $jsonerr:e 0
   };
+  if(obj==0){ <"" }el{};
   let msg=json.str(obj;"message");
   let msgparsed=json.dec(msg);
   let msgobj=mt msgparsed {
     $ok:msgobj msgobj;
-    $jsonerr:e $err($modelerr("ollama chat: failed to parse message field"))
+    $jsonerr:e 0
   };
-  let content=json.str(msgobj;"content");
-  <$ok(content)
+  if(msgobj==0){ <"" }el{};
+  <json.str(msgobj;"content")
+};
+
+(* Kept for callers that already match this result, delegating, the same migration shape
+   as core.storage.audit.logevent. New callers use sendchatplain. *)
+f=sendchat(client:$ollamaclient;opts:$chatopts):str!$lokeerr{
+  let content=sendchatplain(client;opts);
+  if(str.len(content)==0){
+    <$err($networkerr("ollama chat: no content returned from /api/chat"))
+  }el{
+    <$ok(content)
+  }
 };
 
 f=pullmodel(client:$ollamaclient;name:str):i64!$lokeerr{

@@ -43,7 +43,7 @@ f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
 
 
 
-f=parseresponse(obj:i64):$completionresponse!$lokeerr{
+f=buildresponse(obj:i64):$completionresponse{
   let contentarr=json.getarr(obj;"content");
   let text=json.str(contentarr.get(0);"text");
   let usage=json.str(obj;"usage");
@@ -70,15 +70,22 @@ f=parseresponse(obj:i64):$completionresponse!$lokeerr{
   <resp
 };
 
-f=parseraw(raw:str):i64!$lokeerr{
-  let parsed=json.dec(raw);
-  <mt parsed {
-    $jsonerr:e $err($modelerr("anthropic complete: failed to parse response JSON"));
-    $ok:obj parseresponse(obj)
+(* Kept: it never had a failure path of its own. parseresponse's body is now buildresponse,
+   which returns the plain struct the plain path needs. *)
+f=parseresponse(obj:i64):$completionresponse!$lokeerr{
+  <$ok(buildresponse(obj))
+};
+
+(* LS1.1j — the plain path. json.dec is a STDLIB result, so this match does discriminate
+   correctly; it is only a user-declared error side that T-18 breaks. *)
+f=parseplain(raw:str):$completionresponse{
+  <mt json.dec(raw) {
+    $ok:obj buildresponse(obj);
+    $jsonerr:e pt.nocompletion("anthropic complete: failed to parse response JSON")
   }
 };
 
-f=complete(client:$anthropicclient;req:$completionrequest):$completionresponse!$lokeerr{
+f=completeplain(client:$anthropicclient;req:$completionrequest):$completionresponse{
   let hc=http.client("https://api.anthropic.com");
   let body=json.enc($jsonobj{
     model:req.modelid;
@@ -93,8 +100,34 @@ f=complete(client:$anthropicclient;req:$completionrequest):$completionresponse!$
   );
   let result=http.postheaders(hc;"/v1/messages";str.tobytes(body);headers);
   <mt result {
-    $httperr:e $err($networkerr(str.concat("anthropic complete: HTTP error — ";json.enc(e))));
-    $ok:raw parseraw(raw)
+    $ok:raw parseplain(raw);
+    $httperr:e pt.nocompletion(str.concat("anthropic complete: HTTP error — ";json.enc(e)))
+  }
+};
+
+(* The return type said i64!$lokeerr while every return in the body was a
+   $completionresponse. Nothing caught it, and nothing outside this module calls it. Now
+   it says what it hands back, and delegates. *)
+f=parseraw(raw:str):$completionresponse!$lokeerr{
+  let parsed=parseplain(raw);
+  if(pt.iscompletion(parsed)){
+    <$ok(parsed)
+  }el{
+    <$err($modelerr(pt.completionerror(parsed)))
+  }
+};
+
+(* Kept for callers that already match this result, delegating exactly as
+   core.storage.audit.logevent does. The $lokeerr variant is now $networkerr for a parse
+   failure as well as a transport one: a caller cannot match on the variant anyway (T-18)
+   and the message, which it CAN log, is preserved verbatim. New callers use completeplain
+   and core.providers.types.iscompletion. *)
+f=complete(client:$anthropicclient;req:$completionrequest):$completionresponse!$lokeerr{
+  let resp=completeplain(client;req);
+  if(pt.iscompletion(resp)){
+    <$ok(resp)
+  }el{
+    <$err($networkerr(pt.completionerror(resp)))
   }
 };
 

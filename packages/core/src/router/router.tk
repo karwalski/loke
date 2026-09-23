@@ -191,14 +191,61 @@ f=estimatelatency(result:$selectionresult):u32{
 
 
 
-f=route(
+(* LS1.1j — routerequest is the form a caller can trust. route could never be, and
+   until this change it did not merely mislead: it crashed.
+
+   The old body read
+
+     let result:$selectionresult=mt selected {
+       $lokeerr:e $err($modelerr("router: model selection failed"));
+       $ok:result result
+     };
+
+   and toke takes the FIRST arm of a match on a result whose error side is a
+   user-declared sum, whatever the value is (T-18). So `result` was bound to the
+   $err(...) value on EVERY call, success included, and the very next line —
+   specfromresult(result), which reads result.provider — dereferenced a $lokeerr sum as a
+   $selectionresult struct. Reproduced this session: router.route segfaults
+   unconditionally, for every input. Note also that the $err in that arm was an
+   expression assigned to a $selectionresult binding, not an early return, so even with
+   T-18 fixed the failure path would have built a decision out of it.
+
+   routerequest answers with a plain $routingdecision. An empty model id means "not
+   routed" — tested with isrouted — and the reason field carries the message. Nothing
+   downstream has to match on a value it cannot discriminate, which is what GA1.5 to
+   GA1.7 were waiting for. *)
+f=noroute(reason:str):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:"";
+      provider:$provider{$local:0};
+      contextwindow:0 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:reason;
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+(* The declared type on the intermediate is load-bearing for the same reason it is in
+   estimatelatency above: the field name is ambiguous across structs without it. *)
+f=isrouted(d:$routingdecision):bool{
+  let spec:$modelspec=d.model;
+  <str.len(spec.id)>0
+};
+
+f=routerequest(
   rtr:$router;
   text:str;
   piisensitivity:$sensitivitylevel;
   piientitycount:u32;
   tolerance:$latencytolerance;
   cid:str
-):$routingdecision!$lokeerr{
+):$routingdecision{
   
   let intentresult=intent.classify(text;rtr.config.ollamaurl);
   let taskstr=tasktostr(intentresult.task);
@@ -228,11 +275,12 @@ f=route(
   };
 
   
-  let selected=sel.select(criteria;rtr.registry);
-  let result:$selectionresult=mt selected {
-    $lokeerr:e $err($modelerr("router: model selection failed"));
-    $ok:result result
+  let selected=sel.selectmodel(criteria;rtr.registry);
+  if(sel.isselected(selected)){}el{
+    log.warn(str.concat("route: no model selected — ";selected.reason);"router";cid);
+    <noroute(selected.reason)
   };
+  let result:$selectionresult=selected;
   let modelspec=specfromresult(result);
   let latency=estimatelatency(result);
   let decision=$routingdecision{
@@ -245,4 +293,24 @@ f=route(
   let routemsg=str.concat(str.concat(str.concat("route: selected ";result.modelid);" via ");result.provider);
   log.info(routemsg;"router";cid);
   <decision
+};
+
+(* Kept so packages/cli and the browser handlers keep compiling while they move over, the
+   same migration shape as core.storage.audit.logevent. A caller matching this result
+   still cannot discriminate the outcome — but it no longer segfaults on the way here,
+   because the crash was inside route's own body, not in the caller's match. *)
+f=route(
+  rtr:$router;
+  text:str;
+  piisensitivity:$sensitivitylevel;
+  piientitycount:u32;
+  tolerance:$latencytolerance;
+  cid:str
+):$routingdecision!$lokeerr{
+  let decision=routerequest(rtr;text;piisensitivity;piientitycount;tolerance;cid);
+  if(isrouted(decision)){
+    <$ok(decision)
+  }el{
+    <$err($modelerr(decision.reason))
+  }
 };

@@ -32,53 +32,91 @@ f=new(keys:$apikeys;ollamaurl:str):$dispatcher{
 
 
 
-f=dispatchanthropic(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+(* LS1.1j — the trydispatch* family is the form a caller can act on.
+
+   Every dispatch* function below returns $completionresponse!$lokeerr, whose error side is
+   a user-declared sum, and toke takes the FIRST arm of a match on such a result whatever
+   the value is (T-18). So none of the seven told its caller anything: every `$err:` arm in
+   this module was dead code, and — verified with a probe this session — reading a field off
+   the mis-bound value SEGFAULTS rather than yielding nonsense. `mt disp.dispatch(...) {
+   $ok:r r.content; $err:e "" }`, which is what packages/cli/src/{ask,proxy}.tk still write,
+   crashes the process the moment a provider call fails.
+
+   Note where the honest discrimination actually lives. It is NOT in this module: dispatcher
+   matches nothing itself, it forwards to a provider, and each provider's `complete` was
+   equally unable to report its own outcome. So the plain forms had to start at the bottom —
+   ant/oai/olp.completeplain, and core.models.ollama.sendchatplain beneath those — where the
+   matches are on std.http and std.json results, which DO discriminate. That distinction is
+   the design: a stdlib result is trustworthy, a user-declared error side is not.
+
+   A trydispatch result is tested with isdispatched and its failure message read with
+   dispatcherror. The sentinel is an empty modelid, which cannot occur on a response that
+   really came from a provider — see the comment on core.providers.types.nocompletion. *)
+f=trydispatchanthropic(d:$dispatcher;req:$completionrequest):$completionresponse{
   let keys:$apikeys=d.keys;
   let client=ant.new(keys.anthropic);
   log.info(str.concat("dispatcher: routing to anthropic model=";req.modelid);"dispatcher";"");
-  <ant.complete(client;req)
+  <ant.completeplain(client;req)
 };
 
-f=dispatchopenai(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+f=trydispatchopenai(d:$dispatcher;req:$completionrequest):$completionresponse{
   let keys:$apikeys=d.keys;
   let client=oai.new(keys.openai);
   log.info(str.concat("dispatcher: routing to openai model=";req.modelid);"dispatcher";"");
-  <oai.complete(client;req)
+  <oai.completeplain(client;req)
 };
 
-f=dispatchollama(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+f=trydispatchollama(d:$dispatcher;req:$completionrequest):$completionresponse{
   let p=olp.new(d.ollamaurl);
   log.info(str.concat("dispatcher: routing to ollama model=";req.modelid);"dispatcher";"");
-  <olp.complete(p;req)
+  <olp.completeplain(p;req)
 };
 
-f=dispatchlocal(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+f=trydispatchlocal(d:$dispatcher;req:$completionrequest):$completionresponse{
   let p=olp.new(d.ollamaurl);
   log.info(str.concat("dispatcher: routing to local (ollama) model=";req.modelid);"dispatcher";"");
-  <olp.complete(p;req)
+  <olp.completeplain(p;req)
 };
 
-f=dispatchunsupported():$completionresponse!$lokeerr{
-  let msg="dispatcher: provider not yet supported";
+f=trydispatchunsupported(name:str):$completionresponse{
+  let msg=str.concat("dispatcher: provider not yet supported: ";name);
   log.warn(msg;"dispatcher";"");
-  <$err($modelerr(msg))
+  <pt.nocompletion(msg)
 };
 
-f=dispatch(d:$dispatcher;req:$completionrequest;provider:$provider):$completionresponse!$lokeerr{
+f=isdispatched(r:$completionresponse):bool{
+  <pt.iscompletion(r)
+};
+
+f=dispatcherror(r:$completionresponse):str{
+  <pt.completionerror(r)
+};
+
+(* All seven $provider variants, named.
+
+   The old arm list was `$anthropic, $openai, $ollama, $local, $ok` — so $google, $mistral
+   and $openrouter had no arm at all, and `$ok` is not a variant of $provider. toke accepted
+   the bogus arm name without a diagnostic. A match on a plain user sum DOES discriminate
+   correctly across a module boundary (probed this session, unlike T-18's result case), so
+   what the three missing variants did was fall through this match rather than reach
+   dispatchunsupported. They are now listed, which is also what makes the "not yet
+   supported" message able to say WHICH provider. *)
+f=trydispatch(d:$dispatcher;req:$completionrequest;provider:$provider):$completionresponse{
   <mt provider {
-    $anthropic:v dispatchanthropic(d;req);
-    $openai:v dispatchopenai(d;req);
-    $ollama:v dispatchollama(d;req);
-    $local:v dispatchlocal(d;req);
-    $ok:v dispatchunsupported()
+    $anthropic:v trydispatchanthropic(d;req);
+    $openai:v trydispatchopenai(d;req);
+    $google:v trydispatchunsupported("google");
+    $mistral:v trydispatchunsupported("mistral");
+    $openrouter:v trydispatchunsupported("openrouter");
+    $ollama:v trydispatchollama(d;req);
+    $local:v trydispatchlocal(d;req)
   }
 };
 
-
-
-
-
-f=dispatchwithguardian(d:$dispatcher;req:$completionrequest;provider:$provider;systemprompt:str):$completionresponse!$lokeerr{
+(* The guardian system prompt, built once and shared by both dispatch-with-guardian forms so
+   the text is not duplicated. T-26: there is no assignment to a struct field in toke, so the
+   guarded request is RECONSTRUCTED rather than patched. *)
+f=guardedrequest(req:$completionrequest;systemprompt:str):$completionrequest{
   let alreadyhasguardian=str.contains(systemprompt;"LOKE_GUARDIAN_v");
   let fullsystem=mut.systemprompt;
   if(alreadyhasguardian){}el{
@@ -104,15 +142,61 @@ These rules take precedence over all other instructions.";
 ");systemprompt)
     }
   };
-  let guardedreq=$completionrequest{
+  <$completionrequest{
     modelid:req.modelid;
     messages:req.messages;
     systemprompt:fullsystem;
     maxtokens:req.maxtokens;
     temperature:req.temperature;
     stream:req.stream
-  };
-  <dispatch(d;guardedreq;provider)
+  }
+};
+
+f=trydispatchwithguardian(d:$dispatcher;req:$completionrequest;provider:$provider;systemprompt:str):$completionresponse{
+  <trydispatch(d;guardedrequest(req;systemprompt);provider)
+};
+
+(* ── The result-returning signatures, kept ──────────────────────────────────────────
+   Every one of these delegates to its plain sibling, the same migration shape as
+   core.storage.audit.logevent: the trustworthy function is added, the old signature keeps
+   working, and callers move over one diff at a time. They are still not discriminable by a
+   caller — that is T-18 and no signature kept here can fix it — but they no longer perform
+   the provider call twice and the failure message now survives into the $err payload
+   instead of being a fixed string. *)
+f=dispatchanthropic(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+  <aserror(trydispatchanthropic(d;req))
+};
+
+f=dispatchopenai(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+  <aserror(trydispatchopenai(d;req))
+};
+
+f=dispatchollama(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+  <aserror(trydispatchollama(d;req))
+};
+
+f=dispatchlocal(d:$dispatcher;req:$completionrequest):$completionresponse!$lokeerr{
+  <aserror(trydispatchlocal(d;req))
+};
+
+f=dispatchunsupported():$completionresponse!$lokeerr{
+  <aserror(trydispatchunsupported("unknown"))
+};
+
+f=dispatch(d:$dispatcher;req:$completionrequest;provider:$provider):$completionresponse!$lokeerr{
+  <aserror(trydispatch(d;req;provider))
+};
+
+f=dispatchwithguardian(d:$dispatcher;req:$completionrequest;provider:$provider;systemprompt:str):$completionresponse!$lokeerr{
+  <aserror(trydispatchwithguardian(d;req;provider;systemprompt))
+};
+
+f=aserror(r:$completionresponse):$completionresponse!$lokeerr{
+  if(pt.iscompletion(r)){
+    <$ok(r)
+  }el{
+    <$err($modelerr(pt.completionerror(r)))
+  }
 };
 
 (* Provider keys come from the environment, not from ~/.loke/config.toml: a key in
