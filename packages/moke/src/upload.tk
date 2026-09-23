@@ -3,6 +3,9 @@
 
 m=moke.upload;
 i=str:std.str;
+i=csv:std.csv;
+(* Imported for the $dataset TYPE, not for any function — `grep 'compute\.'` finds nothing.
+   Removing it fails the build, because a type from an import is referred to unqualified. *)
 i=compute:moke.compute;
 
 (* ── The CSV parser could not parse CSV, and nothing said so ───────────────────────
@@ -167,39 +170,123 @@ f=datalines(text:str):@str{
   <lines
 };
 
-f=parsecsv(text:str;opts:$parseopts):$parseresult{
-  let delim=mut.opts.delimiter;
-  if(str.len(delim)==0){
-    delim=detectdelimiter(text)
-  };
-  let lines=datalines(text);
-  if(lines.len==0){
-    <$parseresult{
-      ok:false;
-      dataset:emptydataset();
-      error:"no data";
-      rowcount:0;
-      colcount:0;
-      previewrows:@()
+(* ── CSV parsing, on std.csv rather than on line splitting ────────────────────────
+   This used to split the text on newlines first (`datalines`) and then split each line on the
+   delimiter. `splitcsvline` is careful and correct about quotes — it tracks `inquotes` and
+   handles the doubled-quote escape — but by the time it ran, the damage was done: a newline
+   INSIDE a quoted field had already ended a "line".
+
+   Measured on a three-row file whose second record holds a two-line address:
+
+     name,address,city
+     Alice,"1 High St",Sydney
+     Bob,"12 Smith St
+     Unit 4",Melbourne
+     Carol,"9 Park Rd",Perth
+
+   the old parser reported **4 data rows**, and not merely shifted:
+
+     row1  Bob   | 12 Smith St |            <- Melbourne LOST
+     row2  Unit 4,Melbourne |  |            <- a PHANTOM record
+
+   So one person's record became two, one of which is fabricated, and a field that was present
+   in the file was silently dropped. For this epic that is worse than a parse error: the column
+   the sensitivity classifier reads is no longer the column the value came from, so a PII field
+   can be classified from a header that describes something else — and a multi-line address is
+   ordinary data in the kind of spreadsheet this demo loads.
+
+   `std.csv` arrived with toke's Epic 135 and is at the pinned commit. Measured on the same
+   input it returns 3 data rows with `12 Smith St\nUnit 4` intact and Melbourne in place.
+
+   Read ITERATIVELY, not recursively: `csv.next` is a stateful reader and the obvious recursive
+   drain would put one frame per row on the stack, which a real upload would exhaust. The loop
+   is bounded by `maxrows` AND by an explicit iteration count, so a reader that neither
+   advances nor reports `atend` cannot spin.
+
+   `$ok` first in every match, because arms bind by position (T-31) and an error arm written
+   first would make a well-formed row take the failure path. *)
+f=delimbyte(text:str;opts:$parseopts):u8{
+  (* An explicit option wins. Otherwise ask std.csv to sniff, and fall back to the
+     count-the-occurrences heuristic this module already had if sniffing cannot tell. *)
+  if(str.len(opts.delimiter)>0){
+    <str.charat(opts.delimiter;0) as u8
+  }el{};
+  <mt csv.sniff(str.bytes(text)) {
+    $ok:d firstbyteor(d.delim;text);
+    $csverr:e firstbyteor(detectdelimiter(text);text)
+  }
+};
+
+f=firstbyteor(delim:str;text:str):u8{
+  if(str.len(delim)>0){
+    <str.charat(delim;0) as u8
+  }el{
+    <str.charat(detectdelimiter(text);0) as u8
+  }
+};
+
+f=readallrows(text:str;sep:u8;limit:i64):@(@str){
+  let rd=csv.reader(str.bytes(text);sep);
+  let rows=mut.@();
+  lp(let it=0;it<limit;it=it+1){
+    if(csv.atend(rd)){}el{
+      rows=mt csv.next(rd) {
+        $ok:row rows.push(row.fields);
+        $csverr:e rows
+      }
     }
   };
+  <rows
+};
+
+f=tailrows(rows:@(@str)):@(@str){
+  let out=mut.@();
+  lp(let i=1;i<rows.len;i=i+1){
+    out=out.push(rows.get(i))
+  };
+  <out
+};
+
+f=noparse(reason:str):$parseresult{
+  <$parseresult{
+    ok:false;
+    dataset:emptydataset();
+    error:reason;
+    rowcount:0;
+    colcount:0;
+    previewrows:@()
+  }
+};
+
+f=parsecsv(text:str;opts:$parseopts):$parseresult{
+  let maxrows=opts.maxrows as i64;
+  (* +1 so a header does not cost the caller a data row. *)
+  let allrows=readallrows(text;delimbyte(text;opts);maxrows+1);
+  if(allrows.len==0){
+    <noparse("no data")
+  }el{};
+
   let headers=mut.@();
-  let startrow=mut.0;
+  let datarows=mut.@();
   if(opts.hasheader){
-    headers=splitcsvline(str.trim(lines.get(0));delim);
-    startrow=1
+    headers=allrows.get(0);
+    datarows=tailrows(allrows)
   }el{
-    headers=gencolheaders(splitcsvline(str.trim(lines.get(0));delim).len)
+    headers=gencolheaders(allrows.get(0).len);
+    datarows=allrows
   };
   let colcount=headers.len;
-  let maxrows=opts.maxrows as i64;
+
+  (* padfields is kept: std.csv reports a ragged row through csv.raggedreport rather than
+     padding it, and every consumer here indexes by column. *)
   let rows=mut.@();
-  lp(let rowidx=startrow;rowidx<lines.len && rows.len<maxrows;rowidx=rowidx+1){
-    let rawline=str.trim(lines.get(rowidx));
-    if(str.len(rawline)>0){
-      rows=rows.push(padfields(splitcsvline(rawline;delim);colcount))
-    }
+  lp(let ri=0;ri<datarows.len && rows.len<maxrows;ri=ri+1){
+    rows=rows.push(padfields(datarows.get(ri);colcount))
   };
+  if(rows.len==0){
+    <noparse("no data")
+  }el{};
+
   let preview=mut.@();
   lp(let pi=0;pi<5 && pi<rows.len;pi=pi+1){
     preview=preview.push(rows.get(pi))

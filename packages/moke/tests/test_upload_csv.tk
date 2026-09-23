@@ -1,0 +1,122 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=packages.moke.tests.testuploadcsv;
+
+i=t:std.test;
+i=str:std.str;
+i=up:moke.upload;
+i=compute:moke.compute;
+
+(* MK21.17 — `moke.upload.parsecsv`, against the REAL module.
+
+   This is the first test under `packages/moke/tests/` that imports production code. The other
+   33 declare a local struct of literal strings and assert it against the same literals — X7.1
+   measured that 21 of them make no `t.assert` call at all — so none of them could have caught
+   what this one does.
+
+   **The defect it exists for.** `parsecsv` used to split the text on newlines (`datalines`) and
+   then split each line on the delimiter. `splitcsvline` is careful and correct about quotes, but
+   by the time it ran a newline INSIDE a quoted field had already ended a "line". Measured on the
+   three-record file below, whose second record holds a two-line address, the old parser
+   reported **4 data rows**:
+
+     row1  Bob | 12 Smith St |           <- Melbourne LOST
+     row2  Unit 4,Melbourne |  |         <- a PHANTOM record
+
+   One person's record became two, one of them fabricated, and a field that was in the file was
+   silently dropped. That is worse than a parse error for this epic: the column the sensitivity
+   classifier reads is no longer the column the value came from, so a PII field can be classified
+   from a header describing something else. A multi-line address is ordinary data.
+
+   Rewritten on `std.csv`, which arrived with toke's Epic 135 and is at the pinned commit.
+
+   **How this was verified**, because `scripts/run_tests.sh` cannot run it yet — it passes a
+   single `-I build/interfaces` and links `packages/browser/build/ooke`, so no test can reach a
+   moke module (X7.2 records this; it is a runner limitation, not a code one). Both parses were
+   driven from a hand-linked probe: `moke.upload`'s object plus a generated `main`, linked
+   against the union of its and the probe's `--emit-deps` C sources. Before: 4 rows, Melbourne
+   absent. After: 3 rows, `12 Smith St\nUnit 4` intact, Melbourne in place. The seven cases below
+   were run the same way and all held. This file is the assertion in the form the suite will use
+   once the runner reaches moke. *)
+
+f=multiline():str{
+  <"name,address,city
+Alice,\"1 High St\",Sydney
+Bob,\"12 Smith St
+Unit 4\",Melbourne
+Carol,\"9 Park Rd\",Perth"
+};
+
+f=opts():$parseopts{
+  <$parseopts{ delimiter:""; hasheader:true; maxrows:1000 as i32 }
+};
+
+f=parse(text:str):$parseresult{
+  <up.parsecsv(text;opts())
+};
+
+(* Every read of a `$dataset` field goes through a DECLARED intermediate. `rows`, `headers` and
+   `title` are each declared by several structs in this tree at different offsets, and toke
+   reports the ambiguity at the READ (E4034) rather than at the binding — so
+   `dsof(plain).rows.len` fails while `let ds:$dataset=plain.dataset; ds.rows.len` is fine. *)
+f=dsof(r:$parseresult):$dataset{
+  <r.dataset
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── THE REGRESSION ──────────────────────────────────────────────────────────
+     Three records in, three records out. This is the assertion that was false. *)
+  let r:$parseresult=parse(multiline());
+  let ds:$dataset=r.dataset;
+  if(t.assert(ds.rows.len==3;"a quoted field containing a NEWLINE does not split the record — 3 records in, 3 out, where the line-splitting parser reported 4")){pass=pass+1}el{fail=fail+1};
+
+  (* The two halves of the old failure, asserted separately, because a row count alone would
+     pass on a parser that dropped a record instead of splitting one. *)
+  let bob:@str=ds.rows.get(1);
+  if(t.assert(str.contains(bob.get(1);"12 Smith St");"the second record keeps the first line of its address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(bob.get(1);"Unit 4");"and the second line, in the SAME field")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bob.get(2);"Melbourne";"and its city, which the old parser lost entirely")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ds.rows.get(2).get(0);"Carol";"the record after the multi-line one is still itself, not an offcut of it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Regressions: everything the old parser got right, it must still get right ─
+     It was rewritten, not patched, so these are not optional. *)
+  let plain:$parseresult=parse("a,b,c
+1,2,3
+4,5,6");
+  if(t.assert(dsof(plain).rows.len==2;"a plain file parses to its row count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dsof(plain).headers.len==3;"and its header is read")){pass=pass+1}el{fail=fail+1};
+
+  (* A delimiter inside quotes is one field, which is what splitcsvline already did correctly. *)
+  let q:$parseresult=parse("a,b
+\"x,y\",z");
+  if(t.asserteq(dsof(q).rows.get(0).get(0);"x,y";"a comma inside quotes stays inside one field")){pass=pass+1}el{fail=fail+1};
+
+  (* Delimiter detection, now through csv.sniff with the old heuristic as the fallback. *)
+  let semi:$parseresult=parse("a;b;c
+1;2;3");
+  if(t.assert(dsof(semi).headers.len==3;"a semicolon-delimited file is detected, not read as one column")){pass=pass+1}el{fail=fail+1};
+  let tab:$parseresult=parse("a	b
+1	2");
+  if(t.assert(dsof(tab).headers.len==2;"and a tab-delimited one")){pass=pass+1}el{fail=fail+1};
+
+  (* No header: columns are generated and the first line is DATA, not consumed. *)
+  let nh:$parseresult=up.parsecsv("1,2,3
+4,5,6";$parseopts{ delimiter:""; hasheader:false; maxrows:1000 as i32 });
+  if(t.assert(dsof(nh).rows.len==2;"with hasheader false the first line is data, not a header")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dsof(nh).headers.get(0);"col_0";"and the columns are generated")){pass=pass+1}el{fail=fail+1};
+
+  (* A short row is padded, so every consumer can index by column. *)
+  let rag:$parseresult=parse("a,b,c
+1,2");
+  if(t.assert(dsof(rag).rows.get(0).len==3;"a short row is padded to the column count rather than left ragged")){pass=pass+1}el{fail=fail+1};
+
+  (* Empty input is a refusal, not an empty success. *)
+  let empty:$parseresult=parse("");
+  if(t.assert(!empty.ok;"empty input is reported as not-ok rather than as an empty dataset")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

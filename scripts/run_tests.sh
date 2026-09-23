@@ -77,6 +77,33 @@ else
   echo "      call into loke will fail to link rather than silently test a stub." >&2
 fi
 
+# moke's modules, so a test under packages/moke/tests/ can call the real thing.
+#
+# X7.2 recorded moke's 33 tests as untestable, and the reason was this script rather than the
+# code: it passed a single `-I build/interfaces` and linked only loke's archive, so no test
+# could reach a moke module. The 33 compiled anyway — precisely BECAUSE they import nothing and
+# assert a local struct of literals against the same literals, which is the X7.1 trap in its
+# clearest form. The first moke test to import production code (test_upload_csv.tk, MK21.17)
+# therefore failed to compile where the vacuous ones passed.
+#
+# Six moke objects still do not assemble (T-35 truncation in the four data modules, T-37 in
+# compute and ml/engine — see MK21.16), so this archive is deliberately "whatever assembled".
+# The archive links LAZILY, so a test pulls in only what it references: a test that needs one
+# of the six fails at link with a named undefined symbol, which is the honest outcome, and a
+# test that does not is unaffected.
+MOKE_OBJ_DIR="$PROJECTDIR/build/trees/moke/obj"
+MOKE_IFACE_DIR="$PROJECTDIR/build/trees/moke/interfaces"
+MOKE_A="$BUILDDIR/libmoke.a"
+if [ -d "$MOKE_OBJ_DIR" ]; then
+  NEWEST_M=$(find "$MOKE_OBJ_DIR" -name '*.o' -newer "$MOKE_A" 2>/dev/null | head -1)
+  if [ ! -f "$MOKE_A" ] || [ -n "$NEWEST_M" ]; then
+    echo "Building $MOKE_A (once) ..."
+    rm -f "$MOKE_A"
+    find "$MOKE_OBJ_DIR" -name '*.o' -print0 | xargs -0 ar rcs "$MOKE_A" 2>/dev/null
+    echo "  $(find "$MOKE_OBJ_DIR" -name '*.o' | wc -l | tr -d ' ') moke modules archived"
+  fi
+fi
+
 # ooke's objects, for the page modules: they call ooke.template and ooke.serve.
 OOKE_DIR="${OOKE_DIR:-$HOME/tk/toke-ooke}"
 OOKE_A="$BUILDDIR/libooke.a"
@@ -142,7 +169,12 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   ORIGDIR=$(pwd)
 
   # Step 1: emit LLVM IR
-  if ! $TOKE $TKCONFIG -I "$IFACE_DIR" --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null; then
+  # Two interface dirs. `-I` is repeatable, and the moke tree's interfaces are needed by
+  # packages/moke/tests/*. build/interfaces is listed FIRST so loke's own modules always win a
+  # name collision — both trees emit shared.types.tki, and the moke tree's copy is only as fresh
+  # as the last moke build.
+  if ! $TOKE $TKCONFIG -I "$IFACE_DIR" $([ -d "$MOKE_IFACE_DIR" ] && echo "-I $MOKE_IFACE_DIR") \
+       --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null; then
     echo "COMPILE_ERROR $SRC"
     FAIL=$((FAIL+1))
     ERRORS="$ERRORS\n  $SRC (compile)"
@@ -157,7 +189,8 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   # privacy unit test into a link against the whole application.
   if ! clang $CFLAGS -L/opt/homebrew/lib \
     -x ir "$BUILDDIR/$NAME.ll" -x none \
-    $([ -f "$LOKE_A" ] && echo "$LOKE_A") $([ -f "$OOKE_A" ] && echo "$OOKE_A") "$STDLIB_A" \
+    $([ -f "$LOKE_A" ] && echo "$LOKE_A") $([ -f "$MOKE_A" ] && echo "$MOKE_A") \
+    $([ -f "$OOKE_A" ] && echo "$OOKE_A") "$STDLIB_A" \
     -o "$BUILDDIR/$NAME" -lm -lz -lsqlite3 -lssl -lcrypto \
     -framework Security -framework CoreFoundation -lobjc \
     2>/dev/null; then
