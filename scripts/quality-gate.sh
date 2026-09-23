@@ -109,6 +109,11 @@ step_checks() {
     python3 ./scripts/check_claims.py --check || failed=1
   fi
 
+  if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
+    echo "  backlog schema and generated SUMMARY"
+    python3 ./scripts/check_backlog.py --check || failed=1
+  fi
+
   if [[ -f tests/fixtures/pii-corpus/generate.py ]]; then
     echo "  PII corpus spans verify"
     python3 tests/fixtures/pii-corpus/generate.py --verify >/dev/null \

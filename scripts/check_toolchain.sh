@@ -71,6 +71,30 @@ else
       echo "        git -C $TOKE_DIR log --oneline $TOKE_VERIFIED..HEAD first —"
       echo "        a new diagnostic upstream is a likelier cause than anything local."
     fi
+
+    # Is the compiler that is about to build loke one anybody else can fetch?
+    #
+    # Allowing a descendant of the minimum is deliberate (see above), but it has a cost
+    # that went unreported for two days: the local checkout sat hundreds of commits past
+    # the pin on a branch that was on no remote, so "the build is green" was true of a
+    # compiler nobody else had. Meanwhile the lock recorded CI as blocked for a reason
+    # that had stopped being true. Both mistakes are the same mistake — a claim about a
+    # commit that nobody re-tested — so the commit that actually builds is now named, and
+    # whether it is reachable is checked rather than assumed.
+    #
+    # A warning, not an error. Working ahead of the pin is legitimate and common; what is
+    # not legitimate is quoting a measurement without saying which compiler produced it.
+    if ! git -C "$TOKE_DIR" branch -r --contains HEAD >/dev/null 2>&1 \
+       || [ -z "$(git -C "$TOKE_DIR" branch -r --contains HEAD 2>/dev/null)" ]; then
+      echo "  WARNING: toke $toke_head is on NO REMOTE BRANCH."
+      echo "           This build is not reproducible by anyone else, and CI cannot"
+      echo "           reproduce it either. Any figure measured here must be labelled"
+      echo "           with $toke_head, not with the lock's $TOKE_VERIFIED."
+      echo "           To make it reproducible: push the branch, or check out a"
+      echo "           published commit at or after $TOKE_MIN."
+    else
+      echo "  toke: $toke_head is published ($(git -C "$TOKE_DIR" branch -r --contains HEAD 2>/dev/null | head -1 | tr -d ' '))"
+    fi
   else
     echo "ERROR: toke at $toke_head is BEFORE the required commit $TOKE_MIN." >&2
     echo "       loke needs a build of main at or after $TOKE_MIN. No tagged" >&2

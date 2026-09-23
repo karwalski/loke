@@ -1,12 +1,21 @@
 #!/bin/sh
-# build_loke.sh — Build loke native binary
-# Wraps ooke's gen_app_makefile.sh with loke-specific settings:
-# -I for .tki interfaces, source_paths for core modules, .ll→.o linking
+# build_loke.sh — Build the loke native binary.
 #
-# This script reports every compile failure and exits non-zero if any module
-# failed. It does NOT suppress compiler stderr and does NOT pass
-# -Wl,-undefined,dynamic_lookup, because both of those turn build failures
-# into runtime crashes. A failure census is written to build/break-report.txt.
+# This is the `loke` target of the five build targets: packages/core/src,
+# packages/shared/src, packages/browser/extensions and packages/browser/pages, linked
+# into a single ooke-served binary on port 11430.
+#
+# The compile pipeline itself — fresh ooke .tki copy, dependency-ordered interface
+# pass, compile census, undefined-symbol census, link — lives in
+# scripts/lib/build_tree.sh, because four other trees need exactly the same pipeline
+# with a different root list and a different (or absent) link phase. See
+# scripts/build_trees.sh for the other four. What stays HERE is only what is specific
+# to loke: the generated handler registry and the generated ooke server main.
+#
+# This script reports every compile failure and exits non-zero if any module failed.
+# It does NOT suppress compiler stderr and does NOT pass
+# -Wl,-undefined,dynamic_lookup, because both of those turn build failures into
+# runtime crashes. A failure census is written to build/break-report.txt.
 
 set -eu
 
@@ -14,69 +23,13 @@ PROJECTDIR="$(cd "$(dirname "$0")/.." && pwd)"
 BROWSERDIR="$PROJECTDIR/packages/browser"
 OOKE_DIR="${OOKE_DIR:-$HOME/tk/toke-ooke}"
 TOKE_DIR="${TOKE_DIR:-$HOME/tk/toke}"
-TOKE="$TOKE_DIR/toke"
-# loke's capability manifest (F10.9). toke looks for ./tkc.toml in the CURRENT
-# directory and this script cds to packages/browser, so the path is passed explicitly.
-# Without it every compiled binary traps CAP001 on its first log line.
-TKCONFIG="--config=$PROJECTDIR/tkc.toml"
-STDLIB="$TOKE_DIR/src/stdlib"
-VENDOR="$TOKE_DIR/stdlib/vendor"
-IFACE_DIR="$PROJECTDIR/build/interfaces"
 
 # Step 0: Toolchain guard — refuse to compile against an unverified toolchain
 if [ -x "$PROJECTDIR/scripts/check_toolchain.sh" ]; then
   TOKE_DIR="$TOKE_DIR" OOKE_DIR="$OOKE_DIR" "$PROJECTDIR/scripts/check_toolchain.sh"
 fi
 
-[ -x "$TOKE" ] || { echo "ERROR: toke compiler not executable at $TOKE" >&2
-                    echo "       set TOKE_DIR to your toke checkout" >&2; exit 1; }
-[ -d "$OOKE_DIR/src" ] || { echo "ERROR: ooke source not found at $OOKE_DIR/src" >&2
-                            echo "       set OOKE_DIR to your ooke checkout" >&2; exit 1; }
-
-REPORT="$PROJECTDIR/build/break-report.txt"
-mkdir -p "$PROJECTDIR/build"
-: > "$REPORT"
-FAILED=0
-COMPILED=0
-
-# compile <label> <outflag-and-args...> — records failure, never aborts the census
-compile_one() {
-  _src="$1"; shift
-  if "$TOKE" $TKCONFIG -I "$IFACE_DIR" "$@" "$_src" 2>>"$REPORT"; then
-    COMPILED=$((COMPILED + 1))
-  else
-    FAILED=$((FAILED + 1))
-    echo "COMPILE_FAIL $_src" >> "$REPORT"
-    echo "  compile FAILED: $_src" >&2
-  fi
-}
-
-# Step 1: Copy fresh ooke .tki files
-#
-# The loke interfaces are rebuilt from scratch every run. They used to be left in
-# place, and a stale nested tree from May survived four months of toolchain change:
-# toke resolves -I against FLAT, dot-separated names (core.privacy.ner.tki), so the
-# old core/privacy/ner.tki layout was never read at all. Every cross-module import
-# therefore resolved against nothing, which is why the build reported "module not
-# found; available: ooke.handlers.tki" and a long tail of interface-disagrees-with-
-# implementation errors that were really just absence.
-rm -rf "$IFACE_DIR"
-mkdir -p "$IFACE_DIR/ooke"
-for f in "$OOKE_DIR/src"/ooke.*.tki; do
-  [ -f "$f" ] && cp "$f" "$IFACE_DIR/ooke/$(basename "$f" | sed 's/^ooke\.//')"
-done
-
-# Step 2: Generate handlers and main
-"$OOKE_DIR/scripts/gen_handlers.sh" "$BROWSERDIR/pages" "$BROWSERDIR/_handlers.tk"
-# gen_handlers.sh is ooke's and emits no licence header. This file is tracked, so
-# the header is prepended here rather than upstream.
-if ! head -1 "$BROWSERDIR/_handlers.tk" | grep -q 'Copyright 2026 loke contributors'; then
-  printf '(* Copyright 2026 loke contributors\n   SPDX-License-Identifier: Apache-2.0 *)\n\n%s' \
-    "$(cat "$BROWSERDIR/_handlers.tk")" > "$BROWSERDIR/_handlers.tk.tmp"
-  mv "$BROWSERDIR/_handlers.tk.tmp" "$BROWSERDIR/_handlers.tk"
-fi
-
-# Step 3: Generate _serve_main.tk
+# Step 1: Generate _serve_main.tk
 # NOTE: match arms use $ok/$err and serverun's final parameter is [str] as of
 # ooke 2.0.0. Keep this in sync with $OOKE_DIR/src/ooke.serve.tki.
 cat > "$BROWSERDIR/_serve_main.tk" << 'MAIN'
@@ -127,128 +80,32 @@ f=main():i64{
 };
 MAIN
 
-# Step 4: Compile all modules
-cd "$BROWSERDIR"
-rm -rf build/ooke build/main.ll build/loke
-mkdir -p build/ooke
-
-# Order matters and was wrong. The page handlers and main used to be compiled BEFORE
-# the interface pass, so every cross-module import in a page resolved against nothing
-# — and the interface pass did not cover packages/browser/pages either, so the pages
-# never contributed interfaces of their own. Both halves are fixed: interfaces first,
-# over the pages too, then everything is compiled.
-
-echo "Emitting module interfaces in dependency order..."
-MODULE_SRCS=$("$PROJECTDIR/scripts/module_order.py" \
-  "$PROJECTDIR/packages/core/src" "$PROJECTDIR/packages/shared/src" \
-  "$BROWSERDIR/extensions" "$BROWSERDIR/pages" 2>/dev/null)
-[ -n "$MODULE_SRCS" ] || { echo "ERROR: could not compute module order" >&2; exit 1; }
-# --emit-llvm matters here and is not cosmetic. Without it toke compiles a BINARY,
-# which requires a main function, so every library module failed with
-# "E9020 no main function defined" and emitted no interface. That single missing
-# flag was the whole reason only 33 of 179 interfaces appeared — it read as a
-# dependency-order problem and was not one. ooke's own Makefile pairs the two flags.
-# --out is a DIRECTORY here, so toke names the .tki by module path
-# (core.privacy.ner.tki). The .ll lands beside it and is ignored; the compile pass
-# in step 4b emits the IR that actually gets linked.
-for tkfile in $MODULE_SRCS; do
-  "$TOKE" $TKCONFIG -I "$IFACE_DIR" --emit-interface --emit-llvm \
-    --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
-done
-echo "  $(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ') of $(echo "$MODULE_SRCS" | wc -l | tr -d ' ') interface(s) emitted"
-
-echo "Compiling page handlers..."
-for tkfile in $(find pages -name '*.tk' -type f | sort); do
-  has_handler=0
-  grep -q 'f=get(' "$tkfile" && has_handler=1
-  grep -q 'f=post(' "$tkfile" && has_handler=1
-  [ "$has_handler" -eq 0 ] && continue
-  modpath=$(grep '^m=' "$tkfile" | head -1 | sed 's/m=//; s/;//')
-  buildname=$(echo "$modpath" | tr '.' '_')
-  compile_one "$tkfile" --emit-interface --emit-llvm --out "build/ooke/$buildname"
-done
-
-echo "Compiling handlers registry..."
-compile_one _handlers.tk --emit-interface --emit-llvm --out build/ooke/handlers
-
-echo "Compiling main..."
-compile_one _serve_main.tk --emit-llvm --out build/main.ll
-
-# Step 4a: interface pass.
+# Step 2: the tree build.
 #
-# A module cannot be compiled before the interfaces of its imports exist, and the
-# import graph is not the alphabetical order the loop walks. So interfaces are
-# emitted first, for every module, and the pass runs twice: an interface can itself
-# need another interface to be emitted, and two passes reach the fixpoint for a
-# graph this shallow. Failures here are expected and silent — a module that cannot
-# typecheck still yields a usable signature list, and the census in step 4b is
-# where a real failure is reported.
-# Interfaces are emitted in DEPENDENCY ORDER, not alphabetical order and not by
-# repetition. A module's interface can only be emitted once its imports' interfaces
-# exist, so alphabetical-plus-repeat stalled at 33 of 179: repetition cannot fix an
-# ordering problem, only a shallow one. scripts/module_order.py reads the m= and i=
-# lines, topologically sorts them (179 modules, no cycles) and prints the order.
-echo "Compiling core modules..."
-for tkfile in $MODULE_SRCS; do
-  modpath=$(grep '^m=' "$tkfile" | head -1 | sed 's/m=//; s/;//')
-  [ -z "$modpath" ] && continue
-  buildname=$(echo "$modpath" | tr '.' '_')
-  compile_one "$tkfile" --emit-llvm --out "build/ooke/$buildname"
-done
-
-echo ""
-echo "Compile census: $COMPILED succeeded, $FAILED failed"
-if [ "$FAILED" -gt 0 ]; then
-  echo "See $REPORT for diagnostics." >&2
-  echo "Refusing to link an incomplete build." >&2
-  exit 1
-fi
-
-# Step 5: Compile .ll → .o
-echo "Compiling IR to object files..."
-for f in build/main.ll $(find build/ooke -type f ! -name '*.tki' ! -name '*.o'); do
-  clang -c -x ir "$f" -o "$f.o"
-done
-for f in "$OOKE_DIR"/src/ooke/*; do
-  [ -f "$f" ] || continue
-  case "$f" in *.tki|*.o) continue ;; esac
-  clang -c -x ir "$f" -o "$f.o"
-done
-
-# Step 6: Link
-echo "Linking build/loke..."
-
-OBJLIST=$(mktemp "${TMPDIR:-/tmp}/loke_obj.XXXXXX")
-CLIST=$(mktemp "${TMPDIR:-/tmp}/loke_c.XXXXXX")
-trap 'rm -f "$OBJLIST" "$CLIST"' EXIT INT TERM
-
-find build -name '*.o' > "$OBJLIST"
-find "$OOKE_DIR/src/ooke" -name '*.o' ! -name 'handlers.o' >> "$OBJLIST"
-# sys_glue.c and llm_tool.c are INCLUDED. It was excluded here from this script's first commit with
-# no recorded reason, alongside llm_tool.c and infer_stream.c, and the omission cost
-# the link: tk_sys_platform_w, tk_sys_isarm64_w, tk_sys_totalramgb_w, tk_sys_cpucount_w,
-# tk_sys_diskfreegb_w, tk_sys_chipname_w and tk_sys_datadir_w are all defined there and
-# nowhere else, and installer/detect, setup/wizard and pages/installer all call them.
-# It compiles clean and its eight symbols do not collide with sys.o's two.
+# The interface dir and the object dir are pinned to the paths they have always had:
+# scripts/run_tests.sh reads build/interfaces for -I and archives
+# packages/browser/build/ooke into libloke.a, so moving either would break the test
+# suite silently. The other four targets write under build/trees/<name>/ instead,
+# which is also why the link line names its object dirs explicitly now — the old
+# single `find build -name '*.o'` sweep would have put another target's objects on
+# loke's link line and duplicated every symbol in core.
 #
-# llm_tool.c was excluded the same way while llm_tool_glue.c was kept, so the glue's
-# calls to llm_chatwithtools, llm_parse_tool_calls, llm_submitresult and
-# llm_tool_result_msgs had no definitions. It compiles clean too.
-#
-# infer_stream.c stays out: it is the only one of the three that does not build here.
-find "$STDLIB" -name '*.c' ! -name 'infer_stream.c' > "$CLIST"
-find "$VENDOR/cmark/src" -name '*.c' ! -name 'main.c' >> "$CLIST"
-echo "$VENDOR/tomlc99/toml.c" >> "$CLIST"
-
-# No -Wl,-undefined,dynamic_lookup: undefined symbols must fail the link here
-# rather than crash at runtime.
-clang -std=c99 -D_GNU_SOURCE -O1 -iquote "$STDLIB" \
-  -I"$VENDOR/cmark/src" -I"$VENDOR/tomlc99" \
-  -I/opt/homebrew/include -L/opt/homebrew/lib \
-  -Wno-implicit-function-declaration -Wno-pedantic -DTK_HAVE_OPENSSL \
-  $(cat "$OBJLIST") \
-  -x c $(cat "$CLIST") \
-  -o build/loke -lssl -lcrypto -lz -lm -lsqlite3 \
-  -framework Security -framework CoreFoundation -lobjc
-
-echo "Done: $BROWSERDIR/build/loke ($(du -h build/loke | cut -f1))"
+# --legacy-report keeps build/break-report.txt where CI uploads it from and where
+# scripts/build_census.py looks when no --tree is given.
+exec "$PROJECTDIR/scripts/lib/build_tree.sh" \
+  --link=binary \
+  --main="$BROWSERDIR/_serve_main.tk" \
+  --binary="$BROWSERDIR/build/loke" \
+  --iface="$PROJECTDIR/build/interfaces" \
+  --objdir="$BROWSERDIR/build/ooke" \
+  --report="$PROJECTDIR/build/trees/loke/break-report.txt" \
+  --legacy-report="$PROJECTDIR/build/break-report.txt" \
+  --gen-handlers="$BROWSERDIR/pages:$BROWSERDIR/_handlers.tk" \
+  --extra="$BROWSERDIR/_handlers.tk:handlers" \
+  --handler-iface-pass="$BROWSERDIR/pages" \
+  --ooke-objs \
+  loke \
+  "$PROJECTDIR/packages/core/src" \
+  "$PROJECTDIR/packages/shared/src" \
+  "$BROWSERDIR/extensions" \
+  "$BROWSERDIR/pages"
