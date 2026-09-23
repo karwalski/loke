@@ -1,0 +1,101 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.shared.logwrites;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=sht:shared.types;
+i=log:shared.log;
+
+(* Does a log line actually reach a file?
+
+   Nothing in this repository asked that until today, and the answer was NO for the whole of
+   its existence, for two independent reasons — either of which alone was enough:
+
+     1. the path was the literal "~/.loke/loke.log", and the tilde is never expanded by toke's
+        path layer (LS1.1q: `file.exists("~/.loke/x")` is false for a file that exists, and an
+        append to such a path writes nothing at all);
+     2. `file.appendline` is declared `(i64, i64) -> i64` — one of std.file's UNTYPED helpers,
+        the same family as the `json.getval` that segfaults on a typed value — and it was being
+        handed two `str`s. The typed function is `file.append(str, str) -> bool!FileErr`.
+
+   So every log.debug / log.info / log.warn / log.error call this project has ever made was
+   silently discarded. That is why nothing here has ever been diagnosed from a log.
+
+   This file is the assertion that would have caught it. It writes through the REAL
+   `shared.log`, to the REAL path, and measures the file's size before and after — it does not
+   re-implement a logger and compare the copy to itself, which is the X7 trap.
+
+   It deliberately does NOT delete the log file: this is the operator's actual log, and a test
+   that truncates it destroys evidence. Growth is asserted instead of exact content, which is
+   also why the assertions are about the DELTA. *)
+
+f=logsize():i64{
+  <mt file.size(log.logpath()) {
+    $ok:n n;
+    $err:e 0
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── The path is absolute ────────────────────────────────────────────────────
+     The defect in its simplest form. A path beginning `~` never resolves, so this is the one
+     assertion that fails the instant somebody reintroduces a tilde literal here. *)
+  let p=log.logpath();
+  if(t.assert(!str.startswith(p;"~");"the log path is not tilde-prefixed — a `~` path never resolves")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(p;"/");"it is absolute")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(p;"/.loke/loke.log");"and it is the expected file under the loke directory")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A line actually lands ───────────────────────────────────────────────────
+     THE regression assertion. If this is red, the logger is silent, whatever the path says. *)
+  let before=logsize();
+  log.info("test_log_writes: a line from the real logger";"test.logwrites";"log-test");
+  let after=logsize();
+  if(t.assert(after>before;"log.info GROWS THE LOG FILE — the whole point, and false for the entire life of this project until 2026-09-23")){pass=pass+1}el{fail=fail+1};
+
+  (* Every level writes, not just the one that happened to be tested. All four had the same
+     two defects and all four were fixed together; asserting one would not establish the rest. *)
+  let b2=logsize();
+  log.debug("test_log_writes: debug";"test.logwrites";"log-test");
+  if(t.assert(logsize()>b2;"log.debug writes")){pass=pass+1}el{fail=fail+1};
+  let b3=logsize();
+  log.warn("test_log_writes: warn";"test.logwrites";"log-test");
+  if(t.assert(logsize()>b3;"log.warn writes")){pass=pass+1}el{fail=fail+1};
+  let b4=logsize();
+  log.error("test_log_writes: error";"test.logwrites";"log-test");
+  if(t.assert(logsize()>b4;"log.error writes")){pass=pass+1}el{fail=fail+1};
+
+  (* ── One line per call ───────────────────────────────────────────────────────
+     Two calls must grow the file by more than one does. Without the newline `writeline` adds,
+     every line would be concatenated into one and a log with no line breaks is not a log. *)
+  let b5=logsize();
+  log.info("test_log_writes: first of two";"test.logwrites";"log-test");
+  let mid=logsize();
+  log.info("test_log_writes: second of two";"test.logwrites";"log-test");
+  let b6=logsize();
+  if(t.assert((b6-mid)>0;"a second call grows the file again rather than overwriting it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((b6-b5)>(mid-b5);"and two lines are longer than one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The sanitiser is on the write path ──────────────────────────────────────
+     `shared.log` routes every message through core.privacy.logsanitiser before writing, and
+     "never log PII, even at debug level" is a stated project invariant. Asserting the line
+     lands is not enough on its own: it must land sanitised. This checks the growth is
+     consistent with a REDACTED message rather than the raw one — an email address is 19
+     characters and its replacement is shorter, so a line carrying the original would be longer
+     than one carrying the redaction. *)
+  let b7=logsize();
+  log.info("test_log_writes: contact alice.example@example.com now";"test.logwrites";"log-test");
+  let withpii=logsize()-b7;
+  let b8=logsize();
+  log.info("test_log_writes: contact  now";"test.logwrites";"log-test");
+  let without=logsize()-b8;
+  if(t.assert(withpii>0;"a message containing an email address still produces a line")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(withpii<=(without+12);"and that line is not longer than the redacted form by more than the placeholder — so the address was not written verbatim")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
