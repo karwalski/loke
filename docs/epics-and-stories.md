@@ -1049,10 +1049,10 @@ hand-edit produced a set of numbers that disagreed with them.*
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | TOOLCHAIN | 1 | 45 | 15 | 3 | — | — | — | 1 | — | 26 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 30 | 10 | 4 | — | — | — | — | — | 16 |
-| AUDIT-DRIVEN GAPS | 5 | 38 | 33 | — | 5 | — | — | — | — | — |
+| AUDIT-DRIVEN GAPS | 5 | 38 | 34 | — | 4 | — | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 15 | 1 | — | — | — | — | — | 16 |
-| VERIFICATION PROGRAMME | 14 | 103 | 40 | 8 | — | 6 | 6 | — | — | 43 |
-| **Total** | **88** | **638** | **498** | **16** | **8** | **6** | **6** | **1** | — | **103** |
+| VERIFICATION PROGRAMME | 14 | 104 | 40 | 8 | — | 6 | 6 | — | — | 44 |
+| **Total** | **88** | **639** | **499** | **16** | **7** | **6** | **6** | **1** | — | **104** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1123,7 +1123,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | MK19 | 1 | 10 | 6 | 2 | — | — | — | — | — | 2 |
 | MK20 | 1 | 5 | 4 | 1 | — | — | — | — | — | — |
 | MK21 | 1 | 15 | — | 1 | — | — | — | — | — | 14 |
-| GA1 | 1 | 10 | 6 | — | 4 | — | — | — | — | — |
+| GA1 | 1 | 10 | 7 | — | 3 | — | — | — | — | — |
 | GA2 | 1 | 5 | 4 | — | 1 | — | — | — | — | — |
 | GA3 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | GA4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
@@ -1135,7 +1135,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VM1 | 1 | 8 | 5 | 2 | — | — | — | — | — | 1 |
 | CB1 | 1 | 7 | 2 | — | — | — | — | — | — | 5 |
 | AD1 | 1 | 8 | 2 | 2 | — | — | — | — | — | 4 |
-| GA5 | 1 | 14 | 4 | 1 | — | 1 | — | — | — | 8 |
+| GA5 | 1 | 15 | 4 | 1 | — | 1 | — | — | — | 9 |
 | RG1 | 1 | 6 | 3 | 2 | — | — | — | — | — | 1 |
 | RS | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | X6 | 1 | 5 | 5 | — | — | — | — | — | — | — |
@@ -1146,9 +1146,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 17 | 8 | 1 | — | — | — | — | — | 8 |
 | RV1 | 1 | 10 | 2 | — | — | — | — | — | — | 8 |
-| **Total** | **88** | **638** | **498** | **16** | **8** | **6** | **6** | **1** | — | **103** |
+| **Total** | **88** | **639** | **499** | **16** | **7** | **6** | **6** | **1** | — | **104** |
 
-Rows parsed: **638**, across **88** epics and **16** level-1 headings.
+Rows parsed: **639**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
@@ -1392,7 +1392,7 @@ never leaves, not even for categorisation.
 | GA1.6 | M | **Reopened** — no cache lookup exists in the handler | **Wire semantic cache into pipeline** — Before dispatching to LLM, check `core.optimiser.cache.lookup()` for semantically similar previous requests. If cache hit (similarity > 0.92), return cached response with `[cache hit]` indicator. On cache miss, store response via `cache.store()` after receiving. Target: up to 73% savings on cache hits per spec. |
 | GA1.7 | M | **Reopened** | **Wire intelligent router into pipeline** — Replace the if/else API key check with actual `core.router.selector.select()` which evaluates sensitivity × cost × latency × capability to choose the optimal model. Currently the router makes simplistic binary local/cloud choices; the spec requires multi-dimensional optimisation.<br><br>**Status detail:** **Reopened** — `selector.select()` is never called; the provider is chosen by `str.len(anthropickey)>20`. Overlaps X8.6, which owns the four named strategies |
 | GA1.8 | S | **Done** | **Wire governance policy evaluation** — Before dispatching, call `core.governance.policy.evaluate()` to get risk classification (low/medium/high) and decision ($allow/$allowwithwarning/$requireapproval). Show warnings to user per graduated severity. Currently policy evaluation exists but is never called from the browser.<br><br>**Status detail:** **Done — 2026-09-23.** Recovered under GA1.10, and the cheapest of the GA1 wirings for a structural reason: `policy.evaluate` returns a **plain struct**, so T-18 cannot touch it, and `classifyrisk` takes its cost as an f64 **parameter**, which crosses a module boundary intact. A policy deny is audited before the 403 is returned — a blocked request is exactly the kind an auditor asks about |
-| GA1.9 | S | **Reopened** | **Verify end-to-end pipeline in browser** — Full integration test: send a prompt containing PII through the browser, verify privacy filter detects and masks it, token optimiser compresses it, router selects appropriate model, audit log records the event, kill switch blocks when engaged, and response restoration returns clean output. Document the verified flow.<br><br>**Status detail:** **Reopened** — cannot pass while GA1.5-GA1.7 are unwired, and the existing test asserts on JSON shape rather than on whether anonymisation occurred |
+| GA1.9 | S | **Done** | **Verify end-to-end pipeline in browser** — Full integration test: send a prompt containing PII through the browser, verify privacy filter detects and masks it, token optimiser compresses it, router selects appropriate model, audit log records the event, kill switch blocks when engaged, and response restoration returns clean output. Document the verified flow.<br><br>**Status detail:** **Reopened** — cannot pass while GA1.5-GA1.7 are unwired, and the existing test asserts on JSON shape rather than on whether anonymisation occurred *Done 2026-09-23. `tests/integration/test_request_path_e2e.tk`, 20 assertions, driving the ROUTE'S OWN exported functions rather than re-implementing the sequence — `h.decide`, `h.isdeny`, `h.risktierof`, `h.restoretext`, `h.recordevent`, `h.killswitchengaged` — so a regression in any of them fails this test. It composes them rather than calling `post(req)` because toke cannot construct an http request from source (T-16): `std.http` exposes `reqpath`/`reqmethod`/`reqbody` as accessors over an opaque `i64` and no constructor, so `post` is unreachable from a test. The assertion this story was reopened for is now present: **that anonymisation OCCURRED** — neither the email address nor the card number appears in the text that would be forwarded, non-PII survives unchanged, and restoration through the route's own function reproduces the original byte-for-byte, including when a placeholder is echoed back inside a longer provider reply. Plus: exactly one audit row per request, the chain over those rows verifies, and an **unopenable store reads as ENGAGED** rather than disengaged. **GA1.5, GA1.6 and GA1.7 are explicitly named as not asserted, in the test body**, with the reason — a test that silently skipped the unwired half would let this row be marked Done on partial evidence, which is the failure mode this epic exists to correct. Their assertions belong here when they land.* |
 | GA1.10 | M | **Done** — 2026-09-23 | **Recover the request-path wiring destroyed by `09b0a67`** — Found 2026-09-23 while re-verifying A13. GA1.2, GA1.4 and GA1.8 were **not** never-implemented: they were implemented, committed, and then silently deleted. At `2b8942e`, `packages/browser/pages/api/pipeline.tk` was **240 lines** and really did call `ph.newmap()` (`:85`), `ph.addentry()` (`:93`), `ks.isengaged()` (`:116`), `policy.classifyrisk()`/`policy.evaluate()` (`:137-138`), `ph.restore()` (`:195`) and `audit.logevent()` (`:217`). `09b0a67` — *"fix(F10.18): ooke.template.renderfile -> tplrenderfile"*, a mechanical 24-site sweep — cut the file to **79 lines**, net **-161**, keeping the imports and deleting every call. Its commit message does not mention the file, and it is the **only** file in that commit that shrank by more than 30 lines, so this was collateral, not intent. `docs/claims.md` had recorded the hazard in advance: the working-tree copy *"strips all nine core imports and must not be committed (F10.13, X8.5)"*. It was committed anyway. **So `2b8942e` is the reference implementation for GA1.2/GA1.4/GA1.8, not prose** — recover from it rather than writing fresh, but it needs adapting: the pipeline API changed with NC1.9 (`runforward` + `issafetoforward`), and the recovered `ph.addentry` path still depends on PL1.1, because the placeholder map it built is the one `regex.rundetection` throws away |
 
 ## Epic GA2: Security Hardening
@@ -1623,6 +1623,7 @@ never leaves, not even for categorisation.
 | GA5.12 | M |  | **`governance/report.tk` and `dsar.tk` query a table no migration creates** — Found 2026-09-23. All four of `report.tk`'s queries read `audit_events` (columns `ts`, `rule_id`, `event_type`); `migrations.tk` creates `audit_log` only. So `countevents` returns 0 for totals, violations and quota breaches, and `querytoprules` takes its failure path. `dsar.tk:129,146` exports from the same absent table. Either create `audit_events`, or point these at `audit_log` and map the column names — but decide which, because two tables with overlapping meaning is how this started. Sibling of **M1.7** |
 | GA5.13 | S |  | **The scorecard builds an undeclared type and reads a field it never writes** — Found 2026-09-23. `governance/dashboard.tk:197-228` constructs `$dashboardmetric{name;value;status;detail}` literals; **`$dashboardmetric` is declared nowhere in the tree**. They are assigned to `$governancescorecard.metrics`, declared `@$scorecardmetric{label;value;status}`, and `formatscorecard` then reads `m.label` — so `name` is written and `label` is read. toke accepts all of it with **zero diagnostics**, which is the T-4/T-7 family: an undeclared struct literal in a value position is not checked. Declare the real type, align the fields, and add the case to the upstream report |
 | GA5.14 | S |  | **The report generator falls through to a cost report for any unrecognised template** — Found 2026-09-23. `report-engine.tk:48` `generate` initialises `result` to `generatecost(...)` and then falls through silently for `cost_savings` and for any unknown template, so `--template nonsense` quietly produces a cost report rather than an error. Separately every `$reportrow.severity`/`.value` is hardcoded `"INFO"`/`""`, so the cost report carries no cost figure — which is the DA1.5 defect in a second place |
+| GA5.15 | S | | **`cost_usd` should be an INTEGER number of hundredths, not a REAL** — Found 2026-09-23 by GA1.9's end-to-end test, and it is a digest-stability defect rather than a tidiness one. `cost_usd` is declared REAL, so **SQLite owns its rendering**: `str.fromfloat(0.0)` produces `"0"` and the column gives back `"0.0"`. The chain digest covers the stored rendering, so the writer hashed `"0"`, the verifier recomputed over `"0.0"`, and **an untampered chain failed on every row the request path writes** — because the cost estimate is deliberately 0.0 until LS1.1h. `0.005` happened to survive the round-trip; `0.0` did not. Fixed for now by normalising both sides through the same integer (`f64hundredths` writing, `rowf64hundredths` verifying), which is stable whatever SQLite does with a REAL — at the stated cost that the digest now covers cost only to the nearest hundredth, so altering 0.005 to 0.009 would not break the chain. Storing hundredths as an INTEGER removes the float from the column entirely and restores full precision to the digest. The general lesson, worth applying to every column the digest covers: **a digest over a value whose text representation the database controls is a digest over the database's formatting choices** |
 
 ## Epic RG1: Regulatory Alignment — ANZ First
 

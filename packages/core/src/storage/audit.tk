@@ -81,10 +81,26 @@ t=$chainresult{
    1, which formats back as 0.01, so the recomputed digest differed from the stored one on
    every row. The chain was fine; the reconstruction was lossy.
 
-   Hashing the stored text directly removes the class of problem rather than widening the
-   numeric type: whatever str.fromfloat produced is exactly what the column holds, so the
-   verifier reads the same bytes that were hashed. A digest over a re-parsed value is a
-   digest over a guess about the parser. *)
+   Hashing the stored text directly removes most of the class: whatever str.fromfloat
+   produced is what the column holds for a value SQLite renders identically.
+
+   But not all of them, and the second failure is why cost_usd is now hashed as an INTEGER
+   number of hundredths rather than as text. `cost_usd` is declared REAL, so SQLite owns its
+   rendering: str.fromfloat(0.0) produces "0" and SQLite gives back "0.0". The digest was
+   over "0" and the verifier recomputed it over "0.0", so an untampered chain failed on every
+   row whose cost was zero — which is every row the request path writes today, because the
+   cost estimate needs an f64 across a module boundary and is deliberately 0.0 until LS1.1h
+   (see browser/pages/api/pipeline.tk). 0.005 happened to survive the round-trip; 0.0 did not.
+
+   Both sides now normalise through the same integer: the writer hashes
+   f64hundredths(costusd) and the verifier hashes rowf64hundredths of the stored column, so
+   the digest is stable no matter how SQLite chooses to render a REAL.
+
+   The honest cost of that canonical form: the digest covers cost to the nearest hundredth,
+   so altering 0.005 to 0.009 would not break the chain. Sub-cent tampering on a cost field
+   is a small hole and it is recorded rather than hidden — GA5.15 changes the column to an
+   INTEGER number of hundredths, after which no float rendering is involved at all and the
+   full precision is covered again. *)
 f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str):str{
   (* The separator keeps two different field splits from hashing alike. A pipe is enough
      here because no field is free text — the closest is the correlation id, which is
@@ -122,7 +138,7 @@ f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
     event.risktier;
     str.fromint(event.tokensin);
     str.fromint(event.tokensout);
-    str.fromfloat(event.costusd);
+    str.fromi64(t.f64hundredths(event.costusd));
     str.fromint(event.durationms);
     event.correlationid;
     str.fromi64(created))
@@ -220,7 +236,7 @@ f=digestfromrow(r:$row):str{
     s.rowstr(r;"risk_tier");
     s.rowstr(r;"tokens_in");
     s.rowstr(r;"tokens_out");
-    s.rowstr(r;"cost_usd");
+    str.fromi64(s.rowf64hundredths(r;"cost_usd"));
     s.rowstr(r;"duration_ms");
     s.rowstr(r;"correlation_id");
     s.rowstr(r;"created_at"))

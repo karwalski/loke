@@ -1,0 +1,149 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testrequestpathe2e;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=ph:core.privacy.placeholder;
+i=ks:core.governance.killswitch;
+i=audit:core.storage.audit;
+i=sdb:core.storage.db;
+i=h:browser.pages.api.pipeline;
+
+(* GA1.9 — the request path, end to end, driving the ROUTE'S OWN functions.
+
+   Why it composes the route's functions rather than calling post(req): toke has no way to
+   construct an http request from source (T-16) — std.http exposes reqpath/reqmethod/reqbody
+   as accessors over an opaque i64 and no constructor. So `post` itself is unreachable from a
+   test, and the honest alternative is to exercise every function `post` calls, in the order
+   it calls them, importing `browser.pages.api.pipeline` for real. That is not a stub: a
+   regression in any of those functions fails this test.
+
+   This is the story that was Reopened as "cannot pass while GA1.5-GA1.7 are unwired, and the
+   existing test asserts on JSON shape rather than on whether anonymisation occurred". The
+   second half is what this file fixes. The first half is still true and is stated explicitly
+   at the bottom rather than quietly omitted — a test that silently skips the unwired half
+   would let GA1.9 be marked Done on partial evidence, which is the failure mode this whole
+   epic exists to correct.
+
+   Configured local-only: the two network sidecars are not running in CI, so the in-process
+   regex layer is the detection layer under test. That layer cannot be unavailable, which is
+   the healthy case — NC1.9's refusal path has its own test in
+   tests/unit/privacy/test_fail_closed.tk. *)
+
+f=teststore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-reqpath");
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=resetstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-reqpath");
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <0
+};
+
+f=localonly():$pipelineconfig{
+  (* Presidio and NER point at ports nothing is listening on, so both degrade and the
+     regex layer is the only one that completes. shared.reachability makes that an honest
+     detection rather than a hopeful http.get (T-15). *)
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=countaudit(store:i64):i64{
+  <mt audit.getrecent(store;1000 as u32) {
+    $ok:evs evs.len as i64;
+    $err:e 0-1
+  }
+};
+
+f=piitext():str{
+  <"Please email john.smith@example.com about invoice 4111 1111 1111 1111."
+};
+
+f=main():i64{
+  resetstore();
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=teststore();
+
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  (* Stage 1-2: detection and anonymisation, through the real pipeline. *)
+  let run=pipe.runforward(piitext();"";localonly());
+
+  if(t.assert(pipe.issafetoforward(run);"at least one detection layer completed, so the request may be forwarded (NC1.9)")){pass=pass+1}el{fail=fail+1};
+
+  let res:$piidetectionresult=run.result;
+  if(t.assert(run.totalentities>0 as u32;"PII was detected in the prompt")){pass=pass+1}el{fail=fail+1};
+
+  (* The assertion GA1.9 was reopened for: that anonymisation OCCURRED, not that the
+     response has the right JSON shape. *)
+  if(t.assert(!str.contains(res.anonymised;"john.smith@example.com");"the email address does not appear in the text that would be forwarded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(res.anonymised;"4111 1111 1111 1111");"the card number does not appear in the text that would be forwarded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(res.anonymised;"invoice");"non-PII text survives anonymisation unchanged")){pass=pass+1}el{fail=fail+1};
+
+  (* Stage 3: the governance gate, through the route's own decide/isdeny. *)
+  let decision=h.decide(run);
+  if(t.assert(!h.isdeny(decision);"policy allows a CONFIDENTIAL browser-chat request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(h.risklabel(h.risktierof(run)))>0;"the request carries a risk tier label")){pass=pass+1}el{fail=fail+1};
+
+  (* Stage 4: restoration, through the route's own restoretext. This is GA1.2's property:
+     what the user reads is their own words, not [EMAIL_a3f1_1]. *)
+  let restored=h.restoretext(run;res.anonymised);
+  if(t.assert(str.eq(restored;piitext());"restoring the anonymised text through the route's own function reproduces the original byte-for-byte")){pass=pass+1}el{fail=fail+1};
+
+  (* A provider echoes placeholders back inside a longer reply; restoration must find them
+     there too, not only in the exact text it produced. *)
+  let reply=str.concat("Certainly. I will contact ";str.concat(res.anonymised;" shortly."));
+  let restoredreply=h.restoretext(run;reply);
+  if(t.assert(str.contains(restoredreply;"john.smith@example.com");"a placeholder echoed inside a longer provider reply is restored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(restoredreply;"[EMAIL");"no placeholder survives into what the user reads")){pass=pass+1}el{fail=fail+1};
+
+  (* Stage 5: the audit row, through the route's own recordevent. A count delta, because
+     "the call returned" is shape and "the table grew by one" is behaviour. *)
+  let before=countaudit(store);
+  let logged=h.recordevent(store;run;"ollama";"qwen2.5:3b";0;0;42;decision);
+  let after=countaudit(store);
+  if(t.assert(logged;"recordevent reports that the audit row was written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(after==before+1;"exactly one audit row was added")){pass=pass+1}el{fail=fail+1};
+
+  (* And the chain over those rows verifies (GA5.3). *)
+  let chain=audit.verifychain(store);
+  if(t.assert(chain.ok;"the audit chain over the request path's own rows verifies")){pass=pass+1}el{fail=fail+1};
+
+  (* Stage 6: the kill switch, through the route's own predicate. Engaged means blocked. *)
+  if(t.assert(!h.killswitchengaged(store);"the kill switch reads as disengaged before it is engaged")){pass=pass+1}el{fail=fail+1};
+  ks.engage(store;"GA1.9 end-to-end check";0 as i32);
+  if(t.assert(h.killswitchengaged(store);"the kill switch reads as ENGAGED after engage(), so post() would return 403")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+  if(t.assert(!h.killswitchengaged(store);"and as disengaged again after release()")){pass=pass+1}el{fail=fail+1};
+
+  (* An unreadable store must read as ENGAGED, not as disengaged. The unknown state is the
+     unsafe one — the same reasoning as NC1.9. *)
+  if(t.assert(h.killswitchengaged(0);"an unopenable store reads as ENGAGED, not disengaged")){pass=pass+1}el{fail=fail+1};
+
+  (* NOT ASSERTED HERE, and named so GA1.9 is not marked Done on partial evidence:
+
+       GA1.5  token optimisation   — no optimiser call exists on this path
+       GA1.6  semantic cache       — cache.lookup structurally cannot return a hit
+       GA1.7  intelligent routing  — the provider is chosen by str.len(anthropickey)>20;
+                                     selector.select returns a result whose error arm is
+                                     dead under T-18, and a failed selection read as a
+                                     success could send restricted data to a cloud
+                                     endpoint. Blocked on LS1.1j.
+
+     All three are Reopened in the backlog. When they land, their assertions belong here. *)
+
+  <fail
+};
