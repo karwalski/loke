@@ -7,7 +7,7 @@ i=log:shared.log;
 i=out:cli.output;
 i=ext:core.governance.external;
 i=cfg:shared.config;
-i=tr:loke.platform.i18n.translator;
+i=tr:core.i18n.translator;
 i=http:std.http;
 i=time:std.time;
 
@@ -15,13 +15,14 @@ f=presetnames():@$str{
   <@("pagerduty";"datadog";"grafana";"splunk";"elastic";"slack";"teams";"opsgenie";"servicenow";"webhook")
 };
 
+(* Every loop in this module was written as a bare `if`, so isvalidpreset tested only
+   "pagerduty", runlist printed only the first endpoint, and the preset help listed one
+   name out of ten. *)
 f=isvalidpreset(name:str):bool{
   let presets=presetnames();
-  let i=0;
-  if(i<presets.len){
-    if(str.eq(presets.get(i);name)){<true}el{};
-    i=i+1;
-  }el{};
+  lp(let i=0;i<presets.len;i=i+1){
+    if(str.eq(presets.get(i);name)){<true}el{}
+  };
   <false
 };
 
@@ -87,8 +88,11 @@ f=runlist():i64{
     out.printline(str.repeat("-";96));
 
     let i=0;
-    if(i<endpoints.len){
-      let ep=endpoints.get(i);
+    lp(let i=0;i<endpoints.len;i=i+1){
+      (* Declared type, not inferred: `url` sits at a different offset in
+         $externalendpoint than in other structs this module sees, and without the
+         annotation toke cannot tell which offset to read. *)
+      let ep:$externalendpoint=endpoints.get(i);
       let enabledstr=mut."no"; if(ep.enabled){enabledstr="yes"}el{};
       let eventsstr=str.fromint(ep.events.len);
       out.printline(str.concat(
@@ -96,18 +100,26 @@ f=runlist():i64{
         str.concat(
           str.padright(ep.integrationtype;22;" ");
           str.concat(
-            str.padright(str.truncate(ep.url;38);40;" ");
+            str.padright(truncate(ep.url;38);40;" ");
             str.concat(
               str.padright(enabledstr;10;" ");
               eventsstr
             )
           )
         )
-      ));
-      i=i+1;
-    }el{};
+      ))
+    };
     <0
   };
+};
+
+(* std.str has no truncate. *)
+f=truncate(s:str;width:i64):str{
+  if(str.len(s)>width){
+    <str.slice(s;0;width)
+  }el{
+    <s
+  }
 };
 
 f=runadd(args:@str):i64{
@@ -116,11 +128,9 @@ f=runadd(args:@str):i64{
     out.printline("");
     out.printline("Available presets:");
     let presets=presetnames();
-    let i=0;
-    if(i<presets.len){
-      out.printline(str.concat("  ";presets.get(i)));
-      i=i+1;
-    }el{};
+    lp(let i=0;i<presets.len;i=i+1){
+      out.printline(str.concat("  ";presets.get(i)))
+    };
     <1
   }el{
     let preset=args.get(1);
@@ -129,33 +139,34 @@ f=runadd(args:@str):i64{
       out.printline("Run 'loke integrations add' to see available presets.");
       <1
     }el{
-      let ep=buildpresetendpoint(preset);
-      let isok=mt ep {
-        $ok:endpoint true;
-        $err:msg false
-      };
-      if(isok==false){
-        out.printerror("Failed to build preset endpoint");
-        <1
-      }el{};
-      let endpoint=mt ep {
-        $ok:endpoint endpoint;
-        $err:msg endpoint
-      };
-      out.printline(str.concat("Added integration: ";endpoint.name));
-      out.printline(str.concat("  ID:     ";endpoint.id));
-      out.printline(str.concat("  Type:   ";endpoint.integrationtype));
-      out.printline(str.concat("  URL:    ";endpoint.url));
-      out.printline(str.concat("  Events: ";str.fromint(endpoint.events.len)));
-      out.printline("");
-      out.printline("Integration added to configuration.");
-      if(str.len(endpoint.authtokenenv)>0){
-        out.printline(str.concat("Set the environment variable '";str.concat(endpoint.authtokenenv;"' with your API key/token.")))
-      }el{};
-      log.info(str.concat("added integration: ";endpoint.id);"cli.integrations";"system");
-      <0
+      (* One match, not two: the legacy second match's `$err` arm read `endpoint`,
+         the first arm's binding, which is not in scope there. *)
+      <mt buildpresetendpoint(preset) {
+        $ok:endpoint reportadded(endpoint);
+        $err:msg presetbuildfailed(msg)
+      }
     };
   };
+};
+
+f=presetbuildfailed(msg:str):i64{
+  out.printerror(str.concat("Failed to build preset endpoint: ";msg));
+  <1
+};
+
+f=reportadded(endpoint:$externalendpoint):i64{
+  out.printline(str.concat("Added integration: ";endpoint.name));
+  out.printline(str.concat("  ID:     ";endpoint.id));
+  out.printline(str.concat("  Type:   ";endpoint.integrationtype));
+  out.printline(str.concat("  URL:    ";endpoint.url));
+  out.printline(str.concat("  Events: ";str.fromint(endpoint.events.len)));
+  out.printline("");
+  out.printline("Integration added to configuration.");
+  if(str.len(endpoint.authtokenenv)>0){
+    out.printline(str.concat("Set the environment variable '";str.concat(endpoint.authtokenenv;"' with your API key/token.")))
+  }el{};
+  log.info(str.concat("added integration: ";endpoint.id);"cli.integrations";"system");
+  <0
 };
 
 f=buildpresetendpoint(preset:str):$externalendpoint!str{
@@ -202,6 +213,20 @@ f=buildpresetendpoint(preset:str):$externalendpoint!str{
   };
 };
 
+f=emptyendpoint():$externalendpoint{
+  <$externalendpoint{
+    id:"";name:"";integrationtype:"";url:"";authmethod:"";
+    authtokenenv:"";authheadername:"";enabled:true;
+    retrycount:1;timeoutms:5000;events:@()
+  }
+};
+
+(* std.time has no nowiso8601 — that name only ever existed as str.nowiso8601, which
+   does not exist either (F10.12a). time.format does. *)
+f=isonow():str{
+  <time.format(time.now();"%Y-%m-%dT%H:%M:%SZ")
+};
+
 f=runtest(args:@str):i64{
   if(args.len<2){
     out.printerror("usage: loke integrations test <id>");
@@ -210,17 +235,13 @@ f=runtest(args:@str):i64{
     let targetid=args.get(1);
     let config=loadexternalconfig();
     let found=mut.false;
-    let targetep=$externalendpoint{
-      id:"";name:"";integrationtype:"";url:"";authmethod:"";
-      authtokenenv:"";authheadername:"";enabled:true;
-      retrycount:1;timeoutms:5000;events:@()
-    };
-
-    lp(let ei=0;ei<str.arraylen(config.endpoints);ei=ei+1){ let ep=str.arrayget(config.endpoints;ei);
+    let targetep=mut.emptyendpoint();
+    lp(let ei=0;ei<config.endpoints.len;ei=ei+1){
+      let ep=config.endpoints.get(ei);
       if(str.eq(ep.id;targetid)){
         found=true;
         targetep=ep
-      }el{};
+      }el{}
     };
 
     if(found==false){
@@ -232,7 +253,7 @@ f=runtest(args:@str):i64{
 
       let testevent=$governanceevent{
         eventtype:"incident.created";
-        timestamp:time.nowiso8601();
+        timestamp:isonow();
         severity:"P3";
         title:"loke integration test";
         description:"This is a test event sent from 'loke integrations test'.";
@@ -273,13 +294,11 @@ f=runtest(args:@str):i64{
   };
 };
 
-f=loadexternalconfig():i64{
-  let config=mt cfg.loadconfig("~/.loke/config.toml") {
-    $ok:v v;
-    $err:e cfg.defaultconfig()
-  };
-  <mt cfg.getexternalconfig(config) {
-    $ok:v v;
-    $err:e ext.defaultconfig()
-  }
+(* Declared i64 and returned an $externalconfig; and shared.config exports no
+   getexternalconfig, so there is no path from ~/.loke/config.toml to the external
+   endpoint list at all. This returns the built-in default and says so rather than
+   pretending to read the user's file: `loke integrations list` will show the default
+   endpoints until shared.config learns to parse an [external] section. *)
+f=loadexternalconfig():$externalconfig{
+  <ext.defaultconfig()
 };

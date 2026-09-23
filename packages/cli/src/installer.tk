@@ -6,11 +6,14 @@ m=cli.installer;
 i=str:std.str;
 i=out:cli.output;
 i=log:shared.log;
-i=http:std.http;
 i=sys:std.sys;
-i=proc:std.process;
-i=file:std.file;
-i=env:std.env;
+i=io:std.io;
+i=ty:shared.types;
+i=detect:core.installer.detect;
+i=install:core.installer.install;
+i=start:core.installer.start;
+i=pull:core.installer.pull;
+i=verify:core.installer.verify;
 
 t=$installerflags{
   yes:bool;
@@ -116,34 +119,22 @@ f=recommendmodel(ramgb:i64):$modelrec{
     };
   };
 };
+(* These five delegate to core.installer, which already does the work and already
+   compiles. The legacy bodies called std.process.run, std.process.runwithoutput,
+   std.process.spawn with three arguments, std.http.download, std.http.gettimeout with
+   two arguments and std.sys.monotonicms — of which only spawn exists, and with a
+   different arity. So none of this had ever run, while core.installer.detect,
+   .install, .start, .pull and .verify were doing the same jobs correctly a directory
+   away. Whether cli.installer should exist at all once it is this thin is a question
+   for the backlog; it still owns the flag parsing and the interactive prompts. *)
 f=checkollamainstalled():bool{
-  let result=proc.run("ollama";"--version");
-  mt result {
-    $ok:v true;
-    $err:e false
-  };
+  <detect.detectollamainstalled().ok
 };
 f=checkollamarunning(url:str):bool{
-  let apiurl=str.concat(url;"/api/version");
-  let result=http.gettimeout(apiurl;3000);
-  <mt result {
-    $ok:resp resp.status==200;
-    $err:e false
-  }
+  <detect.detectollamarunning().ok
 };
-f=checkmodelpulledresp(resp:i64;modelid:str):bool{
-  let r=mut.false;
-  if(resp.status==200){r=str.contains(resp.body;modelid)}el{};
-  <r
-};
-
 f=checkmodelpulled(url:str;modelid:str):bool{
-  let apiurl=str.concat(url;"/api/tags");
-  let result=http.gettimeout(apiurl;3000);
-  <mt result {
-    $ok:resp checkmodelpulledresp(resp;modelid);
-    $err:e false
-  }
+  <detect.detectmodelpulled(modelid).ok
 };
 f=progressbar(pct:i64;width:i64):str{
   let filled=pct * width / 100;
@@ -154,138 +145,60 @@ f=progressbar(pct:i64;width:i64):str{
 };
 f=installollama(installdir:str):bool{
   out.printline("  Downloading Ollama (90 MB)...");
-  let bindir=str.concat(installdir;"/bin");
-  let mkdirresult=file.mkdir(bindir);
-  let mkdirok=mt mkdirresult {
-    $ok:v true;
-    $err:e false
-  };
-  if(mkdirok==false){
-    out.printerror(str.concat("Could not create ";bindir));
-    <false
-  }el{};
-  let downloadurl="https://ollama.com/download/Ollama-darwin.zip";
-  let zippath=str.concat(installdir;"/ollama-download.zip");
-  let dlresult=http.download(downloadurl;zippath);
-  let dlok=mt dlresult {
-    $ok:v true;
-    $err:e false
-  };
-  if(dlok==false){
-    out.printerror("Download failed");
-    out.printline("  Download Ollama manually from https://ollama.com/download");
-    <false
-  }el{};
-  out.printline(str.concat("  ";str.concat(progressbar(100;32);" 100%")));
-  let extractresult=proc.run("unzip";str.concat("-o ";str.concat(zippath;str.concat(" -d ";bindir))));
-  let extractok=mt extractresult {
-    $ok:v true;
-    $err:e false
-  };
-  if(extractok==false){
-    out.printerror("Extraction failed");
-    <false
-  }el{};
-  let verify=proc.run(str.concat(bindir;"/ollama");"--version");
-  let verifyok=mt verify {
-    $ok:v true;
-    $err:e false
-  };
-  if(verifyok==false){
-    out.printerror("Ollama installed but verification failed");
-    <false
-  }el{};
-  <true
-};
-f=startollamaserver():bool{
-  out.printline("  Starting Ollama server...");
-  let spawnresult=proc.spawn("ollama";@("serve");true);
-  let spawnok=mt spawnresult {
-    $ok:pid true;
-    $err:e false
-  };
-  if(spawnok==false){
-    out.printerror("Could not start Ollama");
-    <false
-  }el{};
-  let attempts=mut.0;
-  let healthy=mut.false;
-  lp(let lv=0;attempts<30;lv=lv){
-    let check=http.gettimeout("http://localhost:11434/api/version";1000);
-    let checkok=mt check {
-      $ok:resp resp.status==200;
-      $err:e false
-    };
-    if(checkok){
-      healthy=true;
-      attempts=30
-    }el{
-      proc.sleep(500);
-      attempts=attempts+1
-    };
-  };
-  if(healthy){
-    out.printline("  Starting Ollama server... running on :11434");
-    <true
-  }el{
-    out.printerror("Ollama failed to start within 15s");
-    <false
-  }
-};
-f=pullmodel(modelid:str):bool{
-  out.printline(str.concat("  Pulling ";str.concat(modelid;"...")));
-  let result=proc.runwithoutput("ollama";str.concat("pull ";modelid));
-  let pullok=mt result {
-    $ok:output true;
-    $err:e false
-  };
-  if(pullok){
+  let result=install.installollama();
+  if(result.success){
     out.printline(str.concat("  ";str.concat(progressbar(100;32);" 100%")));
     <true
   }el{
-    out.printerror(str.concat("Pull failed for ";modelid));
-    out.printline(str.concat("  Try manually: `ollama pull ";str.concat(modelid;"`")));
+    out.printerror(result.message);
+    out.printline("  Download Ollama manually from https://ollama.com/download");
     <false
   }
 };
-f=verifymodel(url:str;modelid:str):$verifyresult{
-  out.printline("  Verifying...");
-  let apiurl=str.concat(url;"/api/generate");
-  let body=str.concat("{\"model\":\"";str.concat(modelid;"\",\"prompt\":\"What is 2 + 2? Reply with just the number.\",\"stream\":false}"));
-  let start=sys.monotonicms();
-  let result=http.postjson(apiurl;body;15000);
-  let elapsed=sys.monotonicms() - start;
-  let ok=mt result {
-    $ok:resp resp.status==200;
-    $err:e false
-  };
-  if(ok==false){
-    <$verifyresult{success:false;latencyms:0}
-  }el{};
-  let respbody=mt result {
-    $ok:resp resp.body;
-    $err:e ""
-  };
-  if(str.contains(respbody;"4")){
-    <$verifyresult{success:true;latencyms:elapsed}
-  }el{};
-  let start2=sys.monotonicms();
-  let retry=http.postjson(apiurl;body;10000);
-  let elapsed2=sys.monotonicms() - start2;
-  let retryok=mt retry {
-    $ok:resp2 str.contains(resp2.body;"4");
-    $err:e2 false
-  };
-  if(retryok){
-    <$verifyresult{success:true;latencyms:elapsed2}
+
+f=startollamaserver():bool{
+  out.printline("  Starting Ollama server...");
+  let result=start.startollama();
+  if(result.success){
+    out.printline("  Starting Ollama server... running on :11434");
+    <true
   }el{
-    <$verifyresult{success:false;latencyms:0}
+    out.printerror(result.message);
+    <false
   }
 };
+
+f=pullmodel(modelid:str):bool{
+  out.printline(str.concat("  Pulling ";str.concat(modelid;"...")));
+  let progress=pull.pullmodel(modelid);
+  if(progress.len>0){
+    let last=progress.get(progress.len-1);
+    if(str.eq(last.status;"error")){
+      out.printerror(str.concat("Pull failed for ";modelid));
+      out.printline(str.concat("  Try manually: `ollama pull ";str.concat(modelid;"`")));
+      <false
+    }el{
+      out.printline(str.concat("  ";str.concat(progressbar(100;32);" 100%")));
+      <true
+    }
+  }el{
+    out.printerror(str.concat("Pull produced no progress for ";modelid));
+    <false
+  }
+};
+
+f=verifymodel(url:str;modelid:str):$verifyresult{
+  out.printline("  Verifying...");
+  let result=verify.verifywithretry(modelid;2);
+  <$verifyresult{success:result.success;latencyms:result.latencyms}
+};
+
 f=promptyn(question:str;defaultyes:bool):bool{
   let suffix=mut."[y/N]"; if(defaultyes){suffix="[Y/n]"}el{};
   out.printline(str.concat("  ";str.concat(question;str.concat(" ";str.concat(suffix;" ")))));
-  let answer=std.readline();
+  (* `std.readline()` named no module at all — `std` is not an alias, and the member
+     does not exist under any of them. std.io.readln is the real one. *)
+  let answer=io.readln();
   if(str.eq(answer;"")){
     <defaultyes
   }el{
@@ -300,7 +213,7 @@ f=promptyn(question:str;defaultyes:bool):bool{
     };
   };
 };
-f=runinteractive(flags:$installerflags):i32{
+f=runinteractive(flags:$installerflags):i64{
   let cid=log.newcorrelationid();
   log.info("installer: starting interactive flow";"cli.installer";cid);
 
@@ -376,7 +289,7 @@ f=runinteractive(flags:$installerflags):i32{
     <1
   };
 };
-f=runnoninteractive(flags:$installerflags):i32{
+f=runnoninteractive(flags:$installerflags):i64{
   let cid=log.newcorrelationid();
   log.info("installer: starting non-interactive flow";"cli.installer";cid);
 
@@ -430,7 +343,7 @@ f=runnoninteractive(flags:$installerflags):i32{
     <1
   };
 };
-f=runskipmodel(flags:$installerflags):i32{
+f=runskipmodel(flags:$installerflags):i64{
   let cid=log.newcorrelationid();
   log.info("installer: skip-model flow";"cli.installer";cid);
 
@@ -450,7 +363,7 @@ f=runskipmodel(flags:$installerflags):i32{
   out.printline("  No model was pulled. Point loke at an existing model or run `loke init` later.");
   <0
 };
-f=run(args:@str):i32{
+f=run(args:@str):i64{
   let flagargs=mut.@();
   let i=0;
   let argc=args.len;

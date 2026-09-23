@@ -7,7 +7,6 @@ i=db:std.db;
 i=str:std.str;
 i=fs:std.fs;
 i=log:shared.log;
-i=json:std.json;
 i=s:core.storage.db;
 i=time:std.time;
 
@@ -23,19 +22,60 @@ t=$govreport{
 };
 
 
+(* ── GA5.12: audit_log is the real table; audit_events never existed ──────────
+   All four queries in this module read a table called `audit_events`, with columns `ts`,
+   `rule_id` and `event_type`. No migration creates it, no code writes it, and it appears
+   nowhere else in the repository outside this file and dsar.tk. So every count returned
+   0 and querytoprules took its failure path — silently, because a query against a
+   missing table returns an error that the surrounding code maps to zero or an empty
+   array.
 
-f=countevents(store:i64;sql:str;fromts:i64;tots:i64):i32{
-  let froms=str.fromint(fromts);
-  let tos=str.fromint(tots);
-  let rows=mt db.many(sql;@(froms;tos)) {
-    $ok:rows rows;
-    $err:e 0 as i32
-  };
+   THE DECISION: audit_log is real and audit_events is deleted from the codebase.
+
+   audit_log is created by migration 3, written on every request by
+   browser/pages/api/pipeline.tk, hash-chained by core.storage.audit.insertevent and
+   verified by audit.verifychain. audit_events has a schema in nobody's head and one row
+   in no database. Creating it would give the system two tables with overlapping meaning
+   and two answers to "how many requests were there", which is exactly the ambiguity that
+   produced this defect. Column mapping used here: `ts` becomes `created_at`, and
+   `event_type` keeps its name because audit_log has that column already.
+
+   Two things do NOT map, and they are reported as unrecorded rather than papered over:
+
+   1. `rule_id` does not exist in audit_log, so top-triggered-rules has no source. See
+      querytoprules.
+   2. Nothing writes 'policy_deny', 'policy_require_approval' or 'quota_exceeded' to
+      audit_log — the only event_type any writer produces today is 'llm_request'. The
+      queries are kept, because they are the right queries for when the policy and quota
+      paths start recording, but a zero from them means NOT RECORDED and formatmarkdown
+      says so. A governance report that prints "0 violations" while nothing on earth could
+      have recorded one is worse than a report that prints nothing.
+
+   fromts and tots are epoch MILLISECONDS, matching audit_log.created_at, and the column
+   is CAST so SQLite compares numbers rather than applying the column's TEXT affinity to
+   the bound parameter. This module has no callers yet, so fixing the unit here costs
+   nothing; core.storage.db.msrangeof converts ISO dates for anything that needs to. *)
+f=countfromrows(rows:@$row):i32{
+  (* The rows are consumed in their own function, which establishes their type.
+     `let rows=mt db.many(...) { $ok:rows rows; $err:e 0 as i32 }` bound @$row on one arm
+     and an i32 on the other, so `rows.len` read whatever happened to be in the slot —
+     the same shape storage/audit.tk records as a segfault in eventsfromrows. It was
+     harmless only while the table was missing and the error arm always taken. *)
   if(rows.len==0){
     <0 as i32
   }el{
-    <s.rowi64(rows.get(0);"cnt") as i32
-  };
+    let r:$row=rows.get(0);
+    <s.rowi64(r;"cnt") as i32
+  }
+};
+
+f=countevents(store:i64;sql:str;fromms:i64;toms:i64):i32{
+  let froms=str.fromi64(fromms);
+  let tos=str.fromi64(toms);
+  <mt db.many(sql;@(froms;tos)) {
+    $ok:rows countfromrows(rows);
+    $err:e 0 as i32
+  }
 };
 
 
@@ -57,36 +97,49 @@ f=querytoprulesfail():@str{
   <@()
 };
 
-f=querytoprules(store:i64;fromts:i64;tots:i64):@str{
-  let froms=str.fromint(fromts);
-  let tos=str.fromint(tots);
-  <mt db.many("SELECT rule_id FROM audit_events
-     WHERE event_type='policy_fire' AND ts>=? AND ts<=?
-     GROUP BY rule_id ORDER BY COUNT(*) DESC LIMIT 5";@(froms;tos)) {
-    $ok:rows querytoprulesmaprows(rows);
-    $err:e querytoprulesfail()
-  }
+(* GA5.12 — there is no source for this section, and that is the finding.
+
+   The query grouped audit_events.rule_id. audit_log has no rule_id column and no other
+   column identifies a policy rule: the fourteen columns the hash chain covers are the
+   request's identity, classification, provider, size, cost and timing, and none of them
+   is a rule. So the top-triggered-rules section cannot be computed from the audit trail
+   as it stands.
+
+   It returns empty and rulesmd names the reason. The alternatives were both worse:
+   grouping by `use_case` would publish a different quantity under the heading "top
+   triggered rules", and adding a rule_id column to audit_log would add a field the
+   digest does not cover — a column an attacker could edit without breaking the chain,
+   inside the one table whose whole value is that editing it breaks the chain. Extending
+   the digest is core.storage.audit's to do, with a migration and a re-hash decision
+   behind it, and is filed rather than smuggled in here. *)
+f=querytoprules(store:i64;fromms:i64;toms:i64):@str{
+  log.info("governance report: top triggered rules not included — audit_log carries no rule identifier (GA5.12)";"report";"system");
+  <@()
 };
 
 
 
 
+f=windowclause():str{
+  <str.concat(" AND ";s.createdatwindowclause())
+};
+
 f=generate(store:i64;period:str;fromts:i64;tots:i64):$govreport{
   let total=countevents(
     store;
-    "SELECT COUNT(*) AS cnt FROM audit_events WHERE ts>=? AND ts<=?";
+    str.concat("SELECT COUNT(*) AS cnt FROM audit_log WHERE 1=1";windowclause());
     fromts;
     tots
   );
   let violations=countevents(
     store;
-    "SELECT COUNT(*) AS cnt FROM audit_events WHERE event_type IN ('policy_deny','policy_require_approval') AND ts>=? AND ts<=?";
+    str.concat("SELECT COUNT(*) AS cnt FROM audit_log WHERE event_type IN ('policy_deny','policy_require_approval')";windowclause());
     fromts;
     tots
   );
   let quotabreaches=countevents(
     store;
-    "SELECT COUNT(*) AS cnt FROM audit_events WHERE event_type='quota_exceeded' AND ts>=? AND ts<=?";
+    str.concat("SELECT COUNT(*) AS cnt FROM audit_log WHERE event_type='quota_exceeded'";windowclause());
     fromts;
     tots
   );
@@ -108,7 +161,10 @@ f=generate(store:i64;period:str;fromts:i64;tots:i64):$govreport{
 
 f=rulesmd(rules:@str):str{
   if(rules.len==0 as u64){
-    <"_none_
+    (* Not "_none_". An empty list here means the audit trail carries no rule identifier
+       to group by, and "none" would be read as "no rule was triggered" — a much stronger
+       claim, and a false one. *)
+    <"_Not recorded — the audit trail carries no rule identifier, so this cannot be computed (GA5.12)._
 "
   }el{
     let out=mut."";
@@ -139,6 +195,11 @@ f=formatmarkdown(report:$govreport):str{
 | Total requests | \(report.totalrequests) |
 | Policy violations | \(report.violations) |
 | Quota breaches | \(report.quotabreaches) |
+
+Total requests is the count of events in `audit_log` for the period and is measured.
+**Policy violations and quota breaches are NOT YET RECORDED:** nothing in loke writes a
+`policy_deny`, `policy_require_approval` or `quota_exceeded` event to the audit trail, so
+a zero in either row means the event was never recorded, not that none occurred (GA5.12).
 
 ## Top Triggered Rules
 

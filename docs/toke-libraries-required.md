@@ -1,9 +1,47 @@
 # Document and Image Libraries Required by toke
 
-**Version:** 1.0
-**Date:** 2026-09-19
+**Version:** 2.0 — **COMPLETE. Every ask in this document has been shipped.**
+**Date:** 2026-09-19, closed 2026-09-23
 **Audience:** the **toke development team**. Written from a downstream consumer's position so the
 requirements are visible before any interface is designed.
+
+> ## Closed 2026-09-23 — all four asks satisfied
+>
+> Verified against the toke checkout by reading `stdlib/*.tki` and the C, not by asking:
+>
+> | Ask | Status | Shipped as |
+> |---|---|---|
+> | 1. PDF text extraction | **Done** | `std.pdf` — 11 functions: `openfile`, `pagecount`, `pagetext`, `pagewidth`/`pageheight`, `runs`, and **`hastext`** |
+> | 2. Zip archive reading | **Done** | `std.zip` — 6 functions over vendored miniz, 359 lines. Present at the pinned `445f519` |
+> | 3. XLSX reading | **Done** | `std.xlsx` — 8 functions, 1,492 lines, including `datefromserial` and `datesystem` |
+> | 4. OCR | **Done, and better than asked** | `std.ocr` — 12 functions, 910 lines, binding **macOS Vision from plain C99**: `isavailable`, `textfile`, `runs`, `languages`, `setfast` |
+>
+> Three things worth recording, because they change decisions downstream rather than just
+> ticking boxes.
+>
+> **`pdf.hastext` is the function that mattered most and we did not think to ask for it.** MK21.4's
+> whole design is a fork between a text-layer PDF and a scan, and we had proposed detecting that
+> ourselves by extracting and measuring what came back. A direct predicate removes a heuristic.
+>
+> **`std.ocr` makes §5 of this document unnecessary.** We proposed a **standalone repository** with a
+> from-scratch OCR pipeline — binarisation, deskew, connected components, glyph classification over
+> `std.ml` — sized at five stories including a trained model. Upstream instead bound the platform
+> recogniser, which is what our own decision **O** had settled on. `ocr.runs` returning per-run
+> geometry is what MK21.5's confidence surfacing needs, so that story is unblocked too rather than
+> merely possible. Do not build the OCR repository.
+>
+> **The effect on this project's backlog is larger than MK21.** `docs/epics-and-stories.md` had
+> carried a standing notice since 2026-09-20 that the remaining holds were "hardware (LC1), a
+> genuinely missing toke capability (zip, XLSX, OCR, PDF), or another story". **That category is now
+> empty.** No story is held on a missing toke capability.
+>
+> `std.zip`, `std.toon` and `std.encrypt` are at the pinned `445f519`; `std.xlsx`, `std.pdf` and
+> `std.ocr` landed after it. So using the latter three is a deliberate `TOOLCHAIN.lock` bump, which
+> is a decision rather than a gap — and one with a cost, since the pin is currently the newest
+> commit published on `origin/main`.
+>
+> The asks below are kept unchanged as the record of what was requested and why. Read them as
+> history, not as a queue.
 
 This document follows the pattern of [ooke-bindings-required.md](archive/ooke-bindings-required.md), which
 worked: downstream states the need and the interface it expects, upstream designs and ships, and the

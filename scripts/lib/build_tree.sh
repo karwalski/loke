@@ -512,7 +512,7 @@ clang -std=c99 -D_GNU_SOURCE -O1 -iquote "$STDLIB" \
   $(cat "$OBJLIST") \
   -x c $(cat "$CLIST") \
   -o "$BINARY" -lssl -lcrypto -lz -lm -lsqlite3 \
-  -framework Security -framework CoreFoundation -lobjc
+  -framework Security -framework CoreFoundation -framework ImageIO -framework CoreGraphics -lobjc
 
 echo "[$NAME] done: $BINARY ($(du -h "$BINARY" | cut -f1))"
 # A binary that links is still not a pass while modules are missing from it.

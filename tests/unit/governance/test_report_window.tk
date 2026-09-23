@@ -1,0 +1,275 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.reportwindow;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=re:core.governance.reportengine;
+
+(* GA5.11 — the acceptance assertion the story names: a row INSIDE the window is returned
+   and a row OUTSIDE it is not.
+
+   That assertion was the thing missing. audit_log.created_at is epoch milliseconds stored
+   as TEXT; the report engine compared it to ISO dates and the dashboard to
+   datetime('now','-N days'). Both were string comparisons of "1773…" against "2026-…",
+   and "1" sorts before "2", so every window on every installation matched zero rows
+   whatever the table held. Nothing failed. The reports rendered, with no rows, and a
+   report with no rows reads as a quiet period.
+
+   So a test that only asserted "the query ran" or "the report has a title" would have
+   passed throughout. The assertion has to be about membership: exactly the row inside the
+   window, and not the one outside it.
+
+   The rows are inserted with raw SQL because the point is the created_at VALUE, and
+   core.storage.audit.insertevent stamps its own from the clock — there is no API for
+   writing a row dated March. INSERT is also the one statement audit_log still accepts
+   after GA5.9, so this needs no exemption from the append-only triggers.
+
+   The window used throughout is 2026-03-01 to 2026-03-31, which resolves to the half-open
+   range [1772323200000, 1775001600000) — the start of 1 March to the start of 1 April, so
+   the end date's own day is included. *)
+
+f=marchstart():str{ <"2026-03-01" };
+f=marchend():str{ <"2026-03-31" };
+
+f=insidems():str{ <"1773532800000" };
+f=beforems():str{ <"1771113600000" };
+f=aftems():str{ <"1775001600000" };
+f=lastinstantms():str{ <"1775001599999" };
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir()'s return value is truncated when
+     interpolated (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-report-window")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh file per run. The assertions below are exact counts, and audit_log is
+     append-only as of GA5.9, so the fixture cannot be reset by deleting rows. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+(* Every NOT NULL column of audit_log, with created_at supplied by the caller. The hash is
+   a placeholder: these rows are about the date window, not the chain, and
+   tests/unit/storage/test_audit_append_only.tk covers the chain. *)
+f=insertat(corrid:str;createdms:str):bool{
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,'llm_request',?,'claude-3.5-sonnet','anthropic','confidential','MEDIUM',10,20,1.5,100,?,'','placeholder',?)";@(
+    str.randhex(16);
+    corrid;
+    corrid;
+    createdms)) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=marchfilter(format:str):$reportfilter{
+  <$reportfilter{
+    startdate:marchstart();
+    enddate:marchend();
+    reporttype:"compliance_summary";
+    format:format
+  }
+};
+
+(* The $err arm is dead — T-18 means a match on a user-declared error union always takes
+   the first arm — but it still has to be a well-typed expression, so it gets an empty
+   report rather than a rebinding of the $ok arm's name. Every call goes through here so
+   the dead arm is written once. *)
+f=emptyreport():$report{
+  <$report{
+    title:"";
+    reporttype:"";
+    generatedat:"";
+    periodstart:"";
+    periodend:"";
+    rows:@();
+    summary:"";
+    format:""
+  }
+};
+
+f=reportof(store:i64;filter:$reportfilter):$report{
+  <mt re.generate(store;filter) {
+    $ok:r r;
+    $err:e emptyreport()
+  }
+};
+
+f=firstrowtimestamp(r:$report):str{
+  if(r.rows.len>0){
+    let row:$reportrow=r.rows.get(0);
+    <row.timestamp
+  }el{
+    <""
+  }
+};
+
+
+(* ── the bounds themselves ─────────────────────────────────────────────────── *)
+
+f=testrangeresolves():bool{
+  openfreshstore();
+  let range=sdb.msrangeof(marchstart();marchend());
+  <t.assert(range.ok;"an ISO date pair resolves to a millisecond range")
+};
+
+f=testrangestartisepochms():bool{
+  openfreshstore();
+  let range=sdb.msrangeof(marchstart();marchend());
+  <t.assert(range.startms==1772323200000;"the start bound is the epoch millisecond of 2026-03-01T00:00:00Z")
+};
+
+f=testrangeendisexclusivenextday():bool{
+  (* The end date's whole day is inside the window, so the exclusive bound is the start of
+     the following day. Resolving the end to midnight ON the end date instead would drop
+     every event of the last day of every report. *)
+  openfreshstore();
+  let range=sdb.msrangeof(marchstart();marchend());
+  <t.assert(range.endms==1775001600000;"the end bound is the start of the day after 2026-03-31, exclusive")
+};
+
+f=testsingledaywindowisawholeday():bool{
+  openfreshstore();
+  let range=sdb.msrangeof("2026-03-15";"2026-03-15");
+  <t.assert(range.endms-range.startms==86400000;"start and end on the same date give a full 24-hour window")
+};
+
+f=testrangerejectsnonsense():bool{
+  (* strftime returns NULL for a date it cannot read, which would arrive as a bound of 0
+     and match nothing — the exact failure being fixed, silently reintroduced. It is
+     refused instead, so a caller can tell "no events" from "I could not read your
+     dates". *)
+  openfreshstore();
+  let range=sdb.msrangeof("nonsense";"2026-03-31");
+  <t.assert(!range.ok;"an unreadable start date is refused rather than matching nothing")
+};
+
+f=testrangerejectsreversedorder():bool{
+  openfreshstore();
+  let range=sdb.msrangeof("2026-03-31";"2026-03-01");
+  <t.assert(!range.ok;"an end date before the start date is refused")
+};
+
+
+(* ── the acceptance assertion ──────────────────────────────────────────────── *)
+
+f=testreturnsonlytheinsiderow():bool{
+  let store=openfreshstore();
+  insertat("corr-inside";insidems());
+  insertat("corr-before";beforems());
+  let report=reportof(store;marchfilter("text"));
+  <t.assert(report.rows.len==1;"a report window returns exactly the row inside it, not the one outside it")
+};
+
+f=testtheonerowistherightone():bool{
+  (* A count of one could be the wrong one. This pins which. *)
+  let store=openfreshstore();
+  insertat("corr-inside";insidems());
+  insertat("corr-before";beforems());
+  let report=reportof(store;marchfilter("text"));
+  <t.assert(str.eq(firstrowtimestamp(report);insidems());"the returned row is the one dated inside the window")
+};
+
+f=testexcludesarowafterthewindow():bool{
+  let store=openfreshstore();
+  insertat("corr-inside";insidems());
+  insertat("corr-after";aftems());
+  let report=reportof(store;marchfilter("text"));
+  <t.assert(report.rows.len==1;"a row dated at the exclusive end bound is outside the window")
+};
+
+f=testincludesthelastinstantoftheendday():bool{
+  (* The complement of the assertion above: the bound is exclusive at the start of the
+     next day, so the last millisecond of the end date is in. *)
+  let store=openfreshstore();
+  insertat("corr-last";lastinstantms());
+  let report=reportof(store;marchfilter("text"));
+  <t.assert(report.rows.len==1;"an event in the final millisecond of the end date is inside the window")
+};
+
+f=testwindowwithnorowsisempty():bool{
+  let store=openfreshstore();
+  insertat("corr-before";beforems());
+  insertat("corr-after";aftems());
+  let report=reportof(store;marchfilter("text"));
+  <t.assert(report.rows.len==0;"a window with nothing in it returns no rows")
+};
+
+f=testreportrowcarriesavalue():bool{
+  (* DA1.5 in its second location: every row's value was the empty string and every
+     severity the literal "INFO", so a cost report carried no cost. *)
+  let store=openfreshstore();
+  insertat("corr-inside";insidems());
+  let filter=$reportfilter{
+    startdate:marchstart();
+    enddate:marchend();
+    reporttype:"cost_savings";
+    format:"text"
+  };
+  let report=reportof(store;filter);
+  let row=report.rows.get(0);
+  <t.assert(str.eq(row.value;"$1.50");"a cost report row carries the cost figure")
+};
+
+f=testunknowntemplateissaidsoloud():bool{
+  (* `--template nonsense` used to yield a cost report under the requested name, because
+     the dispatch initialised its result with generatecost and fell through. The $err arm
+     is unusable here (T-18), so the refusal is carried in the report itself. *)
+  let store=openfreshstore();
+  insertat("corr-inside";insidems());
+  let filter=$reportfilter{
+    startdate:marchstart();
+    enddate:marchend();
+    reporttype:"nonsense";
+    format:"text"
+  };
+  let report=reportof(store;filter);
+  <t.assert(report.rows.len==0;"an unknown template produces no rows instead of a cost report")
+};
+
+f=testbadwindowproducesnorows():bool{
+  let store=openfreshstore();
+  insertat("corr-inside";insidems());
+  let filter=$reportfilter{
+    startdate:"not-a-date";
+    enddate:marchend();
+    reporttype:"compliance_summary";
+    format:"text"
+  };
+  let report=reportof(store;filter);
+  <t.assert(report.rows.len==0;"an unreadable window searches no period rather than all of time")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(testrangeresolves()){pass=pass+1}el{fail=fail+1};
+  if(testrangestartisepochms()){pass=pass+1}el{fail=fail+1};
+  if(testrangeendisexclusivenextday()){pass=pass+1}el{fail=fail+1};
+  if(testsingledaywindowisawholeday()){pass=pass+1}el{fail=fail+1};
+  if(testrangerejectsnonsense()){pass=pass+1}el{fail=fail+1};
+  if(testrangerejectsreversedorder()){pass=pass+1}el{fail=fail+1};
+  if(testreturnsonlytheinsiderow()){pass=pass+1}el{fail=fail+1};
+  if(testtheonerowistherightone()){pass=pass+1}el{fail=fail+1};
+  if(testexcludesarowafterthewindow()){pass=pass+1}el{fail=fail+1};
+  if(testincludesthelastinstantoftheendday()){pass=pass+1}el{fail=fail+1};
+  if(testwindowwithnorowsisempty()){pass=pass+1}el{fail=fail+1};
+  if(testreportrowcarriesavalue()){pass=pass+1}el{fail=fail+1};
+  if(testunknowntemplateissaidsoloud()){pass=pass+1}el{fail=fail+1};
+  if(testbadwindowproducesnorows()){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

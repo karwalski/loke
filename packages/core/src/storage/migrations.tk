@@ -4,6 +4,16 @@
 m=core.storage.migrations;
 
 
+(* One migration is ONE SQL statement, and that is a constraint of the runner rather
+   than a style choice.
+
+   core.storage.db.runmigrations applies each `sql` with std.db.exec, which is
+   sqlite3_prepare_v2 followed by a step. prepare_v2 compiles the FIRST statement in
+   the string and hands back a tail pointer that db.exec discards, so a migration
+   holding two statements separated by a semicolon applies the first and silently
+   reports success for both. Nothing in the runner can see that. So a change needing
+   two statements gets two migration entries with consecutive versions, as versions 6
+   and 7 below do. *)
 t=$migration{
   version:u32;
   description:str;
@@ -76,6 +86,56 @@ f=allmigrations():@$migration{
   created_at TEXT NOT NULL,
   last_active_at TEXT NOT NULL
 )"
+    };
+    (* GA5.9 — append-only on audit_log, enforced by the database rather than asserted
+       in prose.
+
+       Until now the trail was DESCRIBED as append-only and nothing stopped an ordinary
+       UPDATE or DELETE: no trigger, no constraint, no check. The hash chain (GA5.2) made
+       modification DETECTABLE after the fact; it never made it difficult. Those are
+       different controls and the claim needs both.
+
+       What these two triggers do and do not buy, stated plainly because the difference
+       decides how much the claim is worth:
+
+         - They stop every UPDATE and every DELETE that arrives over an ordinary SQLite
+           connection, including loke's own code, including a hand-typed statement in the
+           sqlite3 shell, including a DSAR erasure that tried to sweep the trail. Nothing
+           in the product has an exemption and there is no flag to turn them off.
+         - They do NOT stop an attacker who can already execute arbitrary SQL against the
+           file, because such an attacker can DROP TRIGGER first. Nor do they stop one who
+           can edit the file's bytes directly, or replace the file.
+
+       So the trigger is the control against accident and against ordinary application
+       paths, and the hash chain is the control against the attacker who defeats the
+       trigger. Neither is sufficient; together they are what "tamper-evident, append-only"
+       can honestly mean for a local SQLite file that the user owns and can read.
+
+       That layering is why tests/integration/test_audit_trail_e2e.tk drops these triggers
+       before it tampers: dropping them is exactly the move the threat model already grants
+       that attacker, so the tamper tests keep exercising the real schema and the real
+       verifier without any test-only escape hatch existing in the product.
+
+       core.storage.db.auditappendonlyenforced() reads back whether both triggers are
+       present, so the claim is evidenced at run time and a future migration that rebuilds
+       audit_log cannot drop the control silently. *)
+    $migration{
+      version:6;
+      description:"enforce append-only on audit_log: reject UPDATE";
+      sql:"CREATE TRIGGER IF NOT EXISTS audit_log_append_only_update
+BEFORE UPDATE ON audit_log
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log is append-only: UPDATE is not permitted');
+END"
+    };
+    $migration{
+      version:7;
+      description:"enforce append-only on audit_log: reject DELETE";
+      sql:"CREATE TRIGGER IF NOT EXISTS audit_log_append_only_delete
+BEFORE DELETE ON audit_log
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log is append-only: DELETE is not permitted');
+END"
     }
   )
 };

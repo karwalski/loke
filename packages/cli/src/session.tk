@@ -6,8 +6,9 @@ m=cli.session;
 i=t:shared.types;
 i=log:shared.log;
 i=out:cli.output;
-i=db:storage.db;
+i=db:core.storage.db;
 i=str:std.str;
+i=time:std.time;
 
 t=$session{
   id:str;
@@ -28,8 +29,10 @@ f=ensuretable(store:i64):bool{
 };
 
 f=newsession(store:i64;name:str):$session{
-  let id=str.hexid();
-  let now=db.nowunix();
+  (* std.str.hexid takes an argument and this called it with none; shared.log already
+     mints ids for correlation and is what the rest of the CLI uses. *)
+  let id=log.newcorrelationid();
+  let now=db.nowms();
   let sql=str.concat(
     "INSERT INTO sessions (id, name, created_at, last_active, request_count, active) VALUES ('";
     str.concat(
@@ -83,9 +86,9 @@ f=listsessions(store:i64):@$session{
     sessions=sessions.push($session{
       id:db.rowstr(row;"id");
       name:db.rowstr(row;"name");
-      createdat:db.rowint64(row;"created_at");
-      lastactive:db.rowint64(row;"last_active");
-      requestcount:db.rowint(row;"request_count");
+      createdat:db.rowi64(row;"created_at");
+      lastactive:db.rowi64(row;"last_active");
+      requestcount:db.rowi32(row;"request_count");
       active:db.rowbool(row;"active")
     })
   };
@@ -98,23 +101,23 @@ f=getactive(store:i64):$session{
     $ok:v v;
     $err:e @()
   };
-  if(str.len(rows)<1){
+  if(rows.len<1){
     <$session{id:"";name:"";createdat:0;lastactive:0;requestcount:0;active:false}
   }el{
     let row=rows.get(0);
     <$session{
       id:db.rowstr(row;"id");
       name:db.rowstr(row;"name");
-      createdat:db.rowint64(row;"created_at");
-      lastactive:db.rowint64(row;"last_active");
-      requestcount:db.rowint(row;"request_count");
+      createdat:db.rowi64(row;"created_at");
+      lastactive:db.rowi64(row;"last_active");
+      requestcount:db.rowi32(row;"request_count");
       active:db.rowbool(row;"active")
     }
   }
 };
 
 f=switchto(store:i64;name:str):bool{
-  let now=db.nowunix();
+  let now=db.nowms();
   let sqldeactivate="UPDATE sessions SET active=0";
   mt db.exec(store;sqldeactivate) {
     $ok:v 0;
@@ -147,7 +150,7 @@ f=closesession(store:i64;name:str):bool{
 };
 
 f=recordrequest(store:i64;sessionid:str):bool{
-  let now=db.nowunix();
+  let now=db.nowms();
   let sql=str.concat(
     "UPDATE sessions SET request_count=request_count+1, last_active=";
     str.concat(
@@ -164,6 +167,13 @@ f=recordrequest(store:i64;sessionid:str):bool{
 
 (* Same two defects as listsessions, plus str.padright's third argument: it takes the
    pad character. shared.types.strpad wraps the space-padding case. *)
+(* std.str has no formatunix, and the timestamps in this table are epoch MILLIseconds
+   (db.nowms) — the legacy code called the nonexistent str.formatunix on a value it had
+   obtained from the equally nonexistent db.nowunix. *)
+f=isofromms(ms:i64):str{
+  <time.format((ms/1000) as u64;"%Y-%m-%d %H:%M:%S")
+};
+
 f=formatsessions(sessions:@$session):str{
   let rows=mut.@("Name             | ID               | Requests | Last Active          | Status";
                  "-----------------|------------------|----------|----------------------|--------");
@@ -171,14 +181,14 @@ f=formatsessions(sessions:@$session):str{
     let s:$session=sessions.get(i);
     let status=mut."idle";
     if(s.active){status="active"}el{};
-    rows=rows.push("\(t.strpad(s.name;16)) | \(t.strpad(s.id;16)) | \(t.strpad(str.fromint(s.requestcount);8)) | \(t.strpad(str.formatunix(s.lastactive);20)) | \(status)")
+    rows=rows.push("\(t.strpad(s.name;16)) | \(t.strpad(s.id;16)) | \(t.strpad(str.fromint(s.requestcount);8)) | \(t.strpad(isofromms(s.lastactive);20)) | \(status)")
   };
   <str.join("
 ";rows)
 };
 
 
-f=run(subcommand:str;args:@str;store:i64):i32{
+f=run(subcommand:str;args:@str;store:i64):i64{
   let ok=ensuretable(store);
   if(str.eq(subcommand;"list")){
     let sessions=listsessions(store);
@@ -186,7 +196,7 @@ f=run(subcommand:str;args:@str;store:i64):i32{
     <0
   }el{
     if(str.eq(subcommand;"new")){
-      if(str.len(args)<1){
+      if(args.len<1){
         out.printerror("usage: loke session new <name>");
         <1
       }el{
@@ -197,7 +207,7 @@ f=run(subcommand:str;args:@str;store:i64):i32{
       }
     }el{
       if(str.eq(subcommand;"switch")){
-        if(str.len(args)<1){
+        if(args.len<1){
           out.printerror("usage: loke session switch <name>");
           <1
         }el{
@@ -213,7 +223,7 @@ f=run(subcommand:str;args:@str;store:i64):i32{
         }
       }el{
         if(str.eq(subcommand;"close")){
-          if(str.len(args)<1){
+          if(args.len<1){
             out.printerror("usage: loke session close <name>");
             <1
           }el{

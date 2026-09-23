@@ -8,7 +8,7 @@ i=reg:mcpbroker.registry;
 i=json:std.json;
 i=str:std.str;
 i=log:shared.log;
-i=fs:std.fs;
+i=file:std.file;
 
 
 t=$serverpermission{
@@ -25,23 +25,33 @@ t=$permissionconfig{
 };
 
 
-f=permschecktoolentry(entry:i64;toolname:str):bool{
-  if(entry.permissionsset){
-    <checkpermission(entry.permission;toolname;entry.toolprefix)
+(* Permissions are looked up in the $permissionconfig by server NAME rather than
+   stamped onto the registry entry.
+
+   The legacy module read `entry.permissionsset` and `entry.permission` off a
+   $serverentry that has neither field, and applypermissions built a $serverentry
+   literal with two extra fields — which cannot work in either direction: adding
+   $serverpermission to mcpbroker.registry's entry would make registry import
+   permissions, which already imports registry. Threading the config through the
+   check is the way out of that cycle, and applypermissions is gone with it because
+   there is nothing for it to stamp.
+
+   reg.findfortool returns a $serverentry, not an option: the `$none`/`$some` match
+   had no variants to match. reg.isfound is the predicate. *)
+f=checktoolpermission(registry:$brokerregistry;config:$permissionconfig;toolname:str):bool{
+  let entry=reg.findfortool(registry;toolname);
+  if(reg.isfound(entry)){}el{
+    <false
+  };
+  let perm=findpermission(config;entry.name);
+  if(haspermission(perm)){
+    <checkpermission(perm;toolname;entry.toolprefix)
   }el{
     <true
   }
 };
 
-f=checktoolpermission(registry:i64;toolname:str):bool{
-  let found=reg.findfortool(registry;toolname);
-  <mt found {
-    $none:v false;
-    $some:entry permschecktoolentry(entry;toolname)
-  }
-};
-
-f=checkpermission(perm:i64;toolname:str;prefix:str):bool{
+f=checkpermission(perm:$serverpermission;toolname:str;prefix:str):bool{
   let barename=mut.toolname;
   if(str.startswith(toolname;prefix)){
     barename=str.slice(toolname;str.len(prefix);str.len(toolname))
@@ -57,28 +67,25 @@ f=checkpermission(perm:i64;toolname:str;prefix:str):bool{
 };
 
 f=arraycontains(arr:@str;val:str):bool{
-  let i=0;
-  let n=arr.len;
-  lp(let lv=0;i<n;lv=lv){
-    let item=str.arrayget(arr;i);
-    if(str.eq(item;val)){ <true }el{};
-    i=i+1
+  lp(let i=0;i<arr.len;i=i+1){
+    if(str.eq(arr.get(i);val)){ <true }el{}
   };
   <false
 };
 
 
-f=permsloadok(config:i64;path:str;cid:str):$permissionconfig!$lokeerr{
+f=permsloadok(config:$permissionconfig;path:str;cid:str):$permissionconfig!$lokeerr{
   log.info(str.concat("loaded ";str.concat(str.fromint(config.servercount);str.concat(" server permissions from ";path)));"permissions";cid);
   <$ok(config)
 };
 
 f=loadfromtoml(path:str):$permissionconfig!$lokeerr{
   let cid=log.newcorrelationid();
-  let content=fs.readfile(path);
-  <mt content {
-    $fserr:e $err($configerr(str.concat("could not read config: ";path)));
-    $ok:raw permsparseraw(raw;path;cid)
+  (* std.fs declares nothing at all — its .tki has an empty export list — so
+     fs.readfile was a call into a module with no members. std.file.read is the one. *)
+  <mt file.read(path) {
+    $ok:raw permsparseraw(raw;path;cid);
+    $err:e $err($configerr(str.concat("could not read config: ";path)))
   }
 };
 
@@ -100,10 +107,10 @@ f=parsetomlpermissions(raw:str):$permissionconfig!$lokeerr{
   let currentprivacy=mut.false;
   let inserversection=mut.false;
 
-  let i=0;
+  let i=mut.0;
   let n=lines.len;
   lp(let lv=0;i<n;lv=lv){
-    let line=str.trim(str.arrayget(lines;i));
+    let line=str.trim(lines.get(i));
 
     if(str.startswith(line;"[mcp.servers.")){
       if(inserversection){
@@ -170,7 +177,7 @@ f=parsetomlpermissions(raw:str):$permissionconfig!$lokeerr{
 f=parsestringarray(line:str):@str{
   let result=mut.@();
   let bracketstart=str.indexof(line;"[");
-  let bracketend=str.lastindexof(line;"]");
+  let bracketend=str.lastindex(line;"]");
   if(bracketstart < 0){ <result }el{};
   if(!(bracketend>bracketstart)){ <result }el{};
   let inner=str.slice(line;bracketstart+1;bracketend);
@@ -191,9 +198,9 @@ f=parsestringarray(line:str):@str{
 
 f=parseintvalue(line:str):i32{
   let eqpos=str.indexof(line;"=");
-  if(eqpos < 0){ <0 }el{
+  if(eqpos < 0){ <(0 as i32) }el{
     let val=str.trim(str.slice(line;eqpos+1;str.len(line)));
-    <str.toint(val)
+    <(str.toint(val) as i32)
   }
 };
 
@@ -206,40 +213,33 @@ f=parseboolvalue(line:str):bool{
 };
 
 
-f=applypermissions(registry:i64;config:$permissionconfig):i64{
-  let updatedservers=mut.@();
-  lp(let ii1=0;ii1<registry.servers.len;ii1=ii1+1){
-    let server=registry.servers.get(ii1);
-    let perm=findpermission(config;server.name);
-    let updated=mt perm {
-      $none:v server;
-      $some:p $serverentry{
-          name:server.name;
-          host:server.host;
-          port:server.port;
-          toolprefix:server.toolprefix;
-          healthy:server.healthy;
-          lastchecked:server.lastchecked;
-          permissionsset:true;
-          permission:p
-        }
-    };
-    updatedservers=updatedservers.push(updated)
-  };
-  <$brokerregistry{ servers:updatedservers }
+(* Returns a permission with an empty servername when the config has no entry for this
+   server; haspermission() is the predicate. A $serverpermission!$lokeerr would read as
+   the safer signature and is not: the error type is user-declared, so T-18 means the
+   caller's `$err` arm never runs and "no permission configured" would be indistinguishable
+   from a configured one. A sentinel plus a predicate is total. *)
+f=nopermission():$serverpermission{
+  <$serverpermission{
+    servername:"";
+    allowedtools:@();
+    deniedtools:@();
+    maxrequestspermin:(0 as i32);
+    privacyrequired:false
+  }
 };
 
-f=findpermission(config:i64;name:str):$serverpermission!$lokeerr{
-  let i=0;
-  let n=config.permissions.len;
-  lp(let lv=0;i<n;lv=lv){
-    let perm=str.arrayget(config.permissions;i);
+f=haspermission(perm:$serverpermission):bool{
+  <str.len(perm.servername)>0
+};
+
+f=findpermission(config:$permissionconfig;name:str):$serverpermission{
+  lp(let i=0;i<config.permissions.len;i=i+1){
+    let perm:$serverpermission=config.permissions.get(i);
     if(str.eq(perm.servername;name)){
-      <$ok(perm)
-    }el{};
-    i=i+1
+      <perm
+    }el{}
   };
-  <$err($lokeerr{msg:"not found"})
+  <nopermission()
 };
 
 
@@ -247,21 +247,18 @@ f=formatpermissions(config:$permissionconfig):str{
   let header="Server          | Allowed               | Denied          | RPM  | Privacy\n";
   let sep="----------------+-----------------------+-----------------+------+---------\n";
   let rows=mut."";
-  let i=0;
-  let n=config.permissions.len;
-  lp(let lv=0;i<n;lv=lv){
-    let p=str.arrayget(config.permissions;i);
+  lp(let i=0;i<config.permissions.len;i=i+1){
+    let p:$serverpermission=config.permissions.get(i);
     let allowedstr=mut."*";
     if(p.allowedtools.len==0){}el{allowedstr=str.join(",";p.allowedtools)};
     let deniedstr=mut."-";
     if(p.deniedtools.len==0){}el{deniedstr=str.join(",";p.deniedtools)};
     let rpmstr=mut."none";
-    if(p.maxrequestspermin==0){}el{rpmstr=str.fromint(p.maxrequestspermin)};
+    if(p.maxrequestspermin==(0 as i32)){}el{rpmstr=str.fromint(p.maxrequestspermin as i64)};
     let privacystr=mut."no";
     if(p.privacyrequired){privacystr="yes"}el{};
     let row=str.concat(p.servername;str.concat(" | ";str.concat(allowedstr;str.concat(" | ";str.concat(deniedstr;str.concat(" | ";str.concat(rpmstr;str.concat(" | ";str.concat(privacystr;"\n")))))))));
-    rows=str.concat(rows;row);
-    i=i+1
+    rows=str.concat(rows;row)
   };
   <str.concat(header;str.concat(sep;rows))
 };

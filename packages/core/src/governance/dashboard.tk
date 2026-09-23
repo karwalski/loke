@@ -7,9 +7,9 @@ i=s:core.storage.db;
 i=db:std.db;
 i=str:std.str;
 i=log:shared.log;
-i=json:std.json;
 i=t:shared.types;
 i=gt:core.governance.types;
+i=audit:core.storage.audit;
 
 t=$ragstatus{$green:i64;$amber:i64;$red:i64};
 
@@ -61,115 +61,161 @@ f=worst(a:$ragstatus;b:$ragstatus):$ragstatus{
 
 
 (* The row accessors are core.storage.db's, not std.json's. db.many returns [$row] and
-   the four COUNT/SUM reads below went through json.i64 and json.getfloat against those
-   rows, so every count was 0 and the cost was 0.0. The scorecard therefore reported a
-   perfect privacy coverage rate, a perfect local routing ratio and zero spend on every
-   installation, whatever the audit log held — a governance control that could only ever
-   say GREEN.
+   the four COUNT and SUM reads below went through json.i64 and json.getfloat against
+   those rows, so every count was 0 and the cost was 0.0. The scorecard therefore
+   reported a perfect privacy coverage rate, a perfect local routing ratio and zero spend
+   on every installation, whatever the audit log held — a governance control that could
+   only ever say GREEN.
 
-   The cost column crosses as HUNDREDTHS in an i64 and is divided locally: an f64
-   returned across a module boundary is corrupted (T-20). See storage/db.tk:245-253.
+   The cost column crosses as HUNDREDTHS in an i64 and stays an integer all the way to
+   the formatted string: an f64 returned across a module boundary is corrupted (T-20), and
+   money rendered through a float prints $1.5 where it means $1.50.
 
-   NOT fixed here: `created_at` is a millisecond epoch integer stored as TEXT
-   (storage/audit.tk:46-54), so comparing it against datetime('now','-N days') is a
-   string compare that matches nothing, and the period window is inert. Same defect as
-   the one noted in governance/report-engine.tk. *)
+   GA5.11 — the period window. created_at is epoch milliseconds stored as TEXT, and this
+   compared it to datetime('now','-N days'), which renders "2026-09-16 04:24:34". "1"
+   sorts before "2", so every window matched zero rows and the period was inert. The
+   bound is now resolved to epoch milliseconds by core.storage.db.daysagoms and bound as
+   a parameter, against a CAST column. msrangeof in that module carries the reasoning for
+   converting the parameter rather than re-representing the column.
+
+   The sensitivity comparison was wrong as well, independently of the dates, and in the
+   direction that makes a privacy control look broken rather than absent: it tested
+   sensitivity='CONFIDENTIAL' against a column that shared.types.senslabel writes in
+   LOWER case ("confidential"). Privacy coverage was therefore 0 out of N on every row
+   the request path has ever written, which reads as RED. Compared case-insensitively
+   now, and the same two labels the report engine's PII template uses. *)
+f=firstcount(rows:@$row):i64{
+  (* The rows are consumed in their own function, which is what establishes their type.
+     `let rows=mt db.many(...) { $ok:rows rows; $err:e $err(...) }` gave the binding two
+     different types — @$row on one arm, an error value on the other — and indexing it
+     read whatever was there. All four reads below were written that way; with rows
+     present that is the shape that segfaults (the same defect storage/audit.tk records
+     in eventsfromrows). *)
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <s.rowi64(r;"cnt")
+  }el{
+    <0
+  }
+};
+
+f=firsthundredths(rows:@$row;col:str):i64{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <s.rowf64hundredths(r;col)
+  }el{
+    <0
+  }
+};
+
+f=countin(sql:str;params:@str):i64{
+  (* A plain i64. db.many is a stdlib result so both arms are live (T-18 kills only the
+     error arm of a user-declared sum), and a failed count reading as 0 is the safe
+     direction for a metric: it cannot manufacture coverage that was not measured. *)
+  <mt db.many(sql;params) {
+    $ok:rows firstcount(rows);
+    $err:e 0
+  }
+};
+
+f=sumhundredths(sql:str;params:@str;col:str):i64{
+  <mt db.many(sql;params) {
+    $ok:rows firsthundredths(rows;col);
+    $err:e 0
+  }
+};
+
+f=auditwindowcount(extrafilter:str;sincems:str):i64{
+  let sql=str.concat(
+    "SELECT COUNT(*) as cnt FROM audit_log WHERE CAST(created_at AS INTEGER) >= ?";
+    extrafilter);
+  <countin(sql;@(sincems))
+};
+
+(* Open incidents, counted rather than asserted. This was the literal `let incidents=0`,
+   which made "Open incidents: 0" and its GREEN status a statement about the source code
+   rather than about the installation. core.governance.incidents creates the table
+   lazily, so its absence means no incident has ever been opened OR the module has never
+   run — both of which are honestly reported as zero open incidents, and the table's
+   absence is not treated as evidence of anything else. *)
+f=openincidentcount():i64{
+  if(s.tableexists("incidents")){
+    <countin("SELECT COUNT(*) as cnt FROM incidents WHERE status != 'resolved'";@())
+  }el{
+    <0
+  }
+};
+
 f=buildscorecard(store:i64;perioddays:u32):$governancescorecard!$lokeerr{
-  let dayss=str.fromint(perioddays);
-  let window=str.concat(
-    "datetime('now','-";
-    str.concat(dayss;" days')")
-  );
+  let sincems=str.fromi64(s.daysagoms(perioddays as i64));
 
-  
-  let totalsql=str.concat(
-    "SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ";
-    window
-  );
-  let totalcount=mut.0;
-  let totalrows=mt db.many(totalsql;@()) {
-    $ok:rows rows;
-    $err:e $err($storageerr("failed to query audit_log total"))
-  };
-  if(totalrows.len > 0){ let totalrow:$row=totalrows.get(0); totalcount=s.rowi64(totalrow;"cnt") }el{};
+  let totalcount=auditwindowcount("";sincems);
+  let privcount=auditwindowcount(" AND UPPER(sensitivity) IN ('CONFIDENTIAL','RESTRICTED')";sincems);
+  let localcount=auditwindowcount(" AND (provider='local' OR provider='ollama')";sincems);
+  (* Kept as an exact integer of hundredths rather than divided into an f64: the
+     thresholds below are money comparisons and the display has to pad to two places.
+     See core.storage.db.moneyfromhundredths. *)
+  let totalcosth=sumhundredths(
+    "SELECT COALESCE(SUM(cost_usd),0.0) as total FROM audit_log WHERE CAST(created_at AS INTEGER) >= ?";
+    @(sincems);
+    "total");
 
-  
-  let privsql=str.concat(
-    "SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ";
-    str.concat(window;" AND (sensitivity='CONFIDENTIAL' OR sensitivity='RESTRICTED')")
-  );
-  let privcount=mut.0;
-  let privrows=mt db.many(privsql;@()) {
-    $ok:rows rows;
-    $err:e $err($storageerr("failed to query privacy coverage"))
-  };
-  if(privrows.len > 0){ let privrow:$row=privrows.get(0); privcount=s.rowi64(privrow;"cnt") }el{};
 
-  let localsql=str.concat(
-    "SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ";
-    str.concat(window;" AND (provider='local' OR provider='ollama')")
-  );
-  let localcount=mut.0;
-  let localrows=mt db.many(localsql;@()) {
-    $ok:rows rows;
-    $err:e $err($storageerr("failed to query local routing ratio"))
-  };
-  if(localrows.len > 0){ let localrow:$row=localrows.get(0); localcount=s.rowi64(localrow;"cnt") }el{};
-
-  let costsql=str.concat(
-    "SELECT COALESCE(SUM(cost_usd),0.0) as total FROM audit_log WHERE created_at >= ";
-    window
-  );
-  let totalcost=mut.0.0;
-  let costrows=mt db.many(costsql;@()) {
-    $ok:rows rows;
-    $err:e $err($storageerr("failed to query cost"))
-  };
-  if(costrows.len > 0){ let costrow:$row=costrows.get(0); totalcost=(s.rowf64hundredths(costrow;"total") as f64) / 100.0 }el{};
-
-  
   let totalf=str.tofloat(str.fromint(totalcount));
 
-  let privrate=mut.1.0;
-  if(totalcount == 0){}el{
+  (* A ratio over zero events is UNDEFINED, and the previous code resolved it to 1.0 —
+     so a brand-new installation, or any period with no traffic, reported 100% privacy
+     coverage and 100% local routing, in GREEN. That is a governance control asserting
+     compliance it has no evidence for, which is the one thing it must never do. With no
+     events in the window the two ratio metrics now report "no events" in AMBER: not a
+     failure, and not a pass either. Spend is different — no events really does mean
+     $0.00 — so cost stays measured. *)
+  let measured=totalcount > 0;
+
+  let privrate=mut.0.0;
+  if(measured){
     privrate=str.tofloat(str.fromint(privcount))/totalf
-  };
-  let localrate=mut.1.0;
-  if(totalcount == 0){}el{
+  }el{};
+  let localrate=mut.0.0;
+  if(measured){
     localrate=str.tofloat(str.fromint(localcount))/totalf
-  };
+  }el{};
 
-  let govrate=1.0;
-  if(totalcount == 0){}el{};
-
-  
-  let privstatus=mut.$ragstatus{$red:0};
-  if(privrate > 0.95){
-    privstatus=$ragstatus{$green:0}
-  }el{
-    if(privrate > 0.80){
-      privstatus=$ragstatus{$amber:0}
-    }el{}
-  };
-  let localstatus=mut.$ragstatus{$red:0};
-  if(localrate > 0.60){
-    localstatus=$ragstatus{$green:0}
-  }el{
-    if(localrate > 0.40){
-      localstatus=$ragstatus{$amber:0}
-    }el{}
-  };
+  let privstatus=mut.$ragstatus{$amber:0};
+  if(measured){
+    if(privrate > 0.95){
+      privstatus=$ragstatus{$green:0}
+    }el{
+      if(privrate > 0.80){
+        privstatus=$ragstatus{$amber:0}
+      }el{
+        privstatus=$ragstatus{$red:0}
+      }
+    }
+  }el{};
+  let localstatus=mut.$ragstatus{$amber:0};
+  if(measured){
+    if(localrate > 0.60){
+      localstatus=$ragstatus{$green:0}
+    }el{
+      if(localrate > 0.40){
+        localstatus=$ragstatus{$amber:0}
+      }el{
+        localstatus=$ragstatus{$red:0}
+      }
+    }
+  }el{};
 
   let coststatus=mut.$ragstatus{$red:0};
-  if(totalcost < 100.0){
+  if(totalcosth < 10000){
     coststatus=$ragstatus{$green:0}
   }el{
-    if(totalcost < 200.0){
+    if(totalcosth < 20000){
       coststatus=$ragstatus{$amber:0}
     }el{}
   };
 
-  let incidents=0;
+  let incidents=openincidentcount();
   let incidentstatus=mut.$ragstatus{$red:0};
   if(incidents == 0){
     incidentstatus=$ragstatus{$green:0}
@@ -178,21 +224,43 @@ f=buildscorecard(store:i64;perioddays:u32):$governancescorecard!$lokeerr{
       incidentstatus=$ragstatus{$amber:0}
     }el{}
   };
-  let govstatus=mut.$ragstatus{$red:0};
-  if(govrate > 0.99){
-    govstatus=$ragstatus{$green:0}
-  }el{
-    if(govrate > 0.95){
-      govstatus=$ragstatus{$amber:0}
-    }el{}
-  };
 
-  
-  let privpct=str.concat(str.fromfloat(privrate*100.0);"%");
-  let localpct=str.concat(str.fromfloat(localrate*100.0);"%");
-  let coststr=str.concat("$";str.fromfloat(totalcost));
+  (* Governance coverage — "% of requests with complete audit trail" — was the literal
+     `let govrate=1.0`, so the scorecard reported 100% coverage and GREEN on every
+     installation including one whose audit_log was empty. It is removed rather than
+     corrected, because the quantity is not measurable from here: computing the share of
+     requests that were audited needs a count of requests taken somewhere OTHER than the
+     audit log, and no such counter exists. Deriving it from the audit log alone can only
+     ever return 100% — the rows that are there are the rows that are there.
+
+     What IS checkable is whether the trail is intact and whether the append-only control
+     is live, so the metric reports that instead and says which question it answers. A
+     broken chain is RED; an intact chain with the trigger missing is AMBER, because a
+     trail nothing protects is a trail whose next state is not guaranteed. *)
+  let chain=audit.verifychain(store);
+  let appendonly=s.auditappendonlyenforced();
+  let govstatus=mut.$ragstatus{$red:0};
+  let govvalue=mut."BROKEN";
+  if(chain.ok){
+    if(appendonly){
+      govstatus=$ragstatus{$green:0};
+      govvalue="INTACT"
+    }el{
+      govstatus=$ragstatus{$amber:0};
+      govvalue="UNPROTECTED"
+    }
+  }el{};
+
+  let privpct=mut."no events";
+  if(measured){
+    privpct=str.concat(t.f64fixed(privrate*100.0;1);"%")
+  }el{};
+  let localpct=mut."no events";
+  if(measured){
+    localpct=str.concat(t.f64fixed(localrate*100.0;1);"%")
+  }el{};
+  let coststr=str.concat("$";s.moneyfromhundredths(totalcosth));
   let incidentstr=str.fromint(incidents);
-  let govpct=str.concat(str.fromfloat(govrate*100.0);"%");
 
   let metrics=@(
     $dashboardmetric{
@@ -220,10 +288,10 @@ f=buildscorecard(store:i64;perioddays:u32):$governancescorecard!$lokeerr{
       detail:"count of unresolved incidents"
     };
     $dashboardmetric{
-      name:"Governance coverage";
-      value:govpct;
+      name:"Audit trail integrity";
+      value:govvalue;
       status:govstatus;
-      detail:"% of requests with complete audit trail"
+      detail:"hash chain verified over every recorded event, and whether append-only is enforced"
     }
   );
 

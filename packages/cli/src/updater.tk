@@ -3,10 +3,34 @@
 
 m=cli.updater;
 
-i=fs:std.fs;
 i=str:std.str;
+i=file:std.file;
 i=http:std.http;
-i=sh:std.shell;
+i=json:std.json;
+i=process:std.process;
+i=log:shared.log;
+
+(* Self-update for the loke binary (F10.23e).
+
+   This module had never parsed. All twenty of its diagnostics came from three lines
+   of one shape — `if(res.exitcode==0=false)`, and `=0=false` four more times — where
+   `!=0` was meant. The parser gave up at the first and reported the rest of the file
+   as unexpected tokens, which is why the error count looked like fifteen separate
+   defects and was one.
+
+   What the parse errors were hiding was most of the module. It imported `std.shell`,
+   which does not exist, and called `sh.run(str)`, `fs.readtext`, `fs.writetext`,
+   `http.getjson`, `http.download`, `str.getjsonstr`, `str.getjsonarr`,
+   `str.splitfirst` and `str.trimprefix(a;b)` — of those, only str.trimprefix is real.
+   Commands now go through std.process (spawn an argv, wait, read the pipes), which is
+   what core.installer.install and core.monitoring.sysmon already do; files go through
+   std.file; JSON through std.json.
+
+   Overlap worth a decision, not resolved here: core.update.checker already polls the
+   same GitHub releases endpoint, caches the answer in settings, and has its own
+   version comparison. cli.updater adds download, checksum verification, binary
+   replacement with rollback, and snooze. It has no callers. Collapsing the two is a
+   backlog item; this module is left standing and compiling rather than half-merged. *)
 
 t=$updateinfo{
   current:str;
@@ -21,130 +45,177 @@ t=$updateresult{
   message:str
 };
 
+t=$cmdresult{
+  exitcode:i64;
+  stdout:str;
+  stderr:str
+};
+
 f=snoozekey():str{
   <"loke.updater.snooze_until"
 };
+
 f=snoozepath():str{
   <"~/.loke/updater_snooze"
 };
+
 f=releasesurl():str{
   <"https://api.github.com/repos/karwalski/loke/releases/latest"
 };
+
 f=snoozedurationsecs():i64{
   <86400
 };
 
-f=check(currentversion:str):$updateinfo{
-  let resp=http.getjson(releasesurl());
-  let respok=mt resp {
-    $ok:v true;
-    $err:e false
+(* An argv, not a shell string: nothing here needs a shell, and spawning one would put
+   a version tag and a file path through word splitting. *)
+f=runcmd(argv:@str):$cmdresult{
+  let h=mt process.spawn(argv) {
+    $ok:handle handle;
+    $err:e @()
   };
-  if(respok==false){
-    <$updateinfo{
-      current:currentversion;
-      latest:currentversion;
-      downloadurl:"";
-      releasenotes:"";
-      isnewer:false
-    }
-  }el{};
-  let respval=mt resp {
-    $ok:v v;
-    $err:e v
+  if(!(h == @())){}el{
+    <$cmdresult{ exitcode:127; stdout:""; stderr:"could not spawn command" }
   };
-  let latest=str.trimprefix(
-    str.getjsonstr(respval;"tag_name");
-    "v"
-  );
-  let releasenotes=str.getjsonstr(respval;"body");
-  let osresult=sh.run("uname -s");
-  let osname=osresult.stdout;
-  let archresult=sh.run("uname -m");
-  let archname=archresult.stdout;
-  let assetsuffix=mut."loke-windows-x86_64.exe";
+  let code=mt process.wait(h) {
+    $ok:c (c as i64);
+    $err:e 127
+  };
+  let out=mt process.stdout(h) {
+    $ok:s s;
+    $err:e ""
+  };
+  let err=mt process.stderr(h) {
+    $ok:s s;
+    $err:e ""
+  };
+  <$cmdresult{ exitcode:code; stdout:out; stderr:err }
+};
+
+f=uname(flag:str):str{
+  <str.trim(runcmd(@("uname";flag)).stdout)
+};
+
+(* The release asset this platform wants. Named without a leading "as" because toke
+   warns that an identifier starting with a keyword may have been meant as `as ...`. *)
+f=platformasset():str{
+  let osname=uname("-s");
   if(str.contains(osname;"Darwin")){
-    if(str.contains(archname;"arm64")){
-      assetsuffix="loke-macos-arm64"
+    if(str.contains(uname("-m");"arm64")){
+      <"loke-macos-arm64"
     }el{
-      assetsuffix="loke-macos-x86_64"
+      <"loke-macos-x86_64"
     }
-  }el{};
-  let assets=str.getjsonarr(respval;"assets");
+  }el{
+    <"loke-windows-x86_64.exe"
+  }
+};
+
+f=noupdate(currentversion:str):$updateinfo{
+  <$updateinfo{
+    current:currentversion;
+    latest:currentversion;
+    downloadurl:"";
+    releasenotes:"";
+    isnewer:false
+  }
+};
+
+f=parserelease(currentversion:str;r:$httpresp):$updateinfo{
+  if(!(r.status>199)){ <noupdate(currentversion) }el{};
+  if(!(r.status<300)){ <noupdate(currentversion) }el{};
+  let parsed=json.decode(r.body);
+  let tag=json.str(parsed;"tag_name");
+  let latest=str.trimprefix(tag;"v");
+  let releasenotes=json.str(parsed;"body");
+  let assets=json.getarray(parsed;"assets");
+  let wanted=platformasset();
   let downloadurl=mut."";
-  let i=mut.0;
-  lp(let lv=0;i<str.len(assets);lv=lv){
-    let asset=assets.get(i);
-    let assetname=str.getjsonstr(asset;"name");
-    if(str.contains(assetname;assetsuffix)){
-      downloadurl=str.getjsonstr(asset;"browser_download_url")
-    }el{};
-    i=i+1
+  lp(let i=0;i<assets.len;i=i+1){
+    let asset=str.arrayget(assets;i);
+    if(str.contains(json.str(asset;"name");wanted)){
+      downloadurl=json.str(asset;"browser_download_url")
+    }el{}
   };
-  let isnewer=versiongt(latest;currentversion);
   <$updateinfo{
     current:currentversion;
     latest:latest;
     downloadurl:downloadurl;
     releasenotes:releasenotes;
-    isnewer:isnewer
+    isnewer:versiongt(latest;currentversion)
   }
 };
 
+f=check(currentversion:str):$updateinfo{
+  let resp=http.get(releasesurl();@(
+    http.header("User-Agent";"loke-cli");
+    http.header("Accept";"application/vnd.github+json")
+  ));
+  <mt resp {
+    $ok:r parserelease(currentversion;r);
+    $err:e noupdate(currentversion)
+  }
+};
+
+(* Returns "" when there is nothing to download or the download failed. *)
 f=download(info:$updateinfo;destdir:str):str{
+  if(str.len(info.downloadurl)>0){}el{
+    <""
+  };
   let filename=str.concat("loke-";str.concat(info.latest;"-update"));
   let destpath=str.concat(destdir;str.concat("/";filename));
-  <mt http.download(info.downloadurl;destpath) {
-    $ok:v destpath;
-    $err:e ""
+  let client=http.client(info.downloadurl);
+  if(http.downloadfile(client;info.downloadurl;destpath)==0){
+    <destpath
+  }el{
+    log.error(str.concat("update download failed: ";info.downloadurl);"cli.updater";"system");
+    <""
   }
 };
 
 f=verifychecksum(binpath:str;expectedsha256:str):bool{
-  let osname=sh.run("uname -s").stdout;
-  let cmd=mut.str.concat("sha256sum ";binpath);
+  let osname=uname("-s");
+  let res=mut.runcmd(@("sha256sum";binpath));
   if(str.contains(osname;"Darwin")){
-    cmd=str.concat("shasum -a 256 ";binpath)
+    res=runcmd(@("shasum";"-a";"256";binpath))
   }el{};
-  let res=sh.run(cmd);
-  if(res.exitcode==0=false){
+  if(!(res.exitcode==0)){
+    log.error(str.concat("checksum command failed: ";res.stderr);"cli.updater";"system");
     <false
   }el{};
-  let computed=str.splitfirst(str.trim(res.stdout);" ");
-  <str.eq(computed;expectedsha256)
+  let fields=str.fields(res.stdout);
+  if(fields.len>0){}el{
+    <false
+  };
+  <str.eq(fields.get(0);expectedsha256)
+};
+
+f=failed(message:str):$updateresult{
+  log.error(message;"cli.updater";"system");
+  <$updateresult{ ok:false; message:message }
 };
 
 f=apply(newbinpath:str;currentbinpath:str):$updateresult{
   let bakpath=str.concat(currentbinpath;".bak");
-  let cpbak=sh.run(str.concat("cp ";str.concat(currentbinpath;str.concat(" ";bakpath))));
-  if(cpbak.exitcode=0=false){
-    <$updateresult{
-      ok:false;
-      message:str.concat("backup failed: ";cpbak.stderr)
-    }
+  let cpbak=runcmd(@("cp";currentbinpath;bakpath));
+  if(!(cpbak.exitcode==0)){
+    <failed(str.concat("backup failed: ";cpbak.stderr))
   }el{};
-  let mvres=sh.run(str.concat("mv ";str.concat(newbinpath;str.concat(" ";currentbinpath))));
-  if(mvres.exitcode=0=false){
-    sh.run(str.concat("mv ";str.concat(bakpath;str.concat(" ";currentbinpath))));
-    <$updateresult{
-      ok:false;
-      message:str.concat("replace failed: ";mvres.stderr)
-    }
+  let mvres=runcmd(@("mv";newbinpath;currentbinpath));
+  if(!(mvres.exitcode==0)){
+    let rollback=runcmd(@("mv";bakpath;currentbinpath));
+    log.warn(str.concat("rollback exit code ";str.fromint(rollback.exitcode));"cli.updater";"system");
+    <failed(str.concat("replace failed: ";mvres.stderr))
   }el{};
-  let chmodres=sh.run(str.concat("chmod +x ";currentbinpath));
-  if(chmodres.exitcode=0=false){
-    <$updateresult{
-      ok:false;
-      message:str.concat("chmod failed: ";chmodres.stderr)
-    }
+  let chmodres=runcmd(@("chmod";"+x";currentbinpath));
+  if(!(chmodres.exitcode==0)){
+    <failed(str.concat("chmod failed: ";chmodres.stderr))
   }el{};
-  let smoke=sh.run(str.concat(currentbinpath;" --version"));
-  if(smoke.exitcode=0=false){
-    sh.run(str.concat("mv ";str.concat(bakpath;str.concat(" ";currentbinpath))));
-    <$updateresult{
-      ok:false;
-      message:"new binary failed smoke test — restored previous version"
-    }
+  let smoke=runcmd(@(currentbinpath;"--version"));
+  if(!(smoke.exitcode==0)){
+    let rollback=runcmd(@("mv";bakpath;currentbinpath));
+    log.warn(str.concat("rollback exit code ";str.fromint(rollback.exitcode));"cli.updater";"system");
+    <failed("new binary failed smoke test — restored previous version")
   }el{};
   <$updateresult{
     ok:true;
@@ -152,26 +223,45 @@ f=apply(newbinpath:str;currentbinpath:str):$updateresult{
   }
 };
 
+f=nowsecs():i64{
+  let out=str.trim(runcmd(@("date";"+%s")).stdout);
+  if(str.len(out)>0){
+    <str.toint(out)
+  }el{
+    <0
+  }
+};
+
+(* True when the user should be shown the update prompt: there is a newer version and
+   the snooze window has expired. Writing the next snooze deadline is a side effect of
+   showing the prompt, so it only happens on the true path. *)
 f=promptupdate(info:$updateinfo):bool{
-  if(info.isnewer=false){
+  if(info.isnewer){}el{
     <false
-  }el{};
-  let nowsecs=str.toint(sh.run("date +%s").stdout);
-  let snoozeraw=mt fs.readtext(snoozepath()) {
+  };
+  let now=nowsecs();
+  let snoozeraw=mt file.read(snoozepath()) {
     $ok:v v;
     $err:e ""
   };
   if(str.len(snoozeraw)>0){
-    let snoozeuntil=str.toint(str.trim(snoozeraw));
-    if(nowsecs<snoozeuntil){
+    if(now<str.toint(str.trim(snoozeraw))){
       <false
     }el{}
   }el{};
-  let nextsnooze=str.fromint(nowsecs+snoozedurationsecs());
-  fs.writetext(snoozepath();nextsnooze);
+  let nextsnooze=str.fromint(now+snoozedurationsecs());
+  let wrote=mt file.write(snoozepath();nextsnooze) {
+    $ok:v true;
+    $err:e false
+  };
+  if(wrote){}el{
+    log.warn(str.concat("could not record update snooze at ";snoozepath());"cli.updater";"system")
+  };
   <true
 };
 
+(* a is strictly newer than b, comparing major.minor.patch. partor keeps a two-part
+   version from reading off the end of the array. *)
 f=versiongt(a:str;b:str):bool{
   let aparts=str.split(a;".");
   let bparts=str.split(b;".");
@@ -189,9 +279,9 @@ f=versiongt(a:str;b:str):bool{
 };
 
 f=partor(parts:@str;idx:i64;fallback:str):str{
-  if(idx<str.len(parts)){
-    parts.get(idx)
+  if(idx<parts.len){
+    <parts.get(idx)
   }el{
-    fallback
+    <fallback
   }
 };

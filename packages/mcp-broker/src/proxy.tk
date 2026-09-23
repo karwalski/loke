@@ -3,81 +3,122 @@
 
 m=mcpbroker.proxy;
 i=t:shared.types;
-i=proto:mcp.protocol;
+i=proto:core.mcp.protocol;
 i=http:std.http;
 i=json:std.json;
 i=log:shared.log;
 i=reg:mcpbroker.registry;
-i=privacy:core.privacy.pipeline;
+i=pipe:core.privacy.pipeline;
+i=ph:core.privacy.placeholder;
 i=str:std.str;
+
+(* Privacy-preserving proxy for an upstream MCP tool call (F10.23d, GA1.2).
+
+   Nothing in this module had ever compiled and the shape it was reaching for could not
+   have worked. `core.privacy.pipeline` exports neither anonymise nor restore: the
+   anonymising entry point is pipe.run, which returns a plain $pipelinerun, and
+   restoration lives in core.privacy.placeholder.restore and needs the placeholder MAP
+   built from the entities that run found. The legacy code called
+   `privacy.restore(r.body)` with no map at all — there was no way for it to put
+   anything back, and the $proxyresult it returned would have reported
+   privacyapplied:true for a response it had not touched.
+
+   So the map is threaded through: anonymise the arguments, send the anonymised form
+   upstream, restore the response against the same map. That is the whole point of the
+   broker, and this call site plus cli.proxy are the only two callers of
+   placeholder.restore in the repository.
+
+   Also fixed: reg.findfortool returns a $serverentry, not an option, so the
+   `$none`/`$some` match had no variants to match (its predicate is reg.isfound);
+   std.http.post is not callable at all because http.tki double-declares it as a route
+   (F10.16), so this uses http.postheaders; proto.errorresponse takes
+   (id, code, message) and was being called with (code, message, detail); and every
+   entry parameter was a bare i64 where it meant $serverentry. *)
 
 t=$proxyresult{ ok:bool; responsebody:str; upstreamserver:str; privacyapplied:bool };
 
 f=stripprefix(toolname:str;prefix:str):str{
-  let has=toolname.startswith(prefix);
-  if(has){
-    <toolname.slice(prefix.len();toolname.len())
+  if(str.startswith(toolname;prefix)){
+    <str.slice(toolname;str.len(prefix);str.len(toolname))
   }el{
     <toolname
   }
 };
 
-f=proxyrestoreok(cleanresp:str;toolname:str;entry:i64):$proxyresult{
-  log.info(str.concat("proxied ";str.concat(toolname;str.concat(" via ";entry.name)));"proxy";"proxy_call");
-  <$proxyresult{ ok:true; responsebody:cleanresp; upstreamserver:entry.name; privacyapplied:true }
+f=serverurl(entry:$serverentry):str{
+  <str.concat("http://";str.concat(entry.host;str.concat(":";str.fromint(entry.port as i64))))
 };
 
-f=proxyrestorefail(e:str;toolname:str;rbody:str;entry:i64):$proxyresult{
-  log.warn(str.concat("privacy restore failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
-  <$proxyresult{ ok:true; responsebody:rbody; upstreamserver:entry.name; privacyapplied:false }
-};
-
-f=proxyhandleresponse(r:i64;toolname:str;entry:i64):$proxyresult{
-  let restored=privacy.restore(r.body);
-  <mt restored {
-    $ok:cleanresp proxyrestoreok(cleanresp;toolname;entry);
-    $err:e proxyrestorefail(e;toolname;r.body;entry)
+f=proxyupstreamfail(toolname:str;entry:$serverentry):$proxyresult{
+  log.warn(str.concat("upstream call failed for ";toolname);"proxy";"proxy_call");
+  <$proxyresult{
+    ok:false;
+    responsebody:proto.errorresponse(1;(0-32603) as i32;str.concat("Upstream error for ";toolname));
+    upstreamserver:entry.name;
+    privacyapplied:false
   }
 };
 
-f=proxyupstreamfail(e:str;toolname:str;entry:i64):$proxyresult{
-  log.warn(str.concat("upstream call failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
-  <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32603;"Upstream error";e); upstreamserver:entry.name; privacyapplied:false }
+f=proxyhandleresponse(r:$httpresp;toolname:str;entry:$serverentry;map:$placeholdermap):$proxyresult{
+  log.info(str.concat("proxied ";str.concat(toolname;str.concat(" via ";entry.name)));"proxy";"proxy_call");
+  <$proxyresult{
+    ok:true;
+    responsebody:ph.restore(r.body;map);
+    upstreamserver:entry.name;
+    privacyapplied:true
+  }
 };
 
-f=proxysendrequest(cleanargs:str;toolname:str;entry:i64):$proxyresult{
+f=proxysendrequest(cleanargs:str;toolname:str;entry:$serverentry;map:$placeholdermap):$proxyresult{
   let upstreamtool=stripprefix(toolname;entry.toolprefix);
   let rpcbody=str.concat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"";str.concat(upstreamtool;str.concat("\",\"arguments\":";str.concat(cleanargs;"}}"))));
-  let url=str.concat("http://";str.concat(entry.host;str.concat(":";str.concat(str.fromint(entry.port);"/mcp"))));
-  let resp=http.post(url;rpcbody;"application/json");
+  let resp=http.postheaders(
+    http.client(serverurl(entry));
+    "/mcp";
+    str.tobytes(rpcbody);
+    "{\"content-type\":\"application/json\"}"
+  );
   <mt resp {
-    $ok:r proxyhandleresponse(r;toolname;entry);
-    $err:e proxyupstreamfail(e;toolname;entry)
+    $ok:r proxyhandleresponse(r;toolname;entry;map);
+    $err:e proxyupstreamfail(toolname;entry)
   }
 };
 
-f=proxyanonymisefail(e:str;toolname:str):$proxyresult{
-  log.warn(str.concat("privacy anonymise failed for ";str.concat(toolname;str.concat(": ";e)));"proxy";"proxy_call");
-  <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32603;"Privacy pipeline error";e); upstreamserver:""; privacyapplied:false }
+f=proxyblocked(toolname:str;entry:$serverentry):$proxyresult{
+  log.warn(str.concat("blocked by sensitivity policy: ";toolname);"proxy";"proxy_call");
+  <$proxyresult{
+    ok:false;
+    responsebody:proto.errorresponse(1;(0-32603) as i32;"Blocked: argument sensitivity exceeds forwarding policy");
+    upstreamserver:entry.name;
+    privacyapplied:true
+  }
 };
 
-f=proxyhandleentry(entry:i64;toolname:str;argsjson:str):$proxyresult{
-  let sanitised=privacy.anonymise(argsjson);
-  <mt sanitised {
-    $ok:cleanargs proxysendrequest(cleanargs;toolname;entry);
-    $err:e proxyanonymisefail(e;toolname)
-  }
+f=proxyhandleentry(entry:$serverentry;toolname:str;argsjson:str;pipecfg:$pipelineconfig):$proxyresult{
+  let run=pipe.run(argsjson;"";pipecfg);
+  let detected=run.result;
+  (* Fail closed: what the policy will not forward does not go upstream. *)
+  if(pipe.issafetoforward(run)){}el{
+    <proxyblocked(toolname;entry)
+  };
+  <proxysendrequest(detected.anonymised;toolname;entry;ph.mapfromentities(detected.entities))
 };
 
 f=proxynotfound(toolname:str):$proxyresult{
   log.warn(str.concat("no upstream server for tool: ";toolname);"proxy";"proxy_call");
-  <$proxyresult{ ok:false; responsebody:proto.errorresponse(-32601;"Tool not found";toolname); upstreamserver:""; privacyapplied:false }
+  <$proxyresult{
+    ok:false;
+    responsebody:proto.errorresponse(1;(0-32601) as i32;str.concat("Tool not found: ";toolname));
+    upstreamserver:"";
+    privacyapplied:false
+  }
 };
 
-f=proxycall(toolname:str;argsjson:str;registry:i64):$proxyresult{
+f=proxycall(toolname:str;argsjson:str;registry:$brokerregistry;pipecfg:$pipelineconfig):$proxyresult{
   let found=reg.findfortool(registry;toolname);
-  <mt found {
-    $none:v proxynotfound(toolname);
-    $some:entry proxyhandleentry(entry;toolname;argsjson)
+  if(reg.isfound(found)){
+    <proxyhandleentry(found;toolname;argsjson;pipecfg)
+  }el{
+    <proxynotfound(toolname)
   }
 };

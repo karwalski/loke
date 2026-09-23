@@ -732,6 +732,16 @@ asserted too (`f64hundredths`, arm D). Where a caller only wants the value for d
 return a `str` instead, which crosses safely — `f64absfixed` does the abs and the
 formatting in one call so the f64 never leaves its own module.
 
+**A boundary the defect does NOT cross, measured 2026-09-23.** An `f64` **field of a
+struct** returned across a module boundary is **intact**. We checked because
+`core.metrics.collector.summarise` returns a struct with four f64 fields that a user-facing
+command prints, and nobody had established whether those were corrupted too. They are not,
+and the reason fits the diagnosis exactly: a struct crosses as a **pointer**, so the field
+is loaded from memory on the far side rather than read out of a return register. The bug is
+specific to the register, which is why the parameter direction is also unaffected. So the
+blast radius is bare `f64` returns only — worth knowing before anyone migrates a struct that
+did not need it.
+
 **The assertion, if you want it as a regression test.** `tests/unit/shared/test_f64_boundary.tk`
 in loke, four arms: a module-local control, the loke-boundary case, the stdlib-builtin case,
 and the integer workaround. Arm B is written as a tripwire that asserts the defect is still

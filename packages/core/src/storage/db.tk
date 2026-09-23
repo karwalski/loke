@@ -20,6 +20,20 @@ t=$store{
   datadir:str
 };
 
+(* GA5.11 — a resolved reporting window, in the same units audit_log.created_at is
+   written in: milliseconds since the Unix epoch.
+
+   A plain struct with a predicate, not a result. T-18 makes the error arm of a
+   user-declared sum dead, and the failure this has to report — "I could not make sense
+   of the dates you gave me" — must not read as success, because the symptom of reading
+   it as success is a window that matches nothing, which is the exact defect GA5.11
+   exists to remove. See msrangeof below. *)
+t=$msrange{
+  startms:i64;
+  endms:i64;
+  ok:bool
+};
+
 (* GA2.2: retrieve or generate a 32-byte hex encryption key via OS keychain *)
 (* The environment is checked before the keychain, and that is not a convenience.
 
@@ -160,7 +174,12 @@ f=runmigrations(conn:$dbconn):i64!$lokeerr{
         $ok:v 1;
         $err:e $err($storageerr(str.concat("migration failed: ";mg.description)))
       };
-      mt db.exec("INSERT INTO schema_migrations (version,applied_at,description) VALUES (?,?,?)";@(verstr;"now()";mg.description)) {
+      (* The literal string "now()", not a call: SQL functions are not evaluated inside a
+         bound parameter, so every migration row recorded applied_at as the seven
+         characters n-o-w-(-) — the same defect GA5.1 fixed in audit_log.created_at, still
+         live here. Nothing reads applied_at yet, which is why it survived. An ISO-8601
+         stamp, and nothing hashes this column so there is no digest to disturb. *)
+      mt db.exec("INSERT INTO schema_migrations (version,applied_at,description) VALUES (?,?,?)";@(verstr;str.nowiso8601();mg.description)) {
         $ok:v 1;
         $err:e $err($storageerr(str.concat("failed to record migration: ";mg.description)))
       };
@@ -268,6 +287,41 @@ f=rowf64hundredths(r:$row;col:str):i64{
   }
 };
 
+(* Money, formatted from the exact integer of hundredths and never through a float.
+
+   This exists because the two obvious spellings are both wrong for currency.
+   str.fromfloat(1.50) gives "1.5" and str.fromfloat(0.0) gives "0", so a cost column
+   printed that way reads $1.5 and $0. shared.types.f64fixed truncates the decimal string
+   to the requested places rather than padding it, so f64fixed(1.5;2) is also "1.5". A
+   governance cost report that prints $1.5 where it means $1.50 is the kind of figure
+   somebody reconciles against an invoice.
+
+   Taking the i64 of hundredths that rowf64hundredths already returns keeps the value
+   exact, sidesteps T-20 entirely (no f64 crosses any boundary), and pads properly. *)
+f=pad2(n:i64):str{
+  if(n<10){
+    <str.concat("0";str.fromint(n))
+  }el{
+    <str.fromint(n)
+  }
+};
+
+f=moneyfromhundredths(h:i64):str{
+  let negative=h<0;
+  let magnitude=mut.h;
+  if(negative){
+    magnitude=0-h
+  }el{};
+  let whole=magnitude/100;
+  let cents=magnitude-(whole*100);
+  let body=str.concat(str.fromint(whole);str.concat(".";pad2(cents)));
+  if(negative){
+    <str.concat("-";body)
+  }el{
+    <body
+  }
+};
+
 f=rowget(rows:@$row;idx:i64):$row{
   <db.rowget(rows;idx)
 };
@@ -291,4 +345,153 @@ f=i64val(n:i64):str{
 
 f=nowms():i64{
   <db.nowms()
+};
+
+
+(* ── schema introspection ─────────────────────────────────────────────────────
+   "Does this table exist?" has to be answerable directly, because the alternative is
+   inferring it from a query that returned nothing — and a query against a missing table
+   returns an error that most of this codebase maps to an empty array. That is how
+   governance/report.tk spent its life reporting zero events from a table no migration
+   creates (GA5.12), and how four memory tables are referenced 24 times and created
+   nowhere without anything noticing (M1.7).
+
+   So: one predicate, here in the storage layer, for anything that wants to assert its
+   schema rather than assume it. core.governance.compliance had a private copy; it now
+   delegates. M1.7 should use these two rather than write a third. *)
+f=countquery(sql:str;params:@str):i64{
+  (* A plain i64, no result type. db.many is a STDLIB result so both arms are live
+     (T-18 only kills the error arm of a user-declared sum), and a failed query
+     counting as zero is the safe direction for a predicate that asks whether
+     something exists. *)
+  <mt db.many(sql;params) {
+    $ok:rows rows.len as i64;
+    $err:e 0
+  }
+};
+
+f=tableexists(name:str):bool{
+  <countquery("SELECT name FROM sqlite_master WHERE type='table' AND name=?";@(name))>0
+};
+
+f=triggerexists(name:str):bool{
+  <countquery("SELECT name FROM sqlite_master WHERE type='trigger' AND name=?";@(name))>0
+};
+
+(* GA5.9 — read back whether the append-only control is actually in place.
+
+   Migrations 6 and 7 create the two triggers, but a migration having run once is not
+   evidence that the control is live now: a later migration that rebuilds audit_log
+   would take its triggers with it, and an operator with the sqlite3 shell can drop
+   them. Something that asserts "the trail is append-only" should therefore ask the
+   database rather than trust the migration log. core.governance.compliance reports
+   this, and tests/unit/storage/test_audit_append_only.tk asserts it. *)
+f=auditappendonlyenforced():bool{
+  if(triggerexists("audit_log_append_only_update")){
+    <triggerexists("audit_log_append_only_delete")
+  }el{
+    <false
+  }
+};
+
+
+(* ── GA5.11: the reporting window ────────────────────────────────────────────
+   audit_log.created_at is milliseconds since the Unix epoch, written as TEXT by
+   core.storage.audit.insertevent. Every reader compared it to something else: the
+   report engine to ISO dates such as "2026-01-01", the governance dashboard to
+   datetime('now','-N days'). Both are string comparisons of "1790…" against "2026-…"
+   or "2026-09-16 04:24:34", and "1" sorts before "2", so every window matched zero
+   rows on every installation whatever the table held. The reports and the scorecard
+   period were inert, and inert in the direction that looks like "nothing happened".
+
+   THE DECISION: convert at the query boundary and leave the stored text alone.
+
+   The alternative was to store created_at as an ISO-8601 string, which would make the
+   comparisons work with no conversion at all. It is rejected, and not on taste:
+
+     - The chain digest covers created_at's STORED TEXT (see audit.digestfields).
+       Re-representing existing rows changes that text, so every existing row's stored
+       hash would stop matching a digest recomputed from its own fields — the verifier
+       would report the trail as tampered. The only way to migrate the rows is to
+       recompute their hashes, and a migration that rewrites the hashes of a
+       tamper-evident trail is indistinguishable, from inside the data, from someone
+       rewriting history. An audit trail that has had its digests recomputed once is an
+       audit trail whose digests mean "somebody re-derived these", not "these are what
+       was recorded".
+     - GA5.9, one migration earlier, makes audit_log reject UPDATE. A migration that
+       rewrote created_at on existing rows would have to defeat the control this same
+       change introduces.
+     - This is the third instance today of the same class: a digest over a value whose
+       text representation something else controls. GA5.1 (the literal 'now()'), GA5.15
+       (SQLite rendering a REAL as "0.0" where the writer wrote "0"). Epoch
+       milliseconds as an integer has exactly one textual form, which is the property
+       that makes it safe to hash. ISO-8601 has many.
+
+   So the stored column is untouched, nothing is re-hashed, and the conversion happens
+   on the PARAMETER instead. The column side needs `CAST(created_at AS INTEGER)`, which
+   is a read-only cast in a WHERE clause and never written back — without it SQLite
+   applies the column's TEXT affinity to the integer bound parameter and converts the
+   PARAMETER to text, putting the string comparison back.
+
+   The conversion is done by SQLite's own date functions rather than std.time.parse,
+   deliberately. created_at comes from db.nowms, which is UTC. SQLite reads a bare
+   date as UTC and strftime('%s',…) yields a UTC epoch, so the two agree by
+   construction. std.time.parse wraps strptime, whose result would go through the host's
+   local timezone, and a window silently shifted by the operator's UTC offset is the
+   same class of bug as the one being fixed — near-invisible, and wrong only at the
+   edges of the window. SQLite is also the only date PARSER available here, and it
+   accepts the ISO forms the CLI produces.
+
+   Both bounds are whole UTC days: the window runs from the start of startdate to the
+   start of the day AFTER enddate, half-open. That makes `--start X --end X` a full
+   single day rather than an empty instant, which is what a caller passing two dates
+   means. *)
+f=epochmsfrom(sql:str;arg:str):i64{
+  <mt db.one(sql;@(arg)) {
+    $ok:r rowi64(r;"ms");
+    $err:e 0
+  }
+};
+
+f=badrange():$msrange{
+  <$msrange{startms:0;endms:0;ok:false}
+};
+
+f=msrangeof(startdate:str;enddate:str):$msrange{
+  let startms=epochmsfrom("SELECT CAST(strftime('%s',?,'start of day') AS INTEGER)*1000 AS ms";startdate);
+  let endms=epochmsfrom("SELECT CAST(strftime('%s',?,'start of day','+1 day') AS INTEGER)*1000 AS ms";enddate);
+  (* strftime returns NULL for anything it cannot read as a date, which arrives here as
+     0, and a bound of 0 would quietly match nothing — the failure mode being fixed.
+     Zero is also the Unix epoch itself, so a caller asking for 1970-01-01 is refused;
+     that is the honest trade for catching a typo, and no report window starts there. *)
+  if(startms==0){
+    log.warn(str.concat("report window rejected: could not read a date from ";startdate);"db";"system");
+    <badrange()
+  }el{};
+  if(endms==0){
+    log.warn(str.concat("report window rejected: could not read a date from ";enddate);"db";"system");
+    <badrange()
+  }el{};
+  if(endms<startms){
+    log.warn(str.concat("report window rejected: the end date precedes the start date: ";str.concat(startdate;str.concat(" to ";enddate)));"db";"system");
+    <badrange()
+  }el{};
+  <$msrange{startms:startms;endms:endms;ok:true}
+};
+
+(* The governance scorecard's window: the last N days, ending now. Same units, same
+   clock, same reason for going through SQLite. *)
+f=daysagoms(days:i64):i64{
+  let modifier=str.concat("-";str.concat(str.fromint(days);" days"));
+  <epochmsfrom("SELECT CAST(strftime('%s','now',?) AS INTEGER)*1000 AS ms";modifier)
+};
+
+(* The one spelling of the window predicate, so five report queries and the scorecard
+   cannot drift apart again. Bind str.fromi64 of the two bounds, in this order. *)
+f=createdatwindowclause():str{
+  <"CAST(created_at AS INTEGER) >= ? AND CAST(created_at AS INTEGER) < ?"
+};
+
+f=createdatdescorder():str{
+  <" ORDER BY CAST(created_at AS INTEGER) DESC, rowid DESC"
 };

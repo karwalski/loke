@@ -41,15 +41,23 @@ f=defaultconfig():$serverconfig{
 
 
 
-f=handletoolscall(request:i64;config:$serverconfig):str{
-  let paramsparsed=json.dec(request.paramsraw);
-  <mt paramsparsed {
-    $jsonerr:e proto.errorresponse(request.id;-32602;"Invalid params");
-    $ok:paramsobj handletoolscallparams(request;paramsobj;config)
+(* $ok first in every match, and the request carries its declared type.
+
+   T-18: a `mt` over a union whose error type is user-declared — $lokeerr here — always
+   takes the FIRST arm whatever the value holds. Every match in this module used to put
+   the error arm first, so handlerequest returned "Parse error" for every well-formed
+   request and start() logged "failed to listen" and returned without ever accepting a
+   connection. The whole server was unreachable, and no diagnostic said so. Putting $ok
+   first makes the happy path work; the error arms remain unreachable, which is a
+   language defect and is why the net calls below are plain integer checks instead. *)
+f=handletoolscall(request:$jsonrpcrequest;config:$serverconfig):str{
+  <mt json.dec(request.paramsraw) {
+    $ok:paramsobj handletoolscallparams(request;paramsobj;config);
+    $jsonerr:e proto.errorresponse(request.id;(0-32602) as i32;"Invalid params")
   }
 };
 
-f=handletoolscallparams(request:i64;paramsobj:i64;config:$serverconfig):str{
+f=handletoolscallparams(request:$jsonrpcrequest;paramsobj:i64;config:$serverconfig):str{
   let toolname=json.getstr(paramsobj;"name");
   let argsval=json.getval(paramsobj;"arguments");
   let argsjson=json.enc(argsval);
@@ -57,7 +65,7 @@ f=handletoolscallparams(request:i64;paramsobj:i64;config:$serverconfig):str{
   <proto.okresponse(request.id;toolresult.text)
 };
 
-f=dispatchrequest(request:i64;config:$serverconfig;cid:str):str{
+f=dispatchrequest(request:$jsonrpcrequest;config:$serverconfig;cid:str):str{
   log.debug(str.concat("mcp request: ";request.method);"mcp-server";cid);
   if(str.eq(request.method;"initialize")){
     let result=proto.initresponse(config.servername;config.version);
@@ -72,7 +80,7 @@ f=dispatchrequest(request:i64;config:$serverconfig;cid:str):str{
         <handletoolscall(request;config)
       }el{
         log.warn(str.concat("mcp unknown method: ";request.method);"mcp-server";cid);
-        <proto.errorresponse(request.id;-32601;"Method not found")
+        <proto.errorresponse(request.id;(0-32601) as i32;"Method not found")
       }
     }
   }
@@ -80,56 +88,63 @@ f=dispatchrequest(request:i64;config:$serverconfig;cid:str):str{
 
 f=handlerequest(raw:str;config:$serverconfig):str{
   let cid=log.newcorrelationid();
-  let req=proto.parserequest(raw);
-  <mt req {
-    $lokeerr:e proto.errorresponse(0;-32700;"Parse error");
-    $ok:request dispatchrequest(request;config;cid)
+  <mt proto.parserequest(raw) {
+    $ok:request dispatchrequest(request;config;cid);
+    $lokeerr:e proto.errorresponse(0;(0-32700) as i32;"Parse error")
   }
 };
 
 
 
 
+(* std.net is five abi entry points returning bare i64 — there is no $ok/$neterr union
+   to match, and the legacy matches over net.write, net.read, net.accept and net.listen
+   all put $neterr first, so each one took the failure path unconditionally. *)
 f=handleconndata(raw:str;c:i64;config:$serverconfig;cid:str):void{
   let response=handlerequest(raw;config);
-  let writeresult=net.write(c;response);
-  mt writeresult {
-    $neterr:e log.warn("mcp server: write error";"mcp-server";cid);
-    $ok:v void
+  if(net.write(c;response)>0){}el{
+    log.warn("mcp server: write error";"mcp-server";cid)
   };
-  net.close(c)
-};
-
-f=handleconnreadfail(c:i64;cid:str):void{
-  log.warn("mcp server: read error";"mcp-server";cid);
-  net.close(c)
+  net.close(c);
+  <void
 };
 
 f=handleconn(c:i64;config:$serverconfig;cid:str):void{
-  let data=net.read(c);
-  mt data {
-    $neterr:e handleconnreadfail(c;cid);
-    $ok:raw handleconndata(raw;c;config;cid)
-  }
+  let raw=net.read(c);
+  if(str.len(raw)>0){
+    handleconndata(raw;c;config;cid)
+  }el{
+    log.warn("mcp server: read error";"mcp-server";cid);
+    net.close(c)
+  };
+  <void
 };
 
 f=startlistener(l:i64;config:$serverconfig;cid:str):void{
-  lp(let lv=0;true;lv=lv){
+  let running=mut.true;
+  lp(let lv=0;running;lv=lv){
     let conn=net.accept(l);
-    mt conn {
-      $neterr:e log.warn("mcp server: accept error";"mcp-server";cid);
-      $ok:c handleconn(c;config;cid)
+    if(conn>0){
+      handleconn(conn;config;cid)
+    }el{
+      log.warn("mcp server: accept error";"mcp-server";cid);
+      running=false
     }
-  }
+  };
+  net.close(l);
+  <void
 };
 
 f=start(config:$serverconfig):void{
   let cid=log.newcorrelationid();
-  let portstr=str.fromint(config.port);
+  let portstr=str.fromint(config.port as i64);
   log.info(str.concat("loke MCP server starting on port ";portstr);"mcp-server";cid);
-  let listener=net.listen(config.host;config.port);
-  mt listener {
-    $neterr:e log.error(str.concat("mcp server: failed to listen on port ";portstr);"mcp-server";cid);
-    $ok:l startlistener(l;config;cid)
-  }
+  (* std.net.listen takes the port only; the host was a second argument it never had. *)
+  let listener=net.listen(config.port as i64);
+  if(listener>0){
+    startlistener(listener;config;cid)
+  }el{
+    log.error(str.concat("mcp server: failed to listen on port ";portstr);"mcp-server";cid)
+  };
+  <void
 };

@@ -4,89 +4,115 @@
 m=mcpbroker.server;
 i=t:shared.types;
 i=net:std.net;
-i=proto:mcp.protocol;
+i=proto:core.mcp.protocol;
 i=json:std.json;
 i=log:shared.log;
 i=reg:mcpbroker.registry;
 i=agg:mcpbroker.aggregator;
 i=proxy:mcpbroker.proxy;
+i=pipe:core.privacy.pipeline;
 i=str:std.str;
+
+(* The broker's JSON-RPC front end (F10.23d).
+
+   Rewritten against what the toolchain provides. The legacy body called
+   `doc.getstr(...)`, `params.getraw(...)`, `sock.accept()`, `conn.readbody()` and
+   `conn.writeresponse(...)` — method-call forms on i64 handles that resolve to nothing
+   and would have become undefined symbols at link — matched `net.listen` as an
+   $ok/$err result when std.net returns a bare i64, and called proto.errorresponse
+   with (code, message, detail) when it takes (id, code, message).
+
+   The one that would have bitten hardest at runtime: `reg.register(registry;srv)`
+   with the result discarded. register returns a NEW registry; the old line left the
+   registry empty, so tools/list would have aggregated nothing and every tools/call
+   would have reported "Tool not found" — with no diagnostic anywhere.
+
+   json.decode, not json.parse: json.parse mangles to tk_json_parse_w, which does not
+   exist, and the linker binds it to an unrelated runtime helper that returns an int64
+   rather than a Json (T-17). *)
 
 t=$brokerconfig{ port:i32; datadir:str };
 
-(* json.decode, not json.parse. `json.parse` mangles to tk_json_parse_w, which does
-   not exist; the linker binds it to tk_json_parse — an unrelated runtime helper that
-   parses an int array, a boolean or a number and returns an int64, not a Json*. So
-   every json.parse in this repository returned garbage that json.getopt and json.str
-   then read as a document, silently. Filed as T-17 in docs/upstream/toke-issues.md. *)
-f=defaultport():i32{ <11436 };
+f=defaultport():i32{ <(11436 as i32) };
 
-f=handlerequest(reqbody:str;registry:i64):str{
-  let parsed=json.decode(reqbody);
-  let doc=mt parsed {
-    $ok:doc doc;
-    $err:e proto.errorresponse(-32700;"Parse error";e)
-  };
-  let methodres=doc.getstr("method");
-  let method=mt methodres {
-    $ok:method method;
-    $err:e proto.errorresponse(-32600;"Invalid request";e)
+f=handlerequest(reqbody:str;registry:$brokerregistry;pipecfg:$pipelineconfig):str{
+  let doc=json.decode(reqbody);
+  let method=json.getstr(doc;"method");
+  if(str.len(method)>0){}el{
+    <proto.errorresponse(0;(0-32600) as i32;"Invalid request: no method")
   };
   if(str.eq(method;"initialize")){
-    <proto.initresponse("moke-mcp-broker";"1.0.0")
+    <proto.okresponse(1;proto.initresponse("loke-mcp-broker";"1.0.0"))
   }el{};
   if(str.eq(method;"tools/list")){
-    let tools=agg.aggregateall(registry);
-    <agg.toolslistresponse(tools)
+    <agg.toolslistresponse(agg.aggregateall(registry))
   }el{};
   if(str.eq(method;"tools/call")){
-    let paramsres=doc.getobj("params");
-    let params=mt paramsres {
-      $ok:params params;
-      $err:e proto.errorresponse(-32602;"Invalid params";e)
+    let params=json.getobj(doc;"params");
+    let toolname=json.getstr(params;"name");
+    if(str.len(toolname)>0){}el{
+      <proto.errorresponse(1;(0-32602) as i32;"Missing tool name")
     };
-    let nameres=params.getstr("name");
-    let argsres=params.getraw("arguments");
-    let toolname=mt nameres {
-      $ok:toolname toolname;
-      $err:e proto.errorresponse(-32602;"Missing tool name";e)
-    };
-    let argsjson=mt argsres {
-      $ok:a a;
-      $err:v "{}"
-    };
-    let result=proxy.proxycall(toolname;argsjson;registry);
-    <result.responsebody
+    let argsjson=json.enc(json.getval(params;"arguments"));
+    <proxy.proxycall(toolname;argsjson;registry;pipecfg).responsebody
   }el{};
-  <proto.errorresponse(-32601;"Method not found";"")
+  <proto.errorresponse(1;(0-32601) as i32;str.concat("Method not found: ";method))
 };
 
-f=start(cfg:$brokerconfig):bool{
-  log.info(str.concat("mcp-broker listening on port ";str.fromint(cfg.port));"server";"start");
-  log.info(str.concat("data dir: ";cfg.datadir);"server";"start");
-  let listener=net.listen(cfg.port);
-  let listenerok=mt listener {
-    $ok:sock true;
-    $err:e false
-  };
-  if(listenerok==false){
-    <false
-  }el{};
-  let sock=mt listener {
-    $ok:sock sock;
-    $err:e void
-  };
-  let registry=reg.newregistry();
+(* std.net writes bytes, not HTTP, so the response line and headers are built here. *)
+f=httpjson(body:str):str{
+  <str.concat(
+    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
+    str.concat(
+      str.fromint(str.len(body) as i64);
+      str.concat("\r\nConnection: close\r\n\r\n";body)
+    )
+  )
+};
+
+(* The body of an HTTP request, which is whatever follows the blank line. *)
+f=httpbody(raw:str):str{
+  let at=str.indexof(raw;"\r\n\r\n");
+  if(at<0){
+    <raw
+  }el{
+    <str.slice(raw;at+4;str.len(raw))
+  }
+};
+
+f=seedregistry():$brokerregistry{
+  let registry=mut.reg.newregistry();
   let defaults=reg.defaultservers();
-  lp(let ii72=0;ii72<defaults.len;ii72=ii72+1){
-    let srv=defaults.get(ii72);
-    reg.register(registry;srv)
+  lp(let i=0;i<defaults.len;i=i+1){
+    registry=reg.register(registry;defaults.get(i))
   };
-  lp(let lv=0;true;lv=lv){
-    let conn=sock.accept();
-    let body=conn.readbody();
-    let resp=handlerequest(body;registry);
-    conn.writeresponse(200;"application/json";resp)
+  <registry
+};
+
+f=start(cfg:$brokerconfig;presidiourl:str;ollamaurl:str):bool{
+  log.info(str.concat("mcp-broker listening on port ";str.fromint(cfg.port as i64));"server";"start");
+  log.info(str.concat("data dir: ";cfg.datadir);"server";"start");
+  let sock=net.listen(cfg.port as i64);
+  if(sock>0){}el{
+    log.error(str.concat("mcp-broker: failed to bind port ";str.fromint(cfg.port as i64));"server";"start");
+    <false
   };
+  let registry=seedregistry();
+  let pipecfg=pipe.newconfig(presidiourl;ollamaurl);
+  let running=mut.true;
+  lp(let lv=0;running;lv=lv){
+    let conn=net.accept(sock);
+    if(conn>0){
+      let raw=net.read(conn);
+      if(str.len(raw)>0){
+        net.write(conn;httpjson(handlerequest(httpbody(raw);registry;pipecfg)))
+      }el{};
+      net.close(conn)
+    }el{
+      log.warn("mcp-broker: accept error";"server";"start");
+      running=false
+    }
+  };
+  net.close(sock);
   <true
 };

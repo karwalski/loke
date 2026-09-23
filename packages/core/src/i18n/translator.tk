@@ -1,0 +1,170 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.i18n.translator;
+
+i=loc:core.i18n.locales;
+i=str:std.str;
+i=log:shared.log;
+i=ty:shared.types;
+
+(* Ported from src/platform/i18n/translator.tk (F10.12-T1).
+
+   The legacy module threaded a $translatorstate through every call:
+   `t(s;key)`, `getlocale(s)`, `setlocale(s;code)`. Its seven consumers — all of them
+   in packages/cli — call `tr.t("key")` and `tr.getlocale()` with no state argument at
+   all, so the legacy signatures had never matched a single caller. They could not
+   have: the state was built by `newstate()`, loaded by `loadlocale()`, and
+   `loadlocale` did `s.locales.push(locale); <s` — a discarded push (T-24) returning
+   the state unchanged, so no locale could ever be loaded into it.
+
+   Lookup is therefore stateless here and total: the locale tables are compiled in
+   (core.i18n.locales) and every entry point resolves a locale CODE rather than
+   carrying mutable state, because toke has no module-level mutable state to hold an
+   "active locale" in. `getlocale()` reports the locale this build ships as active;
+   `tfor(code;key)` is the explicit form for looking a key up in another locale.
+
+   A missing key returns the key. That is the legacy behaviour and it is deliberate,
+   but see the CLI note in docs: none of the ~60 `loke.cli.*` keys the seven CLI
+   consumers ask for exists in either table, so every one of them currently renders
+   as its own key. *)
+
+(* The locale this build treats as active. *)
+f=defaultlocale():str{
+  <"en-AU"
+};
+
+f=getlocale():str{
+  <defaultlocale()
+};
+
+(* True when `code` is a locale this build ships. *)
+f=haslocale(code:str):bool{
+  let all=loc.codes();
+  lp(let i=0;i<all.len;i=i+1){
+    if(str.eq(all.get(i);code)){
+      <true
+    }el{}
+  };
+  <false
+};
+
+f=localefor(code:str):$locale{
+  if(str.eq(code;"en-US")){
+    <loc.enus()
+  }el{
+    <loc.enau()
+  }
+};
+
+(* Returns the key itself when the locale has no entry for it. *)
+f=lookup(l:$locale;key:str):str{
+  let entries=l.entries;
+  lp(let i=0;i<entries.len;i=i+1){
+    let entry=entries.get(i);
+    if(str.eq(entry.key;key)){
+      <entry.value
+    }el{}
+  };
+  <key
+};
+
+f=tfor(code:str;key:str):str{
+  <lookup(localefor(code);key)
+};
+
+f=t(key:str):str{
+  <tfor(defaultlocale();key)
+};
+
+f=tn(key:str;count:i32):str{
+  if(count==(0 as i32)){
+    let zerokey=str.concat(key;"_zero");
+    let zeroval=t(zerokey);
+    if(str.eq(zeroval;zerokey)){
+      <t(key)
+    }el{
+      <zeroval
+    }
+  }el{
+    if(count==(1 as i32)){
+      let onekey=str.concat(key;"_one");
+      let oneval=t(onekey);
+      if(str.eq(oneval;onekey)){
+        <t(key)
+      }el{
+        <oneval
+      }
+    }el{
+      let otherkey=str.concat(key;"_other");
+      let otherval=t(otherkey);
+      if(str.eq(otherval;otherkey)){
+        <t(key)
+      }el{
+        <otherval
+      }
+    }
+  }
+};
+
+(* Substitutes {{0}}, {{1}}, … in the translated string. *)
+f=tparams(key:str;params:@str):str{
+  let base=t(key);
+  let result=mut.base;
+  lp(let i=0;i<params.len;i=i+1){
+    let placeholder=str.concat("{{";str.concat(str.fromint(i);"}}"));
+    result=str.replace(result;placeholder;params.get(i))
+  };
+  <result
+};
+
+(* Records the requested locale without being able to make it active.
+
+   Kept because the CLI's `loke locale` command is documented to accept one, and
+   because dropping it silently would look like the capability exists. It does not:
+   there is nowhere to put an active locale that outlives the call, so this reports
+   the request and returns whether the code is one this build ships. A real
+   implementation belongs in core.storage.settings, which is where every other piece
+   of durable preference lives. *)
+f=setlocale(code:str):bool{
+  if(haslocale(code)){
+    log.info(str.concat("locale requested: ";code);"core.i18n.translator";"system");
+    <true
+  }el{
+    log.warn(str.concat("unknown locale requested: ";code);"core.i18n.translator";"system");
+    <false
+  }
+};
+
+(* The legacy signature was `formatnumber(n:f32;localecode:str)` calling the
+   nonexistent `str.formatf32`. f64 here because that is what shared.types formats,
+   and an f64 PARAMETER crosses a module boundary intact — only a RETURN is corrupted
+   (T-20), which is why this hands back a str. *)
+f=formatnumber(n:f64;localecode:str):str{
+  <ty.f64fixed(n;2)
+};
+
+(* ISO-8601 is returned unchanged: locale-aware date rendering is not implemented and
+   this is the legacy behaviour, not a formatting choice. *)
+f=formatdate(iso:str;localecode:str):str{
+  <iso
+};
+
+f=formatrelative(secondsago:i64):str{
+  if(secondsago<60){
+    <"just now"
+  }el{
+    if(secondsago<3600){
+      let minutes=secondsago/60;
+      <str.concat(str.fromint(minutes);" minutes ago")
+    }el{
+      if(secondsago<86400){
+        let hours=secondsago/3600;
+        <str.concat(str.fromint(hours);" hours ago")
+      }el{
+        let days=secondsago/86400;
+        <str.concat(str.fromint(days);" days ago")
+      }
+    }
+  }
+};

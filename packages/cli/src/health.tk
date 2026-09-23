@@ -5,6 +5,7 @@ m=cli.health;
 
 i=t:shared.types;
 i=http:std.http;
+i=reach:shared.reachability;
 i=str:std.str;
 i=log:shared.log;
 
@@ -25,43 +26,64 @@ t=$healthreport{
   subsystems:@$subsystemhealth
 };
 
+(* Reachability first, response second, and that order is the whole point.
+
+   These three are local sidecars, and `http.get` cannot tell "the service replied"
+   from "nothing is listening": against a closed port it returns $ok carrying a nil
+   response, so the $err arm never runs (T-15). The legacy bodies here called
+   `http.gettimeout(url;3000)` and `http.getstatus(url)` — neither of which exists in
+   std.http: gettimeout takes one argument and getstatus is not declared at all — and
+   then read `.status` off an i64. So `loke doctor` had never compiled, and the shape
+   it was reaching for would have reported every dead sidecar as reachable.
+
+   shared.reachability.localserviceup BINDS the port to find out, which is honest for
+   a localhost service and is what core.privacy.ner and core.privacy.presidio already
+   use for exactly these endpoints. *)
 f=checkollama(ollamaurl:str):$subsystemhealth{
-  let url=str.concat(ollamaurl;"/api/tags");
-  let result=http.gettimeout(url;3000);
-  <mt result {
-    $httperr:e $subsystemhealth{ name:"Ollama"; status:$down("Ollama not running — start with: ollama serve"); detail:"unreachable" };
-    $ok:body $subsystemhealth{ name:"Ollama"; status:$healthstatus{$ok:0}; detail:"reachable" }
+  if(reach.localserviceup(ollamaurl)){}el{
+    <$subsystemhealth{ name:"Ollama"; status:$down("Ollama not running — start with: ollama serve"); detail:"unreachable" }
+  };
+  let hc=http.client(ollamaurl);
+  <mt http.get(hc;"/api/tags") {
+    $ok:body $subsystemhealth{ name:"Ollama"; status:$healthstatus{$ok:0}; detail:"reachable" };
+    $err:e $subsystemhealth{ name:"Ollama"; status:$down("Ollama not responding to /api/tags"); detail:"error" }
   }
 };
 
 f=checkpresidio(presidiourl:str):$subsystemhealth{
-  let url=str.concat(presidiourl;"/health");
-  let result=http.getstatus(url);
-  <mt result {
-    $httperr:e $subsystemhealth{ name:"Presidio (NER)"; status:$degraded("Presidio unavailable — NER accuracy reduced to regex-only"); detail:"unreachable" };
-    $ok:resp checkpresidioresp(resp)
+  if(reach.localserviceup(presidiourl)){}el{
+    <$subsystemhealth{ name:"Presidio (NER)"; status:$degraded("Presidio unavailable — NER accuracy reduced to regex-only"); detail:"unreachable" }
+  };
+  let hc=http.client(presidiourl);
+  <mt http.get(hc;"/health") {
+    $ok:body $subsystemhealth{ name:"Presidio (NER)"; status:$healthstatus{$ok:0}; detail:"reachable" };
+    $err:e $subsystemhealth{ name:"Presidio (NER)"; status:$degraded("Presidio unavailable — NER accuracy reduced to regex-only"); detail:"error" }
   }
-};
-
-f=checkpresidioresp(resp:i64):$subsystemhealth{
-  let r=mut.$subsystemhealth{ name:"Presidio (NER)"; status:$degraded("Presidio unavailable — NER accuracy reduced to regex-only"); detail:str.concat("status ";str.fromint(resp.status)) };
-  if(resp.status==200){ r=$subsystemhealth{ name:"Presidio (NER)"; status:$healthstatus{$ok:0}; detail:"reachable" } }el{};
-  <r
 };
 
 f=checkllmlingua(llmlinguaurl:str):$subsystemhealth{
-  let url=str.concat(llmlinguaurl;"/health");
-  let result=http.getstatus(url);
-  <mt result {
-    $httperr:e $subsystemhealth{ name:"LLMLingua"; status:$degraded("LLMLingua unavailable — token compression disabled"); detail:"unreachable" };
-    $ok:resp checkllmlinguaresp(resp)
+  if(reach.localserviceup(llmlinguaurl)){}el{
+    <$subsystemhealth{ name:"LLMLingua"; status:$degraded("LLMLingua unavailable — token compression disabled"); detail:"unreachable" }
+  };
+  let hc=http.client(llmlinguaurl);
+  <mt http.get(hc;"/health") {
+    $ok:body $subsystemhealth{ name:"LLMLingua"; status:$healthstatus{$ok:0}; detail:"reachable" };
+    $err:e $subsystemhealth{ name:"LLMLingua"; status:$degraded("LLMLingua unavailable — token compression disabled"); detail:"error" }
   }
 };
 
-f=checkllmlinguaresp(resp:i64):$subsystemhealth{
-  let r=mut.$subsystemhealth{ name:"LLMLingua"; status:$degraded("LLMLingua unavailable — token compression disabled"); detail:str.concat("status ";str.fromint(resp.status)) };
-  if(resp.status==200){ r=$subsystemhealth{ name:"LLMLingua"; status:$healthstatus{$ok:0}; detail:"reachable" } }el{};
-  <r
+(* True when the status is anything other than ok. Its own function because toke
+   emits duplicate basic-block labels for an inline `mt` of three or more arms, and
+   because the legacy checkall discarded three of these matches: it wrote
+   `mt statusv { … }` as a bare statement and never assigned the result, so
+   `hasdegraded` was read as false however degraded the system was. *)
+f=notok(st:$healthstatus):bool{
+  let stv:$healthstatus=st;
+  <mt stv {
+    $ok:v false;
+    $degraded:d true;
+    $down:d true
+  }
 };
 
 f=checkall(ollamaurl:str;presidiourl:str;llmlinguaurl:str):$healthreport{
@@ -69,30 +91,8 @@ f=checkall(ollamaurl:str;presidiourl:str;llmlinguaurl:str):$healthreport{
   let presidio=checkpresidio(presidiourl);
   let llmlingua=checkllmlingua(llmlinguaurl);
   let subsystems=@(ollama;presidio;llmlingua);
-  let hasdegraded=mut.false;
-  (* The subject is bound with a declared type before the match. toke emits duplicate
-     basic-block labels for a 3+-arm `mt` on a struct field and clang then rejects the
-     whole module; the annotation is what makes it link. See docs/upstream/toke-issues.md T-2. *)
-  let statusv:$healthstatus=ollama.status;
-  let ollamadown=mt statusv {
-    $ok:v false;
-    $degraded:d true;
-    $down:d true
-  };
-  if(!ollamadown){
-    let statusv:$healthstatus=presidio.status;
-    mt statusv {
-      $ok:v false;
-      $degraded:d true;
-      $down:d true
-    };
-    let statusv:$healthstatus=llmlingua.status;
-    mt statusv {
-      $ok:v false;
-      $degraded:d true;
-      $down:d true
-    }
-  }el{};
+  let ollamadown=notok(ollama.status);
+  let hasdegraded=notok(presidio.status)||notok(llmlingua.status);
   let overall=mut.$healthstatus{$ok:0};
   if(ollamadown){ overall=$down("Ollama is not running") }
     el{ if(hasdegraded){ overall=$degraded("one or more optional subsystems unavailable") }
@@ -129,7 +129,7 @@ f=formatreport(report:$healthreport):str{
 ";sep));
   let i=mut.0;
   lp(let lv=0;true;lv=lv){
-    if(!(i<str.len(report.subsystems))){ br }el{
+    if(!(i<report.subsystems.len)){ br }el{
       let sub=report.subsystems.get(i);
       let statusstr=statusline(sub.status);
       let line=str.concat(

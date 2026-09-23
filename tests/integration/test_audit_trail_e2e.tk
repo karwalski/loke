@@ -27,6 +27,18 @@ f=openteststore():i64{
      binding rather than 0. The directory is created first so the open succeeds. *)
   let dir=str.concat(std.homedir();"/.loke/test-audit");
   file.mkdir(dir);
+  (* A fresh database file per test, and that is a correctness fix rather than tidiness.
+     Every test in this file shared one accumulating fixture, and three of them tamper with
+     it on purpose — so after the first run the file held a mutated field and a zeroed
+     hash for good, and `testchainintact` asserted that an untampered chain verifies
+     against a chain that had been tampered with by its own neighbours. It passed exactly
+     once, on a machine with no fixture, and failed on every run after that. 83 rows had
+     accumulated in it by the time this was found.
+
+     Deleting the file is also what makes the append-only tamper tests below repeatable:
+     they drop the two triggers, and a dropped trigger stays dropped in a file that is
+     never replaced. *)
+  file.delete(str.concat(dir;"/loke.db"));
   <mt sdb.openstore(dir) {
     $ok:s s;
     $err:e 0
@@ -218,6 +230,41 @@ f=execsql(sql:str):bool{
   }
 };
 
+(* GA5.9 versus these tamper tests, and why this is not a hole in the control.
+
+   Migrations 6 and 7 make audit_log reject UPDATE and DELETE by trigger. The three tests
+   below have to perform an UPDATE and a DELETE, so something has to give. Three options
+   were available and two of them are worse:
+
+     - Give the triggers a test-only exemption (a settings flag, an environment variable,
+       a magic connection). That puts a bypass INSIDE the product. A control with a
+       documented way to switch it off is a control an attacker reads the documentation
+       for. Rejected.
+     - Move these tests to a fixture database built without the migrations. The tamper
+       tests would then no longer run against the real schema, so a future migration that
+       dropped the triggers or changed a column would leave them passing. Rejected: the
+       point of an end-to-end test is that it is the real thing.
+     - Drop the triggers here, from the test, with raw SQL. Chosen.
+
+   Dropping them is honest because it is precisely the move the threat model already grants
+   the attacker these tests represent. The triggers stop modification over any ordinary
+   connection; they cannot stop somebody who can already execute arbitrary SQL against the
+   file, because that person can DROP TRIGGER first — which is exactly what this function
+   does, in four words, using nothing the attacker lacks. The hash chain is the control for
+   that attacker, and these three tests are what prove the hash chain works.
+
+   So the layering is visible rather than asserted: the trigger is defeated in the test, and
+   the tamper is STILL detected. That is a stronger statement about the chain than a test
+   which never had to get past a trigger at all.
+
+   Nothing in loke itself calls this. It lives in the test, and
+   tests/unit/storage/test_audit_append_only.tk asserts that the triggers do reject both
+   statements when they have not been dropped. *)
+f=droptamperguards():bool{
+  execsql("DROP TRIGGER IF EXISTS audit_log_append_only_update");
+  <execsql("DROP TRIGGER IF EXISTS audit_log_append_only_delete")
+};
+
 f=testchainintact():bool{
   let store=openteststore();
   audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-v1"));
@@ -234,6 +281,7 @@ f=testdetectsfieldmutation():bool{
   audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-fm-3"));
   (* Alter a field of a MIDDLE row without touching its hash — the shape of someone editing
      the record of what was sent while leaving the digest alone. *)
+  droptamperguards();
   execsql("UPDATE audit_log SET provider='tampered' WHERE correlation_id='corr-fm-2'");
   let r=audit.verifychain(store);
   <t.assert(!r.ok;"a mutated field is detected")
@@ -244,6 +292,7 @@ f=testdetectshashmutation():bool{
   audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-hm-1"));
   audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-hm-2"));
   audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-hm-3"));
+  droptamperguards();
   execsql("UPDATE audit_log SET hash='0000000000000000000000000000000000000000000000000000000000000000' WHERE correlation_id='corr-hm-2'");
   let r=audit.verifychain(store);
   <t.assert(!r.ok;"a mutated digest is detected")
@@ -256,6 +305,7 @@ f=testdetectsdeletedrow():bool{
   audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-del-3"));
   (* Removing a middle row breaks the linkage at the row AFTER it, which is why the verifier
      reads forward and reports the first divergence rather than a count. *)
+  droptamperguards();
   execsql("DELETE FROM audit_log WHERE correlation_id='corr-del-2'");
   let r=audit.verifychain(store);
   <t.assert(!r.ok;"a deleted row is detected")

@@ -10,7 +10,10 @@ i=net:std.net;
 i=http:std.http;
 i=json:std.json;
 i=pipe:core.privacy.pipeline;
-i=disp:providers.dispatcher;
+i=ph:core.privacy.placeholder;
+i=ptypes:core.providers.types;
+i=router:core.router.router;
+i=disp:core.providers.dispatcher;
 i=cfg:shared.config;
 i=str:std.str;
 
@@ -87,84 +90,113 @@ f=parseopts(args:@str):$proxyconfig{
 };
 
 
-f=handlerequest(reqbody:str;session:$proxysession;cfg:$proxyconfig;pipecfg:i64):str{
+(* Rewritten against the interfaces the core modules export (F10.23d/GA1.2).
+
+   This function is the redact-and-forward path in its shortest honest form, and
+   nothing here had ever compiled. The legacy body called pipe.run with two arguments
+   when it takes three, matched its plain $pipelinerun return as if it were a result,
+   read piperesult.entitycount / .anonymised / .mapping (the real fields are
+   totalentities and result.{anonymised,entities}), called the nonexistent
+   pipe.defaultconfig, pipe.restore, disp.forward, json.setstr, json.tostr and
+   json.arrtostr, and matched json.decode twice with the second match's $err arm
+   reading the first arm's binding.
+
+   Restoration is core.privacy.placeholder.restore over a map built from the entities
+   the filter found — this call site and mcpbroker.proxy are the only two in the
+   repository, and both were in never-compiled trees. *)
+f=handlerequest(reqbody:str;cfg:$proxyconfig;pipecfg:$pipelineconfig):str{
   let cid=log.newcorrelationid();
-  let parseresult=json.decode(reqbody);
-  let parseok=mt parseresult {
-    $ok:v true;
-    $err:e false
-  };
-  if(parseok==false){
-    log.error("proxy: failed to parse request body";"proxy";cid);
+  let parsed=json.decode(reqbody);
+  let text=promptfrom(parsed);
+  if(str.len(text)>0){}el{
+    log.error("proxy: request body carried no prompt";"proxy";cid);
     <"{\"error\":\"invalid request body\"}"
-  }el{};
-  let parsed=mt parseresult {
-    $ok:v v;
-    $err:e v
   };
-  let text=mt json.getstr(parsed;"prompt") {
-    $ok:v v;
-    $err:e mt json.getarr(parsed;"messages") {
-      $ok:v2 json.arrtostr(v2);
-      $err:e2 ""
-    }
-  };
-  let piperun=pipe.run(text;pipecfg);
-  let pipeok=mt piperun {
-    $ok:v true;
-    $err:e false
-  };
-  if(pipeok==false){
-    log.error("proxy: pipeline error";"proxy";cid);
-    <"{\"error\":\"pipeline failure\"}"
-  }el{};
-  let piperesult=mt piperun {
-    $ok:v v;
-    $err:e v
-  };
+
+  let piperun=pipe.run(text;"";pipecfg);
+  let detected=piperun.result;
+
   if(cfg.verbose){
     log.info(
       str.concat(
         "proxy: redacted ";
-        str.concat(str.fromint(piperesult.entitycount);" entities")
+        str.concat(str.fromint(piperun.totalentities as i64);" entities")
       );
       "proxy";
       cid
     )
   }el{};
+
   if(cfg.dryrun){
     <"{\"content\":\"[dry-run: would send to LLM]\"}"
   }el{};
-  let anonbody=json.setstr(parsed;"prompt";piperesult.anonymised);
-  let anonreq=json.tostr(anonbody);
-  let dispresult=disp.forward(anonreq;cfg.targettool);
-  let dispok=mt dispresult {
-    $ok:v true;
-    $err:e false
+
+  (* Fail closed. The gate is the only thing between a confidential prompt and a
+     provider, and CLAUDE.md is explicit that the filter must not fail open. *)
+  if(pipe.issafetoforward(piperun)){}el{
+    log.warn("proxy: blocked by sensitivity policy";"proxy";cid);
+    <"{\"error\":\"blocked: sensitivity exceeds forwarding policy\"}"
   };
-  if(dispok==false){
-    log.error("proxy: dispatch error";"proxy";cid);
+
+  let request=$completionrequest{
+    modelid:cfg.targettool;
+    messages:@(ptypes.usermsg(detected.anonymised));
+    systemprompt:piperun.finalsystemprompt;
+    maxtokens:(2048 as u32);
+    temperature:0.0;
+    stream:false
+  };
+  let keys=disp.getapikeys();
+  let provider:$provider=router.providerfromstr(cfg.targettool);
+  let raw=mt disp.dispatch(disp.new(keys;"");request;provider) {
+    $ok:r r.content;
+    $err:e ""
+  };
+  if(str.len(raw)>0){}el{
+    log.error("proxy: dispatch returned no content";"proxy";cid);
     <"{\"error\":\"upstream failure\"}"
-  }el{};
-  let rawresponse=mt dispresult {
-    $ok:v v;
-    $err:e v
   };
-  let restored=mt pipe.restore(rawresponse;piperesult.mapping) {
-    $ok:v v;
-    $err:e rawresponse
-  };
-  <restored
+
+  <ph.restore(raw;ph.mapfromentities(detected.entities))
 };
 
-f=start(cfg:$proxyconfig;lokecfg:i64):i32{
+f=promptfrom(parsed:i64):str{
+  let direct=json.getstr(parsed;"prompt");
+  if(str.len(direct)>0){
+    <direct
+  }el{};
+  let messages=json.getarray(parsed;"messages");
+  let joined=mut."";
+  lp(let i=0;i<messages.len;i=i+1){
+    let m=str.arrayget(messages;i);
+    let content=json.getstr(m;"content");
+    if(str.len(content)>0){
+      if(str.len(joined)>0){
+        joined=str.concat(joined;str.concat("\n";content))
+      }el{
+        joined=content
+      }
+    }el{}
+  };
+  <joined
+};
+
+(* std.net is five abi entry points — listen, accept, read, write, close — each taking
+   and returning a bare i64, not a result. The legacy body matched six of them as
+   `$ok`/`$err` results and, in three of those matches, its `$err` arm read the `$ok`
+   arm's binding. It also called net.nowunix, net.readbody and net.closeconn, none of
+   which exist, and reassigned a non-mut `session`.
+
+   Kept as an accept loop over the real primitives. net.read returns the request bytes
+   as a str handle and 0 on failure, which is the only failure signal available. *)
+f=start(cfg:$proxyconfig;lokecfg:$lokeconfig):i64{
   let cid=log.newcorrelationid();
 
   out.printline(
     str.concat(
       "loke proxy listening on localhost:";
       str.concat(
-        str.fromint(cfg.port);
+        str.fromint(cfg.port as i64);
         str.concat(" → intercepting ";cfg.targettool)
       )
     )
@@ -172,75 +204,39 @@ f=start(cfg:$proxyconfig;lokecfg:i64):i32{
   out.printline(
     str.concat(
       "Set your tool to use proxy: export ANTHROPIC_BASE_URL=http://localhost:";
-      str.fromint(cfg.port)
+      str.fromint(cfg.port as i64)
     )
   );
 
-  let pipecfg=pipe.defaultconfig();
+  let pipecfg=pipe.newconfig(lokecfg.presidiourl;lokecfg.ollamaurl);
 
-  let session=$proxysession{
-    id:log.newcorrelationid();
-    tool:cfg.targettool;
-    requestsintercepted:0;
-    entitiesredacted:0;
-    tokenssaved:0;
-    startedat:net.nowunix()
-  };
-
-  let listenresult=net.listen(cfg.port);
-  let listenok=mt listenresult {
-    $ok:v true;
-    $err:e false
-  };
-  if(listenok==false){
+  let listener=net.listen(cfg.port as i64);
+  if(listener>0){}el{
     out.printerror("proxy: failed to bind port");
     <1
-  }el{};
-  let listener=mt listenresult {
-    $ok:v v;
-    $err:e v
   };
   log.info(
-    str.concat("proxy: listening on port ";str.fromint(cfg.port));
+    str.concat("proxy: listening on port ";str.fromint(cfg.port as i64));
     "proxy";
     cid
   );
+
+  let intercepted=mut.0;
   let running=mut.true;
   lp(let lv=0;running;lv=lv){
-    let acceptresult=net.accept(listener);
-    let acceptok=mt acceptresult {
-      $ok:v true;
-      $err:e false
-    };
-    if(acceptok==false){
+    let conn=net.accept(listener);
+    if(conn>0){
+      let reqbody=net.read(conn);
+      if(str.len(reqbody)>0){
+        let response=handlerequest(reqbody;cfg;pipecfg);
+        net.write(conn;response);
+        intercepted=intercepted+1
+      }el{};
+      net.close(conn)
+    }el{
       log.error("proxy: accept error";"proxy";cid);
       running=false;
       net.close(listener)
-    }el{
-      let conn=mt acceptresult {
-        $ok:v v;
-        $err:e v
-      };
-      let reqbody=mt net.readbody(conn) {
-        $ok:v v;
-        $err:e ""
-      };
-      if(str.len(reqbody)>0){
-        let response=handlerequest(reqbody;session;cfg;pipecfg);
-        mt net.write(conn;response) {
-          $ok:v 0;
-          $err:e log.error(str.concat("proxy: write error — ";e);"proxy";cid)
-        };
-        session=$proxysession{
-          id:session.id;
-          tool:session.tool;
-          requestsintercepted:session.requestsintercepted+1;
-          entitiesredacted:session.entitiesredacted;
-          tokenssaved:session.tokenssaved;
-          startedat:session.startedat
-        }
-      }el{};
-      net.closeconn(conn)
     }
   };
 
@@ -248,19 +244,7 @@ f=start(cfg:$proxyconfig;lokecfg:i64):i32{
   out.printline(
     str.concat(
       "session stats — requests intercepted: ";
-      str.fromint(session.requestsintercepted)
-    )
-  );
-  out.printline(
-    str.concat(
-      "session stats — entities redacted: ";
-      str.fromint(session.entitiesredacted)
-    )
-  );
-  out.printline(
-    str.concat(
-      "session stats — tokens saved: ";
-      str.fromint(session.tokenssaved)
+      str.fromint(intercepted)
     )
   );
 

@@ -3,10 +3,18 @@
 
 m=cli.sign;
 
-i=fs:std.fs;
 i=str:std.str;
-i=sh:std.shell;
+i=process:std.process;
+i=ty:shared.types;
+i=log:shared.log;
 
+(* std.shell does not exist, and neither does str.extractbetween. Commands run as an
+   argv through std.process — which also removes the shell quoting problem this module
+   had by construction: an Apple ID, an app password and a signing identity were being
+   pasted into one command string, so any space or quote in a credential would have
+   split the command. The notarisation id comes out of shared.types.strbetween.
+
+   The unused std.fs import went with them: std.fs declares nothing at all. *)
 t=$signconfig{
   identity:str;
   teamid:str;
@@ -23,21 +31,44 @@ t=$signresult{
   notarizationid:str
 };
 
+t=$cmdresult{
+  exitcode:i64;
+  stdout:str;
+  stderr:str
+};
+
+f=runcmd(argv:@str):$cmdresult{
+  let h=mt process.spawn(argv) {
+    $ok:handle handle;
+    $err:e @()
+  };
+  if(!(h == @())){}el{
+    log.error("could not spawn signing tool";"cli.sign";"system");
+    <$cmdresult{ exitcode:127; stdout:""; stderr:"could not spawn command" }
+  };
+  let code=mt process.wait(h) {
+    $ok:c (c as i64);
+    $err:e 127
+  };
+  let out=mt process.stdout(h) {
+    $ok:o o;
+    $err:e ""
+  };
+  let err=mt process.stderr(h) {
+    $ok:o o;
+    $err:e ""
+  };
+  <$cmdresult{ exitcode:code; stdout:out; stderr:err }
+};
+
 f=signmacos(binpath:str;cfg:$signconfig):$signresult{
-  let cmd=str.concat(
-    "codesign --deep --force --options runtime --entitlements ";
-    str.concat(
-      cfg.entitlementspath;
-      str.concat(
-        " --sign ";
-        str.concat(cfg.identity;str.concat(" ";binpath))
-      )
-    )
-  );
-  let res=sh.run(cmd);
-  let ok=res.exitcode==0;
+  let res=runcmd(@(
+    "codesign";"--deep";"--force";"--options";"runtime";
+    "--entitlements";cfg.entitlementspath;
+    "--sign";cfg.identity;binpath
+  ));
   <$signresult{
-    ok:ok;
+    ok:res.exitcode==0;
     stdout:res.stdout;
     stderr:res.stderr;
     notarizationid:""
@@ -46,11 +77,7 @@ f=signmacos(binpath:str;cfg:$signconfig):$signresult{
 
 f=notarizemacos(binpath:str;cfg:$signconfig):$signresult{
   let zippath=str.concat(binpath;".zip");
-  let zipcmd=str.concat(
-    "ditto -c -k --keepParent ";
-    str.concat(binpath;str.concat(" ";zippath))
-  );
-  let zipres=sh.run(zipcmd);
+  let zipres=runcmd(@("ditto";"-c";"-k";"--keepParent";binpath;zippath));
   if(!(zipres.exitcode==0)){
     <$signresult{
       ok:false;
@@ -59,29 +86,13 @@ f=notarizemacos(binpath:str;cfg:$signconfig):$signresult{
       notarizationid:""
     }
   }el{};
-  let submitcmd=str.concat(
-    "xcrun notarytool submit ";
-    str.concat(
-      zippath;
-      str.concat(
-        " --apple-id ";
-        str.concat(
-          cfg.appleid;
-          str.concat(
-            " --password ";
-            str.concat(
-              cfg.apppassword;
-              str.concat(
-                " --team-id ";
-                str.concat(cfg.teamid;" --wait --output-format json")
-              )
-            )
-          )
-        )
-      )
-    )
-  );
-  let subres=sh.run(submitcmd);
+  let subres=runcmd(@(
+    "xcrun";"notarytool";"submit";zippath;
+    "--apple-id";cfg.appleid;
+    "--password";cfg.apppassword;
+    "--team-id";cfg.teamid;
+    "--wait";"--output-format";"json"
+  ));
   if(!(subres.exitcode==0)){
     <$signresult{
       ok:false;
@@ -90,18 +101,16 @@ f=notarizemacos(binpath:str;cfg:$signconfig):$signresult{
       notarizationid:""
     }
   }el{};
-  let notarizationid=str.extractbetween(subres.stdout;"\"id\":\"";"\",");
-  let approved=str.contains(subres.stdout;"\"status\":\"Accepted\"");
-  if(approved==false){
+  let notarizationid=ty.strbetween(subres.stdout;"\"id\":\"";"\",");
+  if(str.contains(subres.stdout;"\"status\":\"Accepted\"")){}el{
     <$signresult{
       ok:false;
       stdout:subres.stdout;
       stderr:subres.stderr;
       notarizationid:notarizationid
     }
-  }el{};
-  let staplecmd=str.concat("xcrun stapler staple ";binpath);
-  let stapleres=sh.run(staplecmd);
+  };
+  let stapleres=runcmd(@("xcrun";"stapler";"staple";binpath));
   <$signresult{
     ok:stapleres.exitcode==0;
     stdout:stapleres.stdout;
@@ -111,29 +120,14 @@ f=notarizemacos(binpath:str;cfg:$signconfig):$signresult{
 };
 
 f=verifymacos(binpath:str):bool{
-  let cmd=str.concat("codesign --verify --deep --strict ";binpath);
-  let res=sh.run(cmd);
-  <res.exitcode==0
+  <runcmd(@("codesign";"--verify";"--deep";"--strict";binpath)).exitcode==0
 };
 
 f=signwindows(binpath:str;certpath:str;certpass:str):$signresult{
-  let cmd=str.concat(
-    "signtool sign /f ";
-    str.concat(
-      certpath;
-      str.concat(
-        " /p ";
-        str.concat(
-          certpass;
-          str.concat(
-            " /fd sha256 /tr http://timestamp.digicert.com /td sha256 ";
-            binpath
-          )
-        )
-      )
-    )
-  );
-  let res=sh.run(cmd);
+  let res=runcmd(@(
+    "signtool";"sign";"/f";certpath;"/p";certpass;
+    "/fd";"sha256";"/tr";"http://timestamp.digicert.com";"/td";"sha256";binpath
+  ));
   <$signresult{
     ok:res.exitcode==0;
     stdout:res.stdout;

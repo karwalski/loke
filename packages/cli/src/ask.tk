@@ -7,10 +7,12 @@ i=t:shared.types;
 i=log:shared.log;
 i=out:cli.output;
 i=pipe:core.privacy.pipeline;
-i=disp:providers.dispatcher;
+i=disp:core.providers.dispatcher;
 i=router:core.router.router;
 i=gw:core.governance.gateway;
 i=cfg:shared.config;
+i=ph:core.privacy.placeholder;
+i=ptypes:core.providers.types;
 i=str:std.str;
 
 t=$askopts{
@@ -36,7 +38,7 @@ f=defaultopts():$askopts{
 f=parseopts(args:@str):$askopts{
   let opts=mut.defaultopts();
   let i=mut.0;
-  let argc=str.len(args);
+  let argc=args.len;
   lp(let lv=0;true;lv=lv){
     if(!(i<argc)){ br }el{
       let arg=args.get(i);
@@ -114,7 +116,20 @@ f=parseopts(args:@str):$askopts{
   <opts
 };
 
-f=run(opts:$askopts;cfg:i64):i32{
+(* Rewritten against the interfaces the core modules actually export (F10.23d).
+
+   The legacy body called pipe.defaultconfig, pipe.fallbackresult, router.route with a
+   $routerequest struct, router.defaultdecision, disp.dispatch with a $dispatchrequest
+   struct, and read piperesult.sensitivitylevel / .entitycount / .anonymisedtext and
+   dispatchresult.responsetext. None of those functions, structs or fields exists: the
+   real ones are pipe.newconfig(presidiourl;ollamaurl), pipe.run(text;systemprompt;cfg)
+   returning a plain $pipelinerun whose payload is in `.result`, router.route(router;
+   prompt;sensitivity;tokens;tolerance;task), and disp.dispatch(dispatcher;
+   $completionrequest;provider).
+
+   pipe.run returns a plain value, not a result, so there is nothing to match on — the
+   legacy `mt pipe.run(...)` had an $err arm for a union that does not exist. *)
+f=run(opts:$askopts;config:$lokeconfig):i64{
   if(str.eq(opts.prompt;"")){
     out.printerror("prompt required. Usage: loke ask \"your question\"");
     <1
@@ -125,65 +140,111 @@ f=run(opts:$askopts;cfg:i64):i32{
 
   out.printpipelinestage("Privacy Filter";"scanning...";"PII detection and anonymisation");
 
-  let pipelinecfg=pipe.defaultconfig();
-  let piperesult=mt pipe.run(opts.prompt;pipelinecfg) {
-    $ok:v v;
-    $err:e pipe.fallbackresult(opts.prompt)
-  };
+  let pipelinecfg=pipe.newconfig(config.presidiourl;config.ollamaurl);
+  let piperun=pipe.run(opts.prompt;opts.systemprompt;pipelinecfg);
+  let detected=piperun.result;
 
-  let badge=out.sensitivitybadge(piperesult.sensitivitylevel);
   out.printline(
     str.concat(
       "  sensitivity: ";
       str.concat(
-        badge;
+        out.sensitivitybadge(sensitivityname(detected.sensitivity));
         str.concat(
           "  entities found: ";
-          str.inttostr(piperesult.entitycount)
+          str.fromint(piperun.totalentities as i64)
         )
       )
     )
   );
 
   if(opts.dryrun){
-    out.printline(str.concat("  anonymised prompt: ";piperesult.anonymisedtext));
+    out.printline(str.concat("  anonymised prompt: ";detected.anonymised));
     <0
   }el{};
 
+  (* The governance gate refuses to forward what the policy will not allow. Anything
+     that reaches a provider from here has been through the privacy filter above — the
+     contributor invariant in CLAUDE.md — and issafetoforward is the check that says
+     so. *)
+  if(pipe.issafetoforward(piperun)){}el{
+    out.printerror("blocked: the prompt's sensitivity exceeds what this policy will forward");
+    <1
+  };
+
   out.printpipelinestage("Router";"selecting model...";"capability and sensitivity routing");
 
-  let decision=mt router.route($routerequest{
-    anonymisedprompt:piperesult.anonymisedtext;
-    sensitivitylevel:piperesult.sensitivitylevel;
-    preferredmodel:opts.model;
-    tolerance:opts.tolerance
-  }) {
-    $ok:v v;
-    $err:e router.defaultdecision(opts.model)
+  let routeengine=router.new(router.newconfig(config.ollamaurl));
+  let decision=mt router.route(
+    routeengine;
+    detected.anonymised;
+    detected.sensitivity;
+    (str.len(detected.anonymised)/4) as u32;
+    tolerancefromstr(opts.tolerance);
+    "chat"
+  ) {
+    $ok:d d;
+    $err:e gw.defaultrouting()
   };
+
+  let modelid=mut.decision.model.id;
+  if(str.len(opts.model)>0){ modelid=opts.model }el{};
 
   out.printpipelinestage(
     "LLM";
     "sending request...";
-    str.concat("model: ";decision.modelid)
+    str.concat("model: ";modelid)
   );
 
-  let dispatchresult=mt disp.dispatch($dispatchrequest{
-    modelid:decision.modelid;
-    prompt:piperesult.anonymisedtext;
-    systemprompt:opts.systemprompt;
+  let request=$completionrequest{
+    modelid:modelid;
+    messages:@(ptypes.usermsg(detected.anonymised));
+    systemprompt:piperun.finalsystemprompt;
+    maxtokens:(2048 as u32);
+    temperature:0.0;
     stream:opts.stream
-  }) {
-    $ok:v v;
-    $err:e out.printerror(str.concat("dispatch failed: ";e))
+  };
+  (* Declared types before the call: `provider` sits at different offsets in different
+     structs, and toke needs the spec's type established before it can read the field. *)
+  let spec:$modelspec=decision.model;
+  let prov:$provider=spec.provider;
+  let responsetext=mt disp.dispatch(disp.new(disp.getapikeys();config.ollamaurl);request;prov) {
+    $ok:r r.content;
+    $err:e ""
+  };
+  if(str.len(responsetext)>0){}el{
+    out.printerror("dispatch failed: no content returned");
+    <1
   };
 
-  out.printline(dispatchresult.responsetext);
+  (* De-anonymisation: the placeholders the filter inserted are put back before the
+     answer is shown. Without this the user reads the redacted form of their own
+     input. *)
+  out.printline(ph.restore(responsetext;ph.mapfromentities(detected.entities)));
 
   out.printpipelinestage("Audit";"logged";"interaction recorded to local store");
 
   log.info("loke ask complete";"cli.ask";cid);
   <0
+};
+
+f=sensitivityname(level:$sensitivitylevel):str{
+  let lv:$sensitivitylevel=level;
+  <mt lv {
+    $public:v "public";
+    $internal:v "internal";
+    $confidential:v "confidential";
+    $restricted:v "restricted"
+  }
+};
+
+f=tolerancefromstr(s:str):$latencytolerance{
+  if(str.eq(s;"patient")){
+    <$latencytolerance{$patient:0}
+  }el{};
+  if(str.eq(s;"background")){
+    <$latencytolerance{$background:0}
+  }el{};
+  <$latencytolerance{$instant:0}
 };
 
 f=usage():str{

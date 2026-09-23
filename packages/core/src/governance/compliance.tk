@@ -7,6 +7,7 @@ i=time:std.time;
 i=str:std.str;
 i=db:std.db;
 i=s:core.storage.db;
+i=audit:core.storage.audit;
 
 t=$compliancecheck{
   name:str;
@@ -57,9 +58,11 @@ f=countrows(sql:str):i64{
   }
 };
 
+(* Delegates to the storage layer's predicate rather than keeping a second copy, so
+   "does this table exist?" has one answer in this codebase. The private version also
+   interpolated the name straight into the SQL; the shared one binds it. *)
 f=tableexists(name:str):bool{
-  let sql=str.concat("SELECT name FROM sqlite_master WHERE type='table' AND name='";str.concat(name;"'"));
-  <countrows(sql)>0
+  <s.tableexists(name)
 };
 
 f=auditrowcount():i64{
@@ -82,27 +85,67 @@ f=checkauditrecording():$compliancecheck{
     <$compliancecheck{
       name:"Audit log enabled";
       status:"FAIL";
-      detail:"audit_log is EMPTY. core.storage.audit.logevent has no callers, so no request has ever been recorded (GA1.4). This was previously reported as PASS"
+      detail:"audit_log is EMPTY, so no request has ever been recorded. GA1.4 gave the request path a writer (browser/pages/api/pipeline.tk calls audit.insertevent), so an empty table now means no request has been served rather than that nothing records them. This was previously reported as PASS"
     }
   }
 };
 
-f=checkaudittrailcomplete():$compliancecheck{
+(* Non-empty is necessary and not sufficient: completeness means the hash chain is
+   unbroken. That used to be unverifiable and this check said so, naming GA5.3. GA5.3
+   landed, so the check now RUNS the verifier instead of citing its absence — a compliance
+   row that quotes a story number is a placeholder, and a stale one is worse than none.
+
+   verifychain returns a plain struct, not a result: T-18 would make the error arm of a
+   user-declared sum dead, and a verifier whose failure read as "intact" is the one
+   outcome this check must never produce. *)
+f=checkaudittrailcomplete(store:i64):$compliancecheck{
   let n=auditrowcount();
   if(n>0){
-    (* Non-empty is necessary and not sufficient: completeness means the hash chain is
-       unbroken, and the verifier for that is GA5.3 and does not exist yet. So this says
-       what it knows and names what it cannot yet check, rather than claiming both. *)
-    <$compliancecheck{
-      name:"Audit trail complete";
-      status:"WARN";
-      detail:str.concat(str.concat("audit_log holds ";str.fromint(n));" event(s), but chain integrity is unverified — the verifier is GA5.3")
+    let chain=audit.verifychain(store);
+    if(chain.ok){
+      <$compliancecheck{
+        name:"Audit trail complete";
+        status:"PASS";
+        detail:audit.formatchainresult(chain)
+      }
+    }el{
+      <$compliancecheck{
+        name:"Audit trail complete";
+        status:"FAIL";
+        detail:audit.formatchainresult(chain)
+      }
     }
   }el{
     <$compliancecheck{
       name:"Audit trail complete";
       status:"FAIL";
       detail:"audit_log is EMPTY, so there is no trail to be complete (GA1.4). This was previously reported as PASS"
+    }
+  }
+};
+
+(* GA5.9 — read the control back from the database instead of asserting it.
+
+   "The audit trail is append-only" was a sentence in the documentation with nothing
+   behind it. Migrations 6 and 7 put two triggers behind it, and this reports whether both
+   are present RIGHT NOW rather than whether a migration once ran: a rebuild of audit_log
+   would take its triggers with it, and an operator with the sqlite3 shell can drop them.
+
+   The detail states the limit of the control rather than overselling it. Someone who can
+   already run arbitrary SQL can drop these triggers, which is why the hash chain exists
+   as well — and why the check reports on both. *)
+f=checkappendonly():$compliancecheck{
+  if(s.auditappendonlyenforced()){
+    <$compliancecheck{
+      name:"Audit trail append-only";
+      status:"PASS";
+      detail:"audit_log rejects UPDATE and DELETE by database trigger. This stops modification over any ordinary connection; it does not stop someone who can DROP TRIGGER first, which is what the hash chain covers"
+    }
+  }el{
+    <$compliancecheck{
+      name:"Audit trail append-only";
+      status:"FAIL";
+      detail:"audit_log does NOT reject UPDATE or DELETE — one or both append-only triggers are missing, so the trail can be modified in place. Expected audit_log_append_only_update and audit_log_append_only_delete from migrations 6 and 7"
     }
   }
 };
@@ -137,6 +180,7 @@ f=asserted(name:str;detail:str):$compliancecheck{
 f=rungdprchecks(store:i64):$compliancereport{
   let checks=@(
     checkauditrecording();
+    checkappendonly();
     asserted("PII anonymised before cloud";
       "Held by the pipeline's fail-closed gate, not by stored state: core.privacy.pipeline.issafetoforward refuses the request when no detection layer completed, asserted in tests/unit/privacy/test_fail_closed.tk (NC1.9)");
     asserted("Data minimisation active";
@@ -145,7 +189,7 @@ f=rungdprchecks(store:i64):$compliancereport{
     $compliancecheck{
       name:"Right to erasure supported";
       status:"WARN";
-      detail:"Deletion drops rows; verifiable deletion that proves the bytes are gone is X8.4"
+      detail:"Deletion drops rows from consent_records, quota_usage and quality_signals; the audit trail is retained deliberately because it is append-only and records no user identifier (GA5.9, GA5.12). Verifiable deletion that proves the bytes are gone is X8.4"
     }
   );
   let overall=overallstatus(checks);
@@ -163,7 +207,8 @@ f=runhipaachecks(store:i64):$compliancereport{
   let checks=@(
     asserted("PHI detection active";
       "Held by the detection layers and their corpus, not by stored state. The measured figure is in docs/metrics-baseline.md and is regex-layer-only; the recall floor on the full pipeline is AD1.2 and is not yet measured");
-    checkaudittrailcomplete();
+    checkaudittrailcomplete(store);
+    checkappendonly();
     checkencryptionatrest();
     $compliancecheck{
       name:"Access controls";
@@ -191,7 +236,10 @@ f=formatreport(report:$compliancereport):str{
   let underline="==========================================
 ";
   let rows=mut."";
-  lp(let i=0;i<str.arraylen(report.checks);i=i+1){ let c=str.arrayget(report.checks;i);
+  (* The typed .len/.get over @$compliancecheck, not str.arraylen/str.arrayget: those
+     erase the element type, which is why overallstatus above was rewritten away from
+     them. This loop was the one that still used them. *)
+  lp(let i=0;i<report.checks.len;i=i+1){ let c:$compliancecheck=report.checks.get(i);
     let prefix=str.concat("[";str.concat(c.status;"] "));
     let line=str.concat(
       prefix;

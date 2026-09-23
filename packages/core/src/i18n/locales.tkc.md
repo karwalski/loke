@@ -1,0 +1,1 @@
+Compiled-in locale tables for the loke UI strings, ported from src/platform/i18n/locales.tk (F10.12-T1). Declares the $localeentry and $localeentry-keyed $locale types and builds the en-AU and en-US tables as array literals, so no entry can be lost to a discarded .push; exports enau, enus, and codes. Depends on nothing beyond the language.

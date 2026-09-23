@@ -100,14 +100,26 @@ f=rowstojson(rows:@$row):str{
   };
 };
 
+(* A missing table and a subject with no records both produced "[]", and a data subject
+   access request is precisely the context in which those two must not look alike: one
+   says "we hold nothing about you", the other says "we did not look". The table is
+   asserted first, through core.storage.db.tableexists, and its absence is logged. *)
+f=exportmissing(table:str):str{
+  log.warn(str.concat("DSAR export: no such table, nothing exported from it: ";table);"dsar";"system");
+  <"[]"
+};
+
 f=exporttable(store:i64;table:str;userid:str):str{
+  if(s.tableexists(table)){}el{
+    <exportmissing(table)
+  };
   let sql=str.concat(
     str.concat("SELECT * FROM ";table);
     " WHERE user_id=?"
   );
   <mt db.many(sql;@(userid)) {
     $ok:rows rowstojson(rows);
-    $err:e "[]"
+    $err:e exportmissing(table)
   }
 };
 
@@ -122,42 +134,85 @@ f=processaccesserr(store:i64;req:$dsarrequest):bool{
   <false
 };
 
+(* GA5.12 — the audit trail cannot be exported per subject, and the export says so.
+
+   This exported "audit_events", a table no migration creates, so the key was always
+   empty and the export always looked complete. The real table is audit_log, but it has
+   no user_id column: its fourteen chained fields identify a REQUEST (by correlation id),
+   a use case, a model, a provider, a classification, a size, a cost and a time. Nothing
+   in it names a data subject, so no subset of it can be attributed to one. Selecting
+   `WHERE user_id=?` against it is not a query that can be fixed — the predicate has no
+   referent.
+
+   So the key stays in the payload with an empty array and an adjacent note stating why.
+   Silently emitting [] under a key called audit_events would tell a data subject that
+   loke holds no audit records concerning them, which is a different and false statement.
+   Keying the audit trail by subject is a schema change to a hash-chained table and is
+   filed, not improvised here. *)
+f=auditexportnote():str{
+  <"loke's audit trail (audit_log) records events against a request correlation id and holds no user identifier, so no part of it can be selected for one data subject. This is a limitation of the schema, not a withholding: there is no field to select on. Tracked as GA5.12."
+};
+
 f=processaccess(store:i64;req:$dsarrequest;outpath:str):bool{
   let s1=setstatus(store;req.id;statusprocessing();0);
   let consent=exporttable(store;"consent_records";req.userid);
   let quota=exporttable(store;"quota_usage";req.userid);
-  let audit=exporttable(store;"audit_events";req.userid);
   let dsars=exporttable(store;"dsar_requests";req.userid);
   let quality=exporttable(store;"quality_signals";req.userid);
   (* Was a nine-deep concat chain with unbalanced parentheses, so this file has
      never parsed. Interpolation is both the fix and the canonical form. *)
-  let payload="{\"user_id\":\(json.enc(req.userid)),\"exported_at\":\(time.nowunix()),\"consent_records\":\(consent),\"quota_usage\":\(quota),\"audit_events\":\(audit),\"dsar_requests\":\(dsars),\"quality_signals\":\(quality)}";
+  let payload="{\"user_id\":\(json.enc(req.userid)),\"exported_at\":\(time.nowunix()),\"consent_records\":\(consent),\"quota_usage\":\(quota),\"audit_log\":[],\"audit_log_note\":\(json.enc(auditexportnote())),\"dsar_requests\":\(dsars),\"quality_signals\":\(quality)}";
   <mt fs.writetext(outpath;payload) {
     $ok:v processaccessok(store;req);
     $err:e processaccesserr(store;req)
   }
 };
 
+(* GA5.9 and GA5.12 — the audit trail is NOT erased, and that is deliberate.
+
+   The list used to include "audit_events", a table that does not exist, so the DELETE
+   silently failed and marked the whole erasure failed with it. Pointing it at audit_log
+   would have been worse in two ways at once. audit_log is append-only as of migrations 6
+   and 7, so the DELETE would be rejected by a trigger and every erasure request would
+   report failure. And it has no user_id column, so the statement could not have selected
+   the subject's rows even if the trigger allowed it — `DELETE ... WHERE user_id=?` on
+   that table is a statement with no referent.
+
+   Underneath both is a real and ordinary conflict: a tamper-evident audit trail and a
+   right to erasure pull in opposite directions, and deleting from the middle of a hash
+   chain destroys the evidential value of every row after it. loke resolves it the way
+   the trail is designed for — the audit log records no personal data to erase. It holds a
+   request correlation id, a use case, a model, a provider, a sensitivity CLASS and
+   counts. Erasure therefore applies to the tables that do hold subject data, and the
+   audit trail is retained. If that retention is ever to be defended it has to be a
+   stated decision rather than a failed DELETE, which is why it is written here. *)
 f=processerasure(store:i64;req:$dsarrequest):bool{
   let s1=setstatus(store;req.id;statusprocessing();0);
   let tables=@(
     "consent_records";
     "quota_usage";
-    "audit_events";
     "quality_signals"
   );
+  log.info("DSAR erasure: audit_log is retained — it is append-only and holds no user identifier (GA5.9, GA5.12)";"dsar";req.userid);
   let allok=mut.true;
   lp(let ii=0;ii<tables.len;ii=ii+1){ let table=tables.get(ii);
-    let sql=str.concat(
-      str.concat("DELETE FROM ";table);
-      " WHERE user_id=?"
-    );
-    let tableok=mt db.exec(sql;@(req.userid)) {
-      $ok:v true;
-      $err:e false
-    };
-    if(tableok){}el{
-      allok=false
+    if(s.tableexists(table)){
+      let sql=str.concat(
+        str.concat("DELETE FROM ";table);
+        " WHERE user_id=?"
+      );
+      let tableok=mt db.exec(sql;@(req.userid)) {
+        $ok:v true;
+        $err:e false
+      };
+      if(tableok){}el{
+        allok=false
+      }
+    }el{
+      (* A table that was never created holds nothing to erase. Counting that as a
+         failure marked every erasure request failed on an installation that had not yet
+         recorded consent. *)
+      log.info(str.concat("DSAR erasure: no such table, nothing to erase from it: ";table);"dsar";req.userid)
     }
   };
   let now=time.nowunix();

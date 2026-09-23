@@ -5,11 +5,10 @@ m=core.governance.reportengine;
 i=db:std.db;
 i=str:std.str;
 i=log:shared.log;
-i=json:std.json;
+(* shared.types is imported for $lokeerr, which generate's return type still names. *)
 i=t:shared.types;
 i=audit:core.storage.audit;
 i=s:core.storage.db;
-i=external:core.governance.external;
 
 t=$reporttype{
   $compliancesummary:i64;
@@ -45,138 +44,335 @@ t=$report{
   format:str
 };
 
-f=generate(conn:i64;filter:$reportfilter;extconfig:$externalconfig):$report!$lokeerr{
-  log.info(str.concat("generating report: ";filter.reporttype);"report_engine";"system");
-  let result=mut.generatecost(conn;filter); if(str.eq(filter.reporttype;"compliance_summary")){
-    result=generatecompliance(conn;filter)
-  }el{
-    if(str.eq(filter.reporttype;"pii_detection_log")){
-      result=generatepii(conn;filter)
-    }el{
-      if(str.eq(filter.reporttype;"routing_decisions")){
-        result=generaterouting(conn;filter)
-      }el{
-        if(str.eq(filter.reporttype;"policy_changes")){
-          result=generatepolicychanges(conn;filter)
-        }el{};
-      };
-    };
-  };
-  <result
+
+(* ── what these reports read ──────────────────────────────────────────────────
+   The row accessors are core.storage.db's, not std.json's. db.many returns [$row] and
+   all five report builders read their fields with json.str against those rows, so every
+   governance report came back with empty timestamps and empty details: the row count was
+   right and every row was blank (LS1.1i).
+
+   The column names were wrong as well. audit_log has no `timestamp` and no `detail`
+   column. Every column named in every query below is now checked against the DDL in
+   storage/migrations.tk: created_at, event_type, use_case, model_id, provider,
+   sensitivity, risk_tier, cost_usd. There is no rule_id and no user_id in that table,
+   which is why nothing here claims to report on either.
+
+   GA5.11 — the window. created_at is epoch milliseconds stored as TEXT; the filter dates
+   are ISO. The comparison was string-against-string and matched nothing, on every
+   installation, whatever the table held. The bounds are now resolved to epoch
+   milliseconds by core.storage.db.msrangeof and bound as numbers, and the column is
+   CAST on the way in so SQLite does not convert the parameter back to text. The full
+   reasoning for converting the parameter rather than re-representing the column — the
+   chain digest covers created_at's stored text — is in msrangeof itself.
+
+   GA5.6 — the event-type filters. This is a DECISION and it changed behaviour, so it is
+   stated rather than buried. The five templates filtered on `event_type LIKE '%pii%'`,
+   `'%routing%'`, `'%compliance%'` and so on. The only event_type anything in this
+   repository ever writes to audit_log is 'llm_request' (browser/pages/api/pipeline.tk is
+   the single writer), so all five filters matched zero rows independently of the date
+   bug — fixing the window alone would have left every report empty and looking correct.
+
+   Each template is therefore mapped onto what the trail ACTUALLY records:
+
+     compliance_summary  every audited event in the window. A compliance summary of an
+                         audit trail is the trail.
+     pii_detection_log   the events classified CONFIDENTIAL or RESTRICTED. That
+                         classification is the only record the trail keeps of sensitive
+                         content having been seen, and governance/dashboard.tk already
+                         treats exactly those two values as the privacy-coverage
+                         numerator, so the two agree.
+     routing_decisions   every audited event, reported by provider and model. Each row
+                         records where the request was sent, which is the routing outcome.
+     policy_changes      event_type LIKE '%policy%' — KEPT, and structurally empty,
+                         because nothing writes a policy-change event yet. An empty
+                         policy-changes report means "not recorded", not "none happened",
+                         and the summary says so rather than letting a reader infer the
+                         stronger claim.
+     cost_savings        every audited event, with the cost figure. Note that the request
+                         path writes cost 0.0 deliberately until LS1.1h, so the total is
+                         honestly zero rather than absent.
+
+   DA1.5 in its second location: every row's severity was the literal "INFO" and every
+   row's value was the empty string, so a cost report carried no cost. Severity now comes
+   from the row's risk_tier and value from the column the template is about. *)
+
+
+f=knowntemplate(name:str):bool{
+  if(str.eq(name;"compliance_summary")){<true}el{};
+  if(str.eq(name;"pii_detection_log")){<true}el{};
+  if(str.eq(name;"routing_decisions")){<true}el{};
+  if(str.eq(name;"policy_changes")){<true}el{};
+  if(str.eq(name;"cost_savings")){<true}el{};
+  <false
 };
 
-(* The row accessors are core.storage.db's, not std.json's. db.many returns [$row] and
-   all five report builders below read their fields with json.str against those rows, so
-   every governance report came back with empty timestamps and empty details: the row
-   count was right and every row was blank.
+f=templatelist():str{
+  <str.join(", ";@(
+    "compliance_summary";
+    "pii_detection_log";
+    "routing_decisions";
+    "policy_changes";
+    "cost_savings"))
+};
 
-   The column names were wrong as well. audit_log (migrations.tk:38) has no `timestamp`
-   and no `detail` column — the timestamp is `created_at`, and the nearest per-event
-   detail the table carries is `use_case`. A typed accessor on the old names would have
-   gone on returning "" just as silently, so the SQL is corrected with them.
 
-   NOT fixed here, and still broken: `created_at` is a millisecond epoch integer stored
-   as TEXT (audit.tk:46-54) while $reportfilter.startdate/enddate are ISO dates such as
-   "2026-01-01" (cli/report.tk:38). The range comparison is therefore a string compare
-   between "1758..." and "2026-...", which matches nothing. The filter dates need
-   converting to epoch milliseconds before these reports return any row at all. *)
-f=buildcompliancerows(results:@$row;filter:$reportfilter):$report!$lokeerr{
+(* One SQL builder for all five templates. They differed only in an event filter and each
+   spelled the SELECT list, the window and the ORDER BY out again — five chances for the
+   column drift above to come back in one place and not the others. The window clause and
+   the ordering come from core.storage.db so there is exactly one spelling of each. *)
+f=auditwindowsql(extrafilter:str):str{
+  <str.concat(
+    "SELECT created_at, event_type, use_case, model_id, provider, sensitivity, risk_tier, cost_usd FROM audit_log WHERE ";
+    str.concat(
+      s.createdatwindowclause();
+      str.concat(extrafilter;s.createdatdescorder())))
+};
+
+
+f=severityof(r:$row):str{
+  (* risk_tier is the trail's own severity scale: LOW / MEDIUM / HIGH, written by
+     core.governance.types.risklabel. A row with none is reported as UNKNOWN rather than
+     promoted to INFO, because "we did not record a risk tier" and "this was routine" are
+     different statements. *)
+  let tier=s.rowstr(r;"risk_tier");
+  if(str.len(tier)==0){
+    <"UNKNOWN"
+  }el{
+    <tier
+  }
+};
+
+(* cost_usd crosses as HUNDREDTHS in an i64 and is formatted from that integer, with no
+   f64 anywhere: T-20 corrupts an f64 returned across a module boundary, str.fromfloat
+   renders 1.50 as "1.5", and shared.types.f64fixed truncates instead of padding, so both
+   float routes print $1.5 where they mean $1.50. See core.storage.db.moneyfromhundredths. *)
+f=costvalue(r:$row):str{
+  <str.concat("$";s.moneyfromhundredths(s.rowf64hundredths(r;"cost_usd")))
+};
+
+f=rowvalue(r:$row;valuekind:str):str{
+  if(str.eq(valuekind;"cost")){<costvalue(r)}el{};
+  if(str.eq(valuekind;"sensitivity")){<s.rowstr(r;"sensitivity")}el{};
+  if(str.eq(valuekind;"provider")){
+    <str.join(" / ";@(s.rowstr(r;"provider");s.rowstr(r;"model_id")))
+  }el{};
+  <severityof(r)
+};
+
+f=rowdetail(r:$row):str{
+  <str.join(" / ";@(
+    s.rowstr(r;"event_type");
+    s.rowstr(r;"use_case");
+    s.rowstr(r;"model_id")))
+};
+
+f=buildrows(results:@$row;category:str;valuekind:str):@$reportrow{
   let rows=mut.@();
-  lp(let ii63=0;ii63<results.len;ii63=ii63+1){
-    let r:$row=results.get(ii63);
-    let ts=s.rowstr(r;"created_at");
-    let detail=s.rowstr(r;"use_case");
-    rows=rows.push($reportrow{timestamp:ts;category:"compliance";detail:detail;severity:"INFO";value:""})
-
+  lp(let i=0;i<results.len;i=i+1){
+    let r:$row=results.get(i);
+    rows=rows.push($reportrow{
+      timestamp:s.rowstr(r;"created_at");
+      category:category;
+      detail:rowdetail(r);
+      severity:severityof(r);
+      value:rowvalue(r;valuekind)
+    })
   };
-  <$ok($report{
-    title:"Compliance Summary Report";
-    reporttype:"compliance_summary";
-    generatedat:"now";
+  <rows
+};
+
+(* Summed in integer hundredths, not f64. The addition happens entirely inside this
+   module so T-20 does not apply to the accumulator, but an integer of cents is also the
+   only form in which a sum of money is exact. *)
+f=costtotalhundredths(results:@$row):i64{
+  let total=mut.0;
+  lp(let i=0;i<results.len;i=i+1){
+    let r:$row=results.get(i);
+    total=total+s.rowf64hundredths(r;"cost_usd")
+  };
+  <total
+};
+
+f=summaryof(results:@$row;label:str;valuekind:str):str{
+  let n=str.fromint(results.len);
+  if(str.eq(valuekind;"cost")){
+    let totalstr=s.moneyfromhundredths(costtotalhundredths(results));
+    <str.concat(label;str.concat(": ";str.concat(n;str.concat(", total cost $";totalstr))))
+  }el{
+    <str.concat(label;str.concat(": ";n))
+  }
+};
+
+f=buildreport(results:@$row;filter:$reportfilter;reporttype:str;title:str;category:str;valuekind:str;label:str;note:str):$report{
+  let summary=summaryof(results;label;valuekind);
+  <$report{
+    title:title;
+    reporttype:reporttype;
+    (* Was the literal "now". str.nowiso8601 is what governance/dashboard.tk stamps its
+       scorecard with, so the two are comparable. *)
+    generatedat:str.nowiso8601();
     periodstart:filter.startdate;
     periodend:filter.enddate;
-    rows:rows;
-    summary:str.concat("Total compliance events: ";str.fromint(rows.len));
+    rows:buildrows(results;category;valuekind);
+    summary:str.concat(summary;note);
     format:filter.format
-  })
-};
-
-f=generatecompliance(conn:i64;filter:$reportfilter):$report!$lokeerr{
-  let sql="SELECT created_at, event_type, use_case FROM audit_log WHERE created_at >= ? AND created_at <= ? AND event_type LIKE '%compliance%' ORDER BY created_at DESC";
-  <mt db.many(sql;@(filter.startdate;filter.enddate)) {
-    $ok:results buildcompliancerows(results;filter);
-    $err:e $err($storageerr("failed to query audit log for compliance"))
   }
 };
 
-f=buildpiirows(results:@$row;filter:$reportfilter):$report!$lokeerr{
-  let rows=mut.@();
-  lp(let ii92=0;ii92<results.len;ii92=ii92+1){
-    let r:$row=results.get(ii92);
-    rows=rows.push($reportrow{timestamp:s.rowstr(r;"created_at");category:"pii";detail:s.rowstr(r;"use_case");severity:"INFO";value:""})
+(* A report that ran and found nothing, versus a report whose window could not be read,
+   are different facts and a reader has to be able to tell them apart. msrangeof refused
+   the dates; this says so in the summary instead of returning an empty report that looks
+   like a quiet period.
 
+   It is not an $err. T-18: the error arm of a user-declared sum is dead, so a caller
+   matching `$report!$lokeerr` takes the $ok arm whatever this function returns. An $err
+   here would reach cli/report.tk as a success carrying an unbound $report — garbage at
+   best. The same reasoning applies to unknowntemplatereport below. *)
+f=badwindowreport(filter:$reportfilter):$report{
+  <$report{
+    title:"Report not generated";
+    reporttype:filter.reporttype;
+    generatedat:str.nowiso8601();
+    periodstart:filter.startdate;
+    periodend:filter.enddate;
+    rows:@();
+    summary:str.concat("The reporting window could not be read as dates, so no period was searched. Expected ISO dates such as 2026-01-01. Given: ";str.concat(filter.startdate;str.concat(" to ";filter.enddate)));
+    format:filter.format
+  }
+};
+
+f=unknowntemplatereport(filter:$reportfilter):$report{
+  <$report{
+    title:"Report not generated";
+    reporttype:filter.reporttype;
+    generatedat:str.nowiso8601();
+    periodstart:filter.startdate;
+    periodend:filter.enddate;
+    rows:@();
+    summary:str.concat("Unknown report template: ";str.concat(filter.reporttype;str.concat(". Available templates: ";templatelist())));
+    format:filter.format
+  }
+};
+
+f=queryfailedreport(filter:$reportfilter;title:str;what:str):$report{
+  <$report{
+    title:title;
+    reporttype:filter.reporttype;
+    generatedat:str.nowiso8601();
+    periodstart:filter.startdate;
+    periodend:filter.enddate;
+    rows:@();
+    summary:str.concat("The audit log could not be queried for ";str.concat(what;". No rows were read, which is not the same as no events having occurred."));
+    format:filter.format
+  }
+};
+
+
+(* The one query path. Every template goes through here, so the window is resolved once,
+   in one place, and a refused window cannot be mistaken for an empty result. *)
+f=runreport(filter:$reportfilter;extrafilter:str;reporttype:str;title:str;category:str;valuekind:str;label:str;note:str):$report{
+  let range=s.msrangeof(filter.startdate;filter.enddate);
+  if(range.ok){}el{
+    <badwindowreport(filter)
   };
-  <$ok($report{title:"PII Detection Log";reporttype:"pii_detection_log";generatedat:"now";periodstart:filter.startdate;periodend:filter.enddate;rows:rows;summary:str.concat("Total PII events: ";str.fromint(rows.len));format:filter.format})
-};
-
-f=generatepii(conn:i64;filter:$reportfilter):$report!$lokeerr{
-  let sql="SELECT created_at, event_type, use_case FROM audit_log WHERE created_at >= ? AND created_at <= ? AND event_type LIKE '%pii%' ORDER BY created_at DESC";
-  <mt db.many(sql;@(filter.startdate;filter.enddate)) {
-    $ok:results buildpiirows(results;filter);
-    $err:e $err($storageerr("failed to query pii events"))
+  let sql=auditwindowsql(extrafilter);
+  let params=@(str.fromi64(range.startms);str.fromi64(range.endms));
+  <mt db.many(sql;params) {
+    $ok:results buildreport(results;filter;reporttype;title;category;valuekind;label;note);
+    $err:e queryfailedreport(filter;title;label)
   }
 };
 
-f=buildroutingrows(results:@$row;filter:$reportfilter):$report!$lokeerr{
-  let rows=mut.@();
-  lp(let ii110=0;ii110<results.len;ii110=ii110+1){
-    let r:$row=results.get(ii110);
-    rows=rows.push($reportrow{timestamp:s.rowstr(r;"created_at");category:"routing";detail:s.rowstr(r;"use_case");severity:"INFO";value:""})
 
+f=generatecompliance(conn:i64;filter:$reportfilter):$report{
+  <runreport(
+    filter;
+    "";
+    "compliance_summary";
+    "Compliance Summary Report";
+    "compliance";
+    "sensitivity";
+    "Total audited events";
+    "")
+};
+
+f=generatepii(conn:i64;filter:$reportfilter):$report{
+  <runreport(
+    filter;
+    " AND UPPER(sensitivity) IN ('CONFIDENTIAL','RESTRICTED')";
+    "pii_detection_log";
+    "PII Detection Log";
+    "pii";
+    "sensitivity";
+    "Events handling confidential or restricted content";
+    "")
+};
+
+f=generaterouting(conn:i64;filter:$reportfilter):$report{
+  <runreport(
+    filter;
+    "";
+    "routing_decisions";
+    "Routing Decisions Report";
+    "routing";
+    "provider";
+    "Total routing decisions";
+    "")
+};
+
+f=generatepolicychanges(conn:i64;filter:$reportfilter):$report{
+  <runreport(
+    filter;
+    " AND event_type LIKE '%policy%'";
+    "policy_changes";
+    "Policy Changes Report";
+    "policy";
+    "risk";
+    "Policy change events recorded";
+    ". Nothing in loke writes a policy-change event to the audit trail yet, so a count of zero here means NOT RECORDED rather than none occurred")
+};
+
+f=generatecost(conn:i64;filter:$reportfilter):$report{
+  <runreport(
+    filter;
+    "";
+    "cost_savings";
+    "Cost and Savings Report";
+    "cost";
+    "cost";
+    "Total audited events";
+    ". Cost is recorded as 0.0 on every request until LS1.1h converts the provider cost estimate, so a total of $0.00 is what the trail holds rather than what was spent")
+};
+
+
+(* The dispatch was `let result=mut.generatecost(conn;filter)` followed by a chain of ifs
+   with an empty final else, so cost_savings worked only by being the initialiser and
+   `--template nonsense` quietly produced a cost report under whatever name was asked
+   for. Every template is now dispatched explicitly and an unrecognised one is named.
+
+   The return type stays `$report!$lokeerr` because cli/report.tk matches it, but the
+   $err arm is NOT used and cannot be: T-18 means a caller matching a user-declared
+   error union always takes the first arm, so an $err would be read as an $ok carrying
+   an unbound value. Everything this function needs to report is therefore carried
+   inside a real $report. knowntemplate() is exported as the plain-bool predicate a
+   caller should use if it wants to reject a template before generating anything. *)
+f=generate(conn:i64;filter:$reportfilter):$report!$lokeerr{
+  log.info(str.concat("generating report: ";filter.reporttype);"report_engine";"system");
+  if(knowntemplate(filter.reporttype)){}el{
+    log.warn(str.concat("unknown report template: ";filter.reporttype);"report_engine";"system");
+    <$ok(unknowntemplatereport(filter))
   };
-  <$ok($report{title:"Routing Decisions Report";reporttype:"routing_decisions";generatedat:"now";periodstart:filter.startdate;periodend:filter.enddate;rows:rows;summary:str.concat("Total routing decisions: ";str.fromint(rows.len));format:filter.format})
-};
-
-f=generaterouting(conn:i64;filter:$reportfilter):$report!$lokeerr{
-  let sql="SELECT created_at, event_type, use_case FROM audit_log WHERE created_at >= ? AND created_at <= ? AND event_type LIKE '%routing%' ORDER BY created_at DESC";
-  <mt db.many(sql;@(filter.startdate;filter.enddate)) {
-    $ok:results buildroutingrows(results;filter);
-    $err:e $err($storageerr("failed to query routing events"))
-  }
-};
-
-f=buildpolicyrows(results:@$row;filter:$reportfilter):$report!$lokeerr{
-  let rows=mut.@();
-  lp(let ii128=0;ii128<results.len;ii128=ii128+1){
-    let r:$row=results.get(ii128);
-    rows=rows.push($reportrow{timestamp:s.rowstr(r;"created_at");category:"policy";detail:s.rowstr(r;"use_case");severity:"INFO";value:""})
-
-  };
-  <$ok($report{title:"Policy Changes Report";reporttype:"policy_changes";generatedat:"now";periodstart:filter.startdate;periodend:filter.enddate;rows:rows;summary:str.concat("Total policy changes: ";str.fromint(rows.len));format:filter.format})
-};
-
-f=generatepolicychanges(conn:i64;filter:$reportfilter):$report!$lokeerr{
-  let sql="SELECT created_at, event_type, use_case FROM audit_log WHERE created_at >= ? AND created_at <= ? AND event_type LIKE '%policy%' ORDER BY created_at DESC";
-  <mt db.many(sql;@(filter.startdate;filter.enddate)) {
-    $ok:results buildpolicyrows(results;filter);
-    $err:e $err($storageerr("failed to query policy events"))
-  }
-};
-
-f=buildcostrows(results:@$row;filter:$reportfilter):$report!$lokeerr{
-  let rows=mut.@();
-  lp(let ii146=0;ii146<results.len;ii146=ii146+1){
-    let r:$row=results.get(ii146);
-    rows=rows.push($reportrow{timestamp:s.rowstr(r;"created_at");category:"cost";detail:s.rowstr(r;"use_case");severity:"INFO";value:""})
-
-  };
-  <$ok($report{title:"Cost and Savings Report";reporttype:"cost_savings";generatedat:"now";periodstart:filter.startdate;periodend:filter.enddate;rows:rows;summary:str.concat("Total cost events: ";str.fromint(rows.len));format:filter.format})
-};
-
-f=generatecost(conn:i64;filter:$reportfilter):$report!$lokeerr{
-  let sql="SELECT created_at, event_type, use_case FROM audit_log WHERE created_at >= ? AND created_at <= ? AND event_type LIKE '%cost%' ORDER BY created_at DESC";
-  <mt db.many(sql;@(filter.startdate;filter.enddate)) {
-    $ok:results buildcostrows(results;filter);
-    $err:e $err($storageerr("failed to query cost events"))
-  }
+  if(str.eq(filter.reporttype;"compliance_summary")){
+    <$ok(generatecompliance(conn;filter))
+  }el{};
+  if(str.eq(filter.reporttype;"pii_detection_log")){
+    <$ok(generatepii(conn;filter))
+  }el{};
+  if(str.eq(filter.reporttype;"routing_decisions")){
+    <$ok(generaterouting(conn;filter))
+  }el{};
+  if(str.eq(filter.reporttype;"policy_changes")){
+    <$ok(generatepolicychanges(conn;filter))
+  }el{};
+  <$ok(generatecost(conn;filter))
 };

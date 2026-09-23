@@ -1,0 +1,183 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.storage.auditappendonly;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+
+(* GA5.9 — the acceptance assertion the story names: an UPDATE and a DELETE on audit_log
+   are both REJECTED.
+
+   Until migrations 6 and 7 the trail was called append-only by the documentation and
+   nothing enforced it. "Nothing enforced it" is not something a reader can check, and
+   neither is "something now does": the tamper tests in
+   tests/integration/test_audit_trail_e2e.tk mutate audit_log with raw SQL and passed
+   perfectly well, which was the evidence that the writes were going through.
+
+   The statements below go around core.storage.audit deliberately, exactly as those tamper
+   tests do. A test that can only try to modify the trail through the module that refuses
+   to offer a modify function proves nothing about an operator at a SQL prompt, and the
+   operator at a SQL prompt is who the control is for. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: a string returned by std.homedir() is truncated when
+     interpolated (T-21). Its own directory, not the one the integration tests use, so
+     neither run's rows are counted by the other. *)
+  <str.concat(std.homedir();"/.loke/test-append-only")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file per run, because the row counts below are exact and the trail
+     cannot be emptied by deleting from it — which is the property under test.
+
+     Removing the whole file is not a bypass of the control and is not the escape hatch
+     the story warns about. The trigger's claim is that a row inside a live audit_log
+     cannot be altered or removed; discarding an entire test fixture makes no claim about
+     that, and nothing in the product can do it to a real trail without the user noticing
+     their database is gone. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=execsql(sql:str):bool{
+  (* db.exec is a STDLIB result, so both arms are live — T-18 kills only the error arm of
+     a user-declared sum. A trigger firing RAISE(ABORT) makes sqlite3_step return
+     SQLITE_CONSTRAINT, which arrives here as $err, so false means "the database refused
+     this statement". *)
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=countof(rows:@$row):i64{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowi64(r;"cnt")
+  }el{
+    <0
+  }
+};
+
+f=rowcount():i64{
+  <mt db.many("SELECT COUNT(1) AS cnt FROM audit_log";@()) {
+    $ok:rows countof(rows);
+    $err:e 0-1
+  }
+};
+
+f=firstprovider(rows:@$row):str{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowstr(r;"provider")
+  }el{
+    <""
+  }
+};
+
+f=providerof(corrid:str):str{
+  <mt db.many("SELECT provider FROM audit_log WHERE correlation_id=? LIMIT 1";@(corrid)) {
+    $ok:rows firstprovider(rows);
+    $err:e ""
+  }
+};
+
+f=sampleevent(corrid:str):$auditevent{
+  <$auditevent{
+    eventtype:"llm_request";
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:"anthropic";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:150;
+    tokensout:200;
+    costusd:0.0;
+    durationms:320;
+    correlationid:corrid
+  }
+};
+
+(* The control has to be readable, not just present: something that claims the trail is
+   append-only needs a way to check rather than to trust the migration log. *)
+f=testtriggersinstalled():bool{
+  openfreshstore();
+  <t.assert(sdb.auditappendonlyenforced();"both append-only triggers are installed on audit_log")
+};
+
+f=testinsertstillworks():bool{
+  (* An append-only trail that rejects appends is not a control, it is an outage. *)
+  let store=openfreshstore();
+  let ok=audit.insertevent(store;sampleevent("corr-ao-insert"));
+  <t.assert(ok;"an INSERT into audit_log is still permitted")
+};
+
+f=testupdaterejected():bool{
+  let store=openfreshstore();
+  audit.insertevent(store;sampleevent("corr-ao-update"));
+  let accepted=execsql("UPDATE audit_log SET provider='tampered' WHERE correlation_id='corr-ao-update'");
+  <t.assert(!accepted;"an UPDATE on audit_log is rejected")
+};
+
+f=testupdateleavestherowalone():bool{
+  (* A rejected statement and an unchanged row are two different facts. A trigger that
+     raised after the write, or an exec that reported failure while committing, would pass
+     the assertion above and fail this one. *)
+  let store=openfreshstore();
+  audit.insertevent(store;sampleevent("corr-ao-update2"));
+  execsql("UPDATE audit_log SET provider='tampered' WHERE correlation_id='corr-ao-update2'");
+  <t.assert(str.eq(providerof("corr-ao-update2");"anthropic");"the row's field is unchanged after a rejected UPDATE")
+};
+
+f=testdeleterejected():bool{
+  let store=openfreshstore();
+  audit.insertevent(store;sampleevent("corr-ao-delete"));
+  let accepted=execsql("DELETE FROM audit_log WHERE correlation_id='corr-ao-delete'");
+  <t.assert(!accepted;"a DELETE on audit_log is rejected")
+};
+
+f=testdeleteleavestherowbehind():bool{
+  let store=openfreshstore();
+  audit.insertevent(store;sampleevent("corr-ao-delete2"));
+  let before=rowcount();
+  execsql("DELETE FROM audit_log");
+  let after=rowcount();
+  <t.assert(after==before;"no row is removed by a rejected DELETE")
+};
+
+f=testchainstillverifies():bool{
+  (* The two controls have to coexist. If the triggers interfered with the ordinary write
+     path, the chain would stop linking and this would catch it. *)
+  let store=openfreshstore();
+  audit.insertevent(store;sampleevent("corr-ao-chain-1"));
+  audit.insertevent(store;sampleevent("corr-ao-chain-2"));
+  audit.insertevent(store;sampleevent("corr-ao-chain-3"));
+  let r=audit.verifychain(store);
+  <t.assert(r.ok;"the hash chain still verifies with append-only enforced")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(testtriggersinstalled()){pass=pass+1}el{fail=fail+1};
+  if(testinsertstillworks()){pass=pass+1}el{fail=fail+1};
+  if(testupdaterejected()){pass=pass+1}el{fail=fail+1};
+  if(testupdateleavestherowalone()){pass=pass+1}el{fail=fail+1};
+  if(testdeleterejected()){pass=pass+1}el{fail=fail+1};
+  if(testdeleteleavestherowbehind()){pass=pass+1}el{fail=fail+1};
+  if(testchainstillverifies()){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

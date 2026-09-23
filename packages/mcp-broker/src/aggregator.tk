@@ -3,85 +3,108 @@
 
 m=mcpbroker.aggregator;
 i=t:shared.types;
-i=proto:mcp.protocol;
+i=proto:core.mcp.protocol;
 i=http:std.http;
 i=json:std.json;
 i=log:shared.log;
 i=reg:mcpbroker.registry;
 i=str:std.str;
 
-(* json.decode, not json.parse. `json.parse` mangles to tk_json_parse_w, which does
-   not exist; the linker binds it to tk_json_parse — an unrelated runtime helper that
-   parses an int array, a boolean or a number and returns an int64, not a Json*. So
-   every json.parse in this repository returned garbage that json.getopt and json.str
-   then read as a document, silently. Filed as T-17 in docs/upstream/toke-issues.md. *)
-f=fetchtoolserrtransport(name:str;e:str):@i64{
-  log.warn(str.concat("failed to fetch tools from ";str.concat(name;str.concat(": ";e)));"aggregator";"fetch_tools");
+(* Tool aggregation across the registered upstream MCP servers (F10.23d).
+
+   Four things in the legacy module did not exist. `core.mcp.protocol` exports neither
+   decodetoollist nor encodetoollist — the list encoder it does export is
+   toolslistresult, and there was never a decoder, so one is written here. `std.http.post`
+   is not callable at all: http.tki declares it twice, once as a route taking
+   (str, funcdecl), and toke resolves the route, so no argument list satisfies it
+   (F10.16); http.postheaders is the one that works. `doc.getpath("result.tools")` is not
+   a member of anything. And every signature here took or returned a bare i64 where it
+   meant $serverentry, $mcptool or @$mcptool, which is the LS1.1e class — an untyped
+   handle plus a field read is how you get the wrong offset silently.
+
+   json.decode, not json.parse: `json.parse` mangles to tk_json_parse_w, which does not
+   exist, and the linker binds it to tk_json_parse — an unrelated runtime helper that
+   returns an int64, not a Json. Filed as T-17 in docs/upstream/toke-issues.md. *)
+
+f=notools(name:str;reason:str):@$mcptool{
+  log.warn(str.concat("no tools from ";str.concat(name;str.concat(": ";reason)));"aggregator";"fetch_tools");
   <@()
 };
 
-f=fetchtoolserrparse(name:str;e:str):@i64{
-  log.warn(str.concat("failed to parse tools response from ";str.concat(name;str.concat(": ";e)));"aggregator";"fetch_tools");
-  <@()
+f=serverurl(entry:$serverentry):str{
+  <str.concat("http://";str.concat(entry.host;str.concat(":";str.fromint(entry.port as i64))))
 };
 
-f=fetchtoolserrnotools(name:str;e:str):@i64{
-  log.warn(str.concat("no tools field in response from ";str.concat(name;str.concat(": ";e)));"aggregator";"fetch_tools");
-  <@()
+(* Reads the tools array out of a tools/list response body. Returns an empty list when
+   the document has no result.tools, which is the same outcome as a transport failure
+   and is logged by the caller. *)
+f=decodetoollist(body:str):@$mcptool{
+  let doc=json.decode(body);
+  let result=json.getobj(doc;"result");
+  let raw=json.getarray(result;"tools");
+  let tools=mut.@();
+  lp(let i=0;i<raw.len;i=i+1){
+    let item=str.arrayget(raw;i);
+    tools=tools.push($mcptool{
+      name:json.getstr(item;"name");
+      description:json.getstr(item;"description");
+      inputschema:json.enc(json.getval(item;"inputSchema"))
+    })
+  };
+  <tools
 };
 
-f=fetchtools(entry:i64):@i64{
-  let url=str.concat("http://";str.concat(entry.host;str.concat(":";str.concat(str.fromint(entry.port);"/mcp"))));
-  let body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}";
-  let resp=http.post(url;body;"application/json");
-  let r=mt resp {
-    $ok:r r;
-    $err:e fetchtoolserrtransport(entry.name;e)
-  };
-  let parsed=json.decode(r.body);
-  let doc=mt parsed {
-    $ok:doc doc;
-    $err:e fetchtoolserrparse(entry.name;e)
-  };
-  let rawtools=doc.getpath("result.tools");
-  let toolsval=mt rawtools {
-    $ok:toolsval toolsval;
-    $err:e fetchtoolserrnotools(entry.name;e)
-  };
-  let tools=proto.decodetoollist(toolsval);
+f=prefixtools(entry:$serverentry;tools:@$mcptool):@$mcptool{
   let prefixed=mut.@();
-  lp(let ii1=0;ii1<tools.len;ii1=ii1+1){
-    let tool=tools.get(ii1);
-    let already=tool.name.startswith(entry.toolprefix);
-    if(already){
-    prefixed=prefixed.push(tool)
+  lp(let i=0;i<tools.len;i=i+1){
+    let tool:$mcptool=tools.get(i);
+    if(str.startswith(tool.name;entry.toolprefix)){
+      prefixed=prefixed.push(tool)
     }el{
-    prefixed=prefixed.push($mcptool{ name:str.concat(entry.toolprefix;tool.name); description:tool.description; inputschema:tool.inputschema })
-    };
+      prefixed=prefixed.push($mcptool{
+        name:str.concat(entry.toolprefix;tool.name);
+        description:tool.description;
+        inputschema:tool.inputschema
+      })
+    }
   };
   <prefixed
 };
 
-f=aggregateall(registry:i64):@i64{
-  let healthy=mut.@();
-  lp(let ii2=0;ii2<registry.servers.len;ii2=ii2+1){
-    let s=registry.servers.get(ii2);
-    if(s.healthy){
-      healthy=healthy.push(s)
-    }
-  };
+f=fetchtools(entry:$serverentry):@$mcptool{
+  let body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}";
+  let resp=http.postheaders(
+    http.client(serverurl(entry));
+    "/mcp";
+    str.tobytes(body);
+    "{\"content-type\":\"application/json\"}"
+  );
+  <mt resp {
+    $ok:r toolsfromresp(entry;r);
+    $err:e notools(entry.name;"upstream call failed")
+  }
+};
+
+(* `body` sits at a different offset in $httpresp than in other structs this module
+   sees, so the response is bound with its declared type before the field is read. *)
+f=toolsfromresp(entry:$serverentry;r:$httpresp):@$mcptool{
+  <prefixtools(entry;decodetoollist(r.body))
+};
+
+f=aggregateall(registry:$brokerregistry):@$mcptool{
   let alltools=mut.@();
-  lp(let ii3=0;ii3<healthy.len;ii3=ii3+1){
-    let s=healthy.get(ii3);
-    let stools=fetchtools(s);
-    lp(let ii4=0;ii4<stools.len;ii4=ii4+1){
-      alltools=alltools.push(stools.get(ii4))
-    }
+  lp(let i=0;i<registry.servers.len;i=i+1){
+    let s:$serverentry=registry.servers.get(i);
+    if(s.healthy){
+      let stools=fetchtools(s);
+      lp(let j=0;j<stools.len;j=j+1){
+        alltools=alltools.push(stools.get(j))
+      }
+    }el{}
   };
   <alltools
 };
 
-f=toolslistresponse(tools:@i64):str{
-  let encoded=proto.encodetoollist(tools);
-  <str.concat("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":";str.concat(encoded;"}}"))
+f=toolslistresponse(tools:@$mcptool):str{
+  <proto.okresponse(1;proto.toolslistresult(tools))
 };
