@@ -59,6 +59,7 @@ already had and discarded.
 | **T-26** | **Blocks, and the fix advice creates a silent bug** | **No assignment to a struct field or array element, and E2002 recommends `==`, which compiles to a no-op** | E2002, with wrong advice |
 | **T-27** | **Silent code deletion** | **Comments nest, so `(*` inside a comment (e.g. `COUNT(*)`) swallows the rest of the file** | none at all |
 | **T-28** | Silent segfault | **`str.isdigit` crashes on a `str.charat` result** — the only producer of a character cannot feed the only classifier of one | none — SIGSEGV |
+| **T-29** | Minor | Control-flow keywords (`sc`, `mt`, `lp`, `el`, `br`, `if`) are reserved as import aliases and the diagnostic does not name the reserved word | E2002, unhelpful |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
 right. **T-13 to T-24 were found later, getting loke's test suite to run against real
@@ -1053,6 +1054,33 @@ composition into a crash.
 
 If `isdigit` is genuinely meant to take a character code, the fix is smaller still: declare
 it `(u8) -> bool` or document the unit. Either way the current pair cannot both be right.
+
+---
+
+## T-29 — control-flow keywords are reserved as import aliases, and the diagnostic does not say so
+
+**Severity: minor, but it costs a confusing five minutes every time.**
+
+```toke
+i=sc:std.str;      (* E2002: "expected import alias, got 'sc'" *)
+```
+
+Measured by probing: **`sc`, `mt`, `lp`, `el`, `br` and `if` are all rejected** as import
+aliases. That is entirely reasonable — they are keywords — but the message says only
+*"expected import alias"*, so the first reading is that the alias syntax is wrong rather than
+that this particular word is taken. We spent a few minutes checking the module path and the
+`i=` form before trying a different letter.
+
+`sc` is the one that actually bites, because it is the natural two-letter abbreviation for a
+great many module names (`scorecard`, `schema`, `scanner`, `scope`) and is not obviously a
+keyword to a reader — it appears to be the structured-concurrency marker, judging by
+`sc_scope` in `llvm.c`.
+
+The ask is one word in the message: *"'sc' is a reserved keyword; choose another alias"*. The
+compiler already knows which token it rejected.
+
+Same family as T-25 and T-26: the information needed to act is in the compiler's hand at the
+moment it emits the diagnostic, and is not in the diagnostic.
 
 ---
 

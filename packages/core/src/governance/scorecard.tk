@@ -6,15 +6,36 @@ m=core.governance.scorecard;
 i=time:std.time;
 i=str:std.str;
 i=t:shared.types;
+i=db:std.db;
+i=s:core.storage.db;
 
+(* Every field here is now DERIVED from audit_log, or explicitly marked as not recorded.
+
+   What was here before: buildscorecard ignored its `store` entirely and returned hardcoded
+   statistics — anthropic 89 requests, openai 34, ollama 19, with invented latencies
+   (p99latencyms:3100), invented error rates and invented costs — which formatscorecard then
+   rendered under the heading "Provider scorecard". Anything displaying it published numbers
+   nobody measured, which `CLAUDE.md` names as a hard constraint and `docs/metrics-baseline.md`
+   exists to prevent. It is the DA1.5 defect in a second place.
+
+   Costs are carried in integer HUNDREDTHS rather than as f64. Two reasons: `audit_log.cost_usd`
+   is a REAL and SQLite owns its rendering, which broke the audit chain's digest twice (see
+   `audit.digestfields`); and a bare f64 crossing a module boundary is corrupted (T-20), which a
+   scorecard field being read by a formatter in another module would hit.
+
+   `errorspresent` is false and `errorratepct` is gone, because there is NO SOURCE for it.
+   `audit_log` records every request with event_type 'llm_request' and carries no
+   success/failure discriminator — the request path does audit a provider failure, but writes
+   the same event_type for it. Reporting 0% would state that no request has ever failed.
+   Filed as GA5.19. *)
 t=$providerstats{
   provider:str;
-  requests:i32;
-  avglatencyms:i32;
-  p99latencyms:i32;
-  errorratepct:f64;
-  totalcostusd:f64;
-  avgcostperreq:f64
+  requests:i64;
+  avglatencyms:i64;
+  p99latencyms:i64;
+  totalcosthundredths:i64;
+  avgcostperreqhundredths:i64;
+  errorsrecorded:bool
 };
 
 t=$providerscorecard{
@@ -22,40 +43,100 @@ t=$providerscorecard{
   generatedat:i64
 };
 
-f=buildscorecard(store:i64):$providerscorecard{
-  let anthropic=$providerstats{
-    provider:"anthropic";
-    requests:89;
-    avglatencyms:1240;
-    p99latencyms:3100;
-    errorratepct:0.5;
-    totalcostusd:0.31;
-    avgcostperreq:0.31/89.0
-  };
-  let openai=$providerstats{
-    provider:"openai";
-    requests:34;
-    avglatencyms:980;
-    p99latencyms:2400;
-    errorratepct:0.0;
-    totalcostusd:0.18;
-    avgcostperreq:0.18/34.0
-  };
-  let ollama=$providerstats{
-    provider:"ollama";
-    requests:19;
-    avglatencyms:420;
-    p99latencyms:890;
-    errorratepct:2.1;
-    totalcostusd:0.0;
-    avgcostperreq:0.0
-  };
-  <$providerscorecard{
-    providers:@(anthropic;openai;ollama);
-    generatedat:time.now()
+f=providernames():@str{
+  (* Read from the trail rather than hardcoded, so a provider that has never been used does
+     not appear with zeroes and a new one appears without a code change. *)
+  <mt db.many("SELECT DISTINCT provider FROM audit_log WHERE provider<>'' ORDER BY provider";@()) {
+    $ok:rows namesfromrows(rows);
+    $err:e @("")
   }
 };
 
+f=namesfromrows(rows:@$row):@str{
+  let out=mut.@("");
+  out=@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let r:$row=rows.get(i);
+    out=out.push(s.rowstr(r;"provider"))
+  };
+  <out
+};
+
+f=avgdurationms(provider:str):i64{
+  (* AVG over an INTEGER column returns a REAL, so it is read as hundredths and divided back
+     — the same reason rowf64hundredths exists. Rounds rather than truncating. *)
+  <mt db.one("SELECT CAST(ROUND(AVG(duration_ms)) AS INTEGER) AS v FROM audit_log WHERE provider=?";@(provider)) {
+    $ok:r s.rowi64(r;"v");
+    $err:e 0
+  }
+};
+
+f=p99durationms(provider:str;n:i64):i64{
+  (* SQLite has no percentile function, so the 99th is the row at offset ceil(n*99/100)-1 in
+     ascending order. With fewer than 100 rows that is the maximum, which is the honest answer
+     for a small sample rather than an interpolation nobody asked for. *)
+  if(n<1){
+    <0
+  }el{
+    let idx=mut.((n * 99) + 99) / 100 - 1;
+    if(idx<0){idx=0}el{};
+    if(idx>n-1){idx=n-1}el{};
+    <mt db.one(str.concat("SELECT duration_ms AS v FROM audit_log WHERE provider=? ORDER BY CAST(duration_ms AS INTEGER) ASC LIMIT 1 OFFSET ";str.fromi64(idx));@(provider)) {
+      $ok:r s.rowi64(r;"v");
+      $err:e 0
+    }
+  }
+};
+
+f=totalcosthundredthsfor(provider:str):i64{
+  <mt db.one("SELECT SUM(cost_usd) AS v FROM audit_log WHERE provider=?";@(provider)) {
+    $ok:r s.rowf64hundredths(r;"v");
+    $err:e 0
+  }
+};
+
+f=statsfor(provider:str):$providerstats{
+  (* db.one plus rowi64, NOT s.countquery. countquery returns the number of ROWS a query
+     returns, which is 1 for any `SELECT COUNT(...)` — it is an existence check, and using it
+     as a scalar reader silently reports every provider as having exactly one request. Caught
+     by the count-equals-rows-written assertion, which is the assertion that exists to catch a
+     constant. *)
+  let n=mt db.one("SELECT COUNT(id) AS cnt FROM audit_log WHERE provider=?";@(provider)) {
+    $ok:r s.rowi64(r;"cnt");
+    $err:e 0
+  };
+  let total=totalcosthundredthsfor(provider);
+  let per=mut.0;
+  if(n>0){per=total/n}el{};
+  <$providerstats{
+    provider:provider;
+    requests:n;
+    avglatencyms:avgdurationms(provider);
+    p99latencyms:p99durationms(provider;n);
+    totalcosthundredths:total;
+    avgcostperreqhundredths:per;
+    errorsrecorded:false
+  }
+};
+
+f=buildscorecard(store:i64):$providerscorecard{
+  (* store is still the parameter for signature compatibility; core.storage.db's helpers hold
+     the connection, which is why nothing is passed on. Previously `store` was ignored because
+     nothing was queried at all — it is now ignored because it is not needed. *)
+  if(s.tableexists("audit_log")){
+    let names=providernames();
+    let rows=mut.@($providerstats);
+    lp(let i=0;i<names.len;i=i+1){
+      let nm=names.get(i);
+      if(str.len(nm)>0){
+        rows=rows.push(statsfor(nm))
+      }el{}
+    };
+    <$providerscorecard{providers:rows;generatedat:time.now()}
+  }el{
+    <$providerscorecard{providers:@($providerstats);generatedat:time.now()}
+  }
+};
 
 f=formatscorecard(card:$providerscorecard):str{
   let header=str.concat(
@@ -86,11 +167,15 @@ f=formatscorecard(card:$providerscorecard):str{
   let rows=mut."";
   lp(let ii94=0;ii94<card.providers.len;ii94=ii94+1){
     let p=card.providers.get(ii94);
-    let reqs=str.fromint(p.requests);
-    let avgs=str.fromint(p.avglatencyms);
-    let p99s=str.fromint(p.p99latencyms);
-    let errs=str.concat(str.fromfloat(p.errorratepct);"%");
-    let costs=str.concat("$";str.fromfloat(p.totalcostusd));
+    let reqs=str.fromi64(p.requests);
+    let avgs=str.fromi64(p.avglatencyms);
+    let p99s=str.fromi64(p.p99latencyms);
+    (* "n/r" — NOT RECORDED, not 0%. audit_log has no success/failure discriminator, so a
+       figure here would state that no request has ever failed (GA5.19). A dash would read as
+       zero; an explicit marker cannot be mistaken for a measurement. *)
+    let errs=mut."n/r";
+    if(p.errorsrecorded){errs="0.0%"}el{};
+    let costs=s.moneyfromhundredths(p.totalcosthundredths);
     let row=str.concat(
       t.strpad(p.provider;12);
       str.concat(

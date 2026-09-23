@@ -1,0 +1,130 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testscorecardderived;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=card:core.governance.scorecard;
+i=audit:core.storage.audit;
+i=sdb:core.storage.db;
+
+(* GA5.16 — the scorecard must be derived, and this is the assertion that says so.
+
+   `buildscorecard` used to ignore its `store` entirely and return hardcoded statistics:
+   anthropic 89 requests, openai 34, ollama 19, with invented latencies (p99 3100ms), invented
+   error rates and invented costs — rendered under the heading "Provider scorecard". Anything
+   displaying it published numbers nobody measured.
+
+   The shape of the test matters more than its assertions. The old code would have passed any
+   test that only checked "the scorecard has three providers and non-zero requests" — that was
+   true of the fabrication. So every assertion here is a RELATIONSHIP between what was written
+   to audit_log and what the scorecard reports, which a constant cannot satisfy:
+
+     - an empty trail yields an EMPTY scorecard, not three providers
+     - writing N rows for one provider yields exactly that provider, with exactly N requests
+     - a second provider appears only after it has a row
+     - the provider names come from the trail, so a name never written never appears
+
+   The last is the one that would have caught the original directly: "openai" was hardcoded,
+   so it appeared on an installation that had never called OpenAI. *)
+
+f=teststore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-scorecard");
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) { $ok:s s; $err:e 0 }
+};
+
+f=resetstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-scorecard");
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <0
+};
+
+f=eventfor(provider:str;durationms:i64):$auditevent{
+  <$auditevent{
+    eventtype:"llm_request";
+    usecase:"test";
+    modelid:"m";
+    provider:provider;
+    sensitivity:"internal";
+    risktier:"low";
+    tokensin:10 as u32;
+    tokensout:20 as u32;
+    costusd:0.0;
+    durationms:durationms as u32;
+    correlationid:str.concat("corr-";provider)
+  }
+};
+
+f=providerin(card:$providerscorecard;name:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<card.providers.len;i=i+1){
+    let p=card.providers.get(i);
+    if(str.eq(p.provider;name)){found=true}el{}
+  };
+  <found
+};
+
+f=requestsfor(card:$providerscorecard;name:str):i64{
+  let n=mut.0-1;
+  lp(let i=0;i<card.providers.len;i=i+1){
+    let p=card.providers.get(i);
+    if(str.eq(p.provider;name)){n=p.requests}el{}
+  };
+  <n
+};
+
+f=main():i64{
+  resetstore();
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=teststore();
+
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  (* An empty trail. The fabrication reported three providers here. *)
+  let empty=card.buildscorecard(store);
+  if(t.assert(empty.providers.len==0;"an empty audit trail yields an EMPTY scorecard, not three hardcoded providers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!providerin(empty;"openai");"a provider that has never been called does not appear — 'openai' was hardcoded before")){pass=pass+1}el{fail=fail+1};
+
+  (* Three rows for one provider. *)
+  audit.insertevent(store;eventfor("ollama";100));
+  audit.insertevent(store;eventfor("ollama";200));
+  audit.insertevent(store;eventfor("ollama";300));
+  let one=card.buildscorecard(store);
+  if(t.assert(one.providers.len==1;"one provider in the trail yields exactly one row in the scorecard")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(providerin(one;"ollama");"and it is the provider that was actually written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(requestsfor(one;"ollama")==3;"the request count equals the number of rows written, not a constant")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!providerin(one;"anthropic");"a provider with no rows still does not appear")){pass=pass+1}el{fail=fail+1};
+
+  (* A second provider appears only once it has a row. *)
+  audit.insertevent(store;eventfor("anthropic";500));
+  let two=card.buildscorecard(store);
+  if(t.assert(two.providers.len==2;"a second provider appears after its first row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(requestsfor(two;"anthropic")==1;"with exactly its own count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(requestsfor(two;"ollama")==3;"and the first provider's count is unchanged")){pass=pass+1}el{fail=fail+1};
+
+  (* Latency is derived, so it must lie within the range actually written (100..500). *)
+  let n=mut.0;
+  lp(let i=0;i<two.providers.len;i=i+1){
+    let p=two.providers.get(i);
+    if(str.eq(p.provider;"ollama")){
+      if(p.avglatencyms==200){n=n+1}el{}
+    }el{}
+  };
+  if(t.assert(n==1;"average latency for ollama is exactly 200ms — the mean of 100, 200 and 300")){pass=pass+1}el{fail=fail+1};
+
+  (* And the error column is NOT RECORDED rather than 0%, because audit_log carries no
+     success/failure discriminator (GA5.19). Reporting 0% would state that nothing ever
+     failed. *)
+  let rendered=card.formatscorecard(two);
+  if(t.assert(str.contains(rendered;"n/r");"the error column reads NOT RECORDED, not 0%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(rendered;"0.0%");"no fabricated zero error rate is rendered")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
