@@ -5,130 +5,202 @@ m=test.router.selector;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=reg:core.models.registry;
+i=sel:core.router.selector;
 
-(* --- stub selector functions --- *)
+(* X7.2 — this file declared eight stand-ins for core.router.selector, including a whole
+   fake selection policy:
 
-(* tolerance from string *)
-f=tolerancefromstr(s:str):i64{
-  if(str.eq(s;"patient")){<1};
-  if(str.eq(s;"background")){<2};
-  <0
+     (* stub select: restricted forces local; preferlocal tries local first *)
+     f=selectmodel(task:str;sensitivity:i64;preferlocal:i64;tolerance:i64):str{
+       ...
+       if(str.eq(task;"code")){<"codellama-7b"};
+       <"llama3"
+     };
+
+   and then asserted `str.eq(m1;"codellama-7b")`. There is no codellama-7b in
+   core.models.registry — nor llama3, nor mistral-7b, nor claude-3-5-sonnet without its
+   date suffix. Five of its eleven assertions named models the product does not have, and
+   the sixth asserted a comma-separated-string candidate list that no function takes. The
+   file's `selectmodel` also had the RESTRICTED rule right by accident while getting the
+   refusal wrong: its version always returns SOME model, so it could not have expressed
+   the one outcome that matters — that a RESTRICTED request with no local candidate is
+   REFUSED rather than sent to a cloud provider.
+
+   tests/unit/router/test_selection_outcome.tk already covers that refusal and the
+   selected/refused distinction, so this file deliberately does not repeat them. What it
+   takes is the surface that file leaves alone: the six pure conversions, the reason string,
+   and the two cost functions — plus the one safety property stated from this module's own
+   angle, which is that no selection or refusal ever names a cloud provider for RESTRICTED
+   input.
+
+   Every function asserted here returns a plain value. `select` is the result-returning
+   form and cannot be asserted at all: toke takes the FIRST arm of a match on a result
+   whose error side is a user-declared sum whatever the value is, so its $err arm is
+   unreachable and its $ok arm would bind the error payload on failure. test_selection_outcome
+   carries the witness assertion for that. *)
+
+f=registry():$registry{
+  <reg.newregistry()
 };
 
-(* tier from tolerance *)
-f=tierfromtolerance(tolerance:i64):i64{
-  if(tolerance==0){<0};
-  if(tolerance==1){<1};
-  <2
-};
-
-(* tier to string *)
-f=tiertostr(tier:i64):str{
-  if(tier==0){<"interactive"};
-  if(tier==1){<"considered"};
-  <"background"
-};
-
-(* sensitivity to string *)
-f=senstostr(level:i64):str{
-  if(level==0){<"PUBLIC"};
-  if(level==1){<"INTERNAL"};
-  if(level==2){<"CONFIDENTIAL"};
-  <"RESTRICTED"
-};
-
-(* provider to string *)
-f=providertostr(p:i64):str{
-  if(p==0){<"anthropic"};
-  if(p==1){<"openai"};
-  if(p==2){<"google"};
-  if(p==3){<"ollama"};
-  if(p==4){<"local"};
-  <"openrouter"
-};
-
-(* build reason string *)
-f=buildreason(modelid:str;localonly:i64;sensitivitystr:str;tierstr:str):str{
-  let localpart=mut."cloud-eligible (sensitivity: ";
-  if(localonly==1){localpart="local-only (sensitivity: "}el{};
-  let senspart=str.concat(localpart;sensitivitystr);
-  let closepart=str.concat(senspart;", tier: ");
-  let tierpart=str.concat(closepart;tierstr);
-  let reasonmid=str.concat(tierpart;") => ");
-  <str.concat(reasonmid;modelid)
-};
-
-(* stub select: restricted forces local; preferlocal tries local first *)
-f=selectmodel(task:str;sensitivity:i64;preferlocal:i64;tolerance:i64):str{
-  let isrestricted=sensitivity==3;
-  let localonly=mut.preferlocal;
-  if(isrestricted){localonly=1}el{};
-  if(localonly==1){
-    if(str.eq(task;"code")){<"codellama-7b"};
-    <"llama3"
-  }el{};
-  if(str.eq(task;"code")){<"gpt-4o"};
-  if(str.eq(task;"chat")){<"claude-3-5-sonnet"};
-  <"llama3"
-};
-
-(* stub cost estimation *)
-f=estimatecost(modelid:str;inputk:i64;outputk:i64):i64{
-  if(str.contains(modelid;"llama")){<0};
-  if(str.contains(modelid;"codellama")){<0};
-  if(str.contains(modelid;"gpt-4o-mini")){<inputk*15+outputk*60};
-  if(str.contains(modelid;"gpt-4o")){<inputk*500+outputk*1500};
-  if(str.contains(modelid;"claude-3-5-sonnet")){<inputk*300+outputk*1500};
-  if(str.contains(modelid;"claude-3-5-haiku")){<inputk*100+outputk*500};
-  <inputk*100+outputk*300
+f=criteria(task:$tasktype;sens:$sensitivitylevel;tol:$latencytolerance;preferlocal:bool):$selectioncriteria{
+  <$selectioncriteria{
+    task:task;
+    sensitivity:sens;
+    tolerance:tol;
+    preferlocal:preferlocal;
+    maxcostper1k:0.05;
+    requiretools:false
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
+  let r=registry();
 
-  (* T1: restricted sensitivity forces local routing *)
-  let m1=selectmodel("code";3;0;0);
-  if(t.assert(str.eq(m1;"codellama-7b");"restricted sensitivity forces local model for code")){pass=pass+1}el{fail=fail+1};
+  (* ── providertostr: all seven, one assertion each ────────────────────────────
+     This string is what lands in an audit row's `provider` column and in the reason a
+     user is shown. A collapsed arm would attribute a request to the wrong provider in a
+     tamper-evident trail. *)
+  if(t.asserteq(sel.providertostr($provider{$anthropic:0});"anthropic";"anthropic renders as anthropic")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.providertostr($provider{$openai:0});"openai";"openai does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.providertostr($provider{$google:0});"google";"google does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.providertostr($provider{$mistral:0});"mistral";"mistral does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.providertostr($provider{$openrouter:0});"openrouter";"openrouter does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.providertostr($provider{$ollama:0});"ollama";"ollama does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.providertostr($provider{$local:0});"local";"local does")){pass=pass+1}el{fail=fail+1};
 
-  (* T2: restricted sensitivity forces local even for chat *)
-  let m2=selectmodel("chat";3;0;0);
-  if(t.assert(str.eq(m2;"llama3");"restricted sensitivity forces local model for chat")){pass=pass+1}el{fail=fail+1};
+  (* ── senstostr, and that it agrees with shared.types ─────────────────────────
+     Two modules render the same four levels. If they ever disagree, an audit row and a
+     user-facing warning describe the same request differently. *)
+  if(t.asserteq(sel.senstostr($sensitivitylevel{$public:0});"PUBLIC";"PUBLIC renders as PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.senstostr($sensitivitylevel{$internal:0});"INTERNAL";"INTERNAL does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.senstostr($sensitivitylevel{$confidential:0});"CONFIDENTIAL";"CONFIDENTIAL does")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.senstostr($sensitivitylevel{$restricted:0});"RESTRICTED";"RESTRICTED does")){pass=pass+1}el{fail=fail+1};
+  (* FINDING, latent but with one documented incident: the two labellers DISAGREE ON CASE.
+     core.router.selector.senstostr and core.router.sensitivity.leveltostr render
+     "RESTRICTED"; shared.types.senslabel renders "restricted". Measured here.
 
-  (* T3: preferlocal selects local model *)
-  let m3=selectmodel("code";0;1;0);
-  if(t.assert(str.eq(m3;"codellama-7b");"preferlocal selects local code model")){pass=pass+1}el{fail=fail+1};
+     It has bitten once already. core/governance/dashboard.tk:82-86 records that the
+     privacy-coverage query compared `sensitivity='CONFIDENTIAL'` against a column
+     shared.types.senslabel writes in lower case, so coverage read 0 out of N on every row
+     the request path has ever written — which presents as a privacy control being RED
+     rather than absent. That query now compares case-insensitively, and the divergence
+     itself is untouched.
 
-  (* T4: cloud routing for code task *)
-  let m4=selectmodel("code";0;0;0);
-  if(t.assert(str.eq(m4;"gpt-4o");"cloud code routes to gpt-4o")){pass=pass+1}el{fail=fail+1};
+     Not asserted as equal, and not left red, because every current reader has been patched
+     around it: the uppercase forms reach only log lines and the human-readable reason
+     string (router.tk:318, buildreason), while the stored `audit_log.sensitivity` column
+     and the pipeline's JSON both go through senslabel. So the two contracts are asserted
+     separately, and the divergence is recorded here so the next person to join these two
+     strings finds it written down rather than in a report that reads zero. *)
+  if(t.asserteq(sh.senslabel($sensitivitylevel{$restricted:0});"restricted";"shared.types.senslabel renders RESTRICTED in LOWER case — the form the audit column stores")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(sel.senstostr($sensitivitylevel{$restricted:0});sh.senslabel($sensitivitylevel{$restricted:0}));"and the selector's UPPER-case form does NOT match it: see the comment above, this divergence already made a privacy report read 0 of N")){pass=pass+1}el{fail=fail+1};
 
-  (* T5: cloud routing for chat task *)
-  let m5=selectmodel("chat";0;0;0);
-  if(t.assert(str.eq(m5;"claude-3-5-sonnet");"cloud chat routes to claude-3-5-sonnet")){pass=pass+1}el{fail=fail+1};
+  (* ── the tolerance-to-tier chain ─────────────────────────────────────────────
+     tolerancefromstr parses what a caller passes in, tierfromtolerance maps it to the
+     tier the registry filters on, and tiertostr names it. The three are asserted as a
+     chain because that is how they are used, and because a wrong tier changes which
+     models are eligible — a request that should have had a fast local model can be
+     handed one at 8 tokens per second. *)
+  if(t.asserteq(sel.tiertostr(sel.tierfromtolerance(sel.tolerancefromstr("instant")));"interactive";"instant maps to the interactive tier")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.tiertostr(sel.tierfromtolerance(sel.tolerancefromstr("patient")));"considered";"patient maps to considered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.tiertostr(sel.tierfromtolerance(sel.tolerancefromstr("background")));"background";"background maps to background")){pass=pass+1}el{fail=fail+1};
 
-  (* T6: tolerancefromstr parses known values *)
-  if(t.assert(tolerancefromstr("patient")==1;"patient tolerance parsed correctly")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(tolerancefromstr("background")==2;"background tolerance parsed correctly")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(tolerancefromstr("instant")==0;"instant is the default tolerance")){pass=pass+1}el{fail=fail+1};
+  (* An unrecognised tolerance must default to the STRICTEST option, not the loosest: a
+     typo should slow nothing down and should never widen the candidate set. *)
+  if(t.asserteq(sel.tiertostr(sel.tierfromtolerance(sel.tolerancefromstr("")));"interactive";"an empty tolerance defaults to instant/interactive, the strictest")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.tiertostr(sel.tierfromtolerance(sel.tolerancefromstr("whenever")));"interactive";"and so does an unrecognised one")){pass=pass+1}el{fail=fail+1};
 
-  (* T7: tierfromtolerance maps correctly *)
-  if(t.assert(str.eq(tiertostr(tierfromtolerance(0));"interactive");"instant tolerance maps to interactive tier")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(tiertostr(tierfromtolerance(1));"considered");"patient tolerance maps to considered tier")){pass=pass+1}el{fail=fail+1};
+  (* tiertostr on directly constructed tiers, so the mapping above cannot be satisfied by
+     a tiertostr that returns one constant. *)
+  if(t.asserteq(sel.tiertostr($modeltier{$interactive:0});"interactive";"tiertostr names interactive")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.tiertostr($modeltier{$considered:0});"considered";"considered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.tiertostr($modeltier{$background:0});"background";"and background")){pass=pass+1}el{fail=fail+1};
 
-  (* T8: local models have zero cost *)
-  if(t.assert(estimatecost("llama3";10;10)==0;"local model cost is zero")){pass=pass+1}el{fail=fail+1};
+  (* ── buildreason ─────────────────────────────────────────────────────────────
+     The sentence a user is shown and the reason an audit row carries. The local-only and
+     cloud-eligible prefixes are the part that must never be confused: they are the
+     human-readable record of whether the data was allowed to leave. *)
+  let cloudreason=sel.buildreason("gpt-4o";false;"PUBLIC";"interactive");
+  if(t.assert(str.contains(cloudreason;"cloud-eligible");"a cloud-eligible reason says so")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(cloudreason;"local-only");"and does not also say local-only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cloudreason;"gpt-4o");"it names the model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cloudreason;"PUBLIC");"the sensitivity")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cloudreason;"interactive");"and the tier")){pass=pass+1}el{fail=fail+1};
 
-  (* T9: cloud models have positive cost *)
-  if(t.assert(estimatecost("gpt-4o";10;10)>0;"cloud model cost is positive")){pass=pass+1}el{fail=fail+1};
+  let localreason=sel.buildreason("qwen2.5:72b";true;"RESTRICTED";"background");
+  if(t.assert(str.contains(localreason;"local-only");"a local-only reason says so")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(localreason;"cloud-eligible");"and does not also say cloud-eligible")){pass=pass+1}el{fail=fail+1};
 
-  (* T10: buildreason includes model id *)
-  let reason=buildreason("gpt-4o";0;"PUBLIC";"interactive");
-  if(t.assert(str.contains(reason;"gpt-4o");"reason string contains model id")){pass=pass+1}el{fail=fail+1};
+  (* withstrategy appends rather than rewrites, which is why the assertions above still
+     match on a reason that has been through it (X8.6). *)
+  let strat=sel.withstrategy(cloudreason;"best-quality");
+  if(t.assert(str.contains(strat;"cloud-eligible");"withstrategy leaves the original reason intact")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(strat;"[strategy: best-quality]");"and appends the named strategy")){pass=pass+1}el{fail=fail+1};
 
-  (* T11: buildreason local-only vs cloud-eligible prefix *)
-  let reasonlocal=buildreason("llama3";1;"RESTRICTED";"interactive");
-  if(t.assert(str.contains(reasonlocal;"local-only");"local-only reason has correct prefix")){pass=pass+1}el{fail=fail+1};
+  (* ── noselection / isselected ────────────────────────────────────────────────
+     The sentinel pair that replaces the result type. A refusal must carry NO model and NO
+     provider — an empty provider is what makes it undispatchable even if a caller ignored
+     the predicate. *)
+  let refusal=sel.noselection("selector: nothing available");
+  if(t.assert(!sel.isselected(refusal);"noselection is not selected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(refusal.modelid)==0;"it names no model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(refusal.provider)==0;"and no provider, so nothing can be dispatched to it even by a caller that ignored isselected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!refusal.islocal;"a refusal is not claimed to be local either")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(refusal.reason;"selector: nothing available";"and the reason survives for the caller to log")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE SAFETY PROPERTY, from this module's angle ───────────────────────────
+     A RESTRICTED request that CAN be served locally must be served locally. The refusal
+     case is covered in test_selection_outcome.tk; this is the other half, and it is the
+     half that could silently disclose: a selection that succeeds but names a cloud
+     provider is worse than a refusal, because it proceeds. *)
+  let restrictedchat=sel.selectmodel(criteria($tasktype{$chat:0};$sensitivitylevel{$restricted:0};$latencytolerance{$background:0};false);r);
+  if(t.assert(sel.isselected(restrictedchat);"a RESTRICTED chat request with a local candidate IS served")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(restrictedchat.islocal;"and it is served by a LOCAL model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(restrictedchat.provider;"ollama";"whose provider is ollama")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(restrictedchat.provider;"anthropic");"never anthropic")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(restrictedchat.provider;"openai");"and never openai")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(restrictedchat.reason;"local-only");"the reason records that it was held locally")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(restrictedchat.reason;"RESTRICTED");"and why")){pass=pass+1}el{fail=fail+1};
+
+  (* preferlocal:false is NOT enough to release a RESTRICTED request. The flag is a user
+     preference; the sensitivity rule overrides it, and it is asserted here because the
+     ordering is the safety property. *)
+  if(t.assert(restrictedchat.islocal;"preferlocal:false does not release a RESTRICTED request to the cloud")){pass=pass+1}el{fail=fail+1};
+
+  (* And the contrast: a PUBLIC request with preferlocal:false may use a cloud model, or
+     this test would pass on a selector that simply refused everything. *)
+  let publicchat=sel.selectmodel(criteria($tasktype{$chat:0};$sensitivitylevel{$public:0};$latencytolerance{$instant:0};false);r);
+  if(t.assert(sel.isselected(publicchat);"a PUBLIC chat request is served")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!publicchat.islocal;"and is allowed a cloud model, so the local-only rule is a rule and not a constant")){pass=pass+1}el{fail=fail+1};
+
+  (* ── estimatecosthundredths ──────────────────────────────────────────────────
+     The cross-module form. estimatecost returns a bare f64, which T-20 corrupts across a
+     module boundary, so its value is NOT asserted here — the hundredths form is the one a
+     caller in another module may read, and it is the one that has to be right.
+
+     A local model costing zero is the point of routing to one, and a cloud model costing
+     more than zero is what makes a saving measurable. Before this was fixed, an integer
+     division applied before the cast made every request under a thousand tokens cost
+     exactly zero, which would have reported a 100% saving on every short prompt. *)
+  if(t.assert(sel.estimatecosthundredths("qwen2.5:7b";1000 as u32;1000 as u32;r)==0;"a LOCAL model costs zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sel.estimatecosthundredths("gpt-4o";1000 as u32;1000 as u32;r)>0;"a CLOUD model costs more than zero")){pass=pass+1}el{fail=fail+1};
+
+  (* A model the registry does not have must cost zero rather than a guess: a fabricated
+     figure in a cost report is worse than an absent one. *)
+  if(t.assert(sel.estimatecosthundredths("no-such-model";1000 as u32;1000 as u32;r)==0;"an unknown model costs zero rather than a default guess")){pass=pass+1}el{fail=fail+1};
+
+  (* Cost rises with tokens, which is the only property that makes the figure a
+     measurement rather than a constant. *)
+  if(t.assert(sel.estimatecosthundredths("gpt-4o";10000 as u32;10000 as u32;r)>sel.estimatecosthundredths("gpt-4o";1000 as u32;1000 as u32;r);"ten times the tokens costs more than one times")){pass=pass+1}el{fail=fail+1};
+
+  (* And the cheaper model is cheaper, so the cost table is read per model rather than
+     applied uniformly. *)
+  if(t.assert(sel.estimatecosthundredths("gpt-4o-mini";100000 as u32;100000 as u32;r)<sel.estimatecosthundredths("gpt-4o";100000 as u32;100000 as u32;r);"gpt-4o-mini costs less than gpt-4o for the same work")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

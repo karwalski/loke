@@ -5,90 +5,74 @@ m=test.privacy.entityrouting;
 
 i=t:std.test;
 i=str:std.str;
+i=er:core.privacy.entityrouting;
 
-(* --- stub types and functions mirroring core.privacy.entityrouting --- *)
+(* X7.2 — this file used to declare its own $entityroute table and assert against it. It
+   now imports core.privacy.entityrouting.
 
-t=$entityroute{
-  entitytype:str;
-  preferredlayers:str;
-  fallbacklayers:str
-};
+   FINDING, recorded rather than asserted as correct: THE ROUTING TABLE'S ENTITY NAMES
+   MATCH NO DETECTOR'S OUTPUT. defaultrouting names its five routes "email", "phone",
+   "person", "creditcard" and "address". core.privacy.regex emits "phone_au", "phone_us",
+   "credit_card", "au_tfn", "ssn_us", "ip_v4", "url", "api_key" and "email"; Presidio
+   emits "PHONE_NUMBER", "CREDIT_CARD", "PERSON", "EMAIL_ADDRESS". So of the five routes,
+   exactly ONE — "email" — matches anything any layer actually produces, and
+   hasroute("credit_card") is false while hasroute("creditcard") is true.
 
-t=$routingconfig{
-  routes:@$entityroute;
-  count:i64
-};
+   That interacts badly with the second finding: getroute on an unrouted type returns a
+   route whose preferred AND fallback layer lists are both EMPTY, rather than saying it has
+   no route. A caller using this to decide which layers scan an entity would conclude that
+   a credit card is scanned by nothing at all — fail-open, silently, for four of the five
+   entity types the table was written to cover.
 
-f=defaultrouting():$routingconfig{
-  let routes=@(
-    $entityroute{entitytype:"email";preferredlayers:"regex";fallbacklayers:"ner,presidio"};
-    $entityroute{entitytype:"phone";preferredlayers:"regex";fallbacklayers:"presidio"};
-    $entityroute{entitytype:"person";preferredlayers:"ner";fallbacklayers:"presidio"};
-    $entityroute{entitytype:"creditcard";preferredlayers:"regex";fallbacklayers:"presidio"};
-    $entityroute{entitytype:"address";preferredlayers:"presidio";fallbacklayers:"ner"}
-  );
-  <$routingconfig{routes:routes;count:5}
-};
-
-f=getroute(cfg:$routingconfig;entitytype:str):$entityroute{
-  let result=mut.$entityroute{entitytype:entitytype;preferredlayers:"";fallbacklayers:""};
-  lp(let i=0;i<cfg.count;i=i+1){
-    let r=cfg.routes.get(i);
-    if(str.eq(r.entitytype;entitytype)){result=r}el{}
-  };
-  <result
-};
-
-f=hasroute(cfg:$routingconfig;entitytype:str):bool{
-  let found=mut.false;
-  lp(let i=0;i<cfg.count;i=i+1){
-    let r=cfg.routes.get(i);
-    if(str.eq(r.entitytype;entitytype)){found=true}el{}
-  };
-  <found
-};
-
-(* --- tests --- *)
+   NEITHER IS FIXED HERE: this module has no importer anywhere in the repository, so the
+   defects are latent. core.privacy.pipeline runs every enabled layer over the whole text
+   and does not consult a per-entity routing table. The assertions below therefore record
+   the behaviour as it is, following the precedent in tests/unit/storage/test_backup.tk,
+   and the naming assertions turn RED when the vocabularies are reconciled — which is
+   story X7.6's business. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let cfg=defaultrouting();
+  let cfg=er.defaultrouting();
 
-  (* 1. default routing has 5 entries *)
-  if(t.assert(cfg.count==5;"default routing has 5 routes")){pass=pass+1}el{fail=fail+1};
+  (* ── The table's shape ───────────────────────────────────────────────────────
+     count is a separate field from routes.len, and every loop in the module iterates to
+     count rather than to routes.len. If the two ever disagree, routes are silently
+     skipped or the loop reads past the end — and reading a field off a mis-matched value
+     segfaults rather than returning nonsense. This is the assertion that keeps them
+     honest. *)
+  if(t.assert(cfg.count==5;"the routing table declares five routes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cfg.routes.len==cfg.count;"and count agrees with the actual number of routes — every loop in the module trusts count, not routes.len")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. email route exists *)
-  if(t.assert(hasroute(cfg;"email");"email route exists")){pass=pass+1}el{fail=fail+1};
+  (* ── Routes that resolve ─────────────────────────────────────────────────────*)
+  if(t.assert(er.hasroute(cfg;"email");"email has a route")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(er.getroute(cfg;"email").preferredlayers;"regex";"and prefers the regex layer, which is the cheap deterministic one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(er.getroute(cfg;"email").fallbacklayers;"presidio");"with Presidio among its fallbacks")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(er.getroute(cfg;"person").preferredlayers;"ner";"a person is routed to NER first, because no regex finds a name")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(er.getroute(cfg;"address").preferredlayers;"presidio";"and an address to Presidio")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. phone route exists *)
-  if(t.assert(hasroute(cfg;"phone");"phone route exists")){pass=pass+1}el{fail=fail+1};
+  (* Every route must name at least a preferred layer. A route with neither is the same as
+     no route, and worse because it looks configured. *)
+  if(t.assert((str.len(er.getroute(cfg;"phone").preferredlayers) as i64)>0;"every declared route names a preferred layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(er.getroute(cfg;"creditcard").preferredlayers) as i64)>0;"including the card route")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. person route exists *)
-  if(t.assert(hasroute(cfg;"person");"person route exists")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 1, recorded: the vocabulary matches no detector ─────────────────*)
+  if(t.assert(!er.hasroute(cfg;"credit_card");"there is NO route for credit_card, which is what core.privacy.regex actually emits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(er.hasroute(cfg;"creditcard");"the route is spelled creditcard, which no layer emits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!er.hasroute(cfg;"phone_au");"and there is no route for phone_au either")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!er.hasroute(cfg;"CREDIT_CARD");"nor for the Presidio spelling")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!er.hasroute(cfg;"api_key");"nor for api_key, ssn_us, au_tfn, ip_v4 or url — five detected types with no route at all")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. unknown entity type has no route *)
-  if(t.assert(!hasroute(cfg;"unknown");"unknown entity has no route")){pass=pass+1}el{fail=fail+1};
-
-  (* 6. email preferred layer is regex *)
-  let emailroute=getroute(cfg;"email");
-  if(t.asserteq(emailroute.preferredlayers;"regex";"email prefers regex layer")){pass=pass+1}el{fail=fail+1};
-
-  (* 7. email fallback includes ner *)
-  if(t.assert(str.contains(emailroute.fallbacklayers;"ner");"email fallback includes ner")){pass=pass+1}el{fail=fail+1};
-
-  (* 8. person preferred layer is ner *)
-  let personroute=getroute(cfg;"person");
-  if(t.asserteq(personroute.preferredlayers;"ner";"person prefers ner layer")){pass=pass+1}el{fail=fail+1};
-
-  (* 9. address preferred layer is presidio *)
-  let addressroute=getroute(cfg;"address");
-  if(t.asserteq(addressroute.preferredlayers;"presidio";"address prefers presidio layer")){pass=pass+1}el{fail=fail+1};
-
-  (* 10. unknown route returns empty preferred *)
-  let unknownroute=getroute(cfg;"unknown");
-  if(t.asserteq(unknownroute.preferredlayers;"";"unknown route has empty preferred layers")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 2, recorded: an unrouted type resolves to NO LAYERS ─────────────
+     Not to a default, not to an error — to a route with both layer lists empty. A caller
+     reading that as "which layers scan this" concludes: none. *)
+  let missing=er.getroute(cfg;"au_tfn");
+  if(t.asserteq(missing.entitytype;"au_tfn";"an unrouted type echoes its own name back")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(missing.preferredlayers;"";"but names NO preferred layer")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(missing.fallbacklayers;"";"and NO fallback either — so an unrouted entity would be scanned by nothing, which fails OPEN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!er.hasroute(cfg;"");"an empty entity type has no route")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

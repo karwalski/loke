@@ -2,138 +2,174 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=tests.unit.storage.testsettings;
+
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=st:core.storage.settings;
 
-t=$settingtype{kind:str};
+(* X7.2 — this file used to declare a $settingstore with its own newstore/setstr/setint/
+   setbool/removekey/getstr/getint/getbool and assert against that copy. It had two
+   independent reasons to be replaced rather than extended:
 
-t=$setting{ key:str; value:str; vtype:$settingtype; namespace:str };
+   1. The copy had nothing in common with core.storage.settings but the function names.
+      The real module has no store struct at all: every getter and setter goes to the
+      `settings` table through std.db, and the store argument is an i64.
 
-t=$settingstore{
-  entries:@$setting
+   2. IT COULD NOT FAIL. Every assertion was written as a bare statement —
+      `t.asserteq(v1;"loke";"...")` — with the returned bool discarded, followed by an
+      unconditional `pass=pass+1`. `fail` was declared and never incremented, and the
+      function returns `fail`. Eleven assertions, and the exit status was 0 whatever any
+      of them said. That is a stronger failure than the stub pattern: a stub at least
+      reports a mismatch against its own copy.
+
+   What it covers now is the real table, and in particular the plain `…or` readers. Those
+   exist because T-18 makes the `$err:` arm of a result-returning getter dead code, so a
+   caller of `getstr` binds the ERROR PAYLOAD as if it were the value on failure. That is
+   how an ENGAGED KILL SWITCH came to report itself disengaged: killswitch wrote the flag
+   with setbool ("bool") and read it back with getstr, which refuses any non-"str" row,
+   and the `false` in its $err arm never ran. The write-then-read-back assertion below is
+   the regression test for that. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir()'s return is truncated when
+     interpolated (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-settings-unit")
 };
 
-f=newstore():$settingstore{
-  <$settingstore{ entries:@() }
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file, because the row counts below are exact. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
 
-f=setstr(store:$settingstore;key:str;value:str;ns:str):$settingstore{
-  let entry=$setting{ key:key; value:value; vtype:"str"; namespace:ns };
-  let next=mut.removekey(store;key);
-  <$settingstore{ entries:next.entries.push(entry) }
+f=firstcol(rows:@$row;col:str):str{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowstr(r;col)
+  }el{
+    <""
+  }
 };
 
-f=setint(store:$settingstore;key:str;value:i64;ns:str):$settingstore{
-  let entry=$setting{ key:key; value:str.fromint(value); vtype:"int"; namespace:ns };
-  let next=mut.removekey(store;key);
-  <$settingstore{ entries:next.entries.push(entry) }
+f=countof(rows:@$row):i64{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowi64(r;"cnt")
+  }el{
+    <0-1
+  }
 };
 
-f=setbool(store:$settingstore;key:str;value:bool;ns:str):$settingstore{
-  let v=mut."false";
-  if(value){v="true"}el{};
-  let entry=$setting{ key:key; value:v; vtype:"bool"; namespace:ns };
-  let next=mut.removekey(store;key);
-  <$settingstore{ entries:next.entries.push(entry) }
+(* Read straight through std.db rather than through the module, for the two facts the
+   module has no accessor for: how many rows a key occupies, and what went into
+   updated_at. db.many is a STDLIB result, so both arms are live. *)
+f=rowsforkey(key:str):i64{
+  <mt db.many("SELECT COUNT(1) AS cnt FROM settings WHERE key=?";@(key)) {
+    $ok:rows countof(rows);
+    $err:e 0-1
+  }
 };
 
-f=removekey(store:$settingstore;key:str):$settingstore{
-  let next=mut.@($setting);
-  lp(let i=0;i<store.entries.len;i=i+1){
-    let e=store.entries.get(i);
-    if(!str.eq(e.key;key)){
-      next=next.push(e)
-    }el{}
-  };
-  <$settingstore{ entries:next }
+f=updatedatof(key:str):str{
+  <mt db.many("SELECT updated_at FROM settings WHERE key=? LIMIT 1";@(key)) {
+    $ok:rows firstcol(rows;"updated_at");
+    $err:e ""
+  }
 };
 
-f=getstr(store:$settingstore;key:str;default:str):str{
-  lp(let i=0;i<store.entries.len;i=i+1){
-    let e=store.entries.get(i);
-    if(str.eq(e.key;key)){
-      <e.value
-    }el{}
-  };
-  <default
-};
-
-f=getint(store:$settingstore;key:str;default:i64):i64{
-  lp(let i=0;i<store.entries.len;i=i+1){
-    let e=store.entries.get(i);
-    if(str.eq(e.key;key)){
-      <str.toint(e.value)
-    }el{}
-  };
-  <default
-};
-
-f=getbool(store:$settingstore;key:str;default:bool):bool{
-  lp(let i=0;i<store.entries.len;i=i+1){
-    let e=store.entries.get(i);
-    if(str.eq(e.key;key)){
-      <str.eq(e.value;"true")
-    }el{}
-  };
-  <default
+f=valuetypeof(key:str):str{
+  <mt db.many("SELECT value_type FROM settings WHERE key=? LIMIT 1";@(key)) {
+    $ok:rows firstcol(rows;"value_type");
+    $err:e ""
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let store=newstore();
+  let store=openfreshstore();
 
-  let store=setstr(store;"app.name";"loke";"general");
-  let v1=getstr(store;"app.name";"");
-  t.asserteq(v1;"loke";"set and get string value");
-  pass=pass+1;
+  (* ── The upsert, before anything relies on it ────────────────────────────────
+     key is the PRIMARY KEY, so without the conflict clause a second write to the same
+     key is a constraint error, not an overwrite — and the setters' error arms are dead
+     (T-18), so it would fail silently. *)
+  if(t.assert(str.contains(st.upsertsql();"ON CONFLICT(key) DO UPDATE");"the setter SQL upserts rather than inserting, so a second write overwrites")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(st.upsertsql();"value_type=excluded.value_type");"and the declared type is updated with the value, not left describing the old one")){pass=pass+1}el{fail=fail+1};
 
-  let store=setstr(store;"app.version";"3.0.1";"general");
-  let v2=getstr(store;"app.version";"");
-  t.asserteq(v2;"3.0.1";"set and get second string");
-  pass=pass+1;
+  (* ── String round trip ──────────────────────────────────────────────────────*)
+  mt st.setstr(store;"app.name";"loke";"general") { $ok:v v; $err:e 0 };
+  if(t.asserteq(st.getstror(store;"app.name";"");"loke";"a string setting round-trips through the settings table")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valuetypeof("app.name");"str";"and is recorded as a str")){pass=pass+1}el{fail=fail+1};
 
-  let store=setint(store;"max.tokens";4096;"limits");
-  let v3=getint(store;"max.tokens";0);
-  t.assert(v3==4096;"set and get int value");
-  pass=pass+1;
+  (* The overwrite, and that it is an overwrite: one row, not two. *)
+  mt st.setstr(store;"app.name";"loke-updated";"general") { $ok:v v; $err:e 0 };
+  if(t.asserteq(st.getstror(store;"app.name";"");"loke-updated";"writing the same key again replaces the value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rowsforkey("app.name")==1;"and leaves one row, not two")){pass=pass+1}el{fail=fail+1};
 
-  let store=setint(store;"timeout.ms";30000;"limits");
-  let v4=getint(store;"timeout.ms";0);
-  t.assert(v4==30000;"set and get second int");
-  pass=pass+1;
+  mt st.setstr(store;"app.version";"3.0.1";"general") { $ok:v v; $err:e 0 };
+  if(t.asserteq(st.getstror(store;"app.version";"");"3.0.1";"a second key is stored independently")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(st.getstror(store;"app.name";"");"loke-updated";"and the first key is unaffected by it")){pass=pass+1}el{fail=fail+1};
 
-  let store=setbool(store;"privacy.enabled";true;"privacy");
-  let v5=getbool(store;"privacy.enabled";false);
-  t.assert(v5==true;"set and get bool true");
-  pass=pass+1;
+  (* ── Integer round trip ─────────────────────────────────────────────────────*)
+  mt st.setint(store;"max.tokens";4096;"limits") { $ok:v v; $err:e 0 };
+  if(t.assert(st.getintor(store;"max.tokens";0)==4096;"an integer setting round-trips")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valuetypeof("max.tokens");"int";"and is recorded as an int")){pass=pass+1}el{fail=fail+1};
 
-  let store=setbool(store;"debug.mode";false;"dev");
-  let v6=getbool(store;"debug.mode";true);
-  t.assert(v6==false;"set and get bool false");
-  pass=pass+1;
+  (* ── Boolean round trip: the kill-switch regression ─────────────────────────
+     Both directions, because the defect was direction-dependent — the failure path
+     returned the error payload, which read as engaged-means-disengaged. A bool written
+     here must come back as written no matter which way it points. *)
+  mt st.setbool(store;"privacy.enabled";true;"privacy") { $ok:v v; $err:e 0 };
+  if(t.assert(st.getboolor(store;"privacy.enabled";false)==true;"a bool written true reads back true even when the default is false")){pass=pass+1}el{fail=fail+1};
+  mt st.setbool(store;"debug.mode";false;"dev") { $ok:v v; $err:e 0 };
+  if(t.assert(st.getboolor(store;"debug.mode";true)==false;"and a bool written false reads back false even when the default is true")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valuetypeof("debug.mode");"bool";"and is recorded as a bool")){pass=pass+1}el{fail=fail+1};
 
-  let v7=getstr(store;"nonexistent.key";"fallback");
-  t.asserteq(v7;"fallback";"default value when string key missing");
-  pass=pass+1;
+  (* Flipping a stored flag is what a kill switch does. *)
+  mt st.setbool(store;"privacy.enabled";false;"privacy") { $ok:v v; $err:e 0 };
+  if(t.assert(st.getboolor(store;"privacy.enabled";true)==false;"flipping a stored flag is visible on the next read")){pass=pass+1}el{fail=fail+1};
 
-  let v8=getint(store;"nonexistent.int";-1);
-  t.assert(v8==-1;"default value when int key missing");
-  pass=pass+1;
+  (* ── The defaults ───────────────────────────────────────────────────────────
+     Applied by a plain `if` on the row count inside the module, which is the whole
+     reason these functions exist rather than being spelled `mt getstr(...)`. *)
+  if(t.asserteq(st.getstror(store;"nonexistent.key";"fallback");"fallback";"a missing string key yields the caller's default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(st.getintor(store;"nonexistent.int";0-1)==0-1;"a missing integer key yields the caller's default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(st.getboolor(store;"nonexistent.bool";true)==true;"a missing bool key yields the caller's default")){pass=pass+1}el{fail=fail+1};
 
-  let v9=getbool(store;"nonexistent.bool";true);
-  t.assert(v9==true;"default value when bool key missing");
-  pass=pass+1;
+  (* ── Delete ─────────────────────────────────────────────────────────────────*)
+  mt st.delete(store;"app.version") { $ok:v v; $err:e 0 };
+  if(t.assert(rowsforkey("app.version")==0;"delete removes the row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(st.getstror(store;"app.version";"gone");"gone";"and the reader falls back to the default afterwards")){pass=pass+1}el{fail=fail+1};
 
-  let store=setstr(store;"app.name";"loke-updated";"general");
-  let v10=getstr(store;"app.name";"");
-  t.asserteq(v10;"loke-updated";"overwrite existing key");
-  pass=pass+1;
+  (* ── The namespace listing ──────────────────────────────────────────────────
+     listns returns a result, so only its first arm is reachable (T-18) — which is why
+     this asserts the contents rather than the absence of an error. *)
+  mt st.listns(store;"limits") {
+    $ok:keys if(t.assert(keys.len==1;"listns returns the one key in the limits namespace")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"listns should not error")){pass=pass+1}el{fail=fail+1}
+  };
 
-  let v11=getstr(store;"app.version";"");
-  t.asserteq(v11;"3.0.1";"other keys unaffected by overwrite");
-  pass=pass+1;
+  (* ── FINDING, NOT A REGRESSION: updated_at is the literal string "now()" ─────
+     Every setter binds "now()" as a PARAMETER. SQL functions are not evaluated inside a
+     bound parameter, so each row's updated_at is the seven characters n-o-w-(-) rather
+     than a timestamp. This is exactly the GA5.1 defect — fixed in audit_log.created_at,
+     and fixed again in schema_migrations.applied_at — still live in
+     core.storage.settings (all four setters) and core.storage.dashboard.tk:97.
+
+     It survives because nothing reads the column yet. Asserted in the honest direction:
+     if this test is red, the defect is present. It is not a test bug and it is not a
+     regression in the test suite. *)
+  if(t.assert(!str.eq(updatedatof("app.name");"now()");"updated_at is a timestamp, not the literal string now() — see GA5.1")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

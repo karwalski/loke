@@ -5,106 +5,123 @@ m=test.storage.db;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
 
-(* --- stub database logic mirroring core.storage.db --- *)
+(* X7.2 — this file used to declare ten stand-ins for core.storage.db and assert against
+   them. Two of the ten are the reason it had to be rewritten rather than extended:
 
-(* simulate opening a store: returns 1 on valid path, 0 on empty *)
-f=openstore(datadir:str):i64{
-  if(str.len(datadir)==0){<0};
-  <1
+     f=applyencryptionkey(hexkey:str):i64{ if(str.len(hexkey)==64){<1}; <0 };
+     f=pragmakey(hexkey:str):str{ <str.concat("PRAGMA key='x''";...) };
+
+   `applyencryptionkey` and its `PRAGMA key` were DELETED from the module under X8.1,
+   because the toolchain links plain SQLite, which accepts that pragma, ignores it, and
+   reports success — a control that encrypted nothing while reporting that it had. The
+   stub test went on asserting that a 64-character key is "accepted" and that the SQL
+   "contains PRAGMA key", and stayed green for the whole life of both the defect and its
+   removal. It was asserting the presence of a control the product had deliberately given
+   up, which is the exact failure mode the encryption claim was retracted to stop.
+
+   What it covers now is the module: the retraction itself (dbencryptionavailable), the
+   currency formatting that exists because two obvious spellings round money wrongly,
+   and the GA5.11 reporting window, whose bug was that every report matched zero rows on
+   every installation. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: a string returned by std.homedir() is truncated when
+     interpolated (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-db-unit")
 };
 
-(* simulate database path construction *)
-f=dbpath(datadir:str):str{
-  <str.concat(datadir;"/loke.db")
+(* The window and schema predicates go through std.db's connection, so a store has to be
+   open before any of them can answer. Without one db.many errors, countquery maps that
+   to 0, and every assertion below would be testing the no-connection path instead. *)
+f=openstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
-
-(* simulate ensuredbkey: returns hex key length (64 chars for 32 bytes) *)
-f=ensuredbkeylength():i64{ <64 };
-
-(* simulate applyencryptionkey: returns 1 on valid hex key, 0 otherwise *)
-f=applyencryptionkey(hexkey:str):i64{
-  if(str.len(hexkey)==64){<1};
-  <0
-};
-
-(* simulate PRAGMA key SQL construction *)
-f=pragmakey(hexkey:str):str{
-  <str.concat("PRAGMA key='x''";str.concat(hexkey;"''"))
-};
-
-(* simulate migration table creation SQL check *)
-f=migrationtablesql():str{
-  <"CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, description TEXT NOT NULL)"
-};
-
-(* simulate exec: returns 1 on non-empty SQL, 0 otherwise *)
-f=exec(sql:str):i64{
-  if(str.len(sql)==0){<0};
-  <1
-};
-
-(* simulate execparams: validates SQL and params *)
-f=execparams(sql:str;paramcount:i64):i64{
-  if(str.len(sql)==0){<0};
-  if(paramcount==0){<0};
-  <1
-};
-
-(* simulate boolval *)
-f=boolval(b:i64):str{
-  if(b==1){<"1"};
-  <"0"
-};
-
-(* simulate closestore: always succeeds *)
-f=closestore():i64{ <1 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test openstore succeeds with valid path *)
-  if(t.assert(openstore("/tmp/loke")==1;"openstore succeeds with valid path")){pass=pass+1}el{fail=fail+1};
+  openstore();
 
-  (* test openstore fails with empty path *)
-  if(t.assert(openstore("")==0;"openstore fails with empty path")){pass=pass+1}el{fail=fail+1};
+  (* ── X8.1: the encryption claim, retracted and readable ─────────────────────
+     Asserted in both directions. If somebody reinstates a PRAGMA key and flips this
+     predicate without linking SQLCipher, this is what says no. *)
+  if(t.assert(!sdb.dbencryptionavailable();"database-level encryption is NOT available: the toolchain links plain SQLite")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sdb.dbencryptionstatus();"NOT encrypted at rest");"and the status string says so rather than implying encryption")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sdb.dbencryptionstatus();"X8.2");"and names the story that will encrypt the mapping table")){pass=pass+1}el{fail=fail+1};
 
-  (* test database path construction *)
-  if(t.assert(str.eq(dbpath("/data");"/data/loke.db");"dbpath appends /loke.db")){pass=pass+1}el{fail=fail+1};
+  (* ── The key read from the environment ──────────────────────────────────────
+     run_tests.sh exports a 64-character LOKE_DB_KEY, and the reason it does is that
+     the keychain read blocks on an authorisation dialog a headless process cannot
+     answer. If this returns empty the suite is one keychain call away from hanging. *)
+  if(t.assert((str.len(sdb.dbkeyfromenv()) as i64)==64;"LOKE_DB_KEY is read from the environment as a 64-character hex key")){pass=pass+1}el{fail=fail+1};
 
-  (* test encryption key length is 64 hex chars for 32 bytes *)
-  if(t.assert(ensuredbkeylength()==64;"encryption key is 64 hex chars")){pass=pass+1}el{fail=fail+1};
+  (* ── Money, formatted from exact hundredths ─────────────────────────────────
+     str.fromfloat(1.50) gives "1.5" and str.fromfloat(0.0) gives "0". A cost column
+     printed either way reads $1.5 and $0 — figures somebody reconciles against an
+     invoice. The two padding cases are the ones both obvious spellings get wrong. *)
+  if(t.asserteq(sdb.moneyfromhundredths(150);"1.50";"150 hundredths formats as 1.50, not 1.5")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.moneyfromhundredths(0);"0.00";"zero formats as 0.00, not 0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.moneyfromhundredths(5);"0.05";"five hundredths keeps its leading zero")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.moneyfromhundredths(100000);"1000.00";"a thousand dollars carries its cents")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.moneyfromhundredths(0-150);"-1.50";"a negative amount keeps one sign, in front")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.pad2(5);"05";"pad2 pads a single digit")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.pad2(10);"10";"and leaves two alone")){pass=pass+1}el{fail=fail+1};
 
-  (* test applyencryptionkey succeeds with correct key length *)
-  if(t.assert(applyencryptionkey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")==1;"64-char hex key accepted")){pass=pass+1}el{fail=fail+1};
+  (* ── boolval: what goes into a bound parameter ──────────────────────────────*)
+  if(t.asserteq(sdb.boolval(true);"1";"true binds as 1")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.boolval(false);"0";"false binds as 0")){pass=pass+1}el{fail=fail+1};
 
-  (* test applyencryptionkey rejects wrong key length *)
-  if(t.assert(applyencryptionkey("tooshort")==0;"short hex key rejected")){pass=pass+1}el{fail=fail+1};
+  (* ── GA5.11: the reporting window ───────────────────────────────────────────
+     A plain struct with an `ok` predicate rather than a result type, because T-18
+     makes the error arm of a user-declared sum dead and a rejected window read as
+     success is the very defect GA5.11 removed. Both directions are asserted here for
+     that reason. *)
+  let oneday=sdb.msrangeof("2026-01-01";"2026-01-01");
+  if(t.assert(oneday.ok;"a single date is a readable window")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(oneday.endms-oneday.startms==86400000;"--start X --end X is a full UTC day, half-open, not an empty instant")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(oneday.startms>0;"and the bound is epoch milliseconds, not a date string")){pass=pass+1}el{fail=fail+1};
 
-  (* test PRAGMA key SQL format *)
-  let pragma=pragmakey("abc123");
-  if(t.assert(str.contains(pragma;"PRAGMA key");"pragma SQL contains PRAGMA key")){pass=pass+1}el{fail=fail+1};
+  let twodays=sdb.msrangeof("2026-01-01";"2026-01-02");
+  if(t.assert(twodays.endms-twodays.startms==172800000;"two dates span two whole days")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(twodays.startms==oneday.startms;"and the start of the window does not move")){pass=pass+1}el{fail=fail+1};
 
-  (* test migration table SQL includes schema_migrations *)
-  if(t.assert(str.contains(migrationtablesql();"schema_migrations");"migration SQL references schema_migrations table")){pass=pass+1}el{fail=fail+1};
+  (* strftime returns NULL for anything it cannot read, which arrives as 0. A bound of
+     0 would quietly match nothing, so it must be refused rather than carried. *)
+  let garbage=sdb.msrangeof("not-a-date";"2026-01-01");
+  if(t.assert(!garbage.ok;"an unreadable start date is refused, not silently treated as the epoch")){pass=pass+1}el{fail=fail+1};
+  let garbageend=sdb.msrangeof("2026-01-01";"the day after tomorrow");
+  if(t.assert(!garbageend.ok;"and so is an unreadable end date")){pass=pass+1}el{fail=fail+1};
+  let reversed=sdb.msrangeof("2026-02-01";"2026-01-01");
+  if(t.assert(!reversed.ok;"a window whose end precedes its start is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.badrange().ok;"badrange is not ok, which is the whole point of it")){pass=pass+1}el{fail=fail+1};
 
-  (* test exec succeeds with valid SQL *)
-  if(t.assert(exec("SELECT 1")==1;"exec succeeds with valid SQL")){pass=pass+1}el{fail=fail+1};
+  (* The clause both bounds are bound into. The CAST is load-bearing: without it SQLite
+     applies the column's TEXT affinity to the integer parameter and converts the
+     PARAMETER to text, which puts the string comparison — and the bug — back. *)
+  if(t.assert(str.contains(sdb.createdatwindowclause();"CAST(created_at AS INTEGER)");"the window clause casts the column, not the parameter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sdb.createdatdescorder();"CAST(created_at AS INTEGER) DESC");"and the ordering casts it too, so rows do not sort lexically")){pass=pass+1}el{fail=fail+1};
 
-  (* test exec fails with empty SQL *)
-  if(t.assert(exec("")==0;"exec fails with empty SQL")){pass=pass+1}el{fail=fail+1};
+  let week=sdb.daysagoms(7);
+  if(t.assert(week>0;"the scorecard window resolves to a real epoch millisecond value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(week<sdb.nowms();"and seven days ago is before now")){pass=pass+1}el{fail=fail+1};
 
-  (* test execparams with valid SQL and params *)
-  if(t.assert(execparams("INSERT INTO kv VALUES (?,?)";2)==1;"execparams succeeds with SQL and params")){pass=pass+1}el{fail=fail+1};
-
-  (* test execparams fails with zero params *)
-  if(t.assert(execparams("INSERT INTO kv VALUES (?)";0)==0;"execparams fails with zero params")){pass=pass+1}el{fail=fail+1};
-
-  (* test boolval conversion *)
-  if(t.assert(str.eq(boolval(1);"1");"boolval true is 1")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(str.eq(boolval(0);"0");"boolval false is 0")){pass=pass+1}el{fail=fail+1};
+  (* ── Schema introspection ───────────────────────────────────────────────────
+     A query against a missing table errors, and most of this codebase maps that to an
+     empty array — which is how a report spent its life showing zero events from a
+     table no migration creates. The predicate has to distinguish the two. *)
+  if(t.assert(sdb.tableexists("schema_migrations");"the migrations table exists after openstore ran them")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.tableexists("no_such_table_xyz");"and a table that does not exist is reported absent, not empty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.triggerexists("no_such_trigger_xyz");"the same for triggers")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

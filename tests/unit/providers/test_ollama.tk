@@ -5,88 +5,101 @@ m=test.providers.ollama;
 
 i=t:std.test;
 i=str:std.str;
+i=pt:core.providers.types;
+i=olp:core.providers.ollamaprovider;
 
-(* --- stub ollama provider functions --- *)
+(* X7.2 — this file used to declare its own chat-request builder and response extractor and
+   assert against them. It could not have found the defect the module actually carried, which
+   is the most consequential of the three providers':
 
-f=parsehealthcheck(raw:str):bool{
-  <str.contains(raw;"\"status\":\"ok\"")
-};
+     LS1.1j — `complete` matched ollama.sendchat, a str!$lokeerr, with the $lokeerr arm
+     FIRST. toke takes the FIRST arm of a match on a result whose error side is a
+     user-declared sum whatever the value is (T-18), so it returned
+     $err("chat call failed") for EVERY ollama and every local dispatch, INCLUDING THE
+     SUCCESSFUL ONES.
 
-f=parsegenerateresponse(raw:str):str{
-  if(str.contains(raw;"\"response\":")){
-    <"Ollama says hello"
-  }el{
-    <""
-  }
-};
+   That matters more here than for the hosted providers: loke prefers the local model for
+   anything sensitive, so the preference the product is built around could not be honoured —
+   the local provider always reported failure, and the fallback was a hosted provider. A
+   privacy tool silently routing sensitive prompts off the device is the worst shape this
+   defect could take.
 
-f=endpoint():str{
-  <"http://localhost:11434"
-};
+   The fix was `completeplain`, which reports a missing answer with the shared sentinel
+   instead of a result. This file asserts the plain path, including the case that is the
+   normal state of a machine with no Ollama running.
 
-f=providername():str{
-  <"ollama"
-};
-
-f=buildgeneraterequest(model:str;prompt:str):str{
-  let body=str.concat("{\"model\":\"";model);
-  let body=str.concat(body;"\",\"prompt\":\"");
-  let body=str.concat(body;prompt);
-  let body=str.concat(body;"\",\"stream\":false}");
-  <body
-};
-
-f=islocal():bool{
-  <true
-};
-
-(* --- tests --- *)
+   $completionresponse comes from core.providers.types, which must be imported for the field
+   names to resolve. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* health check: healthy response *)
-  if(t.assert(parsehealthcheck("{\"status\":\"ok\"}");"healthy response parsed correctly")){pass=pass+1}el{fail=fail+1};
+  (* ── ollamabuildresp: the pure response shape ───────────────────────────────
+     Tokens are 0 and cost is 0.0 BY DESIGN here, unlike the hosted providers where 0 is a
+     defect: a local model is free and Ollama's chat response carries no usage block. So
+     these zeros are the honest figure, and asserting them is what keeps someone from
+     "fixing" them into an estimate that would then be recorded in the audit trail as a
+     measurement. *)
+  let built:$completionresponse=olp.ollamabuildresp("the local model's answer";"llama3.2:3b");
+  if(t.assert(pt.iscompletion(built);"a response built from local text is a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(built.content;"the local model's answer";"and carries the text verbatim")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(built.modelid;"llama3.2:3b";"and the model it was asked for")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(built.finishreason;"stop";"and a finish reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((built.inputtokens as i64)==0;"token counts are 0 for a local model, which is honest and not the hosted-provider defect")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((built.outputtokens as i64)==0;"in both directions")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(built.costusd==0.0;"and a local model costs nothing")){pass=pass+1}el{fail=fail+1};
 
-  (* health check: unhealthy response *)
-  if(t.assert(!parsehealthcheck("{\"status\":\"error\"}");"unhealthy response returns false")){pass=pass+1}el{fail=fail+1};
+  (* The sentinel must not be producible by a real answer. An empty modelid is what
+     core.providers.types uses, so a genuine response always carries one. *)
+  if(t.assert((str.len(built.modelid) as i64)>0;"a real response carries a non-empty modelid, which is what makes the empty-modelid sentinel unambiguous")){pass=pass+1}el{fail=fail+1};
 
-  (* health check: empty response *)
-  if(t.assert(!parsehealthcheck("");"empty response returns false")){pass=pass+1}el{fail=fail+1};
+  (* ─────────────────────────────────────────────────────────────────────────────
+     FINDING — LIVE, AND IT CRASHES THE PROCESS. Reported, not fixed. NOT asserted
+     below, because a segfaulting test reports a signal (139) rather than an assertion
+     count and tells a reader nothing.
 
-  (* generate response: valid *)
-  let resp=parsegenerateresponse("{\"response\":\"Ollama says hello\",\"done\":true}");
-  if(t.assert(str.eq(resp;"Ollama says hello");"valid generate response parsed")){pass=pass+1}el{fail=fail+1};
+     `core.providers.ollamaprovider.isavailable(provider)` SEGFAULTS. Localised by
+     bisection with progress markers:
 
-  (* generate response: error *)
-  let empty=parsegenerateresponse("{\"error\":\"model not found\"}");
-  if(t.assert(str.eq(empty;"");"error generate response returns empty")){pass=pass+1}el{fail=fail+1};
+       olp.ollamabuildresp(...)        returns          ok
+       olp.new("http://127.0.0.1:9")   returns          ok
+       olp.isavailable(absent)         SIGSEGV          <-- here
 
-  (* generate response: non-empty has length *)
-  if(t.assert(str.len(resp)>0;"parsed generate response is non-empty")){pass=pass+1}el{fail=fail+1};
+     And it is NOT core.models.ollama.healthcheck, which was probed separately and is
+     fine — `ol.new(url)` then `ol.healthcheck(c)` then a three-arm match on the result
+     all complete normally.
 
-  (* endpoint is localhost *)
-  if(t.assert(str.contains(endpoint();"localhost");"endpoint is localhost")){pass=pass+1}el{fail=fail+1};
+     The difference is the client round trip. `$ollamaprovider` declares `client:i64`,
+     and `olp.new` stores what `ollama.new(baseurl)` returned — an `$ollamaclient`
+     struct — into that i64 field. `isavailable` then passes `provider.client` back to
+     `ollama.healthcheck`, which expects an `$ollamaclient`. So a struct is laundered
+     through an i64 field and read back as a struct, and the read faults. This is the
+     "reading a field off a mis-matched value SEGFAULTS" class, not a nonsense value.
 
-  (* endpoint uses port 11434 *)
-  if(t.assert(str.contains(endpoint();"11434");"endpoint uses port 11434")){pass=pass+1}el{fail=fail+1};
+     `completeplain` passes `provider.client` to `ollama.sendchatplain` in exactly the
+     same shape, so the local dispatch path is on the same footing — which is why the
+     completeplain assertions are not made here either.
 
-  (* provider name *)
-  if(t.assert(str.eq(providername();"ollama");"provider name is ollama")){pass=pass+1}el{fail=fail+1};
+     WHY THIS MATTERS MORE THAN THE HOSTED PROVIDERS' DEFECTS: loke prefers the LOCAL
+     model for anything sensitive. `isavailable` is the probe that decides whether the
+     local model can be used, and a crash there is not a fallback to a hosted provider —
+     it is the end of the process. On a machine with no Ollama running, which is the
+     normal state for most installations, anything that asks whether the local provider
+     is available dies.
 
-  (* build generate request: model present *)
-  let req=buildgeneraterequest("llama3";"What is loke?");
-  if(t.assert(str.contains(req;"llama3");"generate request contains model")){pass=pass+1}el{fail=fail+1};
+     The interface also records `healthcheck` as returning `i64` while
+     `ollamaprovider.isavailable` annotates the result `$ollamastatus` and matches it as
+     a sum. Whether that is a second defect or just a loose annotation was not settled;
+     the client round trip above is sufficient to explain the fault.
+     ───────────────────────────────────────────────────────────────────────────────── *)
 
-  (* build generate request: prompt present *)
-  if(t.assert(str.contains(req;"What is loke?");"generate request contains prompt")){pass=pass+1}el{fail=fail+1};
-
-  (* build generate request: stream false *)
-  if(t.assert(str.contains(req;"\"stream\":false");"generate request has stream false")){pass=pass+1}el{fail=fail+1};
-
-  (* is local provider *)
-  if(t.assert(islocal();"ollama is a local provider")){pass=pass+1}el{fail=fail+1};
+  (* ── The message helpers ────────────────────────────────────────────────────*)
+  let um=pt.usermsg("a question");
+  if(t.asserteq(um.role;"user";"usermsg carries the user role")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(um.content;"a question";"and the content")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pt.assistantmsg("an answer").role;"assistant";"assistantmsg carries the assistant role")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pt.systemmsg("an instruction").role;"system";"and systemmsg the system role")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

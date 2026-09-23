@@ -5,133 +5,130 @@ m=test.governance.killswitch;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=set:core.storage.settings;
+i=ks:core.governance.killswitch;
 
-t=$killswitchentry{
-  id:str;
-  scope:str;
-  target:str;
-  reason:str;
-  enabledat:i64;
-  enabledby:str
+(* X7.2 — this file used to declare an ENTIRE parallel kill switch: its own
+   $killswitchstate with a `switches` array, its own enableglobal / disableglobal /
+   isglobalactive / enableprovider / isblocked / getfallbackmessage / listactive, and
+   twelve assertions against that machinery. None of it exists in
+   core.governance.killswitch, which has no per-provider scope, no switch list and no
+   fallback message — it is a single global flag in the settings table.
+
+   The stub was not merely useless, it was actively misleading in the worst possible
+   direction. While it asserted
+
+     t.assert(isblocked(st2;"provider";"anthropic");"global blocks anthropic")
+
+   against a struct field it had set two lines earlier, the REAL kill switch reported
+   itself DISENGAGED WHILE ENGAGED. `loadstate` read the flag with `set.getstr` and took
+   its "false" default from an `$err:` arm; `engage` writes the flag with `set.setbool`,
+   so the row's value_type is "bool", getstr refuses it as a type mismatch — and T-18
+   means the $err arm never runs, so the caller bound the ERROR PAYLOAD as if it were the
+   string. str.eq(payload;"true") was false. The control that blocks all LLM traffic did
+   nothing, silently, and this test file was green for the whole of it.
+
+   That is the regression this file now guards, and it is why the engage-then-read
+   assertion below is the most important line in it: it goes through the real settings
+   table, with the real value_type, exactly as production does. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation — std.homedir()'s return is truncated when
+     interpolated (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-kill-switch")
 };
 
-t=$fallbackmessage{
-  scope:str;
-  target:str;
-  message:str
-};
-
-t=$killswitchstate{
-  globalactive:bool;
-  switches:@$killswitchentry
-};
-
-f=newstate():$killswitchstate{
-  <$killswitchstate{globalactive:false;switches:@()}
-};
-
-f=enableglobal(st:$killswitchstate;reason:str;by:str):$killswitchstate{
-  let entry=$killswitchentry{
-    id:str.concat("ks-g-";str.fromint(st.switches.len));
-    scope:"global";
-    target:"*";
-    reason:reason;
-    enabledat:0;
-    enabledby:by
-  };
-  <$killswitchstate{globalactive:true;switches:st.switches.push(entry)}
-};
-
-f=disableglobal(st:$killswitchstate):$killswitchstate{
-  <$killswitchstate{globalactive:false;switches:st.switches}
-};
-
-f=isglobalactive(st:$killswitchstate):bool{
-  <st.globalactive
-};
-
-f=enableprovider(st:$killswitchstate;provider:str;reason:str;by:str):$killswitchstate{
-  let entry=$killswitchentry{
-    id:str.concat("ks-p-";str.fromint(st.switches.len));
-    scope:"provider";
-    target:provider;
-    reason:reason;
-    enabledat:0;
-    enabledby:by
-  };
-  <$killswitchstate{globalactive:st.globalactive;switches:st.switches.push(entry)}
-};
-
-f=isblocked(st:$killswitchstate;scope:str;target:str):bool{
-  if(st.globalactive){ <true }el{};
-  let blocked=mut.false;
-  lp(let ii=0;ii<st.switches.len;ii=ii+1){
-    let entry=st.switches.get(ii);
-    if(str.eq(entry.scope;scope)){
-      if(str.eq(entry.target;target)){
-        blocked=true
-      }el{}
-    }el{}
-  };
-  <blocked
-};
-
-f=getfallbackmessage(st:$killswitchstate;scope:str;target:str):$fallbackmessage{
-  let detail=mut."This provider/feature is temporarily disabled. ";
-  if(st.globalactive){
-    detail="A global kill switch is active. "
-  }el{};
-  let msg=str.concat("AI services are currently disabled. ";str.concat(detail;"Please try again later or contact your administrator."));
-  <$fallbackmessage{scope:scope;target:target;message:msg}
-};
-
-f=listactive(st:$killswitchstate):@$killswitchentry{
-  <st.switches
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file per run: the flag is persistent state and a leftover engaged
+     switch from a previous run would make the first assertion pass for the wrong
+     reason. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let st=newstate();
-  t.assert(!isglobalactive(st);"fresh state global is inactive");
-  if(!isglobalactive(st)){ pass=pass+1 }el{ fail=fail+1 };
+  let store=openfreshstore();
 
-  let st2=enableglobal(st;"compliance breach";"admin");
-  t.assert(isglobalactive(st2);"global active after enable");
-  if(isglobalactive(st2)){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── The setting key ─────────────────────────────────────────────────────────
+     Spelled out, because it is the contract between this module and the settings table
+     and anything else that reads the flag directly. A silent rename makes an engaged
+     switch invisible. *)
+  if(t.asserteq(ks.settingkey();"governance.kill_switch.engaged";"the engaged flag lives under a known settings key")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(isblocked(st2;"provider";"anthropic");"global blocks anthropic");
-  if(isblocked(st2;"provider";"anthropic")){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── Disengaged by default ───────────────────────────────────────────────────
+     A kill switch that defaults to engaged is an outage; one whose default cannot be
+     read is the defect above. On a database with no row at all, the answer must be a
+     definite false. *)
+  if(t.assert(!ks.isengaged(store);"a fresh installation is NOT engaged")){pass=pass+1}el{fail=fail+1};
+  let fresh=ks.loadstate(store);
+  if(t.assert(!fresh.engaged;"loadstate agrees on a database with no row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fresh.engagedat==0;"and carries no engagement time")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(fresh.reason;"";"and no reason")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(isblocked(st2;"provider";"ollama");"global blocks ollama too");
-  if(isblocked(st2;"provider";"ollama")){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── THE REGRESSION: engage, then read it back ───────────────────────────────
+     Written with setbool and read with getboolor, through the real settings table. If
+     the reader and the writer ever disagree about the value type again, this is the
+     assertion that goes red — and it is the only one in the suite that would. *)
+  if(t.assert(ks.engage(store;"compliance breach";0 as i32);"engage reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isengaged(store);"AN ENGAGED KILL SWITCH READS BACK AS ENGAGED — the T-18 defect that made it report itself disengaged")){pass=pass+1}el{fail=fail+1};
 
-  let st3=disableglobal(st2);
-  t.assert(!isglobalactive(st3);"global inactive after disable");
-  if(!isglobalactive(st3)){ pass=pass+1 }el{ fail=fail+1 };
+  let engaged=ks.loadstate(store);
+  if(t.assert(engaged.engaged;"loadstate agrees")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(engaged.reason;"compliance breach";"the reason is stored verbatim, because it is what an operator is shown")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(engaged.engagedby;"system";"and who engaged it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(engaged.engagedat>0;"and when, as a real timestamp")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(engaged.autoreleaseat==0;"with no auto-release when none was asked for — zero must not mean 'release immediately'")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(!isblocked(st3;"provider";"anthropic");"anthropic unblocked after global disable");
-  if(!isblocked(st3;"provider";"anthropic")){ pass=pass+1 }el{ fail=fail+1 };
+  (* The widget an operator reads. Its two states must not be confusable. *)
+  if(t.assert(str.contains(ks.formatwidget(engaged);"ENGAGED");"the widget says ENGAGED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ks.formatwidget(engaged);"All LLM traffic blocked");"and states the consequence")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ks.formatwidget(engaged);"compliance breach");"and shows the reason it was given")){pass=pass+1}el{fail=fail+1};
 
-  let st4=enableprovider(st3;"anthropic";"rate limit exceeded";"ops");
-  t.assert(isblocked(st4;"provider";"anthropic");"anthropic blocked per-provider");
-  if(isblocked(st4;"provider";"anthropic")){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── Release ─────────────────────────────────────────────────────────────────*)
+  if(t.assert(ks.release(store);"release reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.isengaged(store);"and the switch is disengaged afterwards")){pass=pass+1}el{fail=fail+1};
+  let released=ks.loadstate(store);
+  if(t.asserteq(released.reason;"";"the reason is cleared, not left describing a switch that is no longer engaged")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(released.engagedat==0;"and so is the engagement time")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ks.formatwidget(released);"DISENGAGED");"and the widget says DISENGAGED")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(!isblocked(st4;"provider";"ollama");"ollama not blocked when only anthropic blocked");
-  if(!isblocked(st4;"provider";"ollama")){ pass=pass+1 }el{ fail=fail+1 };
+  (* Re-engaging after a release has to work. A switch that can only be used once is
+     worse than none, because the second incident is the one it fails on. *)
+  ks.engage(store;"second incident";0 as i32);
+  if(t.assert(ks.isengaged(store);"the switch can be engaged again after a release")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ks.loadstate(store).reason;"second incident";"with the new reason, not the old one")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
 
-  let active=listactive(st4);
-  t.assert(active.len>0;"list active non-empty after provider enable");
-  if(active.len>0){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── Auto-release ────────────────────────────────────────────────────────────
+     A timed engagement must NOT release early. This is the direction that matters: an
+     auto-release that fires immediately turns a 30-minute block into no block at all. *)
+  ks.engage(store;"timed incident";30 as i32);
+  let timed=ks.loadstate(store);
+  if(t.assert(timed.autoreleaseat>timed.engagedat;"a timed engagement sets an auto-release in the FUTURE")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(timed.autoreleaseat-timed.engagedat==1800;"thirty minutes is 1800 seconds, converted rather than stored as minutes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.checkautorelease(store);"checkautorelease does NOT fire before the deadline")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isengaged(store);"and the switch is still engaged")){pass=pass+1}el{fail=fail+1};
 
-  let fb=getfallbackmessage(st4;"provider";"anthropic");
-  t.assert(str.len(fb.message)>0;"fallback message is non-empty");
-  if(str.len(fb.message)>0){ pass=pass+1 }el{ fail=fail+1 };
-
-  let fbglobal=getfallbackmessage(st2;"provider";"anthropic");
-  t.assert(str.contains(fbglobal.message;"global");"global fallback mentions global");
-  if(str.contains(fbglobal.message;"global")){ pass=pass+1 }el{ fail=fail+1 };
+  (* Now the other direction, with a deadline in the past. The settings row is written
+     directly rather than through engage(), because engage only accepts a positive number
+     of minutes and there is no way to ask it for a deadline that has already passed —
+     so the elapsed case is unreachable through the module's own API and would otherwise
+     go untested. T-18: setint returns a result, so its arms are matched only to satisfy
+     the type; the write itself is what matters. *)
+  mt set.setint(store;"governance.kill_switch.auto_release_at";1000;"governance") { $ok:v v; $err:e 0 };
+  if(t.assert(ks.checkautorelease(store);"an auto-release deadline in the past DOES fire")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.isengaged(store);"and the switch is released by it, without anyone calling release")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

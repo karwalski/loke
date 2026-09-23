@@ -5,90 +5,115 @@ m=test.privacy.content;
 
 i=t:std.test;
 i=str:std.str;
+i=c:core.privacy.content;
 
-(* --- stub content type detection --- *)
+(* X7.2 — this file used to declare its own extractor and scorer and assert against them.
+   It now imports core.privacy.content.
 
-f=detecttype(text:str):str{
-  if(str.len(text)==0){
-    <"plain"
-  }el{
-    if(str.contains(text;"<html>")){
-      <"html"
-    }el{
-      if(str.startswith(text;"{")){
-        <"json"
-      }el{
-        if(str.startswith(text;"[")){
-          <"json"
-        }el{
-          if(str.startswith(text;"#")){
-            <"markdown"
-          }el{
-            (* CSV heuristic: contains comma and newline *)
-            if(str.contains(text;",") && str.contains(text;"\n")){
-              <"csv"
-            }el{
-              <"plain"
-            }
-          }
-        }
-      }
-    }
-  }
+   Why this module matters despite having no importer today (see the note at the end):
+   extract() decides WHAT TEXT of a web page is handed to the privacy pipeline and then to
+   a model. Anything it fails to strip is forwarded; anything it strips is never scanned.
+   Both directions are privacy-relevant, and the script-stripping assertion below is the
+   one that would catch the worse of the two — a page's inline <script> routinely carries
+   session tokens, API keys and embedded JSON of the logged-in user, none of which is
+   visible text and all of which would go to the provider verbatim. *)
+
+f=samplehtml():str{
+  <"<html><head><title>  Checkout — Example Store  </title>
+<style>body{color:#fff}.secretcss{x:1}</style>
+<script>var apiToken=\"sk-ant-do-not-send-this\";</script>
+</head><body>
+<h1>Complete your payment</h1>
+<p>Enter your credit card details to finish.</p>
+<a href=\"/cart\">Cart</a> <a href=\"/help\">Help</a> <a href=\"/terms\">Terms</a>
+<form action=\"/pay\"><input type=\"text\" name=\"card\"><input type=\"password\" name=\"pw\"></form>
+</body></html>"
 };
 
-(* --- tests --- *)
+f=plainhtml():str{
+  <"<html><head><title>Weather</title></head><body><p>It is sunny today.</p></body></html>"
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. CSV detected *)
-  let csvtext="name,age\nAlice,30\nBob,25";
-  if(t.assert(str.eq(detecttype(csvtext);"csv");"csv detected with commas and newlines")){pass=pass+1}el{fail=fail+1};
+  let page=c.extract(samplehtml();"https://shop.example.com/checkout/step2");
 
-  (* 2. JSON detected with opening brace *)
-  let jsonobj="{\"key\":\"value\"}";
-  if(t.assert(str.eq(detecttype(jsonobj);"json");"json detected with opening brace")){pass=pass+1}el{fail=fail+1};
+  (* ── The title ───────────────────────────────────────────────────────────────*)
+  if(t.asserteq(page.title;"Checkout — Example Store";"the title is extracted and its surrounding whitespace stripped")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(c.extract("<html><body>no title here</body></html>";"https://x.test/").title;"";"a page with no title yields an empty title rather than a fragment of markup")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. JSON detected with opening bracket *)
-  let jsonarr="[1,2,3]";
-  if(t.assert(str.eq(detecttype(jsonarr);"json");"json detected with opening bracket")){pass=pass+1}el{fail=fail+1};
+  (* ── THE ASSERTION THIS FILE EXISTS FOR ──────────────────────────────────────
+     Script and style bodies must not survive into .text. An inline <script> on a real
+     page carries session tokens and embedded user JSON; it is not visible text, so a
+     user reviewing what loke is about to send would never see it, and it would be
+     forwarded verbatim. *)
+  if(t.assert(!str.contains(page.text;"sk-ant-do-not-send-this");"THE SCRIPT BODY IS NOT IN THE EXTRACTED TEXT — an inline script's API token must never be forwarded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(page.text;"apiToken");"nor the variable that held it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(page.text;"secretcss");"and a style body is stripped too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(page.text;"<");"no markup survives into the text at all")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(page.text;"href");"including attribute names, which carry paths a user did not choose to share")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. Markdown detected *)
-  let mdtext="# Heading\nSome content here";
-  if(t.assert(str.eq(detecttype(mdtext);"markdown");"markdown detected with hash prefix")){pass=pass+1}el{fail=fail+1};
+  (* The control: the visible prose DOES survive, so the five assertions above are about
+     stripping and not about an empty result. *)
+  if(t.assert(str.contains(page.text;"Complete your payment");"the visible heading survives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(page.text;"credit card details");"and the visible paragraph")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. Plain text default *)
-  let plain="Just some ordinary text";
-  if(t.assert(str.eq(detecttype(plain);"plain");"plain text is default type")){pass=pass+1}el{fail=fail+1};
+  (* ── Structure counts ────────────────────────────────────────────────────────*)
+  if(t.assert(page.linkcount==3 as i32;"the three links are counted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(page.formcount==1 as i32;"and the one form")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.extract(plainhtml();"https://x.test/").linkcount==0 as i32;"a page with no links counts none")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. HTML detected *)
-  let htmltext="<html><body>Hello</body></html>";
-  if(t.assert(str.eq(detecttype(htmltext);"html");"html detected with html tag")){pass=pass+1}el{fail=fail+1};
+  (* ── The two flags that drive the score ──────────────────────────────────────
+     Each has several triggers, and a page is flagged if ANY fires. Asserted trigger by
+     trigger, because a page that quietly stopped being flagged as a payment page would
+     score twenty points higher for no reason a reader could see. *)
+  if(t.assert(page.haslogin;"a password input marks the page as a login page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.extract("<html><body>Please sign in to continue</body></html>";"https://x.test/").haslogin;"and so does the phrase sign in, with no password field")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.extract("<html><body>You must log in first</body></html>";"https://x.test/").haslogin;"and the phrase log in")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!c.extract(plainhtml();"https://x.test/").haslogin;"while an ordinary page is not a login page")){pass=pass+1}el{fail=fail+1};
 
-  (* 7. Empty string returns valid result *)
-  let emptyresult=detecttype("");
-  if(t.assert(str.len(emptyresult)>0;"empty string returns non-empty type")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(emptyresult;"plain");"empty string returns plain")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(page.haspayment;"credit card marks the page as a payment page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.extract("<html><body>Proceed to checkout</body></html>";"https://x.test/").haspayment;"and so does checkout")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.extract("<html><body>Update your billing address</body></html>";"https://x.test/").haspayment;"and billing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.extract("<html><body>Enter the CVV</body></html>";"https://x.test/").haspayment;"and CVV, case-insensitively")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!c.extract(plainhtml();"https://x.test/").haspayment;"while an ordinary page is not a payment page")){pass=pass+1}el{fail=fail+1};
 
-  (* 8. Very long string handled -- build 1000+ char string *)
-  let chunk="abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnop";
-  let long=str.concat(chunk;chunk);
-  let long=str.concat(long;long);
-  let long=str.concat(long;long);
-  let long=str.concat(long;long);
-  let long=str.concat(long;long);
-  if(t.assert(str.len(long)>1000;"built string exceeds 1000 chars")){pass=pass+1}el{fail=fail+1};
-  let longresult=detecttype(long);
-  if(t.assert(str.eq(longresult;"plain");"very long plain string detected as plain")){pass=pass+1}el{fail=fail+1};
+  (* ── The score ───────────────────────────────────────────────────────────────
+     100 is a page with nothing sensitive about it; each flag costs twenty. The score is
+     what a user sees before deciding to share a page, so the deductions have to be real
+     and the bounds have to hold. *)
+  if(t.assert(c.privacyscore(c.extract(plainhtml();"https://x.test/"))==100 as i32;"an ordinary page scores 100")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.privacyscore(page)<100 as i32;"a login-and-payment page scores lower")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.privacyscore(page)==60 as i32;"by exactly forty: twenty for the login, twenty for the payment")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.privacyscore(c.extract("<html><body>Please sign in</body></html>";"https://x.test/"))==80 as i32;"a login page alone costs twenty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.privacyscore(page)>=0 as i32;"the score never goes negative, however many flags fire")){pass=pass+1}el{fail=fail+1};
 
-  (* 9. HTML embedded in middle of text *)
-  let embeddedhtml="Some text <html> more text";
-  if(t.assert(str.eq(detecttype(embeddedhtml);"html");"html tag in middle still detected")){pass=pass+1}el{fail=fail+1};
+  (* The form deduction is INTEGER division by ten, so it is coarse by design: a page with
+     nine forms loses nothing and a page with ten loses five. Recorded because the
+     granularity is invisible from the formula's intent and somebody tuning it needs to
+     know it is a step function, not a slope. *)
+  if(t.assert(c.privacyscore(page)==60 as i32;"one form deducts NOTHING — the form penalty is (formcount/10)*5 in integer arithmetic, so it is a step at every tenth form, not a slope")){pass=pass+1}el{fail=fail+1};
 
-  (* 10. Single char hash is markdown *)
-  if(t.assert(str.eq(detecttype("#");"markdown");"single hash is markdown")){pass=pass+1}el{fail=fail+1};
+  (* ── The summary a user reads ────────────────────────────────────────────────*)
+  let s=c.summary(page);
+  if(t.assert(str.contains(s;"shop.example.com");"the summary names the host, taken from the URL rather than from the page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(s;"/checkout/step2");"and NOT the path, which is itself information about what the user was doing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(s;"links");"it reports the link count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(s;"[login]");"and flags the login page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(s;"[payment]");"and the payment page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(c.summary(c.extract(plainhtml();"https://x.test/"));"[login]");"while an ordinary page carries no flag — warnings must be earned")){pass=pass+1}el{fail=fail+1};
+
+  (* A URL with no path still yields a host rather than an empty summary. *)
+  if(t.assert((str.len(c.summary(c.extract(plainhtml();"https://x.test"))) as i64)>0;"a URL with no trailing path still summarises")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Scope note ──────────────────────────────────────────────────────────────
+     core.privacy.content has NO importer anywhere in the repository. De-stubbing this
+     file makes the module EXERCISED; it does not make it USED. The browser extractor in
+     src/browser/workspace/extractor.tk is a separate implementation. That is worth
+     knowing before anyone reads a passing test here as evidence that page extraction is
+     covered on the live path. *)
 
   <fail
 };

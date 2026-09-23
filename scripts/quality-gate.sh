@@ -138,6 +138,17 @@ step_checks() {
     fi
   fi
 
+  # X7.3 — a test that re-declares its subject is a gate failure, PER DIRECTORY.
+  #
+  # Turning this on repo-wide only after X7.2 finishes would leave it unenforced for
+  # exactly the period in which the stub count could grow back. The script carries an
+  # ENFORCED list; a directory joins it the moment it reaches zero and never leaves.
+  # scripts/known-defects.txt is the shrinking allowlist, story ID required.
+  if [[ -f ./scripts/check_test_stubs.py ]]; then
+    echo "  enforced test directories exercise production code"
+    python3 ./scripts/check_test_stubs.py --check || failed=1
+  fi
+
   if [[ -f tests/fixtures/pii-corpus/generate.py ]]; then
     echo "  PII corpus spans verify"
     python3 tests/fixtures/pii-corpus/generate.py --verify >/dev/null \

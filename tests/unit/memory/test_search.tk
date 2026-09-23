@@ -2,102 +2,286 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=test.memory.search;
+
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=memtypes:core.memory.types;
+i=se:core.memory.search;
 
-t=$searchresult{
-  drawerid:str;
-  contentexcerpt:str;
-  relevancescore:f64;
-  createdat:str
+(* X7.2 — this file used to declare a $searchindex with its own addentry, scorematch and
+   search, and assert against the copy. Its scoring was a word-overlap ratio returning
+   1.0 on an exact substring match. The real core.memory.search does none of that: it
+   extracts keywords, queries a memory_index table with LIKE, SUMs the per-keyword weights
+   per drawer, and joins back to memory_drawers for the excerpt. Ten assertions passed
+   against a design the product does not have.
+
+   What it covers now is the real module, in two halves.
+
+   THE PURE HALF — stopwords, isstopword, extractkeywords, firstn — needs no database and
+   is the part that decides WHICH WORDS ARE SEARCHED FOR. A keyword silently dropped here
+   makes a memory unfindable, which the user experiences as the palace having forgotten
+   something it still holds.
+
+   THE SQL HALF needs memory_index and memory_drawers, and NOTHING IN THE PRODUCT CREATES
+   THEM — see tests/unit/memory/test_palace_drawers.tk for that measurement (M1.7), and
+   note that core.memory.palace.open segfaults, so the module's own opener cannot make
+   them either. So this file CREATES THE TWO TABLES ITSELF, with the columns the module's
+   queries name, and exercises search against real rows. That is deliberate and it is
+   labelled: it tests the module's QUERY AND SCORING behaviour, which is real and worth
+   protecting, and it does NOT show that the product's schema exists. Those are two
+   different claims and only the second is M1.7's.
+
+   indexdrawer is NOT called. Its signature is indexdrawer(palace:i64;drawer:i64) and its
+   body reads drawer.content and drawer.id — fields off a value declared i64, which
+   segfaults rather than returning nonsense. It also returns from inside its loop over
+   keywords (`<mt db.exec(...)` on the first iteration), so even with the signature fixed
+   it would index one keyword per drawer and stop. Reported, not fixed. The rows below are
+   inserted with SQL for that reason. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-memory-search")
 };
 
-t=$searchindex{
-  entries:@$indexentry;
-  count:i64
-};
-
-t=$indexentry{
-  drawerid:str;
-  content:str;
-  keywords:str
-};
-
-f=newindex():$searchindex{
-  <$searchindex{entries:@();count:0}
-};
-
-f=addentry(idx:$searchindex;e:$indexentry):$searchindex{
-  let es=idx.entries;
-  let es=str.arraypush(es;e);
-  <$searchindex{entries:es;count:idx.count+1}
-};
-
-f=scorematch(content:str;query:str):f64{
-  if(str.contains(content;query)){<1.0}el{
-    let words=str.split(query;" ");
-    let matched=mut.0.0;
-    let total=mut.0.0;
-    lp(let i=0;i<words.len;i=i+1){
-      let w=words.get(i);
-      total=total+1.0;
-      if(str.contains(content;w)){matched=matched+1.0}el{}
-    };
-    if(total>0.0){<matched/total}el{<0.0}
+f=exec(sql:str):bool{
+  (* db.exec is a STDLIB result and its $ok arm is written FIRST, so it discriminates:
+     false here means the database refused the statement. Writing the arms the other way
+     round silently swaps the two branches — see tests/unit/mcp/test_protocol.tk. *)
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
   }
 };
 
-f=search(idx:$searchindex;query:str):@$searchresult{
-  let results=mut.@($searchresult);
-  if(str.eq(query;"")){<results}el{};
-  lp(let i=0;i<idx.count;i=i+1){
-    let e=idx.entries.get(i);
-    let score=scorematch(e.content;query);
-    if(score>0.0){
-      let r=$searchresult{drawerid:e.drawerid;contentexcerpt:e.content;relevancescore:score;createdat:""};
-      results=str.arraypush(results;r)
+f=execp(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+(* The two tables core.memory.search queries, with the columns it names. Created here
+   because the product does not create them (M1.7). *)
+f=creatememorytables():bool{
+  exec("CREATE TABLE IF NOT EXISTS memory_drawers (id TEXT PRIMARY KEY, wing TEXT NOT NULL, hall TEXT NOT NULL, room TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)");
+  <exec("CREATE TABLE IF NOT EXISTS memory_index (drawer_id TEXT NOT NULL, keyword TEXT NOT NULL, weight REAL DEFAULT 1.0, PRIMARY KEY (drawer_id, keyword))")
+};
+
+f=adddrawer(id:str;wing:str;content:str):bool{
+  <execp("INSERT OR REPLACE INTO memory_drawers (id,wing,hall,room,role,content,created_at) VALUES (?,?,'Hall','Room','user',?,'1790000000')";@(id;wing;content))
+};
+
+f=addkeyword(drawerid:str;keyword:str):bool{
+  <execp("INSERT OR REPLACE INTO memory_index (drawer_id,keyword,weight) VALUES (?,?,1.0)";@(drawerid;keyword))
+};
+
+f=haskeyword(kws:@str;wanted:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<kws.len;i=i+1){
+    if(str.eq(kws.get(i);wanted)){
+      found=true
     }el{}
   };
-  <results
+  <found
+};
+
+f=resultfor(rs:@$searchresult;drawerid:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$searchresult=rs.get(i);
+    if(str.eq(r.drawerid;drawerid)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+f=excerptof(rs:@$searchresult):str{
+  if(rs.len>0){
+    let r:$searchresult=rs.get(0);
+    <r.contentexcerpt
+  }el{
+    <""
+  }
+};
+
+f=wingof(rs:@$searchresult):str{
+  if(rs.len>0){
+    let r:$searchresult=rs.get(0);
+    <r.location.wing
+  }el{
+    <""
+  }
+};
+
+(* The highest-scoring result, found by comparing scores rather than trusting the order:
+   the module does not sort, so "top" has to mean "highest score" here. *)
+f=topis(rs:@$searchresult;drawerid:str):bool{
+  if(rs.len==0){
+    <false
+  }el{};
+  let besti=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let a:$searchresult=rs.get(i);
+    let b:$searchresult=rs.get(besti);
+    if(a.relevancescore>b.relevancescore){
+      besti=i
+    }el{}
+  };
+  let best:$searchresult=rs.get(besti);
+  <str.eq(best.drawerid;drawerid)
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let idx=newindex();
-  let idx=addentry(idx;$indexentry{drawerid:"d-001";content:"loke privacy proxy architecture design";keywords:"loke privacy proxy"});
-  let idx=addentry(idx;$indexentry{drawerid:"d-002";content:"sprint planning for next quarter";keywords:"sprint planning"});
-  let idx=addentry(idx;$indexentry{drawerid:"d-003";content:"privacy filter implementation details";keywords:"privacy filter"});
-  let idx=addentry(idx;$indexentry{drawerid:"d-004";content:"running schedule and fitness goals";keywords:"fitness running"});
+  (* ── The stopword list ───────────────────────────────────────────────────────*)
+  let stops=se.stopwords();
+  if(t.assert(stops.len>40;"the stopword list is populated — an empty one would make every word a keyword")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(se.isstopword("the");"\"the\" is a stopword")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(se.isstopword("would");"and so is \"would\" — it is long enough to survive the length filter, so the list has to catch it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(se.isstopword("should");"and \"should\"")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!se.isstopword("privacy");"\"privacy\" is NOT a stopword")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!se.isstopword("");"and neither is the empty string, which is not in the list")){pass=pass+1}el{fail=fail+1};
 
-  let r1=search(idx;"privacy");
-  if(t.assert(r1.len==2;"keyword privacy returns 2 results")){pass=pass+1}el{fail=fail+1};
+  (* ── Keyword extraction ──────────────────────────────────────────────────────
+     Two filters run here: words of 3 characters or fewer are dropped, and stopwords are
+     dropped. Both are asserted, in both directions. *)
+  let kws=se.extractkeywords("The privacy filter should redact emails");
+  if(t.assert(haskeyword(kws;"privacy");"a content word is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haskeyword(kws;"filter");"and another")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haskeyword(kws;"redact");"and another")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haskeyword(kws;"emails");"and another")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!haskeyword(kws;"the");"\"The\" is dropped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!haskeyword(kws;"should");"and \"should\" is dropped as a stopword even though it is six characters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(kws.len==4;"so six words yield four keywords")){pass=pass+1}el{fail=fail+1};
 
-  let r2=search(idx;"");
-  if(t.assert(r2.len==0;"empty query returns empty results")){pass=pass+1}el{fail=fail+1};
+  (* Case is folded before matching, or a capitalised word would miss both filters and
+     then fail to match a lower-cased index. *)
+  if(t.assert(haskeyword(se.extractkeywords("PRIVACY Filter");"privacy");"extraction LOWERCASES: a capitalised word becomes a lower-case keyword")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!haskeyword(se.extractkeywords("PRIVACY Filter");"PRIVACY");"and the original case is not kept")){pass=pass+1}el{fail=fail+1};
 
-  let r3=search(idx;"nonexistent topic xyz");
-  if(t.assert(r3.len==0;"irrelevant query returns no results")){pass=pass+1}el{fail=fail+1};
+  (* The length filter is >3, so a three-letter word goes and a four-letter one stays.
+     This is the boundary, and an off-by-one here drops or keeps a whole class of words. *)
+  if(t.assert(!haskeyword(se.extractkeywords("dog cats");"dog");"a three-character word is dropped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haskeyword(se.extractkeywords("dog cats");"cats");"a four-character word is kept")){pass=pass+1}el{fail=fail+1};
 
-  let r4=search(idx;"loke privacy proxy architecture design");
-  if(t.assert(r4.len>0;"exact content match returns results")){pass=pass+1}el{fail=fail+1};
+  (* A query of nothing but stopwords yields nothing, which is what makes search return
+     an empty result rather than every drawer. *)
+  if(t.assert(se.extractkeywords("the and but or").len==0;"a query of nothing but stopwords yields no keywords")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(se.extractkeywords("").len==0;"and neither does an empty query")){pass=pass+1}el{fail=fail+1};
 
-  let first=r4.get(0);
-  if(t.assert(first.relevancescore==1.0;"exact match has score 1.0")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(first.drawerid;"d-001");"exact match returns correct drawer id")){pass=pass+1}el{fail=fail+1};
+  (* ── firstn, the limit ───────────────────────────────────────────────────────
+     It must CLAMP rather than read past the end: a caller asking for 10 of 2 must get 2,
+     not a crash and not two entries plus rubbish. *)
+  let three=@($searchscore{drawerid:"d-1";score:3.0};$searchscore{drawerid:"d-2";score:2.0};$searchscore{drawerid:"d-3";score:1.0});
+  if(t.assert(se.firstn(three;2).len==2;"firstn takes the first n")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(se.firstn(three;10).len==3;"and CLAMPS when n exceeds the length rather than reading past the end")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(se.firstn(three;0).len==0;"and returns nothing for n=0")){pass=pass+1}el{fail=fail+1};
+  let firsttwo=se.firstn(three;2);
+  let head:$searchscore=firsttwo.get(0);
+  if(t.asserteq(head.drawerid;"d-1";"and preserves order — it is the FIRST n, not an arbitrary n")){pass=pass+1}el{fail=fail+1};
 
-  let r5=search(idx;"sprint");
-  if(t.assert(r5.len==1;"keyword sprint returns 1 result")){pass=pass+1}el{fail=fail+1};
-  let sprintresult=r5.get(0);
-  if(t.assert(str.eq(sprintresult.drawerid;"d-002");"sprint search returns d-002")){pass=pass+1}el{fail=fail+1};
+  (* ── The SQL half, against tables this file creates ──────────────────────────*)
+  openfreshstore();
+  if(t.assert(creatememorytables();"the test's own memory_index and memory_drawers were created")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("memory_index");"and memory_index is really there, so the queries below are not failing into an empty array")){pass=pass+1}el{fail=fail+1};
 
-  let r6=search(idx;"loke");
-  if(t.assert(r6.len==1;"keyword loke returns 1 result")){pass=pass+1}el{fail=fail+1};
+  adddrawer("d-001";"work";"loke privacy proxy architecture design");
+  adddrawer("d-002";"work";"sprint planning for next quarter");
+  adddrawer("d-003";"personal";"privacy filter implementation details");
+  addkeyword("d-001";"privacy");
+  addkeyword("d-001";"proxy");
+  addkeyword("d-001";"architecture");
+  addkeyword("d-002";"sprint");
+  addkeyword("d-002";"planning");
+  addkeyword("d-003";"privacy");
+  addkeyword("d-003";"filter");
 
-  let r7=search(idx;"fitness");
-  let fitresult=r7.get(0);
-  if(t.assert(str.contains(fitresult.contentexcerpt;"fitness");"result excerpt contains search term")){pass=pass+1}el{fail=fail+1};
+  (* $ok arm FIRST on every result match below: the arms are positional, so the other
+     order silently swaps the branches. *)
+  mt se.search(0;"privacy";10 as u32) {
+    $ok:rs if(t.assert(rs.len==2;"a keyword held by two drawers returns both")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error against a real index")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.search(0;"privacy";10 as u32) {
+    $ok:rs if(t.assert(resultfor(rs;"d-001");"and one of them is the drawer that holds it")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.search(0;"privacy";10 as u32) {
+    $ok:rs if(t.assert(resultfor(rs;"d-003");"and so is the other")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* The excerpt comes from memory_drawers, which means the JOIN back ran. Without it a
+     result carries an id and no content, which is what the user sees as a blank hit. *)
+  mt se.search(0;"sprint";10 as u32) {
+    $ok:rs if(t.assert(rs.len==1;"a keyword held by one drawer returns one result")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.search(0;"sprint";10 as u32) {
+    $ok:rs if(t.assert(str.contains(excerptof(rs);"sprint planning");"the result carries the drawer's CONTENT, so the join back to memory_drawers ran")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.search(0;"sprint";10 as u32) {
+    $ok:rs if(t.assert(str.len(wingof(rs))>0;"and its palace location, which is how the UI shows where a hit lives")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* Multi-keyword relevance must ACCUMULATE. This is the LS1.1a defect: the old
+     searchaccumulatescores tried to mutate the caller's array and to mutate an element in
+     place, so a drawer matching two keywords scored the same as one matching one, and the
+     ranking was meaningless. d-001 holds both "privacy" and "proxy"; d-003 holds only
+     "privacy". *)
+  mt se.search(0;"privacy proxy";10 as u32) {
+    $ok:rs if(t.assert(topis(rs;"d-001");"a drawer matching TWO keywords outranks one matching one — the per-keyword weights accumulate (LS1.1a)")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* A query that matches nothing returns nothing, rather than everything. *)
+  mt se.search(0;"nonexistent";10 as u32) {
+    $ok:rs if(t.assert(rs.len==0;"a query matching no keyword returns no results")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.search(0;"the and but";10 as u32) {
+    $ok:rs if(t.assert(rs.len==0;"and a query of nothing but stopwords returns no results rather than every drawer")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* The limit is honoured — without it a broad query returns the whole palace. *)
+  mt se.search(0;"privacy";1 as u32) {
+    $ok:rs if(t.assert(rs.len==1;"the limit is honoured: 1 of 2 matches returns 1")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"search should not error")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* searchinwing narrows to one wing. d-003 is the only "personal" drawer holding
+     "privacy", so scoping must drop d-001. *)
+  mt se.searchinwing(0;"privacy";"personal";10 as u32) {
+    $ok:rs if(t.assert(rs.len==1;"searchinwing scopes to one wing")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"searchinwing should not error")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.searchinwing(0;"privacy";"personal";10 as u32) {
+    $ok:rs if(t.assert(resultfor(rs;"d-003");"and returns the drawer in that wing")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"searchinwing should not error")){pass=pass+1}el{fail=fail+1}
+  };
+  mt se.searchinwing(0;"privacy";"personal";10 as u32) {
+    $ok:rs if(t.assert(!resultfor(rs;"d-001");"and NOT the one in another wing")){pass=pass+1}el{fail=fail+1};
+    $err:e if(t.assert(false;"searchinwing should not error")){pass=pass+1}el{fail=fail+1}
+  };
 
   <fail
 };

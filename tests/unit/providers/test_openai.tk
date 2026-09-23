@@ -5,85 +5,116 @@ m=test.providers.openai;
 
 i=t:std.test;
 i=str:std.str;
+i=pt:core.providers.types;
+i=oai:core.providers.openai;
 
-(* --- stub openai provider functions --- *)
+(* X7.2 — this file used to declare its own request builder and response extractor:
 
-f=buildrequest(model:str;usermsg:str;maxtokens:i64):str{
-  let body=str.concat("{\"model\":\"";model);
-  let body=str.concat(body;"\",\"max_tokens\":");
-  let tokstr=str.concat("";str.fromint(maxtokens));
-  let body=str.concat(body;tokstr);
-  let body=str.concat(body;",\"messages\":[{\"role\":\"user\",\"content\":\"");
-  let body=str.concat(body;usermsg);
-  let body=str.concat(body;"\"}]}");
-  <body
+     (* stub: extracts choices[0].message.content from a mock response *)
+     f=extractcontent(raw:str):str{ ... }
+
+   No such function exists in core.providers.openai. The extraction happens in
+   `openaibuildobj`, which is where the defects below live — so the stub reimplemented the
+   parsing it imagined and asserted that its own reimplementation worked.
+
+   $completionresponse comes from core.providers.types, which must be imported for the field
+   names to resolve.
+
+   ─────────────────────────────────────────────────────────────────────────────────────
+   FINDING — LIVE, in three places. Reported, not fixed.
+
+   `openaibuildobj` (openai.tk:113-129) reads all three nested values ERROR-ARM-FIRST:
+
+     let text=mt msgobj      { $jsonerr:e "";  $ok:m json.str(m;"content") };
+     let inputtokens=mt usageobj  { $jsonerr:e 0; $ok:u json.i64(u;"prompt_tokens") };
+     let outputtokens=mt usageobj { $jsonerr:e 0; $ok:u json.i64(u;"completion_tokens") };
+
+   `mt` on a STDLIB result binds arms BY POSITION, not by label — measured with no loke
+   module involved: a match written `{ $ok:…; $jsonerr:… }` discriminates correctly, and one
+   written `{ $jsonerr:…; $ok:… }` returns the error arm for valid input and the ok arm for
+   invalid. So all three of these are inverted. On top of that `json.str` extracts a STRING
+   value and both `message` and `usage` are nested OBJECTS, so the extraction yields nothing
+   even before the inversion.
+
+   This is the same defect as core.providers.anthropic's, one place worse: OpenAI's
+   `content` also comes through a nested object, so it is not only the token counts at risk.
+
+   MEASURED against the sample body below, which carries
+   "message":{"content":"Hi there"} and "usage":{"prompt_tokens":100,"completion_tokens":20}:
+
+     modelid      == "gpt-4o-mini"  correct — the one read that is not nested
+     content      == (null)         should be "Hi there" — a NULL STRING POINTER, not ""
+     inputtokens  == 0              should be 100
+     outputtokens == 0              should be 20
+
+   `content` being a NULL pointer rather than an empty string is worth stating separately:
+   `str.len(NULL)` is 0, so a caller guarding with `str.len(c)>0` is safe, but
+   `str.eq(NULL;"")` returns FALSE — so the idiomatic emptiness test gives the WRONG answer,
+   and anything that concatenates or interpolates it is handling a null.
+
+   The module's own comment at openai.tk:44 says "The two inner matches below are on STDLIB
+   results (std.http, std.json), which DO discriminate correctly; that distinction is the
+   whole design." The distinction is real — but it holds only when `$ok` is written first,
+   and here it is not. The comment describes a property the code does not have.
+
+   Why it matters: browser/pages/api/pipeline.tk reads inputtokens/outputtokens straight into
+   the audit event, and audit_log is append-only with a hash chain over those columns — so
+   zeros recorded there are PERMANENT, and every cost, savings and quota figure derived from
+   them is zero while reading as a measurement.
+
+   Asserted below in the honest direction, because a caller plainly depends on all of it.
+   ───────────────────────────────────────────────────────────────────────────────────── *)
+
+(* A real OpenAI chat/completions response body. *)
+f=samplebody():str{
+  <"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Hi there\"},\"finish_reason\":\"stop\"}],\"model\":\"gpt-4o-mini\",\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20}}"
 };
-
-f=parseresponse(raw:str):str{
-  (* stub: extracts choices[0].message.content from a mock response *)
-  if(str.contains(raw;"\"content\":")){
-    <"Hello from GPT"
-  }el{
-    <""
-  }
-};
-
-f=endpoint():str{
-  <"https://api.openai.com/v1/chat/completions"
-};
-
-f=providername():str{
-  <"openai"
-};
-
-f=supportedmodels():str{
-  <"gpt-4,gpt-4-turbo,gpt-3.5-turbo"
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* request building: model is present *)
-  let req=buildrequest("gpt-4";"Hello";2048);
-  if(t.assert(str.contains(req;"gpt-4");"request contains model name")){pass=pass+1}el{fail=fail+1};
+  (* ── The client carries its configuration ───────────────────────────────────*)
+  let client=oai.new("sk-unit-test-key");
+  if(t.asserteq(client.config.apikey;"sk-unit-test-key";"the client carries the API key it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(client.config.baseurl;"https://api.openai.com";"and the OpenAI base URL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((client.config.timeoutms as i64)==30000;"and a 30-second timeout")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: user message is present *)
-  if(t.assert(str.contains(req;"Hello");"request contains user message")){pass=pass+1}el{fail=fail+1};
+  (* ── The response parser ────────────────────────────────────────────────────
+     openaiparseplain returns a PLAIN struct, so these field reads are safe. Its OWN match
+     is written $ok-first and therefore works; the three inside openaibuildobj are not. *)
+  let r:$completionresponse=oai.openaiparseplain(samplebody());
+  if(t.assert(pt.iscompletion(r);"a valid response body parses to a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.modelid;"gpt-4o-mini";"the model is read from the top-level object, which is the one read that is not nested")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: max_tokens is present *)
-  if(t.assert(str.contains(req;"\"max_tokens\":");"request contains max_tokens field")){pass=pass+1}el{fail=fail+1};
+  (* The nested reads — all three inverted. *)
+  if(t.asserteq(r.content;"Hi there";"the assistant's text is read from choices[0].message.content — see FINDING")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((r.inputtokens as i64)==100;"prompt_tokens is read from the nested usage object — see FINDING")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((r.outputtokens as i64)==20;"and completion_tokens — see FINDING")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: messages array is present *)
-  if(t.assert(str.contains(req;"\"messages\":");"request contains messages array")){pass=pass+1}el{fail=fail+1};
+  (* ── Malformed input must not parse as a completion ──────────────────────────*)
+  let bad:$completionresponse=oai.openaiparseplain("not JSON at all {{{");
+  if(t.assert(!pt.iscompletion(bad);"an unparseable body yields the sentinel, not an empty success")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: role is user *)
-  if(t.assert(str.contains(req;"\"role\":\"user\"");"request has user role")){pass=pass+1}el{fail=fail+1};
+  (* ── The cost arithmetic ────────────────────────────────────────────────────
+     A bare f64 return across a module boundary, which T-20 corrupts — the same shape and
+     the same defect measured in core.providers.anthropic.calccost. gpt-4o-mini is
+     $0.15/Mtok in and $0.60/Mtok out, so 1000 each way is 0.00015 + 0.0006 = 0.00075.
+     Asserted by value and bounded, so a corrupted return cannot satisfy it by accident. *)
+  let minicost=oai.calccost("gpt-4o-mini";1000 as u32;1000 as u32);
+  if(t.assert(minicost>0.00074;"1000 tokens each way on gpt-4o-mini costs $0.00075")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(minicost<0.00076;"bounded from above")){pass=pass+1}el{fail=fail+1};
 
-  (* response parsing: valid response returns content *)
-  let resp=parseresponse("{\"choices\":[{\"message\":{\"content\":\"Hello from GPT\"}}]}");
-  if(t.assert(str.eq(resp;"Hello from GPT");"parsed response returns content text")){pass=pass+1}el{fail=fail+1};
+  (* The ordering the router's cost tier rests on: the mini model is cheaper. *)
+  let fullcost=oai.calccost("gpt-4o";1000 as u32;1000 as u32);
+  if(t.assert(minicost<fullcost;"gpt-4o-mini costs less than gpt-4o for identical token counts")){pass=pass+1}el{fail=fail+1};
 
-  (* response parsing: error response returns empty *)
-  let empty=parseresponse("{\"error\":{\"message\":\"invalid key\"}}");
-  if(t.assert(str.eq(empty;"");"error response returns empty string")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(oai.calccost("gpt-4o";0 as u32;0 as u32)==0.0;"zero tokens cost nothing")){pass=pass+1}el{fail=fail+1};
 
-  (* response parsing: non-empty result has length *)
-  if(t.assert(str.len(resp)>0;"parsed response is non-empty")){pass=pass+1}el{fail=fail+1};
-
-  (* endpoint is correct *)
-  if(t.assert(str.contains(endpoint();"api.openai.com");"endpoint contains api.openai.com")){pass=pass+1}el{fail=fail+1};
-
-  (* provider name *)
-  if(t.assert(str.eq(providername();"openai");"provider name is openai")){pass=pass+1}el{fail=fail+1};
-
-  (* supported models includes gpt-4 *)
-  if(t.assert(str.contains(supportedmodels();"gpt-4");"supported models includes gpt-4")){pass=pass+1}el{fail=fail+1};
-
-  (* request is valid JSON structure *)
-  if(t.assert(str.contains(req;"{");"request contains JSON opening brace")){pass=pass+1}el{fail=fail+1};
+  (* ── The sentinel ───────────────────────────────────────────────────────────*)
+  let none=pt.nocompletion("openai complete: HTTP error");
+  if(t.assert(!pt.iscompletion(none);"a nocompletion sentinel is not a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(pt.completionerror(none);"sk-");"and a failure message carries no API key fragment — a P0 class in this project")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

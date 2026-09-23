@@ -1,132 +1,241 @@
 (* Copyright 2026 loke contributors
    SPDX-License-Identifier: Apache-2.0 *)
 
-m=tests.unit.models.testqueue;
+m=test.models.queue;
+
 i=t:std.test;
 i=str:std.str;
+i=qt:core.models.queuetypes;
+i=q:core.models.queue;
 
-t=$jobstatus{kind:str};
+(* X7.2 — this file used to declare its own queue and its own state transitions and assert
+   against them. The module's own comment records what that hid:
 
-t=$jobpriority{kind:str};
+     "All four state transitions were the same broken shape and none of them worked.
+      `let lv=1` was meant as a break and `let i=i+1` as an increment; both declared a NEW
+      BINDING instead of assigning, so the loop neither advanced nor terminated — every one
+      of these was an INFINITE LOOP. `queue.jobs.set(i;njob)` then discarded its result, and
+      `void` gave the caller no way to receive the change."
 
-t=$queuejob{
-  id:str;
-  modelid:str;
-  prompt:str;
-  priority:str;
-  status:str
-};
+   A stub that reimplemented "set the job's status" in the test file passed throughout,
+   against four functions that would have hung the process.
 
-t=$jobqueue{
-  jobs:@$queuejob;
-  maxconcurrent:i64
-};
+   The queue is built by hand below, with $jobqueue literals, because of FINDING 1. *)
 
-f=newqueue():$jobqueue{
-  <$jobqueue{ jobs:@(); maxconcurrent:1 }
-};
-
-f=enqueue(queue:$jobqueue;id:str;modelid:str;prompt:str;priority:str):$jobqueue{
-  let job=$queuejob{
+f=job(id:str;priority:$jobpriority;status:$jobstatus):$queuejob{
+  <$queuejob{
     id:id;
-    modelid:modelid;
-    prompt:prompt;
+    modelid:"llama3.2:3b";
+    prompt:"a prompt";
     priority:priority;
-    status:"pending"
+    status:status;
+    createdat:"2026-09-23T00:00:00Z";
+    startedat:"";
+    completedat:"";
+    result:"";
+    error:"";
+    estimatedtoks:0.0
+  }
+};
+
+(* Field readers for a named job. STATUS IS NOT AMONG THEM — see FINDING 3: reading the
+   status of a job that has been through a transition segfaults. These read the string
+   fields the transitions write, which is how the test establishes that a transition ran
+   without touching the field that crashes. *)
+f=startedatof(jobs:@$queuejob;id:str):str{
+  let out=mut."NOT FOUND";
+  lp(let i=0;i<jobs.len;i=i+1){
+    let j:$queuejob=jobs.get(i);
+    if(str.eq(j.id;id)){ out=j.startedat }el{}
   };
-  <$jobqueue{ jobs:queue.jobs.push(job); maxconcurrent:queue.maxconcurrent }
+  <out
 };
 
-f=priorityrank(p:str):i64{
-  if(str.eq(p;"user")){ <0 }el{};
-  if(str.eq(p;"agent")){ <1 }el{};
-  <2
-};
-
-f=statuslabel(status:str):str{
-  <status
-};
-
-f=prioritylabel(p:str):str{
-  let label=mut."unknown";
-  if(str.eq(p;"user")){ label="user" }el{};
-  if(str.eq(p;"agent")){ label="agent" }el{};
-  if(str.eq(p;"evaluation")){ label="eval" }el{};
-  <label
-};
-
-f=nextpending(queue:$jobqueue):str{
-  let bestid=mut."";
-  let bestrank=mut.3 as u32;
-  lp(let i=0;i<queue.jobs.len;i=i+1){
-    let job=queue.jobs.get(i);
-    let ispending=str.eq(job.status;"pending");
-    if(ispending){
-      let rank=priorityrank(job.priority);
-      if(rank < bestrank){
-        bestid=job.id;
-        bestrank=rank
-      }el{}
-    }el{}
+f=completedatof(jobs:@$queuejob;id:str):str{
+  let out=mut."NOT FOUND";
+  lp(let i=0;i<jobs.len;i=i+1){
+    let j:$queuejob=jobs.get(i);
+    if(str.eq(j.id;id)){ out=j.completedat }el{}
   };
-  <bestid
+  <out
+};
+
+f=resultof(jobs:@$queuejob;id:str):str{
+  let out=mut."NOT FOUND";
+  lp(let i=0;i<jobs.len;i=i+1){
+    let j:$queuejob=jobs.get(i);
+    if(str.eq(j.id;id)){ out=j.result }el{}
+  };
+  <out
+};
+
+f=errorof(jobs:@$queuejob;id:str):str{
+  let out=mut."NOT FOUND";
+  lp(let i=0;i<jobs.len;i=i+1){
+    let j:$queuejob=jobs.get(i);
+    if(str.eq(j.id;id)){ out=j.error }el{}
+  };
+  <out
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let queue=newqueue();
-  t.assert(queue.jobs.len==0;"new queue is empty");
-  pass=pass+1;
+  (* ── newqueue ───────────────────────────────────────────────────────────────*)
+  let fresh=q.newqueue();
+  if(t.assert(q.listjobs(fresh).len==0;"a new queue holds no jobs")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((fresh.maxconcurrent as i64)==1;"and runs one job at a time — a local model is the resource being protected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.formatlist(fresh);"No jobs in queue.";"and says so rather than rendering an empty list")){pass=pass+1}el{fail=fail+1};
 
-  let queue=enqueue(queue;"job-001";"llama3";"hello";"agent");
-  t.assert(queue.jobs.len==1;"enqueue adds job");
-  pass=pass+1;
+  (* ── The priority ordering nextpending depends on ────────────────────────────
+     A plain user sum, so `mt` discriminates. The ORDER is the contract: a user's own
+     request must outrank an agent's, which must outrank a background evaluation. If these
+     ranks were reordered, an overnight evaluation would take the local model ahead of the
+     person sitting in front of it. *)
+  if(t.assert((q.priorityrank($user(0)) as i64)==0;"a user request has the best rank")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((q.priorityrank($agent(0)) as i64)==1;"an agent request comes after it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((q.priorityrank($evaluation(0)) as i64)==2;"and a background evaluation last")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(q.priorityrank($user(0))<q.priorityrank($evaluation(0));"so a person always outranks a background job")){pass=pass+1}el{fail=fail+1};
 
-  let job=queue.jobs.get(0);
-  let ispending=str.eq(job.status;"pending");
-  t.assert(ispending;"enqueued job status is pending");
-  pass=pass+1;
+  (* ── The labels ─────────────────────────────────────────────────────────────*)
+  if(t.asserteq(q.statuslabel($pending(0));"pending";"pending")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.statuslabel($running(0));"running";"running")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.statuslabel($completed(0));"completed";"completed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.statuslabel($failed(0));"failed";"failed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.statuslabel($cancelled(0));"cancelled";"cancelled")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.prioritylabel($user(0));"user";"the user priority label")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.prioritylabel($agent(0));"agent";"the agent one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q.prioritylabel($evaluation(0));"eval";"and the evaluation one, which is abbreviated")){pass=pass+1}el{fail=fail+1};
 
-  t.asserteq(job.modelid;"llama3";"enqueued job has correct model");
-  pass=pass+1;
+  if(t.assert(q.jobispending($pending(0));"jobispending is true for a pending job")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!q.jobispending($running(0));"and false for a running one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!q.jobispending($completed(0));"and for a completed one")){pass=pass+1}el{fail=fail+1};
 
-  let ru=priorityrank("user");
-  let ra=priorityrank("agent");
-  let re=priorityrank("evaluation");
-  t.assert(ru < ra;"user priority rank < agent");
-  pass=pass+1;
+  (* ── nextpending picks by priority, not by insertion order ───────────────────
+     Three pending jobs, inserted worst-priority first. T-18 makes the $err arm dead, so
+     this is only safe on a queue that DOES have a pending job — on an empty queue the $ok
+     arm would bind the error payload and reading .id would segfault. That case is
+     therefore not asserted; see FINDING 2. *)
+  let three=$jobqueue{
+    jobs:@(
+      job("eval-1";$evaluation(0);$pending(0));
+      job("agent-1";$agent(0);$pending(0));
+      job("user-1";$user(0);$pending(0))
+    );
+    maxconcurrent:1
+  };
+  let picked=mt q.nextpending(three) { $ok:j j; $err:e job("NONE";$user(0);$pending(0)) };
+  if(t.asserteq(picked.id;"user-1";"nextpending picks the user's job even though it was inserted last")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(ra < re;"agent priority rank < evaluation");
-  pass=pass+1;
+  (* Only non-pending jobs left: the agent job is the best PENDING one. *)
+  let mixed=$jobqueue{
+    jobs:@(
+      job("user-done";$user(0);$completed(0));
+      job("agent-2";$agent(0);$pending(0));
+      job("eval-2";$evaluation(0);$pending(0))
+    );
+    maxconcurrent:1
+  };
+  let picked2=mt q.nextpending(mixed) { $ok:j j; $err:e job("NONE";$user(0);$pending(0)) };
+  if(t.asserteq(picked2.id;"agent-2";"a completed high-priority job is skipped: only PENDING jobs are candidates")){pass=pass+1}el{fail=fail+1};
 
-  t.asserteq(statuslabel("pending");"pending";"pending label");
-  pass=pass+1;
+  (* ─────────────────────────────────────────────────────────────────────────────
+     FINDING 3 — LIVE. After any state transition, reading the job's STATUS segfaults.
+     Reported, not fixed. The status reads are therefore NOT made below; a segfaulting
+     test reports a signal (139) rather than an assertion count and tells a reader
+     nothing.
 
-  t.asserteq(statuslabel("running");"running";"running label");
-  pass=pass+1;
+     All four transitions call `withstatus` with a BARE variant name:
 
-  t.asserteq(statuslabel("completed");"completed";"completed label");
-  pass=pass+1;
+       jobs=jobs.push(withstatus(job;$running;"now";job.completedat;job.result;job.error))
 
-  t.asserteq(statuslabel("failed");"failed";"failed label");
-  pass=pass+1;
+     `$running` on its own is not a `$jobstatus` — the constructed form is
+     `$jobstatus{$running:0}`, which is what this test file uses and what `nextpending`
+     uses internally. toke accepted the bare name with no diagnostic, so the field is
+     written with something that is not a valid sum value, and matching it later faults.
+     `$completed`, `$failed` and `$cancelled` are passed the same way.
 
-  t.asserteq(statuslabel("cancelled");"cancelled";"cancelled label");
-  pass=pass+1;
+     Localised by bisection with progress markers, on a queue holding one job "a" after
+     markrunning:
 
-  t.asserteq(prioritylabel("user");"user";"user priority label");
-  pass=pass+1;
+       q.markrunning(three;"a")   returns            ok
+       q.listjobs(m)              returns, len 1     ok
+       jl.get(0)                  returns            ok
+       j.id                       == "a"             ok
+       j.startedat                == "now"           ok   <- the transition DID run
+       m.maxconcurrent            reads              ok
+       q.statuslabel(j.status)    SIGSEGV            <-- here
 
-  t.asserteq(prioritylabel("evaluation");"eval";"eval priority label");
-  pass=pass+1;
+     So the transitions are no longer the infinite loops the module's comment describes —
+     they run, and they write the timestamps — but the one field they exist to change is
+     written as a value that cannot be read back. Anything that lists the queue for a user,
+     or asks whether a job finished, crashes.
 
-  let queue=enqueue(queue;"job-002";"gpt4";"think";"evaluation");
-  let queue=enqueue(queue;"job-003";"llama3";"now";"user");
-  let next=nextpending(queue);
-  t.asserteq(next;"job-003";"next pending selects highest priority (user)");
-  pass=pass+1;
+     What IS asserted below is everything reachable without touching status: that the
+     transition ran (the timestamps and payloads it writes), that it kept every job, and
+     that it touched only the job named.
+     ───────────────────────────────────────────────────────────────────────────────── *)
+
+  let running=q.markrunning(three;"agent-1");
+  let runningjobs=q.listjobs(running);
+  if(t.assert(runningjobs.len==3;"markrunning keeps every job — a rebuild that dropped one would be worse than no transition")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(startedatof(runningjobs;"agent-1");"now";"and stamps the named job's startedat, which is how we know the transition ran at all")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(startedatof(runningjobs;"user-1");"";"and leaves the other jobs' timestamps alone")){pass=pass+1}el{fail=fail+1};
+
+  let completed=q.markcompleted(three;"user-1";"the answer");
+  let completedjobs=q.listjobs(completed);
+  if(t.asserteq(resultof(completedjobs;"user-1");"the answer";"markcompleted stores the result on the named job")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(completedatof(completedjobs;"user-1");"now";"and stamps completedat")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(resultof(completedjobs;"agent-1");"";"and stores nothing on the others")){pass=pass+1}el{fail=fail+1};
+
+  let failed=q.markfailed(three;"eval-1";"the model refused");
+  if(t.asserteq(errorof(q.listjobs(failed);"eval-1");"the model refused";"markfailed stores the error on the named job")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(errorof(q.listjobs(failed);"user-1");"";"and not on the others")){pass=pass+1}el{fail=fail+1};
+
+  (* A transition on an id that is not in the queue must be a no-op, not a corruption. *)
+  let nosuch=q.markrunning(three;"no-such-job");
+  if(t.assert(q.listjobs(nosuch).len==3;"a transition on an unknown id keeps every job")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(startedatof(q.listjobs(nosuch);"user-1");"";"and changes none of them")){pass=pass+1}el{fail=fail+1};
+
+  (* ── FINDING 4, RED: the transitions DROP maxconcurrent ──────────────────────
+     All four return `$jobqueue{jobs:jobs}` and omit maxconcurrent, so the field is reset
+     on every state change. maxconcurrent is what stops two jobs contending for one local
+     model, and a queue whose concurrency limit falls to 0 after the first transition has
+     no limit that means anything. Reported, not fixed. *)
+  if(t.assert((running.maxconcurrent as i64)==1;"markrunning preserves maxconcurrent — see FINDING 4, the field is omitted from the rebuilt struct")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((completed.maxconcurrent as i64)==1;"and so does markcompleted")){pass=pass+1}el{fail=fail+1};
+
+  (* ── formatlist renders what is there ───────────────────────────────────────*)
+  let listing=q.formatlist(three);
+  if(t.assert(str.contains(listing;"user-1");"the listing names the jobs in the queue")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(listing;"No jobs in queue.");"and does not claim the queue is empty when it is not")){pass=pass+1}el{fail=fail+1};
+
+  (* ── FINDING 1: enqueue does not enqueue ────────────────────────────────────
+     `f=enqueue(queue:$jobqueue;modelid:str;prompt:str;priority:$jobpriority):str` generates
+     an id with str.randhex(8), logs "queue: enqueued job <id>", and RETURNS THE ID. The job
+     is never added to queue.jobs, and the signature returns `str` — so there is no updated
+     queue for a caller to receive, and correct behaviour is not expressible through this
+     signature at all. toke structs are values; adding a job requires returning the queue.
+
+     Consequence: the queue can never contain a job that was enqueued. `nextpending` always
+     reports none, `listjobs` is always empty and `formatlist` always says "No jobs in
+     queue." Every assertion above had to build its queue with a $jobqueue literal, which is
+     something no production caller does.
+
+     Nothing outside the module calls enqueue — checked — so this is inert rather than
+     actively wrong today, which is the only reason it is recorded here as prose plus the
+     one assertion that CAN be made rather than as a red assertion about the queue. *)
+  let id=q.enqueue(fresh;"llama3.2:3b";"a prompt";$user(0));
+  if(t.assert((str.len(id) as i64)==16;"enqueue returns a 16-character hex job id — which is all it does; see FINDING 1")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(q.listjobs(fresh).len==0;"and the queue it was given is unchanged, because the job was never added to it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── FINDING 2: nextpending's empty case cannot be asserted ──────────────────
+     `nextpending` returns $queuejob!$lokeerr. T-18: toke takes the FIRST arm whatever the
+     value is, so on an empty queue the $ok arm binds the $lokeerr payload and reading .id
+     off it SEGFAULTS. The failure path is therefore unreachable from a test. The module
+     would need a plain form with a sentinel — as core.providers.types.nocompletion and
+     core.optimiser.cache.nohit both do — for "no pending jobs" to be checkable. *)
 
   <fail
 };

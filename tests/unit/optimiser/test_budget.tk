@@ -5,88 +5,179 @@ m=test.optimiser.budget;
 
 i=t:std.test;
 i=str:std.str;
+i=bt:core.optimiser.budgettypes;
+i=bg:core.optimiser.budget;
 
-(* --- stub budget functions --- *)
+(* X7.2 — this file used to declare seven stand-ins for core.optimiser.budget and assert
+   against them. What it asserted was arithmetic:
 
-f=checklimit(spent:i64;limit:i64):bool{
-  (* returns true if within budget *)
-  <spent<limit
+     f=checklimit(spent:i64;limit:i64):bool{ <spent<limit };
+     ...
+     if(t.assert(checklimit(50;100);"50 spent of 100 is within budget")){...}
+
+   Not one of those seven functions exists in the module. The real module has no
+   `checklimit`, no `isoverbudget`, no `remaining`, no `matchperiod` and no `createbudget`;
+   it has `check`, which walks an array of $budgetlimit against an array of $budgetusage and
+   returns a $budgetcheck. `periodlabel` is the single name the two had in common, and the
+   stub's version returned "Today"/"This week"/"This month" where the module returns
+   "daily"/"weekly"/"monthly" — so even the one overlapping function was asserted to the
+   wrong contract, and passed.
+
+   THE ASSERTION THAT MATTERS HERE IS `record` ACCUMULATING (GA1.5). Its body used to be
+
+     manager.usage.get(i)==$budgetusage{ ... };
+
+   a COMPARISON whose bool was discarded — there is no assignment to a struct field or an
+   array element in toke, and E2002's advice to "use ==" produces exactly this silent no-op
+   (T-26). So no usage row was ever updated: every request recorded against the budget left
+   the counters at zero, and a budget that never accumulates never refuses. A test that
+   re-declared `remaining(spent;limit)` could not have seen that, because the defect was not
+   in the arithmetic — it was in whether anything was ever counted.
+
+   Accumulation is therefore asserted THROUGH `check` — spend, then ask again and require a
+   refusal — rather than through a totals accessor. That is what a real caller does with
+   this module, and it is the observable the defect actually broke. It also keeps this test
+   off the module's totals helpers, which are being reshaped as this is written (a sum across
+   rows double-counts, because defaultlimits returns one row per period and both rows count
+   the same spend). A test pinned to a helper's name breaks on a rename; one pinned to the
+   refusal breaks only when the behaviour is wrong. *)
+
+(* maxtokens is declared u32 in $budgetlimit; toke has no implicit int promotion, so the
+   cast is explicit here and callers below pass plain literals. *)
+f=onelimit(maxtokens:i64;maxcost:f64):@$budgetlimit{
+  <@(
+    $budgetlimit{
+      period:$daily(0);
+      maxtokens:maxtokens as u32;
+      maxcostusd:maxcost;
+      warnatpct:80.0
+    }
+  )
 };
-
-f=isoverbudget(spent:i64;limit:i64):bool{
-  <!(spent<limit)
-};
-
-f=remaining(spent:i64;limit:i64):i64{
-  let r=limit-spent;
-  if(r<0){<0};
-  <r
-};
-
-f=matchperiod(period:str;day:i64):bool{
-  if(str.eq(period;"daily")){<true};
-  if(str.eq(period;"monthly")){<day==1};
-  if(str.eq(period;"weekly")){<!(day>7)};
-  <false
-};
-
-f=periodlabel(period:str):str{
-  if(str.eq(period;"daily")){<"Today"};
-  if(str.eq(period;"weekly")){<"This week"};
-  if(str.eq(period;"monthly")){<"This month"};
-  <"Unknown"
-};
-
-f=createbudget(limit:i64;period:str):str{
-  let b=str.concat("{\"limit\":";str.fromint(limit));
-  let b=str.concat(b;",\"period\":\"");
-  let b=str.concat(b;period);
-  let b=str.concat(b;"\",\"spent\":0}");
-  <b
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* limit checking: within budget *)
-  if(t.assert(checklimit(50;100);"50 spent of 100 is within budget")){pass=pass+1}el{fail=fail+1};
+  (* ── The period sum ─────────────────────────────────────────────────────────
+     A plain user sum, so `mt` DOES discriminate — T-18 kills only the error arm of an
+     X!$err. These labels are what formatusage and every "daily token limit exceeded"
+     message are built from. *)
+  if(t.asserteq(bg.periodlabel($daily(0));"daily";"the daily period is labelled daily")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bg.periodlabel($weekly(0));"weekly";"the weekly period is labelled weekly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bg.periodlabel($monthly(0));"monthly";"the monthly period is labelled monthly")){pass=pass+1}el{fail=fail+1};
 
-  (* limit checking: at budget *)
-  if(t.assert(!checklimit(100;100);"100 spent of 100 is not within budget")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.isdaily($daily(0));"isdaily recognises daily")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!bg.isdaily($monthly(0));"and does not recognise monthly as daily")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.periodeq($monthly(0);$monthly(0));"periodeq matches two monthlies")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!bg.periodeq($daily(0);$weekly(0));"and separates daily from weekly")){pass=pass+1}el{fail=fail+1};
 
-  (* limit checking: over budget *)
-  if(t.assert(!checklimit(150;100);"150 spent of 100 is over budget")){pass=pass+1}el{fail=fail+1};
+  (* ── The shipped defaults ───────────────────────────────────────────────────
+     These are the limits a user gets without configuring anything, so they are part of
+     the product's behaviour and not a detail. Two periods, daily and monthly. *)
+  let deflims=bg.defaultlimits();
+  if(t.assert(deflims.len==2;"two default limits ship: one daily, one monthly")){pass=pass+1}el{fail=fail+1};
+  let d0:$budgetlimit=deflims.get(0);
+  let d1:$budgetlimit=deflims.get(1);
+  if(t.assert(bg.isdaily(d0.period);"the first default limit is the daily one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.ismonthly(d1.period);"the second is the monthly one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((d0.maxtokens as i64)==100000;"the daily token ceiling is 100000")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((d1.maxtokens as i64)==1000000;"the monthly token ceiling is 1000000")){pass=pass+1}el{fail=fail+1};
+  (* maxcostusd is an f64 FIELD of a struct, which crosses a module boundary intact — only
+     a bare f64 RETURN is corrupted (T-20). Read through the module's own microusd rather
+     than compared as a float, so the assertion does not depend on how 5.0 rounds. *)
+  if(t.assert(bg.microusd(d0.maxcostusd)==5000000;"the daily cost ceiling is $5.00")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.microusd(d1.maxcostusd)==50000000;"the monthly cost ceiling is $50.00")){pass=pass+1}el{fail=fail+1};
 
-  (* limit checking: zero spent *)
-  if(t.assert(checklimit(0;100);"zero spent is within budget")){pass=pass+1}el{fail=fail+1};
+  (* ── microusd: the unit is MILLIONTHS, and that is deliberate ────────────────
+     shared.types.f64hundredths would round to CENTS, and one request to a small model
+     costs a fraction of a cent — so cents would record every request as zero and the
+     accumulated total would never move. The unit has to be finer than the quantity. *)
+  if(t.assert(bg.microusd(0.0)==0;"zero cost is zero millionths")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.microusd(1.0)==1000000;"a dollar is a million millionths")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.microusd(0.000015)==15;"a cost far below one cent survives, which is the whole reason this unit is not hundredths")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.microusd(0.0-0.01)==0-10000;"a negative cost keeps its sign and rounds away from zero")){pass=pass+1}el{fail=fail+1};
 
-  (* over budget checks *)
-  if(t.assert(isoverbudget(100;100);"at limit is over budget")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!isoverbudget(50;100);"under limit is not over budget")){pass=pass+1}el{fail=fail+1};
+  (* ── check: the refusal ─────────────────────────────────────────────────────
+     $budgetcheck is a plain struct, not a result, so `allowed` can be read directly. *)
+  let small=bg.new(onelimit(1000;1.0));
+  let ok=bg.check(small;100;0.01);
+  if(t.assert(ok.allowed;"a request inside both ceilings is allowed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ok.reason;"within budget";"and says so rather than leaving the reason empty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((ok.tokensremaining as i64)==900;"and reports what is left")){pass=pass+1}el{fail=fail+1};
 
-  (* remaining calculation *)
-  if(t.assert(remaining(30;100)==70;"remaining is 70 when 30 of 100 spent")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(remaining(100;100)==0;"remaining is 0 when fully spent")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(remaining(150;100)==0;"remaining is 0 when overspent")){pass=pass+1}el{fail=fail+1};
+  let overtokens=bg.check(small;5000;0.01);
+  if(t.assert(!overtokens.allowed;"a request over the token ceiling is REFUSED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(overtokens.reason;"token limit exceeded");"and the reason names the token limit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(overtokens.reason;"daily");"and which period it belongs to")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((overtokens.tokensremaining as i64)==0;"with nothing remaining")){pass=pass+1}el{fail=fail+1};
 
-  (* period matching: daily always matches *)
-  if(t.assert(matchperiod("daily";15);"daily matches any day")){pass=pass+1}el{fail=fail+1};
+  let overcost=bg.check(small;100;5.0);
+  if(t.assert(!overcost.allowed;"a request over the cost ceiling is REFUSED even when the tokens fit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(overcost.reason;"cost limit exceeded");"and the reason names the cost limit")){pass=pass+1}el{fail=fail+1};
 
-  (* period matching: monthly matches day 1 *)
-  if(t.assert(matchperiod("monthly";1);"monthly matches day 1")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!matchperiod("monthly";15);"monthly does not match day 15")){pass=pass+1}el{fail=fail+1};
+  (* The ceiling is exclusive on the way up: exactly at the limit is allowed, one over is
+     not. A budget that refused at exactly its limit would be off by one request. *)
+  let atlimit=bg.check(small;1000;1.0);
+  if(t.assert(atlimit.allowed;"spending exactly to the ceiling is allowed")){pass=pass+1}el{fail=fail+1};
+  let onepast=bg.check(small;1001;1.0);
+  if(t.assert(!onepast.allowed;"and one token past it is not")){pass=pass+1}el{fail=fail+1};
 
-  (* period labels *)
-  if(t.assert(str.eq(periodlabel("daily");"Today");"daily label is Today")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(periodlabel("monthly");"This month");"monthly label is This month")){pass=pass+1}el{fail=fail+1};
+  (* ── GA1.5: record ACCUMULATES, asserted through the refusal ─────────────────
+     Two requests of 900 tokens against a 1000-token ceiling. The first fits; the second
+     must not. Before the fix `record` was a discarded comparison, the usage row stayed at
+     zero, and BOTH were allowed — for ever, at any volume. This is the assertion that was
+     red and could not have been written against a re-declared `remaining()`. *)
+  let spent=bg.record(small;900;0.0);
+  let second=bg.check(spent;900;0.0);
+  if(t.assert(!second.allowed;"after recording 900 of a 1000-token budget, a second 900-token request is REFUSED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(second.reason;"token limit exceeded");"and the refusal names the token limit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(second.reason;"900");"and reports the 900 already used, which is the figure that used to stay at zero")){pass=pass+1}el{fail=fail+1};
 
-  (* budget creation *)
-  let b=createbudget(500;"daily");
-  if(t.assert(str.contains(b;"\"limit\":500");"budget contains limit")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(b;"\"spent\":0");"budget starts with zero spent")){pass=pass+1}el{fail=fail+1};
+  (* The cost side of the same accumulation. Tokens are free here, so only cost can refuse. *)
+  let spentcost=bg.record(bg.new(onelimit(1000000;1.0));0;0.60);
+  let secondcost=bg.check(spentcost;0;0.60);
+  if(t.assert(!secondcost.allowed;"two 60-cent requests against a $1.00 ceiling: the second is REFUSED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(secondcost.reason;"cost limit exceeded");"and the refusal names the cost limit")){pass=pass+1}el{fail=fail+1};
+
+  (* toke structs are VALUES, so record has to RETURN the manager for a caller to see the
+     change. A caller that drops the return records nothing — which is why the signature is
+     no longer void, and asserting the original is untouched is what pins that down. *)
+  let stillok=bg.check(small;900;0.0);
+  if(t.assert(stillok.allowed;"the manager passed IN to record is unchanged: structs are values and record returns a new one")){pass=pass+1}el{fail=fail+1};
+
+  (* check must not MUTATE. It is called before a request to decide whether to allow it; if
+     it recorded, asking the question would spend the budget. *)
+  bg.check(small;900;0.0);
+  bg.check(small;900;0.0);
+  let afterasking=bg.check(small;900;0.0);
+  if(t.assert(afterasking.allowed;"check records nothing: asking three times whether a request fits must not spend the budget")){pass=pass+1}el{fail=fail+1};
+
+  (* ── withusage: a budget that survives the process ──────────────────────────
+     A budget held only in memory in a request handler is reset by every request, which is
+     the same as no budget. *)
+  let seeded=bg.withusage(bg.new(onelimit(1000;1.0));900;0);
+  let seededcheck=bg.check(seeded;200;0.0);
+  if(t.assert(!seededcheck.allowed;"a budget seeded from persisted counters REFUSES on the strength of a previous process's spending")){pass=pass+1}el{fail=fail+1};
+  let seededcost=bg.withusage(bg.new(onelimit(1000000;1.0));0;900000);
+  let seededcostcheck=bg.check(seededcost;0;0.20);
+  if(t.assert(!seededcostcheck.allowed;"and the cost counter round-trips through millionths rather than being lost to rounding")){pass=pass+1}el{fail=fail+1};
+
+  (* ── resetperiod zeroes the matching period and leaves the others ────────────*)
+  let reset=bg.resetperiod(spent;$daily(0));
+  let afterreset=bg.check(reset;900;0.0);
+  if(t.assert(afterreset.allowed;"resetting the daily period frees the budget again")){pass=pass+1}el{fail=fail+1};
+
+  let bothperiods=bg.record(bg.new(bg.defaultlimits());1500;0.02);
+  let dailyonly=bg.resetperiod(bothperiods;$daily(0));
+  if(t.assert(str.contains(bg.formatusage(dailyonly);"1500");"resetting only the daily period leaves the monthly row's 1500 tokens in place")){pass=pass+1}el{fail=fail+1};
+
+  (* ── formatusage: what the user is shown ────────────────────────────────────*)
+  let usage=bg.formatusage(bothperiods);
+  if(t.assert(str.contains(usage;"daily");"the usage summary covers the daily period")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(usage;"monthly");"and the monthly period")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(usage;"1500");"and shows the tokens actually recorded, not a zero from a counter that never moved")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(usage;"requests: 1");"and the request count, which the same no-op left at zero")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

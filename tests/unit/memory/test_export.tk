@@ -5,92 +5,182 @@ m=test.memory.export;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=json:std.json;
+i=sdb:core.storage.db;
+i=ex:core.memory.export;
 
-(* --- stub export format functions --- *)
+(* X7.2 — this file used to declare its own exportjsonentry, exportcsventry,
+   exportcsvheader, exportfilename, validformat and countexportable, and assert against
+   them. Two of its fifteen assertions are worth quoting:
 
-(* export a single memory entry as JSON line *)
-f=exportjsonentry(key:str;value:str;ts:i64):str{
-  <str.concat("{\"key\":\"";str.concat(key;str.concat("\",\"value\":\"";str.concat(value;str.concat("\",\"ts\":";str.concat(str.fromi64(ts);"}"))))))
+     f=countexportable():i64{ <42 };
+     ...
+     t.assert(countexportable()==42;"exportable count returns expected value")
+
+     f=validformat(fmt:str):i64{ if(str.eq(fmt;"json")){<1}; if(str.eq(fmt;"csv")){<1}; if(str.eq(fmt;"txt")){<1}; <0 };
+     ...
+     t.assert(validformat("txt")==1;"txt is a valid format")
+
+   The real core.memory.export supports json, csv and MARKDOWN — there is no txt — so the
+   stub asserted the validity of a format the product does not have and the invalidity of
+   one it does. And the count assertion is a constant compared with itself.
+
+   What it covers now is the real module. The pure half — csvescape, formatlabel,
+   formatmemorymd — needs nothing. For the row half this file CREATES memory_drawers and
+   memory_scores itself, with the columns the module's queries name, because nothing in the
+   product creates them (M1.7 — see tests/unit/memory/test_palace_drawers.tk). That is a
+   test of the module's SERIALISATION, which is real; it is not evidence that the product's
+   schema exists.
+
+   Why serialisation is worth this much care here: an export is the one place the product
+   writes memory content OUT, and memory content is the most PII-dense data it holds. An
+   export that silently truncates, or that produces a file no importer can read, loses the
+   user's data at the moment they were trying to take it with them. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-memory-export")
 };
 
-(* export a single memory entry as CSV line *)
-f=exportcsventry(key:str;value:str;ts:i64):str{
-  <str.concat(key;str.concat(",\"";str.concat(value;str.concat("\",";str.fromi64(ts)))))
+(* $ok arm FIRST: the arms of a match are positional, so the other order silently swaps
+   the two branches. See tests/unit/mcp/test_protocol.tk for the measurement. *)
+f=exec(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
 };
 
-(* generate CSV header *)
-f=exportcsvheader():str{
-  <"key,value,timestamp"
+f=execp(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
 };
 
-(* generate JSON array wrapper open *)
-f=exportjsonopen():str{
-  <"["
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
 
-(* generate JSON array wrapper close *)
-f=exportjsonclose():str{
-  <"]"
+f=creatememorytables():bool{
+  exec("CREATE TABLE IF NOT EXISTS memory_drawers (id TEXT PRIMARY KEY, wing TEXT NOT NULL, hall TEXT NOT NULL, room TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)");
+  <exec("CREATE TABLE IF NOT EXISTS memory_scores (id TEXT PRIMARY KEY, tags TEXT, score REAL, accessed_at TEXT)")
 };
 
-(* format for export filename *)
-f=exportfilename(prefix:str;format:str):str{
-  <str.concat(prefix;str.concat("_export.";format))
+f=adddrawer(id:str;content:str):bool{
+  execp("INSERT OR REPLACE INTO memory_drawers (id,wing,hall,room,role,content,created_at) VALUES (?,'work','Hall','Room','user',?,'1790000000')";@(id;content));
+  <execp("INSERT OR REPLACE INTO memory_scores (id,tags,score,accessed_at) VALUES (?,'tag-a',1.0,'1790000000')";@(id))
 };
 
-(* validate export format string *)
-f=validformat(fmt:str):i64{
-  if(str.eq(fmt;"json")){<1};
-  if(str.eq(fmt;"csv")){<1};
-  if(str.eq(fmt;"txt")){<1};
-  <0
+(* The same query core.memory.export.exportall issues, so the rows handed to the builders
+   below have exactly the columns and aliases they expect. *)
+f=allrows():@$row{
+  <mt db.many("SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,md.created_at, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id ORDER BY md.created_at ASC";@()) {
+    $ok:rows rows;
+    $err:e @()
+  }
 };
 
-(* count entries to export — stub returns fixed count *)
-f=countexportable():i64{ <42 };
+f=validjson(s:str):bool{
+  <mt json.dec(s) {
+    $ok:o true;
+    $jsonerr:e false
+  }
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test JSON entry format *)
-  let je=exportjsonentry("user.pref";"dark_mode";1715600000);
-  if(t.assert(str.contains(je;"\"key\":\"user.pref\"");"JSON entry contains key")){pass=pass+1}el{fail=fail+1};
+  (* ── csvescape ───────────────────────────────────────────────────────────────
+     RFC 4180 escaping: wrap in quotes, and double any quote inside. Correct for CSV, and
+     the reason the JSON assertions further down are what they are. *)
+  if(t.asserteq(ex.csvescape("plain");"\"plain\"";"csvescape wraps a value in double quotes")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ex.csvescape("he said \"hi\"");"\"he said \"\"hi\"\"\"";"and DOUBLES an interior quote, which is CSV's escape and not JSON's")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ex.csvescape("");"\"\"";"an empty value is a pair of quotes, not nothing — otherwise a column vanishes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ex.csvescape("a,b");",");"a comma is preserved inside the quotes rather than splitting the field")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.contains(je;"\"value\":\"dark_mode\"");"JSON entry contains value")){pass=pass+1}el{fail=fail+1};
+  (* ── formatlabel ─────────────────────────────────────────────────────────────
+     A plain user sum, so `mt` discriminates properly on it. The label is what goes into
+     the $memoryexport record the UI reports, so a wrong one misdescribes the file on disk. *)
+  if(t.asserteq(ex.formatlabel($exportformat{$json:0});"json";"the json format is labelled json")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ex.formatlabel($exportformat{$csv:0});"csv";"the csv format is labelled csv")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ex.formatlabel($exportformat{$markdown:0});"markdown";"and the third format is MARKDOWN — the stub this file replaces asserted \"txt\", which the product has never had")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.contains(je;"\"ts\":");"JSON entry contains timestamp field")){pass=pass+1}el{fail=fail+1};
+  (* ── formatmemorymd ──────────────────────────────────────────────────────────
+     Returns a str, so no float crosses the boundary as a return and this is readable. *)
+  let md=ex.formatmemorymd("d-001";"Discussed the architecture";"design,loke";1.0 as f32;1790000000);
+  if(t.assert(str.contains(md;"## d-001");"a markdown memory is headed by its id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"Discussed the architecture");"and contains the content — an export that drops the content is the whole failure")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"design,loke");"and the tags")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"**Tags:**");"and labels them, so the file is readable by a person")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"**Score:**");"and labels the score")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"1790000000");"and carries the timestamp")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"---");"and ends with a rule, so consecutive memories do not run together")){pass=pass+1}el{fail=fail+1};
 
-  (* test CSV entry format *)
-  let ce=exportcsventry("user.pref";"dark_mode";1715600000);
-  if(t.assert(str.contains(ce;"user.pref");"CSV entry contains key")){pass=pass+1}el{fail=fail+1};
+  (* ── The row serialisers, against real rows ──────────────────────────────────*)
+  openfreshstore();
+  if(t.assert(creatememorytables();"the test's own memory_drawers and memory_scores were created")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("memory_scores");"and memory_scores is really there, so the LEFT JOIN below is not silently empty")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.contains(ce;"\"dark_mode\"");"CSV entry quotes value")){pass=pass+1}el{fail=fail+1};
+  adddrawer("d-001";"plain content");
+  let rows=allrows();
+  if(t.assert(rows.len==1;"the export query returns the row that was inserted")){pass=pass+1}el{fail=fail+1};
 
-  (* test CSV header *)
-  if(t.assert(str.eq(exportcsvheader();"key,value,timestamp");"CSV header is correct")){pass=pass+1}el{fail=fail+1};
+  let onejson=ex.buildcontentjson(rows);
+  if(t.assert(str.contains(onejson;"d-001");"the JSON export carries the drawer id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(onejson;"plain content");"and the content")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(onejson;"tag-a");"and the tags from the joined memory_scores row, so the LEFT JOIN is read")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(onejson);"and a plain-content export is valid JSON")){pass=pass+1}el{fail=fail+1};
 
-  (* test JSON wrappers *)
-  if(t.assert(str.eq(exportjsonopen();"[");"JSON open bracket")){pass=pass+1}el{fail=fail+1};
+  let onecsv=ex.buildcontentcsv(rows);
+  if(t.assert(str.contains(onecsv;"\"id\",\"wing\"");"the CSV export starts with a header row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(onecsv;"plain content");"and carries the content")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(exportjsonclose();"]");"JSON close bracket")){pass=pass+1}el{fail=fail+1};
+  let onemd=ex.buildcontentmd(rows);
+  if(t.assert(str.contains(onemd;"# Memory Palace Export");"the markdown export has a title")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(onemd;"plain content");"and carries the content")){pass=pass+1}el{fail=fail+1};
 
-  (* test export filename generation *)
-  if(t.assert(str.eq(exportfilename("memory";"json");"memory_export.json");"JSON filename correct")){pass=pass+1}el{fail=fail+1};
+  (* buildcontent dispatches on the format, so the three builders are reachable through
+     the one entry point the exporters actually call. *)
+  if(t.assert(str.contains(ex.buildcontent(rows;$exportformat{$json:0});"\"id\":");"buildcontent dispatches to the JSON builder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ex.buildcontent(rows;$exportformat{$csv:0});"\"id\",\"wing\"");"and to the CSV builder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ex.buildcontent(rows;$exportformat{$markdown:0});"# Memory Palace Export");"and to the markdown builder")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(exportfilename("memory";"csv");"memory_export.csv");"CSV filename correct")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, RED: the JSON export uses CSV escaping ─────────────────────────
+     rowtojson quotes every string value with csvescape — the CSV rule, which DOUBLES an
+     interior quote. JSON requires a backslash. So a memory whose content contains a double
+     quote is exported as
 
-  (* test format validation *)
-  if(t.assert(validformat("json")==1;"json is valid format")){pass=pass+1}el{fail=fail+1};
+       "content":"he said ""hi""",
 
-  if(t.assert(validformat("csv")==1;"csv is valid format")){pass=pass+1}el{fail=fail+1};
+     which terminates the JSON string at the first doubled quote and leaves the rest as
+     syntax. The file is unparseable, and the failure scales with how conversational the
+     memory is: a quoted phrase is exactly what a memory palace stores.
 
-  if(t.assert(validformat("txt")==1;"txt is valid format")){pass=pass+1}el{fail=fail+1};
+     The same csvescape is correct in rowtocsv2, which is why this is easy to miss — one
+     helper, two call sites, right in one and wrong in the other.
 
-  if(t.assert(validformat("xml")==0;"xml is not a valid format")){pass=pass+1}el{fail=fail+1};
+     Asserted in the honest direction, so this is RED while the defect is present. Reported,
+     not fixed: core.memory.export is not this worker's file. *)
+  adddrawer("d-002";"he said \"hello\" twice");
+  let quoted=allrows();
+  if(t.assert(quoted.len==2;"both drawers are in the export query")){pass=pass+1}el{fail=fail+1};
+  let quotedjson=ex.buildcontentjson(quoted);
+  if(t.assert(str.contains(quotedjson;"hello");"the content with a quote in it reaches the JSON export")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(quotedjson);"a JSON export of a memory containing a DOUBLE QUOTE is valid JSON — rowtojson escapes with csvescape, which doubles the quote instead of backslash-escaping it")){pass=pass+1}el{fail=fail+1};
 
-  (* test exportable count *)
-  if(t.assert(countexportable()==42;"exportable count returns expected value")){pass=pass+1}el{fail=fail+1};
+  (* The CSV export of the same row IS correct, which is the contrast that pins the defect
+     to the JSON path rather than to the data. *)
+  if(t.assert(str.contains(ex.buildcontentcsv(quoted);"\"\"hello\"\"");"the CSV export of the same row doubles the quote, which is correct for CSV")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

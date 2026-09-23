@@ -5,93 +5,112 @@ m=test.optimiser.llmlingua;
 
 i=t:std.test;
 i=str:std.str;
+i=ll:core.optimiser.llmlingua;
 
-(* --- stub LLMLingua functions --- *)
+(* X7.2 — this file used to declare seven stand-ins for core.optimiser.llmlingua and assert
+   against them. The damning pair:
 
-(* build compress request body *)
-f=buildcompressbody(prompt:str;ratio:str):str{
-  let p1=str.concat("{\"prompt\":\"";prompt);
-  let p2=str.concat(p1;"\",\"ratio\":");
-  <str.concat(p2;str.concat(ratio;"}"))
-};
+     f=computesavingspct(origintokens:i64;compressedtokens:i64):i64{
+       if(origintokens==0){<0};
+       <((origintokens-compressedtokens)*100)/origintokens
+     };
+     ...
+     if(t.assert(computesavingspct(1000;600)==40;"1000 to 600 tokens is 40% savings")){...}
 
-(* build compress_auto request body *)
-f=buildcompressautobody(prompt:str;maxtokens:str):str{
-  let p1=str.concat("{\"prompt\":\"";prompt);
-  let p2=str.concat(p1;"\",\"target_token\":");
-  <str.concat(p2;str.concat(maxtokens;"}"))
-};
+   No such function exists in the module. The savings figure is an f64 percentage computed
+   inside `buildcompressresult`; the stub reimplemented the integer arithmetic it imagined
+   and asserted that its own two lines were correct. It also declared `healthurl` and
+   `compressurl` and asserted that concatenating "/health" onto a base URL yields the base
+   URL with "/health" on the end — the module has neither function, because std.http owns
+   the path join.
 
-(* compute savings percentage from token counts *)
-f=computesavingspct(origintokens:i64;compressedtokens:i64):i64{
-  if(origintokens==0){<0};
-  <((origintokens-compressedtokens)*100)/origintokens
-};
+   ─────────────────────────────────────────────────────────────────────────────────────
+   FINDING — FOUND HERE, AND FIXED IN THE MODULE WHILE THIS WAS BEING WRITTEN. The
+   assertion below is now the REGRESSION TEST for it, not a report of a live defect.
 
-(* compute compression ratio *)
-f=computeratio(origintokens:i64;compressedtokens:i64):i64{
-  if(origintokens==0){<0};
-  <(compressedtokens*100)/origintokens
-};
+   STATUS, precisely, because it matters: all four matches in core.optimiser.llmlingua now
+   read `$ok` first in the SOURCE, and the module carries the measurement below in its own
+   comment. The assertion in this file was still RED at the last run, because
+   packages/browser/build/ooke was mid-rebuild and the archive the test links
+   (/tmp/loke-tests/libloke.a, 14:19) predates the source fix (14:24) — so it was linking
+   the OLD object. It is expected to go green on a clean rebuild. That has NOT been
+   observed here, and is not claimed.
 
-(* shouldcompress: prompt length vs threshold *)
-f=shouldcompress(promptlen:i64;threshold:i64):i64{
-  let effectivethreshold=mut.threshold;
-  if(threshold==0){effectivethreshold=2000}el{};
-  if(promptlen>effectivethreshold){<1};
-  <0
-};
+   `mt` on a STDLIB result binds its arms BY POSITION, not by label. Measured directly,
+   with no loke module involved:
 
-(* build health check URL *)
-f=healthurl(baseurl:str):str{
-  <str.concat(baseurl;"/health")
-};
+     f=okfirst(raw:str):i64{  <mt json.dec(raw) { $ok:o 1; $jsonerr:e 2 } };
+     f=errfirst(raw:str):i64{ <mt json.dec(raw) { $jsonerr:e 2; $ok:o 1 } };
 
-(* build compress URL *)
-f=compressurl(baseurl:str):str{
-  <str.concat(baseurl;"/compress")
-};
+       okfirst(valid)   -> 1   ok arm     correct
+       okfirst(invalid) -> 2   err arm    correct
+       errfirst(valid)  -> 2   ERR arm    WRONG — inverted
+       errfirst(invalid)-> 1   OK arm     WRONG — inverted
+
+   So the labels are ignored and arm 0 is bound to tag 0. A module that writes its error arm
+   first has success and failure silently swapped. This is the same family as T-18, stated
+   more generally: T-18 says the error arm of a USER-declared result is dead; this says a
+   STDLIB result discriminates only if `$ok` is written FIRST.
+
+   core.optimiser.llmlingua writes the error arm first in ALL FOUR of its matches:
+
+     :37  isavailable          $httperr:e false;  $ok:body true
+     :70  parsecompressresponse $jsonerr:e $err(...); $ok:obj buildcompressresult(...)
+     :95  compress             $httperr:e compressfailed(cid); $ok:raw parsecompressresponse(...)
+     :110 compressauto         $httperr:e ...;    $ok:raw parsecompressresponse(...)
+
+   Consequences, all measured here or on the probe above:
+
+     - `isavailable` reported TRUE for a sidecar that is not running and FALSE for one that
+       is. That is a FAIL-OPEN: the optimiser is told to compress through a service that
+       does not exist. It is the one consequence asserted below, because it returns a plain
+       bool and can be read safely.
+     - `parsecompressresponse` returns the "failed to parse JSON response" error for a
+       perfectly valid LLMLingua response body. Measured: the exact body
+       `{"compressed_prompt":"short version","origin_tokens":1000,"compressed_tokens":600}`
+       parses fine through `json.dec` on its own (verified separately, 7 shapes, all pass),
+       and fails through this function.
+     - `compress` and `compressauto` therefore report a network failure on every SUCCESSFUL
+       POST, and on a genuine failure they hand the HTTP error payload to
+       `parsecompressresponse` as though it were a response body.
+
+   So no prompt has ever been compressed through this module, and no caller could tell.
+
+   WHY THE PARSER IS NOT ASSERTED DIRECTLY. Because of T-18 the caller's `$ok` arm binds the
+   ERROR payload, and reading a $compressresult field off a $lokeerr SEGFAULTS — this test
+   died with SIGSEGV when it tried. A crashing test reports nothing (the runner sees 139,
+   which is a signal and not an assertion count), so the parser inversion is recorded above
+   from a measurement rather than executed here. `isavailable` returns a plain bool, so it
+   can be asserted safely, and it is the one that is RED below.
+   ───────────────────────────────────────────────────────────────────────────────────── *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* T1: compress body contains prompt *)
-  let body1=buildcompressbody("hello world";"0.5");
-  if(t.assert(str.contains(body1;"hello world");"compress body contains prompt text")){pass=pass+1}el{fail=fail+1};
+  (* ── The client ─────────────────────────────────────────────────────────────*)
+  let client=ll.new("http://127.0.0.1:5000");
+  if(t.asserteq(client.baseurl;"http://127.0.0.1:5000";"the client carries the base URL it was given")){pass=pass+1}el{fail=fail+1};
 
-  (* T2: compress body contains ratio *)
-  if(t.assert(str.contains(body1;"0.5");"compress body contains ratio value")){pass=pass+1}el{fail=fail+1};
+  (* ── RED, and a real defect: the availability probe is inverted ──────────────
+     Port 9 is the discard port. Nothing serves HTTP there, so this is the "LLMLingua is
+     not installed" case — which is the normal state for most installations. A caller
+     plainly depends on this: it is the guard before every compress call, and answering
+     TRUE sends the optimiser at a service that is not there. Asserted in the honest
+     direction. *)
+  if(t.assert(!ll.isavailable(ll.new("http://127.0.0.1:9"));"an unreachable sidecar reports NOT available — the regression test for the arm-order inversion in the FINDING above")){pass=pass+1}el{fail=fail+1};
 
-  (* T3: compress_auto body contains target_token key *)
-  let body2=buildcompressautobody("some long prompt";"512");
-  if(t.assert(str.contains(body2;"target_token");"compress_auto body contains target_token key")){pass=pass+1}el{fail=fail+1};
-
-  (* T4: savings percentage calculation *)
-  if(t.assert(computesavingspct(1000;600)==40;"1000 to 600 tokens is 40% savings")){pass=pass+1}el{fail=fail+1};
-
-  (* T5: savings with zero origin tokens *)
-  if(t.assert(computesavingspct(0;0)==0;"zero origin tokens yields zero savings")){pass=pass+1}el{fail=fail+1};
-
-  (* T6: compression ratio calculation *)
-  if(t.assert(computeratio(1000;500)==50;"1000 to 500 tokens is 50% ratio")){pass=pass+1}el{fail=fail+1};
-
-  (* T7: shouldcompress above default threshold *)
-  if(t.assert(shouldcompress(3000;0)==1;"3000 chars above default 2000 threshold triggers compress")){pass=pass+1}el{fail=fail+1};
-
-  (* T8: shouldcompress below threshold *)
-  if(t.assert(shouldcompress(500;2000)==0;"500 chars below 2000 threshold does not trigger compress")){pass=pass+1}el{fail=fail+1};
-
-  (* T9: shouldcompress with custom threshold *)
-  if(t.assert(shouldcompress(1500;1000)==1;"1500 chars above custom 1000 threshold triggers compress")){pass=pass+1}el{fail=fail+1};
-
-  (* T10: health URL construction *)
-  let hurl=healthurl("http://localhost:5000");
-  if(t.assert(str.eq(hurl;"http://localhost:5000/health");"health URL built correctly")){pass=pass+1}el{fail=fail+1};
-
-  (* T11: compress URL construction *)
-  let curl=compressurl("http://localhost:5000");
-  if(t.assert(str.eq(curl;"http://localhost:5000/compress");"compress URL built correctly")){pass=pass+1}el{fail=fail+1};
+  (* ── shouldcompress ─────────────────────────────────────────────────────────
+     The one function in this module with no match in it, and therefore the one the
+     inversion does not reach. u32 parameters, so the literals are cast: toke has no
+     implicit int promotion. A threshold of 0 means "use the default", 2000 characters. *)
+  if(t.assert(ll.shouldcompress(3000 as u32;0 as u32);"3000 characters is above the default 2000-character threshold")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ll.shouldcompress(500 as u32;0 as u32);"500 characters is not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ll.shouldcompress(2000 as u32;0 as u32);"and exactly at the threshold is NOT compressed — the comparison is strictly greater")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ll.shouldcompress(2001 as u32;0 as u32);"one character past it is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ll.shouldcompress(1500 as u32;1000 as u32);"a caller's own threshold is honoured when it is non-zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ll.shouldcompress(1500 as u32;2000 as u32);"in both directions")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ll.shouldcompress(0 as u32;0 as u32);"an empty prompt is never compressed")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

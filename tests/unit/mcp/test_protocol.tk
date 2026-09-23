@@ -5,86 +5,176 @@ m=test.mcp.protocol;
 
 i=t:std.test;
 i=str:std.str;
+i=json:std.json;
+i=proto:core.mcp.protocol;
 
-(* --- stub MCP JSON-RPC functions --- *)
+(* X7.2 — this file used to declare its own jsonrpcbuild/jsonrpcerror/validmethod and
+   assert against them, so the whole of its coverage of the wire format was of a copy of
+   the wire format written twenty lines above the assertions.
 
-f=encoderequest(id:i64;method:str;params:str):str{
-  let r=str.concat("{\"jsonrpc\":\"2.0\",\"id\":";str.fromint(id));
-  let r=str.concat(r;",\"method\":\"");
-  let r=str.concat(r;method);
-  let r=str.concat(r;"\",\"params\":");
-  let r=str.concat(r;params);
-  let r=str.concat(r;"}");
-  <r
+   It covers core.mcp.protocol now: the only place in the tree that serialises a JSON-RPC
+   response. Two live callers pass a tool's entire output through it —
+   packages/mcp-toke/src/tools.tk and packages/core/src/memory/mcp_server.tk — so a
+   mistake here is a malformed response to every MCP client rather than a cosmetic one.
+
+   WHY parserequest IS NOT CALLED BELOW, which is a finding and not a gap.
+
+   `mt` on a `json.dec` result binds its arms BY POSITION, not by tag. Measured, with a
+   minimal reproduction: for `f(s)=mt json.dec(s){$ok:o true;$jsonerr:e false}` the answers
+   are true for valid JSON and false for invalid, correctly; write the same two arms in the
+   other order and BOTH answers inverc — valid JSON takes the $jsonerr arm and invalid JSON
+   takes the $ok arm. This is the T-18 family, stated more sharply than "the first arm
+   always wins": the arms are positional and the tags are decoration.
+
+   core.mcp.protocol.parserequest (packages/core/src/mcp/protocol.tk:52) writes
+   `$jsonerr` first. So it returns $err for every VALID request, and for an invalid one it
+   runs buildrequestfromobj over the ERROR payload. Calling it from here would not fail an
+   assertion, it would segfault on the first field read. The pure half it delegates to —
+   buildrequestfromobj — is exercised instead, through a correctly-ordered match, which
+   covers the field extraction without going through the inverted wrapper. *)
+
+(* Is this string parseable as JSON at all? $ok arm FIRST, deliberately: see above.
+
+   Asserting `str.contains` on fragments would pass on a response with an unbalanced brace
+   or a raw control character, which is exactly the class of defect a hand-rolled
+   serialiser produces. So every envelope below is parsed as well as inspected. *)
+f=validjson(s:str):bool{
+  <mt json.dec(s) {
+    $ok:o true;
+    $jsonerr:e false
+  }
 };
 
-f=encodenotification(method:str):str{
-  let r=str.concat("{\"jsonrpc\":\"2.0\",\"method\":\"";method);
-  let r=str.concat(r;"\"}");
-  <r
+f=sampletool(name:str;desc:str):$mcptool{
+  <$mcptool{name:name;description:desc;inputschema:"{\"type\":\"object\"}"}
 };
-
-f=decodemethod(raw:str):str{
-  if(str.contains(raw;"\"method\":\"initialize\"")){<"initialize"};
-  if(str.contains(raw;"\"method\":\"tools/list\"")){<"tools/list"};
-  if(str.contains(raw;"\"method\":\"tools/call\"")){<"tools/call"};
-  if(str.contains(raw;"\"method\":\"shutdown\"")){<"shutdown"};
-  <""
-};
-
-f=decodeid(raw:str):str{
-  if(str.contains(raw;"\"id\":1")){<"1"};
-  if(str.contains(raw;"\"id\":42")){<"42"};
-  <"0"
-};
-
-f=isjsonrpc(raw:str):bool{
-  <str.contains(raw;"\"jsonrpc\":\"2.0\"")
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* request encoding: jsonrpc version present *)
-  let req=encoderequest(1;"initialize";"{}");
-  if(t.assert(str.contains(req;"\"jsonrpc\":\"2.0\"");"request has jsonrpc 2.0")){pass=pass+1}el{fail=fail+1};
+  (* The helper has to discriminate, or every assertion that uses it is vacuous. Both
+     directions, first. *)
+  if(t.assert(validjson("{\"a\":1}");"the JSON validity helper accepts valid JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!validjson("{not json");"and rejects invalid JSON — without this the assertions below would be vacuous")){pass=pass+1}el{fail=fail+1};
 
-  (* request encoding: id present *)
-  if(t.assert(str.contains(req;"\"id\":1");"request has id")){pass=pass+1}el{fail=fail+1};
+  (* ── JSON-RPC 2.0 envelope ───────────────────────────────────────────────────
+     The version field is not decoration: a client is entitled to reject a response
+     without it, so an omission is a protocol break. *)
+  let okr=proto.okresponse(7;"{\"value\":42}");
+  if(t.assert(str.contains(okr;"\"jsonrpc\":\"2.0\"");"a success response carries the JSON-RPC version")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(okr;"\"id\":7");"and echoes the request id, which is how a client matches the reply to its call")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(okr;"\"result\":{\"value\":42}");"and embeds the result verbatim rather than re-encoding it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(okr;"\"error\"");"a success response has no error member — the spec forbids both at once")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(okr);"and the whole envelope parses")){pass=pass+1}el{fail=fail+1};
 
-  (* request encoding: method present *)
-  if(t.assert(str.contains(req;"\"method\":\"initialize\"");"request has method")){pass=pass+1}el{fail=fail+1};
+  let errr=proto.errorresponse(7;0-32601 as i32;"Method not found");
+  if(t.assert(str.contains(errr;"\"jsonrpc\":\"2.0\"");"an error response carries the version too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(errr;"\"code\":-32601");"and the numeric code, unquoted, so a client can switch on it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(errr;"\"message\":\"Method not found\"");"and the message")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(errr;"\"result\"");"an error response has no result member")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(errr);"and it parses")){pass=pass+1}el{fail=fail+1};
 
-  (* request encoding: params present *)
-  if(t.assert(str.contains(req;"\"params\":");"request has params")){pass=pass+1}el{fail=fail+1};
+  (* ── Tool results ────────────────────────────────────────────────────────────*)
+  let plain=proto.toolresultok("all good");
+  if(t.assert(str.contains(plain;"\"type\":\"text\"");"a tool result declares its content type")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(plain;"all good");"and carries the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(plain;"isError");"a successful tool result does not claim to be an error")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(plain);"and it parses")){pass=pass+1}el{fail=fail+1};
 
-  (* notification encoding: no id field *)
-  let notif=encodenotification("shutdown");
-  if(t.assert(!str.contains(notif;"\"id\":");"notification has no id")){pass=pass+1}el{fail=fail+1};
+  let terr=proto.toolresulterr("tool blew up");
+  if(t.assert(str.contains(terr;"\"isError\":true");"a failed tool result is flagged, or the client renders a failure as output")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(terr);"and it parses")){pass=pass+1}el{fail=fail+1};
 
-  (* notification encoding: method present *)
-  if(t.assert(str.contains(notif;"\"method\":\"shutdown\"");"notification has method")){pass=pass+1}el{fail=fail+1};
+  (* A quote in the text must not end the JSON string early. This is the one escape the
+     module does perform, and it works. *)
+  if(t.assert(validjson(proto.toolresultok("he said \"hi\""));"a tool result containing a double quote is still valid JSON")){pass=pass+1}el{fail=fail+1};
 
-  (* response decoding: method extraction *)
-  if(t.assert(str.eq(decodemethod(req);"initialize");"decoded method is initialize")){pass=pass+1}el{fail=fail+1};
+  (* toolresultok and toolresulterr escape ONLY the double quote, with
+     str.replace(text;"\"";"\\\""), leaving the backslash and the control characters
+     alone. The two assertions below are the honest test of that and they PASS, so the
+     concern is recorded as checked rather than as a defect: std.json's own decoder accepts
+     both a raw newline and a lone backslash inside a string literal.
 
-  (* response decoding: tools/list *)
-  let toolsreq=encoderequest(42;"tools/list";"{}");
-  if(t.assert(str.eq(decodemethod(toolsreq);"tools/list");"decoded method is tools/list")){pass=pass+1}el{fail=fail+1};
+     The limit of the check is worth stating, because it is the reason not to read more
+     into a green here than is there: std.json is LENIENT, and a strict client — which is
+     what an MCP client is — may reject what it accepts. These are regression guards
+     against the escaping getting worse, not evidence that it is correct by RFC 8259. A
+     real answer needs a conformant parser, which this suite does not have. *)
+  let multiline=proto.toolresultok("line one
+line two");
+  if(t.assert(validjson(multiline);"a tool result containing a NEWLINE still decodes (std.json is lenient about this)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(proto.toolresultok("path C:\\temp"));"and so does one containing a backslash")){pass=pass+1}el{fail=fail+1};
 
-  (* response decoding: id extraction *)
-  if(t.assert(str.eq(decodeid(req);"1");"decoded id is 1")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(decodeid(toolsreq);"42");"decoded id is 42")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, RED: errorresponse does not escape its message at all ──────────
+     No str.replace, no encoding — the message is concatenated straight between two
+     quotes. So a double quote in it terminates the JSON string early and the envelope is
+     malformed, which even std.json's lenient decoder refuses.
 
-  (* isjsonrpc check *)
-  if(t.assert(isjsonrpc(req);"encoded request is valid jsonrpc")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!isjsonrpc("not json");"plain text is not jsonrpc")){pass=pass+1}el{fail=fail+1};
+     Live: packages/mcp-toke/src/tools.tk:312 builds an error message with
+     str.concat("unknown tool: ";name) where `name` is taken from the incoming request. A
+     client that calls a tool whose name contains a quote gets back a response no parser
+     will accept, and the shape of it is a JSON-injection primitive rather than merely a
+     formatting bug. Reported, not fixed. *)
+  if(t.assert(validjson(proto.errorresponse(1;0-32602 as i32;"unknown tool: \"evil\""));"an error message containing a quote does not break the envelope")){pass=pass+1}el{fail=fail+1};
 
-  (* unknown method returns empty *)
-  if(t.assert(str.eq(decodemethod("{\"method\":\"unknown\"}");"");"unknown method returns empty")){pass=pass+1}el{fail=fail+1};
+  (* ── tools/list ──────────────────────────────────────────────────────────────
+     The empty case first: a server with no tools must say so in well-formed JSON rather
+     than emit a trailing comma or a bare bracket. *)
+  if(t.asserteq(proto.toolslistresult(@($mcptool));"{\"tools\":[]}";"an empty tool list is an empty JSON array")){pass=pass+1}el{fail=fail+1};
+
+  let one=proto.toolslistresult(@(sampletool("anonymise";"Redact PII")));
+  if(t.assert(validjson(one);"a one-tool list is valid JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(one;"\"name\":\"anonymise\"");"and names the tool")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(one;"\"inputSchema\":{\"type\":\"object\"}");"and embeds the schema as JSON, not as a quoted string")){pass=pass+1}el{fail=fail+1};
+
+  (* Two tools is the case that catches a separator bug, and a separator bug here makes
+     every tool after the first invisible to the client. *)
+  let two=proto.toolslistresult(@(sampletool("anonymise";"Redact PII");sampletool("compress";"TOON encode")));
+  if(t.assert(validjson(two);"a two-tool list is valid JSON — this is what catches a comma-separator bug")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(two;"\"anonymise\"");"the first tool is present")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(two;"\"compress\"");"and so is the second")){pass=pass+1}el{fail=fail+1};
+
+  (* ── initialize ──────────────────────────────────────────────────────────────
+     The protocol version is a fixed string the client negotiates against. If it drifts, a
+     strict client refuses the session outright. *)
+  let init=proto.initresponse("loke-mcp";"3.0.1");
+  if(t.assert(str.contains(init;"\"protocolVersion\":\"2024-11-05\"");"initialize advertises the MCP protocol version the client negotiates against")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(init;"\"name\":\"loke-mcp\"");"and the server name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(init;"\"version\":\"3.0.1\"");"and its version")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(init;"\"tools\":{}");"and declares the tools capability, without which no client will call a tool")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(init);"and the whole thing parses")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Request field extraction, via buildrequestfromobj ───────────────────────
+     Through a correctly-ordered match, for the reason given at the top of this file. *)
+  mt json.dec("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"anonymise\"}}") {
+    $ok:obj if(t.assert(str.eq(proto.buildrequestfromobj(obj).method;"tools/call");"the method is read off the request object")){pass=pass+1}el{fail=fail+1};
+    $jsonerr:e if(t.assert(false;"the fixture must be valid JSON")){pass=pass+1}el{fail=fail+1}
+  };
+  mt json.dec("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"anonymise\"}}") {
+    $ok:obj if(t.assert(proto.buildrequestfromobj(obj).id==11;"and the id, so the reply can be matched to the call")){pass=pass+1}el{fail=fail+1};
+    $jsonerr:e if(t.assert(false;"the fixture must be valid JSON")){pass=pass+1}el{fail=fail+1}
+  };
+  mt json.dec("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"anonymise\"}}") {
+    (* FINDING, RED: paramsraw is a POINTER ADDRESS, not the params.
+
+       buildrequestfromobj sets it with json.enc(json.getval(obj;"params")). std.json
+       declares json.getval as (i64,i64)->i64 — a Json handle — and json.enc as
+       (str)->str. Passing the handle where a str belongs is width-compatible, so it
+       type-checks, and json.enc renders the pointer. Measured: paramsraw comes back as
+       "51887746848" for the fixture below, while .method on the same object reads
+       correctly, so the request is otherwise parsed fine.
+
+       packages/mcp-toke/src/tools.tk decodes req.paramsraw to obtain a tool's arguments.
+       So NO MCP TOOL CAN EVER RECEIVE AN ARGUMENT: every call arrives with a decimal
+       pointer value where its JSON arguments should be. Reported, not fixed. *)
+    $ok:obj if(t.assert(str.contains(proto.buildrequestfromobj(obj).paramsraw;"anonymise");"params are carried as raw JSON for the tool layer to decode — NOT a rendered pointer")){pass=pass+1}el{fail=fail+1};
+    $jsonerr:e if(t.assert(false;"the fixture must be valid JSON")){pass=pass+1}el{fail=fail+1}
+  };
+  mt json.dec("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"anonymise\"}}") {
+    $ok:obj if(t.asserteq(proto.buildrequestfromobj(obj).jsonrpc;"2.0";"and the envelope version is set on the parsed request")){pass=pass+1}el{fail=fail+1};
+    $jsonerr:e if(t.assert(false;"the fixture must be valid JSON")){pass=pass+1}el{fail=fail+1}
+  };
 
   <fail
 };

@@ -5,114 +5,170 @@ m=test.privacy.placeholder;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=ph:core.privacy.placeholder;
 
-(* i=ph:core.privacy.placeholder; -- linker issue, stubbed below *)
+(* X7.2 — the import is restored. It used to read:
 
-(* --- stub placeholder map --- *)
+     (* i=ph:core.privacy.placeholder; -- linker issue, stubbed below *)
+     (* --- stub placeholder map --- *)
 
-t=$entry{
-  original:str;
-  placeholder:str;
-  entitytype:str
+   and then declared a $phmap with reqid, plus newmap/addentry/makeplaceholder/lookup/
+   reverselookup/restore. The linker gap that note blames closed upstream (UPSTREAM.md:77),
+   and the copy had drifted a long way from the module in the meantime: the real newmap
+   takes no arguments and no request id, makeplaceholder takes a u32 rather than an i64,
+   and there is no lookup or reverselookup anywhere in the module — so three of the
+   fourteen assertions were about functions that have never existed.
+
+   The one that matters most is addentry. The stub's addentry returned the updated map,
+   which is the shape the module should always have had — but for the whole life of
+   LS1.1a the PRODUCTION addentry's body was
+
+     map.entries==str.arraypush(map.entries;entry)
+
+   a discarded COMPARISON (T-26: `=` on a struct field raises E2002 whose advice is to
+   use `==`, which is a silent no-op) around an append to a by-value parameter, in a
+   function declared void. The placeholder map never stored an entry. Restoration
+   returned the model's text with the placeholders still in it. This test was green
+   throughout, because it was asserting its own copy — the copy that did the right thing.
+
+   WHAT IT COVERS NOW. tests/unit/privacy/test_placeholder_collision.tk already covers
+   assignplaceholders, applytotext's longest-value-first ordering, the salt reaching the
+   placeholder, and round trips — so this file does not repeat them. It takes what that
+   file leaves: the placeholder FORMAT in both its salted and unsalted shapes, the salt
+   derivation itself, addentry returning a map that actually holds the entry, and
+   restore's claim that sequential replacement is safe because placeholders are
+   self-delimiting. That last one is asserted directly, because the module's comment
+   states it as a reason not to sort and nothing checked it. *)
+
+f=entity(etype:str;value:str;placeholder:str):$piientity{
+  <$piientity{
+    entitytype:etype;
+    value:value;
+    start:0;
+    end:0;
+    confidence:0.9;
+    placeholder:placeholder
+  }
 };
 
-t=$phmap{
-  reqid:str;
-  entries:@$entry
+f=entrywithplaceholder(map:$placeholdermap;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<map.entries.len;i=i+1){
+    let e:$placeholderentry=map.entries.get(i);
+    if(str.eq(e.placeholder;wanted)){
+      n=n+1
+    }el{}
+  };
+  <n
 };
 
-f=newmap(reqid:str):$phmap{
-  <$phmap{reqid:reqid;entries:@()}
-};
-
-f=addentry(map:$phmap;orig:str;ph:str;etype:str):$phmap{
-  let e=$entry{original:orig;placeholder:ph;entitytype:etype};
-  let updated=map.entries.push(e);
-  <$phmap{reqid:map.reqid;entries:updated}
-};
-
-f=makeplaceholder(etype:str;idx:i64):str{
-  let tag=str.upper(etype);
-  let idxstr=str.fromint(idx);
-  <str.concat("[";str.concat(tag;str.concat("_";str.concat(idxstr;"]"))))
-};
-
-f=lookup(map:$phmap;ph:str):str{
-  let i=mut.0;
-  let n=(map.entries.len as i64);
+f=originalfor(map:$placeholdermap;wanted:str):str{
   let found=mut."";
-  lp(let lv=0;i<n;lv=lv){
-    let e=map.entries.get(i);
-    if(str.eq(e.placeholder;ph)){found=e.original;i=n}el{i=i+1}
+  lp(let i=0;i<map.entries.len;i=i+1){
+    let e:$placeholderentry=map.entries.get(i);
+    if(str.eq(e.placeholder;wanted)){
+      found=e.original
+    }el{}
   };
   <found
 };
-
-f=reverselookup(map:$phmap;orig:str):str{
-  let i=mut.0;
-  let n=(map.entries.len as i64);
-  let found=mut."";
-  lp(let lv=0;i<n;lv=lv){
-    let e=map.entries.get(i);
-    if(str.eq(e.original;orig)){found=e.placeholder;i=n}el{i=i+1}
-  };
-  <found
-};
-
-f=restore(text:str;map:$phmap):str{
-  let result=mut.text;
-  let i=mut.0;
-  let n=(map.entries.len as i64);
-  lp(let lv=0;true;lv=lv){
-    if(!(i<n)){br}el{
-      let e=map.entries.get(i);
-      result=str.replace(result;e.placeholder;e.original);
-      i=i+1
-    }
-  };
-  <result
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* placeholder format *)
-  if(t.assert(str.eq(makeplaceholder("email";1);"[EMAIL_1]");"placeholder format email 1")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(makeplaceholder("phone_au";3);"[PHONE_AU_3]");"placeholder format phone_au 3")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(makeplaceholder("credit_card";2);"[CREDIT_CARD_2]");"placeholder format credit_card 2")){pass=pass+1}el{fail=fail+1};
+  (* ── The placeholder format, unsalted ───────────────────────────────────────
+     The historical shape, which is what a standalone single-layer detector with no
+     request context produces. The three assertions the old stub made about its own copy,
+     now made about the module. *)
+  if(t.asserteq(ph.makeplaceholder("email";1);"[EMAIL_1]";"an unsalted email placeholder is [EMAIL_1]")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.makeplaceholder("phone_au";3);"[PHONE_AU_3]";"the entity type is upper-cased whole, underscore and all")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.makeplaceholder("credit_card";2);"[CREDIT_CARD_2]";"and a two-word type keeps both words")){pass=pass+1}el{fail=fail+1};
 
-  (* new map is empty *)
-  let m0=newmap("req-001");
-  if(t.assert((m0.entries.len as i64)==0;"new map has zero entries")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(m0.reqid;"req-001");"map stores request id")){pass=pass+1}el{fail=fail+1};
+  (* ── The salted form ────────────────────────────────────────────────────────
+     The salt exists so that a literal `[PERSON_1]` a user types into their own prompt
+     cannot be replaced by restore with some OTHER person's real name. An empty salt must
+     still yield the historical shape, because that is the contract makeplaceholder
+     delegates on. *)
+  if(t.asserteq(ph.makesaltedplaceholder("person";"2a4c";1);"[PERSON_2a4c_1]";"a salted placeholder carries the salt between type and index")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.makesaltedplaceholder("person";"";1);"[PERSON_1]";"an empty salt yields the historical unsalted shape")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(ph.makesaltedplaceholder("person";"2a4c";1);ph.makeplaceholder("person";1));"so a salted placeholder cannot collide with a literal the user typed in unsalted form")){pass=pass+1}el{fail=fail+1};
 
-  (* add single entry and retrieve *)
-  let m1=addentry(m0;"john@example.com";"[EMAIL_1]";"email");
-  if(t.assert((m1.entries.len as i64)==1;"map has 1 entry after add")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(lookup(m1;"[EMAIL_1]");"john@example.com");"lookup returns original")){pass=pass+1}el{fail=fail+1};
+  (* ── The salt derivation ────────────────────────────────────────────────────
+     Four hex characters, not the whole request id: the anonymised prompt has to stay
+     readable to a person reviewing it, and four characters is already 65536 ways for a
+     typed literal to miss. A request id SHORTER than the prefix must not trap — that is
+     why the module uses str.substr rather than str.slice, and it is untested elsewhere. *)
+  if(t.asserteq(ph.saltforrequest("2a4c9f18-0000-4000-8000-000000000000");"2a4c";"the salt is the first four characters of the request id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(ph.saltforrequest("2a4c9f18-0000")) as i64)==4;"and only four, however long the id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.saltforrequest("ab");"ab";"an id shorter than four characters is returned whole rather than trapping")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.saltforrequest("");"";"and no request context at all yields the unsalted form")){pass=pass+1}el{fail=fail+1};
 
-  (* reverse lookup *)
-  if(t.assert(str.eq(reverselookup(m1;"john@example.com");"[EMAIL_1]");"reverse lookup returns placeholder")){pass=pass+1}el{fail=fail+1};
+  (* ── newmap and addentry ────────────────────────────────────────────────────
+     LS1.1a: addentry's body was a discarded comparison, so the map never held anything
+     and every restoration downstream of it silently returned the model's text with the
+     placeholders still in it. These are the assertions that would have been red. *)
+  let m0=ph.newmap();
+  if(t.assert(m0.entries.len==0;"a new map holds no entries")){pass=pass+1}el{fail=fail+1};
 
-  (* lookup miss returns empty *)
-  if(t.assert(str.eq(lookup(m1;"[PHONE_1]");"");"lookup miss returns empty string")){pass=pass+1}el{fail=fail+1};
+  let m1=ph.addentry(m0;"john.smith@example.com";"[EMAIL_1]";"email");
+  if(t.assert(m1.entries.len==1;"addentry RETURNS a map that holds the entry — the defect LS1.1a fixed was that it held nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m0.entries.len==0;"and does not mutate the caller's map, because a toke struct is a value")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(originalfor(m1;"[EMAIL_1]");"john.smith@example.com";"the entry maps the placeholder back to the original")){pass=pass+1}el{fail=fail+1};
 
-  (* multiple entities in same request *)
-  let m2=addentry(m1;"0412345678";"[PHONE_AU_1]";"phone_au");
-  if(t.assert((m2.entries.len as i64)==2;"map has 2 entries")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(lookup(m2;"[PHONE_AU_1]");"0412345678");"lookup second entry")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(lookup(m2;"[EMAIL_1]");"john@example.com");"first entry still accessible")){pass=pass+1}el{fail=fail+1};
+  let m2=ph.addentry(m1;"0412 345 678";"[PHONE_AU_1]";"phone_au");
+  if(t.assert(m2.entries.len==2;"a second entry is appended, not substituted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(originalfor(m2;"[EMAIL_1]");"john.smith@example.com";"and the first entry survives the second")){pass=pass+1}el{fail=fail+1};
 
-  (* restore replaces placeholders with originals *)
-  let restored=restore("[EMAIL_1] called [PHONE_AU_1]";m2);
-  if(t.assert(str.eq(restored;"john@example.com called 0412345678");"restore two placeholders")){pass=pass+1}el{fail=fail+1};
+  (* ── mapfromentities ────────────────────────────────────────────────────────
+     Before PL1.1 there was no path from a detection result back to a restore table at
+     all: the only addentry call site in the repository was a local in
+     regex.rundetection that was never returned. *)
+  let ents=@(entity("email";"john.smith@example.com";"[EMAIL_1]");entity("phone_au";"0412 345 678";"[PHONE_AU_1]"));
+  let froments=ph.mapfromentities(ents);
+  if(t.assert(froments.entries.len==2;"mapfromentities builds one entry per entity")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(entrywithplaceholder(froments;"[EMAIL_1]")==1;"keyed by the placeholder the entity already carries")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(originalfor(froments;"[PHONE_AU_1]");"0412 345 678";"and holding the entity's value as the original")){pass=pass+1}el{fail=fail+1};
 
-  (* restore with no placeholders returns input unchanged *)
-  let unchanged=restore("Hello world";m2);
-  if(t.assert(str.eq(unchanged;"Hello world");"restore no match unchanged")){pass=pass+1}el{fail=fail+1};
+  (* An entity list with no placeholders assigned yet produces a map that cannot restore
+     anything — which is why assignplaceholders must run first. Asserted so the ordering
+     dependency is visible rather than folklore. *)
+  let unassigned=ph.mapfromentities(@(entity("email";"a@b.com";"")));
+  if(t.asserteq(ph.restore("nothing to restore here";unassigned);"nothing to restore here";"a map built before placeholders were assigned restores nothing, silently — assignplaceholders must run first")){pass=pass+1}el{fail=fail+1};
+
+  (* ── restore ────────────────────────────────────────────────────────────────*)
+  if(t.asserteq(ph.restore("[EMAIL_1] called [PHONE_AU_1]";m2);"john.smith@example.com called 0412 345 678";"restore replaces every placeholder in the text")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore("Hello world";m2);"Hello world";"and leaves text containing no placeholder untouched")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore("";m2);"";"an empty response restores to empty rather than to the map")){pass=pass+1}el{fail=fail+1};
+
+  (* THE ASYMMETRY THE MODULE CLAIMS AS ITS REASON NOT TO SORT.
+
+     restore replaces sequentially, in map order, with no length ordering — unlike
+     applytotext, which must order longest-first or it strands a surname in the clear.
+     The module's comment justifies the difference: "[EMAIL_1] is not a prefix of
+     [EMAIL_10] because the closing bracket intervenes." Nothing asserted it. If the
+     placeholder format ever loses its brackets, applytotext's careful ordering stays
+     correct and restore silently starts producing "alice@example.com0" — a corrupted
+     response, not a leak, but corrupted in a way no round-trip test would show. *)
+  let tenmap=ph.addentry(ph.addentry(ph.newmap();"alice@example.com";"[EMAIL_1]";"email");"bob@example.com";"[EMAIL_10]";"email");
+  if(t.asserteq(ph.restore("to [EMAIL_10] via [EMAIL_1]";tenmap);"to bob@example.com via alice@example.com";"[EMAIL_1] does not consume the prefix of [EMAIL_10]: the closing bracket is what makes sequential replacement safe")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The selection order primitives ─────────────────────────────────────────
+     beforeinorder's antisymmetry is covered by test_placeholder_collision.tk. What is
+     not covered is the seed and the exhaustion condition — the two ends of the loop in
+     applytotext, and the two places an off-by-one there would silently drop the first or
+     the last substitution. *)
+  let three=@(entity("person";"Bob";"[PERSON_1]");entity("person";"Bob Jones";"[PERSON_2]"));
+  if(t.assert(ph.longestvaluelen(three)==9;"longestvaluelen reports the longest value, which seeds the selection")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ph.longestvaluelen(@($piientity))==0;"and is 0 for an empty list, so the seed still precedes everything")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ph.nextinorder(three;ph.longestvaluelen(three)+1;0)==1;"the first selection is the LONGEST value, not the first in the list")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ph.nextinorder(three;3;0)==0-1;"and the selection reports -1 when nothing is left, which is what stops the loop")){pass=pass+1}el{fail=fail+1};
+
+  (* The substitution the ordering exists for, end to end, one assertion — the detail is
+     test_placeholder_collision.tk's. *)
+  let anon=ph.applytotext("Bob Jones reviewed it and Bob approved it";three);
+  if(t.assert(!str.contains(anon;"Jones");"applytotext leaves no surname in the clear")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

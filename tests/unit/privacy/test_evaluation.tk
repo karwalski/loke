@@ -5,101 +5,149 @@ m=test.privacy.evaluation;
 
 i=t:std.test;
 i=str:std.str;
+i=ev:core.privacy.evaluation;
 
-(* --- stub types and functions mirroring core.privacy.evaluation --- *)
+(* X7.2 — this file used to declare its own precision/recall arithmetic and assert against
+   it. It now imports core.privacy.evaluation.
 
-t=$evaluationresult{
-  layerid:str;
-  detections:i64;
-  truepositives:i64;
-  falsepositives:i64;
-  falsenegatives:i64;
-  precision:f64;
-  recall:f64;
-  f1:f64
-};
+   This module is the INSTRUMENT that produces the recall and precision figures AD1.2 is
+   measured with, and docs/metrics-baseline.md is the only place this project publishes
+   numbers from. So the thing worth asserting is not that the formulae are the textbook
+   ones — that is a tautology against a copy — but that the instrument DISCRIMINATES and
+   that its edge cases do not manufacture a flattering figure. A recall of 0 reported as
+   0 when nothing was detected, and a precision of 0 rather than 1 when nothing was
+   labelled, are the two ways a measurement harness lies in its own favour.
 
-f=computeprecision(tp:i64;fp:i64):f64{
-  if(tp+fp==0){<0.0}el{};
-  <(tp as f64)/((tp+fp) as f64)
-};
+   EVERY ASSERTION HERE USES THE BASIS-POINT FUNCTIONS, and that is not a preference.
+   The module's own comment on ratiobp records the reason: computeprecision, computerecall
+   and computef1 return a BARE f64, and a bare f64 return is corrupted across a module
+   boundary (T-20) — measured, f64abs(-50.0) arrives as the bit pattern 1. So those three
+   cannot be asserted from a test at all, and a test that appeared to do so would be
+   reading the wrong register. An f64 STRUCT FIELD crosses intact, which is why the
+   $evaluationresult fields below can be read.
 
-f=computerecall(tp:i64;fn2:i64):f64{
-  if(tp+fn2==0){<0.0}el{};
-  <(tp as f64)/((tp+fn2) as f64)
-};
-
-f=computef1(precision:f64;recall:f64):f64{
-  if(precision+recall==0.0){<0.0}el{};
-  <2.0*precision*recall/(precision+recall)
-};
-
-f=evaluatelayer(layerid:str;detected:i64;labelled:i64;matched:i64):$evaluationresult{
-  let tp=matched;
-  let fp=mut.detected-matched;
-  let fn2=mut.labelled-matched;
-  if(fp<0){fp=0}el{};
-  if(fn2<0){fn2=0}el{};
-  let p=computeprecision(tp;fp);
-  let r=computerecall(tp;fn2);
-  let f=computef1(p;r);
-  <$evaluationresult{
-    layerid:layerid;detections:detected;
-    truepositives:tp;falsepositives:fp;falsenegatives:fn2;
-    precision:p;recall:r;f1:f
-  }
-};
-
-f=formatresult(r:$evaluationresult):str{
-  <str.concat(r.layerid;str.concat(": P=";str.concat(str.fromfloat(r.precision);str.concat(" R=";str.concat(str.fromfloat(r.recall);str.concat(" F1=";str.fromfloat(r.f1)))))))
-};
-
-(* --- tests --- *)
+   Scope note: core.privacy.evaluation has no importer anywhere in the repository. De-
+   stubbing this file makes the instrument exercised; it does not mean any published figure
+   came from it. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. perfect precision: no false positives *)
-  let p=computeprecision(10;0);
-  if(t.assert(p>0.99;"perfect precision is 1.0")){pass=pass+1}el{fail=fail+1};
+  (* ── ratiobp, in basis points, rounded ───────────────────────────────────────*)
+  if(t.assert(ev.ratiobp(1;2)==5000;"one in two is 5000 basis points")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.ratiobp(1;1)==10000;"one in one is 10000, which is 100%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.ratiobp(0;5)==0;"none in five is zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.ratiobp(2;3)==6667;"two in three ROUNDS to 6667 rather than truncating to 6666")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.ratiobp(1;3)==3333;"and one in three to 3333")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. precision with false positives *)
-  let p2=computeprecision(8;2);
-  if(t.assert(p2>0.79;"precision 8/(8+2) = 0.8")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(p2<0.81;"precision 8/(8+2) upper bound")){pass=pass+1}el{fail=fail+1};
+  (* Division by zero must be zero, not a trap and not 100%. A harness that reported
+     perfect recall when there was nothing to recall would be the worst possible bug in a
+     measurement instrument. *)
+  if(t.assert(ev.ratiobp(0;0)==0;"a ratio with a zero denominator is ZERO, not 100% — a harness must not report a perfect score for measuring nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.ratiobp(5;0)==0;"and neither does a non-zero numerator over nothing")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. precision zero when no detections *)
-  let p3=computeprecision(0;0);
-  if(t.assert(p3<0.01;"precision is 0 when no detections")){pass=pass+1}el{fail=fail+1};
+  (* ── precision and recall are DIFFERENT questions ────────────────────────────
+     Precision asks how much of what was detected was real; recall asks how much of what
+     was real was detected. A harness that conflated them would report the same figure for
+     an over-eager detector and a timid one. The two calls below share tp and differ only
+     in which error count they are given, and they must disagree. *)
+  if(t.assert(ev.precisionbp(9;1)==9000;"nine true positives against one false positive is 90% precision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.recallbp(9;1)==9000;"and nine against one missed is 90% recall")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.precisionbp(9;1)!=ev.precisionbp(9;9);"precision falls as false positives rise")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.precisionbp(9;9)==5000;"nine real and nine spurious is 50% precision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.recallbp(9;9)==5000;"and nine found of eighteen real is 50% recall")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.precisionbp(10;0)==10000;"a detector with no false positives is 100% precise")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.recallbp(10;0)==10000;"and one that misses nothing has 100% recall")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.precisionbp(0;10)==0;"a detector whose every detection is wrong has zero precision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.recallbp(0;10)==0;"and one that finds nothing has zero recall")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.precisionbp(0;0)==0;"a detector that detected nothing at all scores zero precision, NOT 100%")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. perfect recall *)
-  let r=computerecall(10;0);
-  if(t.assert(r>0.99;"perfect recall is 1.0")){pass=pass+1}el{fail=fail+1};
+  (* ── f1 is the harmonic mean, so it punishes imbalance ───────────────────────
+     This is the whole reason F1 is reported instead of an arithmetic mean: a detector
+     with perfect precision and 10% recall is nearly useless, and the arithmetic mean
+     would call it 55%. *)
+  if(t.assert(ev.f1bp(10000;10000)==10000;"perfect precision and perfect recall give an F1 of 100%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.f1bp(8000;8000)==8000;"and equal precision and recall give that same figure")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.f1bp(10000;1000)<3000;"but perfect precision with 10% recall scores BELOW 30% — the harmonic mean punishes imbalance, which an arithmetic mean would flatter to 55%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.f1bp(10000;0)==0;"and 100% precision with zero recall is zero, not fifty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.f1bp(0;0)==0;"a detector with neither scores zero rather than trapping")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. recall with false negatives *)
-  let r2=computerecall(7;3);
-  if(t.assert(r2>0.69;"recall 7/(7+3) = 0.7")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(r2<0.71;"recall 7/(7+3) upper bound")){pass=pass+1}el{fail=fail+1};
+  (* ── The rendering cannot drift from the value ───────────────────────────────
+     bplabel is integer arithmetic throughout, so the string an operator reads is derived
+     from the same integer the assertion used. The zero-padding case is the one a naive
+     implementation gets wrong: 9505 basis points is 95.05%, not 95.5%. *)
+  if(t.asserteq(ev.bplabel(9550);"95.50%";"9550 basis points renders as 95.50%")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ev.bplabel(9505);"95.05%";"and 9505 as 95.05% — the fractional part is ZERO-PADDED, not printed as 95.5%")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ev.bplabel(10000);"100.00%";"and a perfect score as 100.00%")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ev.bplabel(0);"0.00%";"and zero as 0.00% rather than as 0")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. F1 perfect scores *)
-  let f=computef1(1.0;1.0);
-  if(t.assert(f>0.99;"perfect F1 is 1.0")){pass=pass+1}el{fail=fail+1};
+  (* ── evaluatelayerbp: the whole measurement, from raw counts ─────────────────
+     detected, labelled and matched are what a corpus run actually produces. The derived
+     false positive and false negative counts are where an off-by-one would quietly
+     improve every figure the harness reports. *)
+  let r=ev.evaluatelayerbp("regex";12;10;9);
+  if(t.asserteq(r.layerid;"regex";"the result names the layer it measured")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.detections==12;"and how many detections it made")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.truepositives==9;"nine of the twelve matched a label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.falsepositives==3;"so three were spurious: detected minus matched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.falsenegatives==1;"and one label was missed: labelled minus matched")){pass=pass+1}el{fail=fail+1};
 
-  (* 7. F1 zero when both zero *)
-  let f2=computef1(0.0;0.0);
-  if(t.assert(f2<0.01;"F1 is 0 when both precision and recall are 0")){pass=pass+1}el{fail=fail+1};
+  (* The f64 fields are read here, which is safe: $evaluationresult crosses as a STRUCT
+     and its f64 fields survive. It is a bare f64 RETURN that does not (T-20). *)
+  if(t.assert(r.precision>0.74;"precision is nine of twelve, above 0.74")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.precision<0.76;"and below 0.76")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.recall>0.89;"recall is nine of ten, above 0.89")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.f1>r.precision;"and the F1 lies between the two, so it is a mean rather than a copy of either")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.f1<r.recall;"— above precision and below recall")){pass=pass+1}el{fail=fail+1};
 
-  (* 8. evaluatelayer end-to-end *)
-  let result=evaluatelayer("regex";10;8;7);
-  if(t.asserteq(result.layerid;"regex";"evaluatelayer sets layer id")){pass=pass+1}el{fail=fail+1};
+  (* Counts that cannot be negative. A layer that detected fewer entities than it matched,
+     or matched more than were labelled, is a harness bug — and clamping at zero rather
+     than going negative is what keeps a bug from producing a ratio above 100%. *)
+  let impossible=ev.evaluatelayerbp("ner";2;3;5);
+  if(t.assert(impossible.falsepositives==0;"matching more than were detected clamps false positives at zero rather than going negative")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(impossible.falsenegatives==0;"and matching more than were labelled clamps false negatives")){pass=pass+1}el{fail=fail+1};
 
-  (* 9. evaluatelayer TP count *)
-  if(t.assert(result.truepositives==7;"evaluatelayer true positives correct")){pass=pass+1}el{fail=fail+1};
+  (* A layer that ran and found nothing. Every figure zero, and specifically NOT a perfect
+     precision from an empty denominator. *)
+  let nothing=ev.evaluatelayerbp("presidio";0;10;0);
+  if(t.assert(nothing.truepositives==0;"a layer that detected nothing has no true positives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nothing.falsenegatives==10;"and missed every one of the ten labels")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nothing.recall<0.01;"so its recall is zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nothing.precision<0.01;"and its precision is ZERO rather than a perfect score from an empty denominator")){pass=pass+1}el{fail=fail+1};
 
-  (* 10. formatresult includes layer id *)
-  let fmtstr=formatresult(result);
-  if(t.assert(str.contains(fmtstr;"regex");"format result includes layer id")){pass=pass+1}el{fail=fail+1};
+  (* evaluatelayer and evaluatelayerbp must agree on the integer counts. They compute the
+     ratios by different routes, and a divergence in the counts would mean two figures in
+     circulation for one corpus run. *)
+  let viaf64=ev.evaluatelayer("regex";12;10;9);
+  if(t.assert(viaf64.truepositives==r.truepositives;"evaluatelayer and evaluatelayerbp agree on the true positives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(viaf64.falsepositives==r.falsepositives;"and on the false positives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(viaf64.falsenegatives==r.falsenegatives;"and on the false negatives")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The comparison matrix ───────────────────────────────────────────────────
+     Declared when the module was written and never constructed, which AD1.2 records as
+     most of the reason per-layer comparison could not be measured. addlayer RETURNS the
+     new matrix — a callee cannot mutate its caller's struct and .push returns a new array,
+     the defect class that made thirteen accumulations in this repository silently do
+     nothing (LS1.1a). *)
+  let m0=ev.newmatrix(10;3);
+  if(t.assert(m0.totallabelled==10;"a matrix records how many entities the corpus labelled")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m0.totaltexts==3;"and over how many texts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m0.layers.len==0;"and starts with no layers")){pass=pass+1}el{fail=fail+1};
+
+  let m1=ev.addlayer(m0;r);
+  if(t.assert(m1.layers.len==1;"addlayer RETURNS a matrix holding the result")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m0.layers.len==0;"and leaves the caller's matrix alone, because a toke struct is a value")){pass=pass+1}el{fail=fail+1};
+  let m2=ev.addlayer(m1;nothing);
+  if(t.assert(m2.layers.len==2;"a second layer is appended rather than substituted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m2.totallabelled==10;"and the corpus totals survive accumulation")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The line an operator reads ─────────────────────────────────────────────*)
+  let line=ev.formatresult(r);
+  if(t.assert(str.contains(line;"regex");"the summary names the layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"P=");"and labels its precision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"R=");"and its recall")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"F1=");"and its F1, so no figure is unlabelled")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

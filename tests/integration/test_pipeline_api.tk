@@ -2,101 +2,122 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=tests.integration.testpipelineapi;
+
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=bt:core.optimiser.budgettypes;
+i=bud:core.optimiser.budget;
+i=pt:core.providers.types;
+i=h:browser.pages.api.pipeline;
 
-(* Stub types for pipeline request/response JSON shapes *)
-t=$pipelinerequest{
-  model:str;
-  prompt:str;
-  maxTokens:i64;
-  stream:bool
+(* X7.2 — this file used to declare $pipelinerequest and $pipelineresponse and assert
+   twelve times over them:
+
+     (* Stub: construct a pipeline response *)
+     f=buildresponse(id:str;model:str;content:str;tokensUsed:i64):$pipelineresponse{ ... };
+
+   It asserted that a struct literal carries the fields it was given, and imported nothing
+   from the endpoint, so it made no claim about the pipeline API at all. T14.2 cites it as
+   evidence that "POST to /api/pipeline with email in body returns anonymised prompt".
+
+   WHAT IT COVERS NOW. The request path itself is already well covered:
+   tests/integration/test_request_path_e2e.tk exercises detection, anonymisation, policy,
+   restoration, the audit row and the kill switch against the real handler, and
+   tests/unit/browser/test_pipeline_handler.tk covers the rendered privacy metadata. The
+   gap this file takes is the BUDGET, which is a refusal control and is untested anywhere.
+
+   Why the budget and not something else: a budget manager built inside a request handler
+   and thrown away at the end of it is not a budget — every request starts from zero and
+   the limit never binds. The handler therefore persists the counters through the settings
+   store and, because setint returns i64!$lokeerr and T-18 makes its own report of success
+   unreadable, verifies the write by READING IT BACK. That read-back is the entire
+   guarantee, and nothing checked it. A budget that silently fails to persist is a limit
+   that does not exist, and the symptom is indistinguishable from a limit that was never
+   reached. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir()'s return is truncated when interpolated
+     (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-pipeline-api")
 };
 
-t=$pipelineresponse{
-  id:str;
-  model:str;
-  content:str;
-  tokensUsed:i64;
-  status:str
-};
-
-(* Stub: construct a pipeline request *)
-f=buildrequest(model:str;prompt:str;maxTokens:i64;stream:bool):$pipelinerequest{
-  <$pipelinerequest{
-    model:model;
-    prompt:prompt;
-    maxTokens:maxTokens;
-    stream:stream
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
   }
-};
-
-(* Stub: construct a pipeline response *)
-f=buildresponse(id:str;model:str;content:str;tokensUsed:i64):$pipelineresponse{
-  <$pipelineresponse{
-    id:id;
-    model:model;
-    content:content;
-    tokensUsed:tokensUsed;
-    status:"ok"
-  }
-};
-
-(* Stub: serialise request to JSON string *)
-f=requesttojson(r:$pipelinerequest):str{
-  <str.concat("{\"model\":\"";str.concat(r.model;str.concat("\",\"prompt\":\"";str.concat(r.prompt;str.concat("\",\"maxTokens\":";str.concat(str.fromint(r.maxTokens);"}"))))))
-};
-
-(* Stub: parse response status from JSON *)
-f=parsestatus(json:str):str{
-  if(str.contains(json;"\"status\":\"ok\"")){<"ok"}el{
-  if(str.contains(json;"\"status\":\"error\"")){<"error"}el{
-  <"unknown"
-  }}
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test: request construction preserves model *)
-  let req=buildrequest("llama3";"hello world";512;false);
-  if(t.assert(str.eq(req.model;"llama3");"request model preserved")){pass=pass+1}el{fail=fail+1};
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
 
-  (* test: request construction preserves prompt *)
-  if(t.assert(str.eq(req.prompt;"hello world");"request prompt preserved")){pass=pass+1}el{fail=fail+1};
+  (* ── The day key ────────────────────────────────────────────────────────────
+     The counters are keyed by day number so that a day change resets them. If this were
+     0 or negative every day would collide and the budget would never reset; if it moved
+     within a single request the counters would reset mid-flight. *)
+  let day=h.daynumber();
+  if(t.assert(day>20000;"daynumber is a plausible count of days since the epoch, not 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.daynumber()==day;"and it does not move between two calls in the same request")){pass=pass+1}el{fail=fail+1};
 
-  (* test: request construction preserves maxTokens *)
-  if(t.assert(req.maxTokens == 512;"request maxTokens preserved")){pass=pass+1}el{fail=fail+1};
+  (* ── Persistence, and the read-back that is its only guarantee ───────────────*)
+  if(t.assert(h.persistbudget(store;1234;5678);"persistbudget reports success, and it reports it by reading the value back rather than trusting setint")){pass=pass+1}el{fail=fail+1};
 
-  (* test: request JSON contains model field *)
-  let json=requesttojson(req);
-  if(t.assert(str.contains(json;"\"model\":\"llama3\"");"request JSON has model")){pass=pass+1}el{fail=fail+1};
+  (* Read through core.optimiser.budget.rowtokens, not through m.usage.tokensused.
+     `usage` is an ARRAY of per-period counters, one per limit, so the direct spelling
+     reads an array header as a struct and yields a pointer value — measured at
+     4387275664 where 1234 was expected. rowtokens is the module's own accessor and is
+     also how it sidesteps T-20 on the cost figure. *)
+  let m:$budgetmanager=h.budgetmanager(store);
+  if(t.assert(bud.rowtokens(m;0)==1234;"a manager built after the write carries the persisted token count, so the limit binds across requests")){pass=pass+1}el{fail=fail+1};
 
-  (* test: request JSON contains prompt field *)
-  if(t.assert(str.contains(json;"\"prompt\":\"hello world\"");"request JSON has prompt")){pass=pass+1}el{fail=fail+1};
+  (* Overwrite, because a budget that only ever accumulates the first write is a budget
+     that stops counting after one request. *)
+  if(t.assert(h.persistbudget(store;9999;1);"a second write persists")){pass=pass+1}el{fail=fail+1};
+  let m2:$budgetmanager=h.budgetmanager(store);
+  if(t.assert(bud.rowtokens(m2;0)==9999;"and replaces the earlier figure rather than being ignored")){pass=pass+1}el{fail=fail+1};
 
-  (* test: request JSON contains maxTokens *)
-  if(t.assert(str.contains(json;"\"maxTokens\":512");"request JSON has maxTokens")){pass=pass+1}el{fail=fail+1};
+  (* ── No store means no budget, said out loud ────────────────────────────────
+     A store of 0 is the unopenable case. Reporting success here would claim a limit is
+     being enforced when nothing is recording against it — the same class of error as an
+     unreadable kill switch reading as disengaged, and the handler treats it the same way:
+     it refuses to claim. *)
+  if(t.assert(!h.persistbudget(0;10;10);"persistbudget with no store reports FAILURE rather than pretending to have recorded")){pass=pass+1}el{fail=fail+1};
 
-  (* test: response construction sets status to ok *)
-  let resp=buildresponse("req-001";"llama3";"response text";128);
-  if(t.assert(str.eq(resp.status;"ok");"response status is ok")){pass=pass+1}el{fail=fail+1};
+  let fresh:$budgetmanager=h.budgetmanager(0);
+  if(t.assert(bud.rowtokens(fresh;0)==0;"and a manager with no store starts from the default limits with nothing used")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fresh.limits.len>0;"which still carries real limits, so an unpersisted budget is restrictive rather than unlimited")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(bud.formatusage(m2);"9999");"and the rendered usage line reports the persisted figure rather than a fresh zero")){pass=pass+1}el{fail=fail+1};
 
-  (* test: response preserves id *)
-  if(t.assert(str.eq(resp.id;"req-001");"response id preserved")){pass=pass+1}el{fail=fail+1};
+  (* ── The two refusal bodies ─────────────────────────────────────────────────
+     Both are refusals a caller must not mistake for a result. The flags are what a
+     browser branches on, and they must be distinguishable from each other: a routing
+     refusal is a configuration problem and a budget refusal is a spending one. *)
+  if(t.assert(h.refusedroute("no model could be routed to";"")>0;"a routing refusal returns a response handle")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.refusedbudget("daily token budget exhausted";"")>0;"a budget refusal returns a response handle")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.refused("no detection layer is healthy")>0;"a privacy refusal returns a response handle")){pass=pass+1}el{fail=fail+1};
 
-  (* test: response preserves tokensUsed *)
-  if(t.assert(resp.tokensUsed == 128;"response tokensUsed preserved")){pass=pass+1}el{fail=fail+1};
-
-  (* test: parse ok status from JSON *)
-  if(t.assert(str.eq(parsestatus("{\"status\":\"ok\"}");"ok");"parse ok status")){pass=pass+1}el{fail=fail+1};
-
-  (* test: parse error status from JSON *)
-  if(t.assert(str.eq(parsestatus("{\"status\":\"error\"}");"error");"parse error status")){pass=pass+1}el{fail=fail+1};
-
-  (* test: parse unknown status from JSON *)
-  if(t.assert(str.eq(parsestatus("{\"status\":\"pending\"}");"unknown");"parse unknown status")){pass=pass+1}el{fail=fail+1};
+  (* ── The request that is actually sent ──────────────────────────────────────
+     completionfor is what carries the ANONYMISED text to a provider. The assertion that
+     matters is the last one: the original must not be reachable through this struct. *)
+  let req:$completionrequest=h.completionfor("claude-sonnet-4-20250514";"Contact [EMAIL_1] about the invoice";"you are a guardian");
+  if(t.asserteq(req.modelid;"claude-sonnet-4-20250514";"the request names the routed model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(req.messages.len==1;"and carries exactly one user message")){pass=pass+1}el{fail=fail+1};
+  let msg:$chatmessage=req.messages.get(0);
+  if(t.asserteq(msg.role;"user";"whose role is user")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(msg.content;"Contact [EMAIL_1] about the invoice";"and whose content is the text it was given, verbatim")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(msg.content;"@");"the placeholder form carries no address, which is the whole point of sending it instead")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(req.systemprompt;"you are a guardian";"and the guardian system prompt is attached")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!req.stream;"the interactive endpoint does not ask for a stream it cannot restore placeholders in")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

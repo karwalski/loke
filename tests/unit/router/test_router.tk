@@ -5,99 +5,226 @@ m=test.router.router;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=strat:core.router.strategy;
+i=sel:core.router.selector;
+i=rtr:core.router.router;
 
-(* --- stub router functions --- *)
+(* X7.2 — this file declared six stand-ins for core.router.router and asserted against
+   them. The damning one is the routing policy itself:
 
-(* route a request to the best model — returns model name *)
-f=routerequest(task:str;sensitivity:i64;preferlocal:i64):str{
-  (* critical sensitivity always routes local *)
-  if(sensitivity>2){<"llama3"};
-  (* user prefers local *)
-  if(preferlocal==1){
-    if(str.eq(task;"code")){<"mistral-7b"};
-    <"llama3"
-  };
-  (* cloud routing by task *)
-  if(str.eq(task;"code")){<"gpt-4o"};
-  if(str.eq(task;"chat")){<"claude-sonnet"};
-  if(str.eq(task;"vision")){<"gpt-4o"};
-  <"llama3"
+     f=routerequest(task:str;sensitivity:i64;preferlocal:i64):str{
+       if(sensitivity>2){<"llama3"};
+       ...
+       if(str.eq(task;"code")){<"gpt-4o"};
+       ...
+     };
+     ...
+     if(t.assert(str.eq(routerequest("code";3;0);"llama3");"critical sensitivity routes to local model")){...}
+
+   Fifteen assertions, and the real `routerequest` takes six parameters of which not one is
+   a string task name or an i64 sensitivity. `llama3`, `mistral-7b` and `claude-sonnet` are
+   not in core.models.registry — `qwen2.5:7b`, `qwen2.5:72b`, `gemma3:4b`,
+   `nomic-embed-text` and the dated Anthropic ids are. So the file asserted a routing table
+   for a model set the product has never had, and it passed, and while it passed the real
+   `route` **segfaulted unconditionally on every call** (LS1.1j): its internal match was
+   written with the `$lokeerr` arm first, so `result` was bound to the error value on every
+   success and `specfromresult(result)` dereferenced a `$lokeerr` sum as a struct.
+
+   What this file covers now is the pure conversion surface and the route-level safety
+   check. `isrouted`/`noroute` are asserted in test_selection_outcome.tk and are not
+   repeated; `iscloudprovider` and `isclouddecision` are not covered anywhere and are the
+   subject here, because they are the one place in the routing path where the privacy
+   invariant is enforced by the machine rather than by review.
+
+   `route` is the result-returning form and cannot be asserted: toke takes the FIRST arm of
+   a match on a result whose error side is a user-declared sum whatever the value is, so
+   its `$err` arm is unreachable and a caller reading `$ok` on failure would bind the error
+   payload. `routerequest` is the form under test throughout. *)
+
+(* A port nothing is listening on. routerequest calls core.router.intent.classify, which
+   reaches the configured Ollama URL; pointing it at a closed port exercises the keyword
+   fallback rather than making a network dependency of this test. *)
+f=deadurl():str{
+  <"http://127.0.0.1:59998"
 };
 
-(* select model from candidates — returns best match *)
-f=selectmodel(task:str;candidates:str):str{
-  (* candidates is a comma-separated list — simplified stub *)
-  if(str.contains(candidates;"gpt-4o")){
-    if(str.eq(task;"code")){<"gpt-4o"}
-  };
-  if(str.contains(candidates;"claude-sonnet")){
-    if(str.eq(task;"chat")){<"claude-sonnet"}
-  };
-  if(str.contains(candidates;"llama3")){<"llama3"};
-  <""
+f=localrouter():$router{
+  <rtr.new(rtr.newconfig(deadurl()))
 };
 
-(* check if a model is available *)
-f=modelavailable(name:str):i64{
-  if(str.eq(name;"llama3")){<1};
-  if(str.eq(name;"mistral-7b")){<1};
-  if(str.eq(name;"gpt-4o")){<1};
-  if(str.eq(name;"claude-sonnet")){<1};
-  <0
-};
-
-(* fallback model when primary is unavailable *)
-f=fallbackmodel():str{ <"llama3" };
-
-(* estimate cost tier: 0=free (local), 1=cheap, 2=expensive *)
-f=costtier(model:str):i64{
-  if(str.eq(model;"llama3")){<0};
-  if(str.eq(model;"mistral-7b")){<0};
-  if(str.eq(model;"gpt-4o")){<2};
-  if(str.eq(model;"claude-sonnet")){<2};
-  <1
+(* preferlocal:false — cloud-eligible by configuration, which is the setting under which
+   the RESTRICTED rule has to hold on its own. *)
+f=cloudrouter():$router{
+  <rtr.new(rtr.newconfigfull(deadurl();false;0.05;strat.bestquality()))
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test critical sensitivity routes local *)
-  if(t.assert(str.eq(routerequest("code";3;0);"llama3");"critical sensitivity routes to local model")){pass=pass+1}el{fail=fail+1};
+  (* ── tasktostr: all eight ────────────────────────────────────────────────────
+     The wire name of a task. It is logged, and `core.router.intent.taskfromstr` parses the
+     same eight strings back, so a mismatch here silently reclassifies a request. *)
+  if(t.asserteq(rtr.tasktostr($tasktype{$chat:0});"chat";"chat")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$codegeneration:0});"code_generation";"code_generation, with the underscore")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$codereview:0});"code_review";"code_review")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$summarisation:0});"summarisation";"summarisation, in British English")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$classification:0});"classification";"classification")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$ner:0});"ner";"ner")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$embedding:0});"embedding";"embedding")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rtr.tasktostr($tasktype{$dataanalysis:0});"data_analysis";"data_analysis")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(routerequest("chat";3;0);"llama3");"critical chat also routes local")){pass=pass+1}el{fail=fail+1};
+  (* ── providerfromstr, and the round trip through the selector's renderer ──────
+     These two functions are inverse and live in different modules. A request whose
+     provider string is written by one and read by the other must survive the trip, or a
+     cloud provider parses as $local — which is exactly the direction that would defeat
+     iscloudprovider below. *)
+  if(t.assert(rtr.iscloudprovider(rtr.providerfromstr("anthropic"));"anthropic parses back to a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider(rtr.providerfromstr("openai"));"openai does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider(rtr.providerfromstr("google"));"google does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider(rtr.providerfromstr("mistral"));"mistral does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider(rtr.providerfromstr("openrouter"));"openrouter does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider(rtr.providerfromstr("ollama"));"ollama parses back to a LOCAL provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider(rtr.providerfromstr("local"));"and so does local")){pass=pass+1}el{fail=fail+1};
 
-  (* test preferlocal flag *)
-  if(t.assert(str.eq(routerequest("code";0;1);"mistral-7b");"local preference for code uses mistral")){pass=pass+1}el{fail=fail+1};
+  (* Every one of the seven survives the selector -> router round trip by name. *)
+  if(t.assert(rtr.iscloudprovider(rtr.providerfromstr(sel.providertostr($provider{$anthropic:0})));"the anthropic name survives selector.providertostr into router.providerfromstr")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider(rtr.providerfromstr(sel.providertostr($provider{$ollama:0})));"and so does the ollama name")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(routerequest("chat";0;1);"llama3");"local preference for chat uses llama3")){pass=pass+1}el{fail=fail+1};
+  (* An UNKNOWN provider string falls back to $local, which is the fail-safe direction for
+     iscloudprovider — an unrecognised name must not be treated as cloud-eligible. But it
+     is also the direction that HIDES a typo: a misspelt "anthropc" would be classified
+     local and pass the RESTRICTED gate. Asserted so the trade-off is on the record. *)
+  if(t.assert(!rtr.iscloudprovider(rtr.providerfromstr("anthropc"));"a MISSPELT provider name falls back to local — fail-safe for the gate, and it also means a typo is not diagnosed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider(rtr.providerfromstr(""));"an empty provider name is local, not cloud")){pass=pass+1}el{fail=fail+1};
 
-  (* test cloud routing by task *)
-  if(t.assert(str.eq(routerequest("code";0;0);"gpt-4o");"code task routes to gpt-4o")){pass=pass+1}el{fail=fail+1};
+  (* ── iscloudprovider: all seven, one assertion each ──────────────────────────
+     This predicate is the machine-enforced half of the privacy invariant. Five of the
+     seven must be true and two false, and a collapsed arm in either direction is a
+     defect: true-for-everything refuses all local routing, false-for-everything lets
+     restricted data leave. *)
+  if(t.assert(rtr.iscloudprovider($provider{$anthropic:0});"anthropic is a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$openai:0});"openai is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$google:0});"google is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$mistral:0});"mistral is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$openrouter:0});"openrouter is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider($provider{$ollama:0});"ollama is NOT")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider($provider{$local:0});"and local is NOT")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$anthropic:0})!=rtr.iscloudprovider($provider{$ollama:0});"cloud and local are DISTINGUISHABLE — a constant predicate cannot pass this")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(routerequest("chat";0;0);"claude-sonnet");"chat task routes to claude-sonnet")){pass=pass+1}el{fail=fail+1};
+  (* ── ctxfrommodel and the cost table ─────────────────────────────────────────
+     specfromresult builds a $modelspec from these three, and that spec is what a caller
+     reads a context window and a price from. A wrong context window truncates a prompt
+     silently; a wrong price misreports a bill. *)
+  if(t.assert((rtr.ctxfrommodel("claude-3-5-sonnet-20241022") as i64)==200000;"a Claude model has a 200k context window")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.ctxfrommodel("gpt-4o") as i64)==128000;"gpt-4o has 128k")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.ctxfrommodel("qwen2.5:72b") as i64)==128000;"qwen2.5:72b has 128k")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.ctxfrommodel("qwen2.5:7b") as i64)==32000;"qwen2.5:7b has 32k — and the 72b test above proves the two are not confused by a prefix match")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.ctxfrommodel("gemma3:4b") as i64)==8000;"gemma3 has 8k")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.ctxfrommodel("nomic-embed-text") as i64)==8000;"nomic-embed has 8k")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.ctxfrommodel("some-unknown-model") as i64)==32000;"an unknown model gets a conservative 32k rather than the largest window")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(routerequest("vision";0;0);"gpt-4o");"vision task routes to gpt-4o")){pass=pass+1}el{fail=fail+1};
+  (* ── specfromresult ──────────────────────────────────────────────────────────
+     Asserted through the spec's struct FIELDS, which cross a module boundary intact —
+     costinfrommodel and costoutfrommodel return bare f64s, which T-20 corrupts across a
+     boundary, so their return values are deliberately NOT asserted directly. The fields
+     of the returned struct are the trustworthy reading, exactly as
+     browser/pages/api/pipeline.tk's own comment on requestcost says. *)
+  let cloudsel=$selectionresult{
+    modelid:"gpt-4o";
+    provider:"openai";
+    reason:"test";
+    islocal:false;
+    estimatedcost:0.0;
+    tier:$modeltier{$interactive:0}
+  };
+  let cloudspec:$modelspec=rtr.specfromresult(cloudsel);
+  if(t.asserteq(cloudspec.id;"gpt-4o";"specfromresult carries the model id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((cloudspec.contextwindow as i64)==128000;"and the context window for that id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider(cloudspec.provider);"and a provider that reads as cloud")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cloudspec.costper1kinput>0.0;"a cloud model's input price is above zero — read as a struct FIELD, not as a bare f64 return (T-20)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cloudspec.costper1koutput>cloudspec.costper1kinput;"and output costs more than input, as every hosted provider prices it")){pass=pass+1}el{fail=fail+1};
 
-  (* test model selection from candidates *)
-  if(t.assert(str.eq(selectmodel("code";"gpt-4o,llama3");"gpt-4o");"selects gpt-4o for code")){pass=pass+1}el{fail=fail+1};
+  let localsel=$selectionresult{
+    modelid:"qwen2.5:7b";
+    provider:"ollama";
+    reason:"test";
+    islocal:true;
+    estimatedcost:0.0;
+    tier:$modeltier{$background:0}
+  };
+  let localspec:$modelspec=rtr.specfromresult(localsel);
+  if(t.assert(!rtr.iscloudprovider(localspec.provider);"a local selection's spec names a local provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(localspec.costper1kinput==0.0;"and a local model costs nothing to run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(localspec.costper1koutput==0.0;"in either direction")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(selectmodel("chat";"claude-sonnet,llama3");"claude-sonnet");"selects claude-sonnet for chat")){pass=pass+1}el{fail=fail+1};
+  (* ── estimatelatency ─────────────────────────────────────────────────────────
+     Three tiers, three distinct figures. A single constant here would make the tier
+     visualiser and the latency router agree on a number that means nothing. *)
+  if(t.assert((rtr.estimatelatency(cloudsel) as i64)==500;"the interactive tier estimates 500ms")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((rtr.estimatelatency(localsel) as i64)==15000;"the background tier estimates 15000ms")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(selectmodel("chat";"llama3");"llama3");"falls back to llama3 if no better match")){pass=pass+1}el{fail=fail+1};
+  (* ── isclouddecision ─────────────────────────────────────────────────────────*)
+  let clouddecision=$routingdecision{
+    model:cloudspec;
+    reason:"test";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:500 as u32
+  };
+  let localdecision=$routingdecision{
+    model:localspec;
+    reason:"test";
+    tier:$modeltier{$background:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:15000 as u32
+  };
+  if(t.assert(rtr.isclouddecision(clouddecision);"a decision naming a cloud provider reads as a cloud decision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.isclouddecision(localdecision);"and one naming ollama does not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.isclouddecision(rtr.noroute("nothing available"));"a refusal is not a cloud decision either — noroute names $local, so a caller that ignored isrouted still cannot dispatch it to a cloud endpoint")){pass=pass+1}el{fail=fail+1};
 
-  (* test model availability *)
-  if(t.assert(modelavailable("llama3")==1;"llama3 is available")){pass=pass+1}el{fail=fail+1};
+  (* ── THE ROUTE-LEVEL SAFETY PROPERTY, end to end through routerequest ────────
+     This is the value a provider call is actually made from. The selector already refuses
+     a RESTRICTED request that no local model can serve, and routerequest re-checks the
+     decision independently — deliberately, so that a future edit to the selector, a
+     strategy, or the cloud-fallback path cannot release restricted data without this
+     failing.
 
-  if(t.assert(modelavailable("nonexistent")==0;"nonexistent model not available")){pass=pass+1}el{fail=fail+1};
+     Asserted under the HOSTILE configuration: preferlocal:false and best-quality, which
+     is the setting that would prefer claude-3-5-sonnet (qualityscore 0.95) over any local
+     model if sensitivity were not consulted. *)
+  let hostile=cloudrouter();
+  let restricted=rtr.routerequest(hostile;"summarise this report";$sensitivitylevel{$restricted:0};1 as u32;$latencytolerance{$background:0};"cid-restricted");
+  if(t.assert(!rtr.isclouddecision(restricted);"a RESTRICTED request does NOT produce a cloud decision, even with preferlocal:false and a best-quality strategy")){pass=pass+1}el{fail=fail+1};
 
-  (* test fallback *)
-  if(t.assert(str.eq(fallbackmodel();"llama3");"fallback is llama3")){pass=pass+1}el{fail=fail+1};
+  (* Whatever the outcome — routed locally or refused — a cloud provider must not be
+     named. Both branches are acceptable; a cloud decision is not. *)
+  let restrictedspec:$modelspec=restricted.model;
+  if(t.assert(!rtr.iscloudprovider(restrictedspec.provider);"and the decision's provider is not a cloud provider")){pass=pass+1}el{fail=fail+1};
 
-  (* test cost tiers *)
-  if(t.assert(costtier("llama3")==0;"llama3 is free tier")){pass=pass+1}el{fail=fail+1};
+  (* A request whose TEXT alone is restricted, with no PII entity at all. scorefromcontent
+     is what catches this, and it is the case a detector-only gate would miss. *)
+  let bytext=rtr.routerequest(hostile;"what is my password for the bank account";$sensitivitylevel{$public:0};0 as u32;$latencytolerance{$background:0};"cid-bytext");
+  if(t.assert(!rtr.isclouddecision(bytext);"a prompt made RESTRICTED by its TEXT alone, with zero PII entities, is also kept off the cloud")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(costtier("gpt-4o")==2;"gpt-4o is expensive tier")){pass=pass+1}el{fail=fail+1};
+  (* Four CONFIDENTIAL entities escalate to RESTRICTED in scorefrompii, and that escalation
+     must reach this decision — otherwise the accumulation rule is decorative. *)
+  let escalated=rtr.routerequest(hostile;"contact details follow";$sensitivitylevel{$confidential:0};4 as u32;$latencytolerance{$background:0};"cid-escalated");
+  if(t.assert(!rtr.isclouddecision(escalated);"four CONFIDENTIAL entities escalate to RESTRICTED and the escalation reaches the routing decision")){pass=pass+1}el{fail=fail+1};
+
+  (* And the contrast, so none of the above passes on a router that refuses everything: a
+     PUBLIC request under the same hostile config IS allowed a cloud model. *)
+  let publicroute=rtr.routerequest(hostile;"write a haiku about autumn";$sensitivitylevel{$public:0};0 as u32;$latencytolerance{$instant:0};"cid-public");
+  if(t.assert(rtr.isrouted(publicroute);"a PUBLIC request is routed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.isclouddecision(publicroute);"and IS allowed a cloud provider, so the RESTRICTED assertions above are a rule and not a constant refusal")){pass=pass+1}el{fail=fail+1};
+
+  (* The default configuration is local-first with preferlocal:true, which README.md and
+     packages/cli/src/commands.tk both describe loke as. Asserted, because it is a claim. *)
+  let defaultrouter=localrouter();
+  let defaultpublic=rtr.routerequest(defaultrouter;"write a haiku about autumn";$sensitivitylevel{$public:0};0 as u32;$latencytolerance{$instant:0};"cid-default");
+  if(t.assert(rtr.isrouted(defaultpublic);"the default configuration routes a PUBLIC request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.isclouddecision(defaultpublic);"and routes it LOCALLY — newconfig is preferlocal:true, which is what the README claims loke is")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

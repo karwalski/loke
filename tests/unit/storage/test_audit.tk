@@ -5,91 +5,152 @@ m=test.storage.audit;
 
 i=t:std.test;
 i=str:std.str;
+i=audit:core.storage.audit;
 
-(* --- stub audit log functions --- *)
+(* X7.2 — this file used to declare seven stand-ins for core.storage.audit and assert
+   against them. Two of its assertions are why it had to be rewritten rather than kept:
 
-(* append an audit entry — returns 1 on valid input, 0 on invalid *)
-f=auditappend(action:str;user:str;detail:str):i64{
-  if(str.len(action)==0){<0};
-  if(str.len(user)==0){<0};
-  <1
+     f=isappendonly():i64{ <1 };
+     ...
+     t.assert(isappendonly()==1;"audit log is append-only")
+
+   For the whole life of GA5.9 — during which NOTHING enforced append-only on audit_log,
+   and the integration tests were successfully UPDATEing and DELETEing rows — this file
+   asserted the control and was green, because the control was a function in the test that
+   returned 1. Its `auditquerycount` likewise asserted that there are exactly five login
+   events, a number the test itself chose.
+
+   What it covers now is the part of the module that is pure and therefore checkable here:
+   the DIGEST. tests/unit/storage/test_audit_append_only.tk covers the trigger and
+   tests/integration/test_audit_trail_e2e.tk the trail end to end; neither pins down what
+   the hash is over, and that is the whole of the tamper-evidence claim.
+
+   The hash used to be `correlationid + eventtype` — two of eleven fields, with no
+   predecessor. Changing the model, the cost, the sensitivity or the timestamp left it
+   identical, and nothing bound one row to the next. The per-field assertions below are
+   the ones that would have been red then and the ones that go red again if a field is
+   ever dropped from the digest. *)
+
+(* One field substituted into an otherwise fixed set, so each assertion varies exactly
+   one input. `which` selects the position; every other position keeps its base value. *)
+f=fld(i:i64;which:i64;base:str;v:str):str{
+  if(i==which){
+    <v
+  }el{
+    <base
+  }
 };
 
-(* simulate sequential append — takes counter, returns next ID *)
-f=auditappendseq(action:str;user:str;detail:str;counter:i64):i64{
-  if(str.len(action)==0){<0};
-  if(str.len(user)==0){<0};
-  <counter+1
+f=digestwith(which:i64;v:str):str{
+  <audit.digestfields(
+    fld(0;which;"prevhash0";v);
+    fld(1;which;"id0";v);
+    fld(2;which;"llm_request";v);
+    fld(3;which;"browser-chat";v);
+    fld(4;which;"claude-3.5-sonnet";v);
+    fld(5;which;"anthropic";v);
+    fld(6;which;"confidential";v);
+    fld(7;which;"MEDIUM";v);
+    fld(8;which;"150";v);
+    fld(9;which;"200";v);
+    fld(10;which;"0";v);
+    fld(11;which;"320";v);
+    fld(12;which;"corr-1";v);
+    fld(13;which;"1790000000000";v))
 };
 
-(* query audit by action — returns count of matching entries (stubbed) *)
-f=auditquerycount(action:str):i64{
-  if(str.eq(action;"login")){<5};
-  if(str.eq(action;"query")){<12};
-  if(str.eq(action;"export")){<2};
-  <0
+(* -1 substitutes nothing, so this is the base digest. *)
+f=basedigest():str{
+  <digestwith(0-1;"unused")
 };
 
-(* format audit entry as string *)
-f=auditformat(id:i64;action:str;user:str;detail:str):str{
-  <str.concat("[";str.concat(str.fromi64(id);str.concat("] ";str.concat(action;str.concat(" by ";str.concat(user;str.concat(": ";detail)))))))
+f=coversfield(which:i64;name:str):bool{
+  <t.assert(!str.eq(digestwith(which;"ALTERED");basedigest());str.concat("the digest covers ";name))
 };
 
-(* validate action string *)
-f=validaction(action:str):i64{
-  if(str.eq(action;"login")){<1};
-  if(str.eq(action;"logout")){<1};
-  if(str.eq(action;"query")){<1};
-  if(str.eq(action;"export")){<1};
-  if(str.eq(action;"configchange")){<1};
-  <0
+f=sampleevent(cost:f64):$auditevent{
+  <$auditevent{
+    eventtype:"llm_request";
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:"anthropic";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:150;
+    tokensout:200;
+    costusd:cost;
+    durationms:320;
+    correlationid:"corr-1"
+  }
 };
-
-(* check if audit log is immutable (append-only) *)
-f=isappendonly():i64{ <1 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test append returns incrementing IDs *)
-  let id1=auditappendseq("login";"alice";"session start";0);
-  if(t.assert(id1==1;"first entry gets ID 1")){pass=pass+1}el{fail=fail+1};
+  (* It is a sha256, so 32 bytes as 64 hex characters. A digest of another width is a
+     different function than the one the trail's claim rests on. *)
+  if(t.assert((str.len(basedigest()) as i64)==64;"the digest is a sha256 rendered as 64 hex characters")){pass=pass+1}el{fail=fail+1};
 
-  let id2=auditappendseq("query";"alice";"SELECT * FROM data";id1);
-  if(t.assert(id2==2;"second entry gets ID 2")){pass=pass+1}el{fail=fail+1};
+  (* Determinism, because the verifier recomputes it. If this were not stable, an
+     untampered chain would read as broken — which is how it behaved twice before the
+     canonical forms were settled. *)
+  if(t.asserteq(basedigest();basedigest();"the same fields give the same digest")){pass=pass+1}el{fail=fail+1};
 
-  let id3=auditappendseq("logout";"alice";"session end";id2);
-  if(t.assert(id3==3;"third entry gets ID 3")){pass=pass+1}el{fail=fail+1};
+  (* All FOURTEEN fields, one assertion each. The old two-field hash fails twelve of
+     these; anything that drops a field from the join fails one. *)
+  if(coversfield(0;"prev_hash, which is what binds a row to its predecessor")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(1;"the row id")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(2;"event_type")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(3;"use_case")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(4;"model_id")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(5;"provider")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(6;"sensitivity")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(7;"risk_tier")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(8;"tokens_in")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(9;"tokens_out")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(10;"cost_usd")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(11;"duration_ms")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(12;"correlation_id")){pass=pass+1}el{fail=fail+1};
+  if(coversfield(13;"created_at")){pass=pass+1}el{fail=fail+1};
 
-  (* test append rejects empty action *)
-  if(t.assert(auditappend("";"alice";"detail")==0;"empty action rejected")){pass=pass+1}el{fail=fail+1};
+  (* Two different field splits must not hash alike. The separator is what guarantees it:
+     without one, ("ab";"c") and ("a";"bc") are the same byte string. *)
+  let split1=audit.digestfields("a";"b";"";"";"";"";"";"";"";"";"";"";"";"");
+  let split2=audit.digestfields("";"a";"b";"";"";"";"";"";"";"";"";"";"";"");
+  if(t.assert(!str.eq(split1;split2);"two different field splits of the same characters do not hash alike")){pass=pass+1}el{fail=fail+1};
 
-  (* test append rejects empty user *)
-  if(t.assert(auditappend("login";"";"detail")==0;"empty user rejected")){pass=pass+1}el{fail=fail+1};
+  (* eventdigest is what the WRITER uses; digestfields is what the VERIFIER uses. They
+     have to agree on the derivation, including cost as an integer number of hundredths
+     rather than as str.fromfloat text — the verifier read "0.0" where the writer wrote
+     "0" and an intact chain failed on every zero-cost row. *)
+  let viaevent=audit.eventdigest("prevhash0";"id0";sampleevent(0.0);1790000000000);
+  if(t.asserteq(viaevent;basedigest();"eventdigest and digestfields derive the same digest, cost normalised through hundredths")){pass=pass+1}el{fail=fail+1};
 
-  (* test query count *)
-  if(t.assert(auditquerycount("login")==5;"5 login entries found")){pass=pass+1}el{fail=fail+1};
+  (* A real cost change breaks the chain. *)
+  let viacost=audit.eventdigest("prevhash0";"id0";sampleevent(0.01);1790000000000);
+  if(t.assert(!str.eq(viacost;viaevent);"a one-cent change to the cost changes the digest")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(auditquerycount("query")==12;"12 query entries found")){pass=pass+1}el{fail=fail+1};
+  (* And the stated limit, asserted rather than left as prose: the canonical form is
+     hundredths, so sub-cent tampering is NOT covered. GA5.15 closes this by making the
+     column an integer; until then the hole is recorded here so that closing it shows up
+     as this assertion going red. *)
+  let viasubcent=audit.eventdigest("prevhash0";"id0";sampleevent(0.001);1790000000000);
+  if(t.asserteq(viasubcent;viaevent;"sub-cent tampering is NOT covered: the digest is over hundredths (GA5.15)")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(auditquerycount("unknownaction")==0;"unknown action returns 0")){pass=pass+1}el{fail=fail+1};
+  (* The verdict struct. It is a plain struct and not a result because T-18 makes the
+     error arm of a user-declared sum dead, and a verifier whose failure reads as "chain
+     intact" is the worst available outcome for this function. *)
+  let good=audit.chainok(7);
+  if(t.assert(good.ok;"chainok reports ok")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(good.rowschecked==7;"and carries how many rows it checked")){pass=pass+1}el{fail=fail+1};
+  let bad=audit.chainbad(3;"row-abc";"a field was altered");
+  if(t.assert(!bad.ok;"chainbad reports not-ok")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bad.firstbadid;"row-abc";"and names the first row that failed, because everything after it is downstream")){pass=pass+1}el{fail=fail+1};
 
-  (* test format *)
-  let formatted=auditformat(1;"login";"alice";"session start");
-  if(t.assert(str.contains(formatted;"[1]");"format includes ID")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(str.contains(formatted;"login by alice");"format includes action and user")){pass=pass+1}el{fail=fail+1};
-
-  (* test valid actions *)
-  if(t.assert(validaction("login")==1;"login is valid action")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(validaction("configchange")==1;"configchange is valid action")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(validaction("hack")==0;"hack is not valid action")){pass=pass+1}el{fail=fail+1};
-
-  (* test append-only property *)
-  if(t.assert(isappendonly()==1;"audit log is append-only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(audit.formatchainresult(good);"audit chain intact");"an intact chain formats as intact")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(audit.formatchainresult(bad);"AUDIT CHAIN BROKEN");"a broken one says so in words an operator will not skim past")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(audit.formatchainresult(bad);"row-abc");"and includes the offending row id")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

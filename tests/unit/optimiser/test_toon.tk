@@ -5,101 +5,144 @@ m=test.optimiser.toon;
 
 i=t:std.test;
 i=str:std.str;
+i=tt:core.optimiser.toontypes;
+i=toon:core.optimiser.toon;
 
-(* --- stub TOON encoding/decoding functions --- *)
+(* X7.2 — this file used to declare its own `encode`, `decode`, `savings` and
+   `compressionratio` and assert a round trip against them:
 
-f=encode(json:str):str{
-  (* stub: simulates JSON to TOON compact encoding *)
-  (* removes whitespace and shortens keys *)
-  if(str.contains(json;"\"message\"")){
-    <"m=Hello world"
-  };
-  if(str.contains(json;"\"role\":\"user\"")){
-    <"r=u;c=Hi"
-  };
-  if(str.contains(json;"\"empty\"")){
-    <""
-  };
-  <json
-};
+     f=encode(json:str):str{
+       if(str.contains(json;"\"message\"")){ <"m=Hello world" };
+       ...
+     };
+     ...
+     let roundtrip=decode(encode(original));
+     if(t.assert(str.contains(roundtrip;"Hello world");"round-trip preserves message value")){...}
 
-f=decode(toon:str):str{
-  (* stub: simulates TOON compact to JSON decoding *)
-  if(str.eq(toon;"m=Hello world")){
-    <"{\"message\":\"Hello world\"}"
-  };
-  if(str.eq(toon;"r=u;c=Hi")){
-    <"{\"role\":\"user\",\"content\":\"Hi\"}"
-  };
-  if(str.eq(toon;"")){
-    <""
-  };
-  <toon
-};
+   It asserted that a JSON document survives a TOON round trip. The real module CANNOT DO
+   THAT, and says so at length in its own comment at toon.tk:106 — `$toonvalue` declares
+   every variant with an i64 payload, so a $toonvalue records WHICH KIND of value it saw and
+   nothing about the value itself. `jsontotoon` returns "~" for any JSON object at all,
+   `encodetable` returns "" for every input, and `decode` computes headers and fields and
+   then discards them. GA1.5's token-optimisation half was WITHDRAWN rather than wired for
+   exactly this reason: wiring it into the request path would replace the user's prompt with
+   a tilde.
 
-f=savings(original:str;encoded:str):i64{
-  let origlen=str.len(original);
-  let enclen=str.len(encoded);
-  if(origlen==0){<0};
-  let saved=origlen-enclen;
-  <saved
-};
+   So the stub did not merely fail to test the module — it asserted, in the module's name,
+   the one capability the module does not have.
 
-f=compressionratio(original:str;encoded:str):i64{
-  let origlen=str.len(original);
-  let enclen=str.len(encoded);
-  if(origlen==0){<0};
-  (* return percentage saved as integer *)
-  let pct=(origlen-enclen)*100/origlen;
-  <pct
-};
-
-(* --- tests --- *)
+   WHAT THIS FILE COVERS, and why it is not the round trip:
+   `tests/integration/test_toon_roundtrip.tk` already exercises `jsontotoon`, `toontojson`,
+   `defaultopts` and `measuresavings`. It is not duplicated here. What it does NOT do is
+   assert any VALUE that comes back — its round-trip assertion is `str.len(jsonback)>0` and
+   its encode assertion is that the match took the `$ok` arm — so it passes just as happily
+   against a classifier returning "~". This file asserts the values, including the ones that
+   pin the withdrawal down: if somebody ever makes `jsontotoon` a real codec, the assertions
+   marked below go red, and that is the signal to re-read GA1.5 before wiring it anywhere. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* encoding: message JSON to compact *)
-  let enc1=encode("{\"message\":\"Hello world\"}");
-  if(t.assert(str.eq(enc1;"m=Hello world");"message encoded to compact form")){pass=pass+1}el{fail=fail+1};
+  (* ── defaultopts ────────────────────────────────────────────────────────────
+     Asserted by value, where the integration test only asserts maxstrlen>0. *)
+  let opts=toon.defaultopts();
+  if(t.assert((opts.maxstrlen as i64)==200;"the default maximum string length is 200 characters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!opts.abbreviatekeys;"keys are NOT abbreviated by default — abbreviation would need a shared dictionary to reverse")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(opts.omitnulls;"nulls are omitted by default")){pass=pass+1}el{fail=fail+1};
 
-  (* encoding: role/content to compact *)
-  let enc2=encode("{\"role\":\"user\",\"content\":\"Hi\"}");
-  if(t.assert(str.eq(enc2;"r=u;c=Hi");"role/content encoded to compact form")){pass=pass+1}el{fail=fail+1};
+  (* ── encodebool ─────────────────────────────────────────────────────────────
+     y/n, not true/false — that single character is the whole of TOON's saving on a
+     boolean, and a change to it would silently break any decoder. *)
+  if(t.asserteq(toon.encodebool(true);"y";"true encodes as y")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(toon.encodebool(false);"n";"false encodes as n")){pass=pass+1}el{fail=fail+1};
 
-  (* encoding: compact is shorter *)
-  if(t.assert(str.len(enc1)<str.len("{\"message\":\"Hello world\"}");"encoded is shorter than original")){pass=pass+1}el{fail=fail+1};
+  (* ── needsquoting ───────────────────────────────────────────────────────────
+     The delimiters TOON uses structurally. A value containing one of them and NOT quoted
+     would be re-read as structure, which is how a serialiser corrupts a payload. *)
+  if(t.assert(toon.needsquoting("a|b");"a value containing the field separator needs quoting")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(toon.needsquoting("a{b");"an opening brace needs quoting")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(toon.needsquoting("a}b");"a closing brace needs quoting")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(toon.needsquoting("a,b");"a comma needs quoting")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(toon.needsquoting("line one
+line two");"and a newline needs quoting")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!toon.needsquoting("plain value");"a plain value with a space does not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!toon.needsquoting("");"and neither does an empty one")){pass=pass+1}el{fail=fail+1};
+  (* A colon is the KEY separator but is not in the list, and that is the module's choice:
+     decodeflatobj rejoins everything after the first colon, so a colon inside a value
+     survives. Asserted so that removing the rejoin breaks here rather than in a payload. *)
+  if(t.assert(!toon.needsquoting("http://example.com");"a colon does NOT need quoting: decodeflatobj rejoins everything after the first one")){pass=pass+1}el{fail=fail+1};
 
-  (* decoding: compact back to JSON *)
-  let dec1=decode("m=Hello world");
-  if(t.assert(str.contains(dec1;"\"message\"");"decoded contains message key")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(dec1;"Hello world");"decoded contains message value")){pass=pass+1}el{fail=fail+1};
+  (* ── truncate ───────────────────────────────────────────────────────────────
+     Bounded by maxstrlen, and the ellipsis is what tells a reader the value was cut
+     rather than being that short. *)
+  if(t.asserteq(toon.truncate("short";200);"short";"a value under the limit is returned unchanged")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(toon.truncate("abcd";4);"abcd";"a value exactly at the limit is NOT truncated")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(toon.truncate("abcdefghij";4);"abcd...";"one over the limit is cut and marked with an ellipsis")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(toon.truncate("";10);"";"an empty value truncates to empty")){pass=pass+1}el{fail=fail+1};
 
-  (* decoding: role/content back to JSON *)
-  let dec2=decode("r=u;c=Hi");
-  if(t.assert(str.contains(dec2;"\"role\"");"decoded contains role key")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(dec2;"\"content\"");"decoded contains content key")){pass=pass+1}el{fail=fail+1};
+  (* ── measuresavings ─────────────────────────────────────────────────────────
+     FINDING — LIVE T-20 CORRUPTION. RED below. Reported, not fixed.
 
-  (* round-trip: encode then decode *)
-  let original="{\"message\":\"Hello world\"}";
-  let roundtrip=decode(encode(original));
-  if(t.assert(str.contains(roundtrip;"Hello world");"round-trip preserves message value")){pass=pass+1}el{fail=fail+1};
+     `measuresavings(originaljson:str;toonstr:str):f64` returns a BARE f64 across a module
+     boundary, which T-20 says is corrupted. It is. Measured, by rendering the return:
 
-  (* savings measurement: positive savings *)
-  let saved=savings("{\"message\":\"Hello world\"}";"m=Hello world");
-  if(t.assert(saved>0;"savings is positive for compressed content")){pass=pass+1}el{fail=fail+1};
+       measuresavings("{\"name\":\"value\"}";"name:value")  expect 37.5  got 4.94066e-323
+       measuresavings("";"anything")                       expect 0     got 3.95253e-323
+       measuresavings("ab";"abcdefgh")                     expect -300  got 3.95253e-323
+       measuresavings("abcd";"abcd")                       expect 0     got 1.97626e-323
 
-  (* savings measurement: empty original *)
-  if(t.assert(savings("";""  )==0;"savings is zero for empty strings")){pass=pass+1}el{fail=fail+1};
+     Those are denormals whose BIT PATTERNS are 10, 8, 8 and 4 — which are exactly
+     str.len of the SECOND argument in each case. So the function hands back the raw
+     integer `toonlen` in the return register instead of the double it computed. Every
+     savings percentage this function has ever produced is that integer reinterpreted.
 
-  (* encoding: empty value *)
-  let enc3=encode("{\"empty\":\"\"}");
-  if(t.assert(str.eq(enc3;"");"empty value encodes to empty")){pass=pass+1}el{fail=fail+1};
+     AND IT IS ALREADY BEING ASSERTED, GREEN. tests/integration/test_toon_roundtrip.tk:108
+     does exactly this:
 
-  (* compression ratio: positive *)
-  let ratio=compressionratio("{\"message\":\"Hello world\"}";"m=Hello world");
-  if(t.assert(ratio>0;"compression ratio is positive")){pass=pass+1}el{fail=fail+1};
+       let savings=toon.measuresavings("{\"name\":\"value\"}";"name:value");
+       let positive=savings>0.0;
+       <t.assert(positive;"TOON encoding produces positive savings percentage")
+
+     A positive denormal IS greater than 0.0, so that assertion passes on a completely
+     corrupt value. That file imports production code and is counted as such — it is a
+     clean example of the X7.1 trap where importing the module is not the same as
+     asserting anything about it.
+
+     The fix is the one the rest of this codebase already uses for T-20: return an exact
+     integer (hundredths or tenths of a percent) and let the caller divide. That is
+     core.optimiser.budget.microusd, shared.types.f64hundredths and
+     core.storage.db.rowf64hundredths. Not applied here — not my module.
+
+     Asserted by VALUE below rather than by sign, so the defect is visible instead of
+     being satisfied by accident. 16 characters down to 10 is 37.5%. *)
+  let savings=toon.measuresavings("{\"name\":\"value\"}";"name:value");
+  if(t.assert(savings>37.0;"16 characters encoded to 10 is 37.5% saved — above 37")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(savings<38.0;"and below 38")){pass=pass+1}el{fail=fail+1};
+  let nosavings=toon.measuresavings("";"anything");
+  if(t.assert(nosavings==0.0;"an empty original measures zero savings rather than dividing by zero")){pass=pass+1}el{fail=fail+1};
+  let negative=toon.measuresavings("ab";"abcdefgh");
+  if(t.assert(negative<0.0;"an encoding LONGER than the original measures as negative savings, not as zero")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GA1.5: this is a classifier, NOT a codec ────────────────────────────────
+     These are the assertions that keep it out of the request path. If any of them goes
+     red, somebody has given $toonvalue real payloads — which is the work GA1.5 withdrew —
+     and the withdrawal note in toon.tk:106 needs re-reading before this is wired to
+     anything a user's prompt passes through.
+
+     encodetable is unconditional: both branches of its `if` return "". *)
+  if(t.asserteq(toon.encodetable(@($toonvalue);toon.defaultopts());"";"encodetable returns the empty string for no rows")){pass=pass+1}el{fail=fail+1};
+
+  (* jsontotoon on a real JSON object. The integration test asserts only that the match
+     took the $ok arm; this asserts what came back. "~" is the null/unknown tag — the
+     document is GONE. *)
+  let encoded=mt toon.jsontotoon("{\"name\":\"test\",\"n\":42}";toon.defaultopts()) {
+    $ok:s s;
+    $err:e "ERROR"
+  };
+  if(t.asserteq(encoded;"~";"a JSON OBJECT encodes to the bare tag ~ — the document is discarded, which is why GA1.5 was withdrawn rather than wired")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(encoded;"name");"the key does not survive")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(encoded;"test");"and neither does the value — a prompt sent through this would be replaced by a tilde")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

@@ -5,75 +5,85 @@ m=test.privacy.sidecarclient;
 
 i=t:std.test;
 i=str:std.str;
+(* The alias is `sid`, not `sc`: `sc` is a RESERVED TOKEN in toke and rejecting it is
+   reported as E2002 "unexpected token" pointing at the import's alias position, with no
+   hint that the name itself is the problem. Cost ten minutes; recorded so the next person
+   spends none. *)
+i=sid:core.privacy.sidecarclient;
 
-(* --- stub functions mirroring core.privacy.sidecarclient --- *)
-(* note: actual HTTP calls are not made; we test request construction *)
+(* X7.2 — this file used to declare its own HTTP client and assert against it. It now
+   imports core.privacy.sidecarclient.
 
-f=sidecarurl():str{
-  <"http://127.0.0.1:11435"
-};
+   WHAT CANNOT BE TESTED HERE, stated rather than faked: detect(), anonymise() and
+   listmodels() each perform a real HTTP POST or GET to a sidecar on port 11435. With no
+   sidecar running there is nothing to assert about a successful response, and standing one
+   up would make this an integration test. Mocking the transport would test the mock. So
+   what is asserted is the part that is deterministic — the URL every call is built from —
+   plus the behaviour on the path that actually matters for privacy: WHAT HAPPENS WHEN THE
+   SIDECAR IS ABSENT.
 
-f=builddetectbody(text:str):str{
-  <str.concat("{\"text\":\"";str.concat(text;"\"}" ))
-};
+   ═══════════════════════════════════════════════════════════════════════════════
+   FINDING — THIS CLIENT CANNOT REPORT FAILURE, AND ITS FAILURE LOOKS LIKE A CLEAN SCAN.
 
-f=buildanonymisebody(text:str):str{
-  <str.concat("{\"text\":\"";str.concat(text;"\"}"))
-};
+   detect() returns whatever string http.posturl produced. There is no result type, no
+   status code, no empty check and no distinguished error value. When the sidecar is down,
+   a caller receives a string containing no entities — which is byte-for-byte the shape of
+   a successful scan that found no PII. A detection layer whose unavailability is
+   indistinguishable from "this text is clean" fails OPEN, and CLAUDE.md states the
+   invariant it breaks: "Never make the filter fail open — if no detection layer is
+   healthy, fail the request."
 
-f=detectendpoint():str{
-  <str.concat(sidecarurl();"/detect")
-};
+   isavailable() is the intended guard and it is weak in its own right: it asks whether the
+   /health response CONTAINS the two characters "ok", so any transport error string
+   containing them anywhere would report the sidecar as up.
 
-f=anonymiseendpoint():str{
-  <str.concat(sidecarurl();"/anonymise")
-};
+   NOT FIXED HERE — the module is not mine to change, and it has NO importer anywhere in
+   the repository, so nothing is failing open today. core.privacy.presidio is the sidecar
+   path the pipeline actually uses, and core.privacy.pipeline counts layerscompleted so
+   that an absent layer is visible (NC1.9). The assertions below record this module's
+   behaviour as it is, following the precedent in tests/unit/storage/test_backup.tk, and
+   the fail-open ones turn RED the moment detect() learns to signal failure.
 
-f=healthendpoint():str{
-  <str.concat(sidecarurl();"/health")
-};
-
-f=modelsendpoint():str{
-  <str.concat(sidecarurl();"/models")
-};
-
-(* --- tests --- *)
+   Nothing listens on 11435 in a test environment, so the assertions below exercise the
+   unavailable path for real rather than simulating it. A refused connection on localhost
+   returns immediately, so no assertion here waits on a timeout.
+   ═══════════════════════════════════════════════════════════════════════════════ *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. sidecar URL is localhost *)
-  if(t.assert(str.contains(sidecarurl();"127.0.0.1");"sidecar URL uses localhost")){pass=pass+1}el{fail=fail+1};
+  (* ── The URL every call is built from ────────────────────────────────────────
+     Loopback, and a fixed port. A sidecar URL that ever became non-local would send the
+     text being scanned for PII to another host — which is the one thing a local-first
+     privacy product must not do, and it would be a one-word change. *)
+  if(t.asserteq(sid.sidecarurl();"http://127.0.0.1:11435";"the sidecar URL is loopback on a fixed port")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sid.sidecarurl();"127.0.0.1");"and is LOOPBACK — text being scanned for PII must never be posted off the machine")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(sid.sidecarurl();"https://");"it is plain HTTP, which is acceptable only because it never leaves the loopback interface")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. sidecar port is 11435 *)
-  if(t.assert(str.contains(sidecarurl();"11435");"sidecar port is 11435")){pass=pass+1}el{fail=fail+1};
+  (* ── The unavailable path, exercised against a port nothing listens on ───────*)
+  if(t.assert(!sid.isavailable();"with no sidecar running, isavailable reports false")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. detect endpoint path *)
-  if(t.assert(str.contains(detectendpoint();"/detect");"detect endpoint has /detect path")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, recorded: an absent sidecar is indistinguishable from clean text ─
+     The text below contains an email address and a credit card number. A working
+     detector would report both. What comes back instead mentions neither — and does so
+     in a way no caller can tell apart from a successful empty scan. *)
+  let dirty="contact alice@example.com about card 4111 1111 1111 1111";
+  let detected=sid.detect(dirty);
+  if(t.assert(!str.contains(detected;"alice@example.com");"with the sidecar down, detect() reports NO entities for text that plainly contains two")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(detected;"entities");"and returns nothing a caller could parse as a detection result")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(detected;"ERROR");"yet it does NOT say ERROR, so the failure is invisible — this is the fail-open finding, and it goes red when detect() learns to signal failure")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. anonymise endpoint path *)
-  if(t.assert(str.contains(anonymiseendpoint();"/anonymise");"anonymise endpoint has /anonymise path")){pass=pass+1}el{fail=fail+1};
+  (* anonymise() has the same shape, and its failure mode is worse: a caller that
+     forwarded the return value would forward the ORIGINAL text believing it anonymised.
+     Asserted in the direction that matters — the return is not the anonymised text. *)
+  let anonymised=sid.anonymise(dirty);
+  if(t.assert(!str.contains(anonymised;"[EMAIL_1]");"with the sidecar down, anonymise() returns nothing anonymised")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(anonymised;dirty);"it does at least not echo the original text back, which would be forwarded as though it had been redacted")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. health endpoint path *)
-  if(t.assert(str.contains(healthendpoint();"/health");"health endpoint has /health path")){pass=pass+1}el{fail=fail+1};
-
-  (* 6. models endpoint path *)
-  if(t.assert(str.contains(modelsendpoint();"/models");"models endpoint has /models path")){pass=pass+1}el{fail=fail+1};
-
-  (* 7. detect body contains text field *)
-  let body=builddetectbody("hello world");
-  if(t.assert(str.contains(body;"\"text\"");"detect body contains text field")){pass=pass+1}el{fail=fail+1};
-
-  (* 8. detect body contains the input text *)
-  if(t.assert(str.contains(body;"hello world");"detect body contains input text")){pass=pass+1}el{fail=fail+1};
-
-  (* 9. anonymise body is valid JSON structure *)
-  let abody=buildanonymisebody("test data");
-  if(t.assert(str.contains(abody;"{");"anonymise body starts with brace")){pass=pass+1}el{fail=fail+1};
-
-  (* 10. anonymise body contains input text *)
-  if(t.assert(str.contains(abody;"test data");"anonymise body contains input text")){pass=pass+1}el{fail=fail+1};
+  (* listmodels has no privacy consequence, so one assertion is enough: it must not
+     fabricate a model list when there is nothing to ask. *)
+  if(t.assert(!str.contains(sid.listmodels();"qwen");"listmodels invents no models when no sidecar answers")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

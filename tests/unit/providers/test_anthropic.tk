@@ -5,87 +5,143 @@ m=test.providers.anthropic;
 
 i=t:std.test;
 i=str:std.str;
+i=pt:core.providers.types;
+i=ant:core.providers.anthropic;
 
-(* --- stub anthropic provider functions --- *)
+(* X7.2 — this file used to declare its own request builder, response extractor and cost
+   calculator and assert against them. The damning one:
 
-f=buildrequest(model:str;systemprompt:str;usermsg:str;maxtokens:i64):str{
-  let body=str.concat("{\"model\":\"";model);
-  let body=str.concat(body;"\",\"max_tokens\":");
-  let tokstr=str.concat("";str.fromint(maxtokens));
-  let body=str.concat(body;tokstr);
-  let body=str.concat(body;",\"system\":\"");
-  let body=str.concat(body;systemprompt);
-  let body=str.concat(body;"\",\"messages\":[{\"role\":\"user\",\"content\":\"");
-  let body=str.concat(body;usermsg);
-  let body=str.concat(body;"\"}]}");
-  <body
+     (* stub: extracts content[0].text from a mock response *)
+     f=extractcontent(raw:str):str{ ... }
+
+   The module has no `extractcontent`. Its extraction happens in `buildresponse`, and that
+   is where the defect below lives — so a stub that reimplemented the extraction it imagined
+   could not have found it, and did not, for as long as the file has existed.
+
+   $completionresponse comes from core.providers.types, which must be imported for the field
+   names to resolve; without it a field read raises E4034 "no struct in scope declares a
+   field 'content'".
+
+   ─────────────────────────────────────────────────────────────────────────────────────
+   FINDING 1 — LIVE. The token counts are ZERO for every hosted response. RED below.
+
+   `buildresponse` (anthropic.tk:49-58) reads the nested usage object like this:
+
+     let usage=json.str(obj;"usage");
+     let usageobj=json.dec(usage);
+     let inputtokens=mt usageobj { $jsonerr:e 0; $ok:u json.i64(u;"input_tokens") };
+
+   Two independent things are wrong. `json.str` extracts a STRING value, and `usage` is a
+   nested OBJECT, so the extraction yields nothing. And the arms are written ERROR-FIRST:
+   `mt` on a stdlib result binds arms BY POSITION, not by label — measured separately, a
+   match written `{ $jsonerr:…; $ok:… }` returns the error arm for valid input and the ok arm
+   for invalid — so even a correct extraction would come back inverted.
+
+   MEASURED against a real /v1/messages body carrying
+   "usage":{"input_tokens":150,"output_tokens":42}:
+
+     content      == "Hello there"               correct
+     modelid      == "claude-sonnet-4-20250514"  correct
+     inputtokens  == 0                           should be 150
+     outputtokens == 0                           should be 42
+
+   content and model parse correctly, so the response looks entirely healthy. Why it
+   matters: browser/pages/api/pipeline.tk reads resp.inputtokens/resp.outputtokens straight
+   into the audit event, so EVERY audit row for an Anthropic request records tokens_in=0,
+   tokens_out=0 and cost_usd=0 — and audit_log is append-only with a hash chain over exactly
+   those columns, so the zeros are PERMANENT. Every figure derived from them — cost, savings,
+   quota consumption, the governance scorecard's per-provider totals — is zero while reading
+   as a measurement. And it is invisible from inside the program, because
+   pt.nocompletion() legitimately yields 0 and 0, so a failed call and a successful one are
+   indistinguishable in the trail.
+
+   This is the SECOND spelling of this defect: the first lived in
+   browser.pages.api.pipeline.usagetokens, was deleted in a dispatcher rewrite, and the
+   replacement reproduces it. The assertions below are what stops a third.
+
+   FINDING 2 — LIVE. calccost returns a corrupted f64 (T-20). RED below.
+
+   `calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64` returns a BARE f64 across a
+   module boundary. Measured, by rendering the return:
+
+     calccost("claude-sonnet-4-20250514";150;42)   expect 0.00108  got 0
+     calccost("claude-3-5-haiku-20241022";1000;1000) expect 0.0048 got 4.94066e-324
+
+   4.94066e-324 is the smallest denormal — bit pattern 1. So the cost figure is garbage
+   independently of the token counts: even with the tokens fixed, the cost would be wrong.
+   The fix is the one the rest of the codebase already uses for T-20 — return exact integer
+   hundredths or millionths and let the caller divide, as core.optimiser.budget.microusd and
+   core.storage.db.rowf64hundredths do. Not applied here; not my module.
+   ───────────────────────────────────────────────────────────────────────────────────── *)
+
+(* A real Anthropic Messages API response body. *)
+f=samplebody():str{
+  <"{\"content\":[{\"type\":\"text\",\"text\":\"Hello there\"}],\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":150,\"output_tokens\":42},\"stop_reason\":\"end_turn\"}"
 };
-
-f=parseresponse(raw:str):str{
-  (* stub: extracts content[0].text from a mock response *)
-  if(str.contains(raw;"\"text\":")){
-    <"Hello from Claude"
-  }el{
-    <""
-  }
-};
-
-f=endpoint():str{
-  <"https://api.anthropic.com/v1/messages"
-};
-
-f=apiversion():str{
-  <"2023-06-01"
-};
-
-f=providername():str{
-  <"anthropic"
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* request building: model is present *)
-  let req=buildrequest("claude-3-opus";"You are helpful";"Hi";1024);
-  if(t.assert(str.contains(req;"claude-3-opus");"request contains model name")){pass=pass+1}el{fail=fail+1};
+  (* ── The client carries its configuration ───────────────────────────────────*)
+  let client=ant.new("sk-ant-unit-test-key");
+  if(t.asserteq(client.config.apikey;"sk-ant-unit-test-key";"the client carries the API key it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(client.config.baseurl;"https://api.anthropic.com";"and the Anthropic base URL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((client.config.timeoutms as i64)==30000;"and a 30-second timeout")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: system prompt is present *)
-  if(t.assert(str.contains(req;"You are helpful");"request contains system prompt")){pass=pass+1}el{fail=fail+1};
+  (* ── The sentinel, which is how a failure is reported without a result type ──
+     core.providers.types uses a plain struct and a predicate rather than a result,
+     because T-18 makes the error arm of a user-declared result dead and reading a field
+     off the mis-bound value segfaults. *)
+  let none=pt.nocompletion("anthropic complete: something went wrong");
+  if(t.assert(!pt.iscompletion(none);"a nocompletion sentinel is not a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pt.completionerror(none);"anthropic complete: something went wrong";"and carries the reason, which is the only thing a caller can log")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: user message is present *)
-  if(t.assert(str.contains(req;"Hi");"request contains user message")){pass=pass+1}el{fail=fail+1};
+  (* A P0 property of this project: no API key may appear in anything loggable. The error
+     text is the one string a failed call hands upward. *)
+  if(t.assert(!str.contains(pt.completionerror(none);"sk-ant");"a failure message carries no API key fragment")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: max_tokens is present *)
-  if(t.assert(str.contains(req;"\"max_tokens\":");"request contains max_tokens field")){pass=pass+1}el{fail=fail+1};
+  (* ── parseplain on a real response body ─────────────────────────────────────
+     parseplain returns a PLAIN struct, not a result, so these field reads are safe —
+     which is exactly why LS1.1j introduced it. Its own match is written $ok FIRST, so it
+     discriminates correctly; that is the pattern buildresponse gets wrong. *)
+  let r:$completionresponse=ant.parseplain(samplebody());
+  if(t.assert(pt.iscompletion(r);"a valid response body parses to a completion")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.content;"Hello there";"the assistant's text is extracted from content[0].text")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.modelid;"claude-sonnet-4-20250514";"and the model the response reports, not the one that was requested")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.finishreason;"stop";"and a finish reason")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: messages array is present *)
-  if(t.assert(str.contains(req;"\"messages\":");"request contains messages array")){pass=pass+1}el{fail=fail+1};
+  (* FINDING 1, asserted in the honest direction. A caller plainly depends on these: they
+     are written into an append-only audit trail. *)
+  if(t.assert((r.inputtokens as i64)==150;"input_tokens is read from the nested usage object — see FINDING 1: it is 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((r.outputtokens as i64)==42;"and output_tokens — also 0")){pass=pass+1}el{fail=fail+1};
 
-  (* request building: role is user *)
-  if(t.assert(str.contains(req;"\"role\":\"user\"");"request has user role")){pass=pass+1}el{fail=fail+1};
+  (* ── Malformed input must not parse as a completion ──────────────────────────
+     parseplain's own match IS written $ok-first, so this path works. It is the fail-safe:
+     a body that cannot be read must not become an empty but successful answer. *)
+  let bad:$completionresponse=ant.parseplain("this is not JSON at all {{{");
+  if(t.assert(!pt.iscompletion(bad);"an unparseable body yields the sentinel, not an empty success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pt.completionerror(bad);"failed to parse");"and says why")){pass=pass+1}el{fail=fail+1};
 
-  (* response parsing: valid response returns content *)
-  let resp=parseresponse("{\"content\":[{\"type\":\"text\",\"text\":\"Hello from Claude\"}]}");
-  if(t.assert(str.eq(resp;"Hello from Claude");"parsed response returns content text")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 2: the cost arithmetic ─────────────────────────────────────────
+     Sonnet input is $3/Mtok and output $15/Mtok, so 150 in and 42 out is
+     150*0.000003 + 42*0.000015 = 0.00108. Asserted by value, bounded, so a corrupted
+     return cannot satisfy it by accident. *)
+  let sonnetcost=ant.calccost("claude-sonnet-4-20250514";150 as u32;42 as u32);
+  if(t.assert(sonnetcost>0.00107;"150 input and 42 output tokens on Sonnet costs $0.00108 — see FINDING 2, the bare f64 return is corrupted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sonnetcost<0.00109;"bounded from above too")){pass=pass+1}el{fail=fail+1};
 
-  (* response parsing: empty response returns empty string *)
-  let empty=parseresponse("{\"error\":\"bad request\"}");
-  if(t.assert(str.eq(empty;"");"error response returns empty string")){pass=pass+1}el{fail=fail+1};
+  (* Haiku is cheaper than Sonnet, and that ordering is what the router's cost tier rests
+     on. A thousand tokens each way: Haiku 0.0048, Sonnet 0.018. *)
+  let haikucost=ant.calccost("claude-3-5-haiku-20241022";1000 as u32;1000 as u32);
+  let sonnetbulk=ant.calccost("claude-sonnet-4-20250514";1000 as u32;1000 as u32);
+  if(t.assert(haikucost<sonnetbulk;"Haiku costs less than Sonnet for identical token counts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haikucost>0.0047;"and Haiku's own figure is $0.0048")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haikucost<0.0049;"bounded from above")){pass=pass+1}el{fail=fail+1};
 
-  (* endpoint is correct *)
-  if(t.assert(str.contains(endpoint();"api.anthropic.com");"endpoint contains api.anthropic.com")){pass=pass+1}el{fail=fail+1};
-
-  (* api version is set *)
-  if(t.assert(str.len(apiversion())>0;"api version is non-empty")){pass=pass+1}el{fail=fail+1};
-
-  (* provider name *)
-  if(t.assert(str.eq(providername();"anthropic");"provider name is anthropic")){pass=pass+1}el{fail=fail+1};
-
-  (* request JSON is well-formed — starts with brace *)
-  if(t.assert(str.contains(req;"{");"request starts with JSON object")){pass=pass+1}el{fail=fail+1};
+  (* Zero tokens cost nothing. This is the one calccost case that is indistinguishable from
+     the corruption, which is why it is asserted last rather than used as evidence. *)
+  if(t.assert(ant.calccost("claude-sonnet-4-20250514";0 as u32;0 as u32)==0.0;"zero tokens cost nothing")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

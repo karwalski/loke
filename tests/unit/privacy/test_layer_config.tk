@@ -5,91 +5,85 @@ m=test.privacy.layerconfig;
 
 i=t:std.test;
 i=str:std.str;
+i=lc:core.privacy.layerconfig;
 
-(* --- stub types and functions mirroring core.privacy.layerconfig --- *)
+(* X7.2 — this file used to declare its own $layerentry and $layerconfig and assert
+   against them. It now imports core.privacy.layerconfig.
 
-t=$layerentry{
-  id:str;
-  enabled:bool;
-  priority:i32;
-  mode:str;
-  confidencethreshold:f64;
-  entityfilter:str
-};
+   FINDING, recorded rather than asserted as correct: getlayer RETURNS THE FIRST LAYER
+   FOR AN UNKNOWN ID.
 
-t=$layerconfig{
-  layers:@$layerentry;
-  consensusstrategy:str
-};
+       f=getlayer(cfg:$layerconfig;id:str):$layerentry{
+         let result=mut.cfg.layers.get(0);
+         ...
 
-f=defaultconfig():$layerconfig{
-  let layers=@(
-    $layerentry{id:"regex";enabled:true;priority:1 as i32;mode:"detect-and-mask";confidencethreshold:0.8;entityfilter:""};
-    $layerentry{id:"ner";enabled:true;priority:2 as i32;mode:"detect-and-mask";confidencethreshold:0.75;entityfilter:""};
-    $layerentry{id:"presidio";enabled:false;priority:3 as i32;mode:"detect-only";confidencethreshold:0.7;entityfilter:""}
-  );
-  <$layerconfig{layers:layers;consensusstrategy:"most-restrictive"}
-};
+   The accumulator is seeded with layers.get(0) — the regex layer — and only overwritten
+   on a match. So getlayer(cfg;"presidio-v2") returns the REGEX layer's entry, complete
+   with enabled:true and a 0.8 confidence threshold, under a name that does not exist. A
+   caller checking whether a layer it was asked about is enabled gets "yes" for every
+   layer it has never heard of. The honest answers are either an `enabled:false` sentinel
+   or a `has` predicate alongside it, as core.privacy.entityrouting at least manages —
+   that one returns empty layer lists rather than another layer's.
 
-f=getlayer(cfg:$layerconfig;id:str):$layerentry{
-  let result=mut.cfg.layers.get(0);
-  lp(let i=0;i<cfg.layers.len;i=i+1){
-    let l=cfg.layers.get(i);
-    if(str.eq(l.id;id)){result=l}el{}
-  };
-  <result
-};
+   It is worse than fail-open on a lookup: it attributes one layer's configuration to
+   another, so a diagnostic printed from it would be confidently wrong about which layer
+   is doing what.
 
-f=enabledlayers(cfg:$layerconfig):@$layerentry{
-  let result=mut.@();
-  lp(let i=0;i<cfg.layers.len;i=i+1){
-    let l=cfg.layers.get(i);
-    if(l.enabled){result=result.push(l)}el{}
-  };
-  <result
-};
-
-(* --- tests --- *)
+   NOT FIXED HERE: this module has no importer anywhere in the repository, so the defect
+   is latent. The assertion below records it, following the precedent in
+   tests/unit/storage/test_backup.tk, and turns RED when a sentinel or a predicate is
+   added. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let cfg=defaultconfig();
+  let cfg=lc.defaultconfig();
 
-  (* 1. default has 3 layers *)
-  if(t.assert(cfg.layers.len==3;"default config has 3 layers")){pass=pass+1}el{fail=fail+1};
+  (* ── The default layer set ───────────────────────────────────────────────────
+     Three layers, and WHICH of them ship enabled is the whole security posture of a
+     fresh install: regex is in-process and cannot be unavailable, NER needs Ollama,
+     Presidio needs a sidecar. *)
+  if(t.assert(cfg.layers.len==3;"three detection layers are configured by default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.getlayer(cfg;"regex").enabled;"the regex layer ships ENABLED — it is in-process and is the one layer that cannot be unavailable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.getlayer(cfg;"ner").enabled;"NER ships enabled")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!lc.getlayer(cfg;"presidio").enabled;"and Presidio ships DISABLED, because it needs a sidecar that is not part of the install")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.enabledlayers(cfg).len==2;"so two layers are active on a fresh install")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.enabledlayers(cfg).len>0;"and never zero, which would mean nothing scans the text")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. default consensus strategy is most-restrictive *)
-  if(t.asserteq(cfg.consensusstrategy;"most-restrictive";"default strategy is most-restrictive")){pass=pass+1}el{fail=fail+1};
+  (* Priority orders the layers. Regex first is deliberate: it is deterministic and free,
+     so it runs before anything that costs a model call. *)
+  if(t.assert(lc.getlayer(cfg;"regex").priority<lc.getlayer(cfg;"ner").priority;"regex runs before NER, being deterministic and free")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.getlayer(cfg;"ner").priority<lc.getlayer(cfg;"presidio").priority;"and NER before Presidio")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. regex layer is enabled *)
-  let regexlayer=getlayer(cfg;"regex");
-  if(t.assert(regexlayer.enabled;"regex layer is enabled by default")){pass=pass+1}el{fail=fail+1};
+  (* Mode. detect-and-mask actually redacts; detect-only reports and does not. A layer
+     silently switched to detect-only would detect everything and mask nothing, which
+     looks like a working pipeline and forwards the text in the clear. *)
+  if(t.asserteq(lc.getlayer(cfg;"regex").mode;"detect-and-mask";"the regex layer MASKS what it detects, rather than only reporting it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lc.getlayer(cfg;"ner").mode;"detect-and-mask";"and so does NER")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lc.getlayer(cfg;"presidio").mode;"detect-only";"Presidio is detect-only by default")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. presidio layer is disabled *)
-  let presidiolayer=getlayer(cfg;"presidio");
-  if(t.assert(!presidiolayer.enabled;"presidio layer is disabled by default")){pass=pass+1}el{fail=fail+1};
+  (* Confidence thresholds. A threshold of 0 would accept every candidate a layer
+     produced; a threshold of 1 would accept none. Both ends are asserted rather than the
+     exact values, so the numbers can be tuned but not zeroed. *)
+  if(t.assert(lc.getlayer(cfg;"regex").confidencethreshold>0.0;"every layer has a confidence threshold above zero — zero would accept every candidate")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.getlayer(cfg;"regex").confidencethreshold<1.0;"and below one, which would accept none")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.getlayer(cfg;"ner").confidencethreshold>0.0;"the same for NER")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.getlayer(cfg;"presidio").confidencethreshold>0.0;"and for Presidio")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. regex has highest priority *)
-  if(t.assert((regexlayer.priority as i64)==1;"regex has priority 1")){pass=pass+1}el{fail=fail+1};
+  (* The entity filter is empty by default, which means every entity type. A non-empty
+     default would silently narrow detection on a fresh install. *)
+  if(t.asserteq(lc.getlayer(cfg;"regex").entityfilter;"";"the entity filter is empty by default, so no entity type is excluded on a fresh install")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. ner has priority 2 *)
-  let nerlayer=getlayer(cfg;"ner");
-  if(t.assert((nerlayer.priority as i64)==2;"ner has priority 2")){pass=pass+1}el{fail=fail+1};
+  (* The consensus strategy decides what happens when two layers disagree.
+     most-restrictive is the fail-safe direction for redaction. *)
+  if(t.asserteq(cfg.consensusstrategy;"most-restrictive";"disagreement between layers resolves the MOST restrictive way, which is the fail-safe direction for redaction")){pass=pass+1}el{fail=fail+1};
 
-  (* 7. enabled layers returns only 2 *)
-  let enabled=enabledlayers(cfg);
-  if(t.assert(enabled.len==2;"only 2 layers are enabled")){pass=pass+1}el{fail=fail+1};
-
-  (* 8. regex mode is detect-and-mask *)
-  if(t.asserteq(regexlayer.mode;"detect-and-mask";"regex mode is detect-and-mask")){pass=pass+1}el{fail=fail+1};
-
-  (* 9. presidio mode is detect-only *)
-  if(t.asserteq(presidiolayer.mode;"detect-only";"presidio mode is detect-only")){pass=pass+1}el{fail=fail+1};
-
-  (* 10. regex confidence threshold *)
-  if(t.assert(regexlayer.confidencethreshold>0.79;"regex confidence threshold is 0.8")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, recorded: an unknown layer id returns the FIRST layer ──────────*)
+  let unknown=lc.getlayer(cfg;"no-such-layer");
+  if(t.asserteq(unknown.id;"regex";"an UNKNOWN layer id returns the first layer's entry — the regex layer — rather than a sentinel")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unknown.enabled;"so a caller asking whether a layer it has never heard of is enabled is told YES")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lc.getlayer(cfg;"").id;"regex";"and an empty id does the same")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

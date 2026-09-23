@@ -5,104 +5,216 @@ m=test.models.registry;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=reg:core.models.registry;
 
-(* --- stub model registry functions --- *)
+(* X7.2 — this file used to declare its own model table and its own selection function and
+   assert against them. The module's own comments record three separate defects that a
+   re-declared table could not reach, because in every case the module's code was there and
+   silently doing nothing:
 
-(* model tiers *)
-f=tierlocal():i64{ <0 };
-f=tiercloud():i64{ <1 };
-f=tierpremium():i64{ <2 };
+     findfortask — "`let matches=matches.append(entry)` inside the branch declared a NEW
+       BINDING, so this returned an EMPTY ARRAY for every task and model selection could
+       never succeed."
 
-(* register a model — returns 1 on success, 0 on invalid *)
-f=registermodel(name:str;provider:str;tier:i64):i64{
-  if(str.len(name)==0){<0};
-  if(str.len(provider)==0){<0};
-  if(tier<0){<0};
-  if(tier>2){<0};
-  <1
+     bestfortask — "`!$bestopt` put a type sigil on a local so the guard never read the flag;
+       `let best=entry` and `let bestopt=true` inside the branch shadowed rather than
+       assigned, so nothing was ever selected... It also took the FIRST acceptable candidate
+       rather than the best one."
+
+     findbest — "returns $modelcapability!$lokeerr... toke takes the FIRST arm whatever the
+       value is (T-18)... reading ANY field off the mis-bound value SEGFAULTS.
+       core.router.selector.select therefore could not tell success from failure, and
+       core.router.router.route crashed unconditionally."
+
+   So for as long as this file existed, model selection returned nothing, and the test that
+   was supposed to guard it asserted against a table declared beside the assertions.
+
+   $tasktype, $modeltier and $provider come from shared.types, which must be imported for
+   the variant names to resolve. The result-returning `findbest` and `byid` are NOT called
+   here: T-18 makes their error arms dead and reading a field off the mis-bound value
+   segfaults, which is precisely why the plain `bestfortask` and `capabilitybyid` exist. *)
+
+f=hasmodel(caps:@$modelcapability;id:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<caps.len;i=i+1){
+    let c:$modelcapability=caps.get(i);
+    if(str.eq(c.modelid;id)){ found=true }el{}
+  };
+  <found
 };
 
-(* find model by name — returns provider or empty *)
-f=findmodel(name:str):str{
-  if(str.eq(name;"llama3")){<"ollama"};
-  if(str.eq(name;"gpt-4o")){<"openai"};
-  if(str.eq(name;"claude-sonnet")){<"anthropic"};
-  if(str.eq(name;"mistral-7b")){<"ollama"};
-  <""
-};
-
-(* find models by capability — returns count of matching models *)
-f=findbycapability(capability:str):i64{
-  if(str.eq(capability;"code")){<3};
-  if(str.eq(capability;"chat")){<4};
-  if(str.eq(capability;"vision")){<2};
-  if(str.eq(capability;"embedding")){<1};
-  <0
-};
-
-(* get model tier *)
-f=gettier(name:str):i64{
-  if(str.eq(name;"llama3")){<tierlocal()};
-  if(str.eq(name;"mistral-7b")){<tierlocal()};
-  if(str.eq(name;"gpt-4o")){<tiercloud()};
-  if(str.eq(name;"claude-sonnet")){<tierpremium()};
-  <0-1
-};
-
-(* count registered models *)
-f=modelcount():i64{ <4 };
-
-(* check if model is local *)
-f=islocal(name:str):i64{
-  if(gettier(name)==tierlocal()){<1};
-  <0
+f=alllocal(caps:@$modelcapability):bool{
+  let ok=mut.true;
+  lp(let i=0;i<caps.len;i=i+1){
+    let c:$modelcapability=caps.get(i);
+    if(c.local){}el{ ok=false }
+  };
+  <ok
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test register model *)
-  if(t.assert(registermodel("llama3";"ollama";0)==1;"register valid model succeeds")){pass=pass+1}el{fail=fail+1};
+  (* ── The registry is populated ──────────────────────────────────────────────*)
+  let r=reg.newregistry();
+  if(t.assert(r.entries.len>0;"the default registry is not empty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reg.defaultentries().len==r.entries.len;"and newregistry carries exactly the default entries")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(registermodel("";"ollama";0)==0;"empty name rejected")){pass=pass+1}el{fail=fail+1};
+  (* ── The sentinel ───────────────────────────────────────────────────────────
+     A plain struct with an empty modelid, tested with an `if` on a string length rather
+     than a match a caller cannot trust. A real capability always has a modelid, so the
+     sentinel cannot be confused with one. *)
+  if(t.assert(!reg.iscapability(reg.nocapability());"nocapability is not a capability")){pass=pass+1}el{fail=fail+1};
+  (* Bound to an annotated local rather than read off the call return directly: a chained
+     field access on a returned struct is the shape that faults in this toolchain. *)
+  let sentinel:$modelcapability=reg.nocapability();
+  if(t.asserteq(sentinel.modelid;"";"and the sentinel is an empty modelid")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(registermodel("llama3";"";0)==0;"empty provider rejected")){pass=pass+1}el{fail=fail+1};
+  (* ── findfortask: the function that used to return an empty array for everything ──*)
+  let chat=reg.findfortask(r;$chat(0);false);
+  if(t.assert(chat.len>0;"there is at least one model for chat — this returned an empty array for every task")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasmodel(chat;"claude-3-5-sonnet-20241022");"Sonnet is among the chat models")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasmodel(chat;"qwen2.5:7b");"and so is a local model")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(registermodel("llama3";"ollama";5)==0;"invalid tier rejected")){pass=pass+1}el{fail=fail+1};
+  (* The task filter has to actually filter. Embedding is declared for fewer models than
+     chat, so a filter that ignored the task would return the same count for both. *)
+  let embedding=reg.findfortask(r;$embedding(0);false);
+  if(t.assert(embedding.len>0;"there is at least one model for embedding")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(embedding.len<chat.len;"and fewer than for chat, so the task filter is doing something")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasmodel(embedding;"gpt-4o-mini");"gpt-4o-mini is not declared for embedding")){pass=pass+1}el{fail=fail+1};
 
-  (* test find model by name *)
-  if(t.assert(str.eq(findmodel("llama3");"ollama");"llama3 is from ollama")){pass=pass+1}el{fail=fail+1};
+  (* ── localonly is a PRIVACY filter, not a preference ─────────────────────────
+     This is the constraint that keeps a sensitive prompt on the device. If it leaked one
+     hosted model into the result, a RESTRICTED prompt could be routed off-device — so the
+     assertion is over EVERY entry returned, not a sample. *)
+  let localchat=reg.findfortask(r;$chat(0);true);
+  if(t.assert(localchat.len>0;"there is a local model for chat")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(alllocal(localchat);"and EVERY model returned under localonly is local — one hosted entry here would route a sensitive prompt off-device")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasmodel(localchat;"claude-3-5-sonnet-20241022");"a hosted model is excluded by name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasmodel(localchat;"gpt-4o");"and so is the other one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(localchat.len<chat.len;"and localonly returns strictly fewer models than an unconstrained search")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(findmodel("gpt-4o");"openai");"gpt-4o is from openai")){pass=pass+1}el{fail=fail+1};
+  (* ── meetstier: the speed floor each tier imposes ────────────────────────────
+     $interactive means a person is waiting, so it needs more than 40 tok/s; $considered
+     tolerates 8; $background accepts anything. The boundaries are strict inequalities, and
+     the 8.0 one matters: qwen2.5:72b runs at exactly 8.0, so it must NOT qualify as
+     considered. An off-by-one here puts a model a person is waiting on at 8 tok/s. *)
+  if(t.assert(reg.meetstier($interactive(0);45.0);"45 tok/s meets the interactive floor")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.meetstier($interactive(0);40.0);"exactly 40 does NOT — the comparison is strictly greater")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.meetstier($interactive(0);8.0);"and 8 certainly does not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reg.meetstier($considered(0);45.0);"45 meets the considered floor")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.meetstier($considered(0);8.0);"exactly 8 does not meet it either")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reg.meetstier($considered(0);8.5);"but 8.5 does")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(findmodel("claude-sonnet");"anthropic");"claude-sonnet is from anthropic")){pass=pass+1}el{fail=fail+1};
+  (* ─────────────────────────────────────────────────────────────────────────────
+     FINDING — LIVE, AND IT CRASHES THE PROCESS. Reported, not fixed. The $background
+     assertions are therefore NOT made; a segfaulting test reports a signal (139) rather
+     than an assertion count and tells a reader nothing.
 
-  if(t.assert(str.eq(findmodel("nonexistent");"");"unknown model returns empty")){pass=pass+1}el{fail=fail+1};
+     `core.models.registry.meetstier` SEGFAULTS on the `$background` tier. Isolated, on a
+     freshly rebuilt object archive (the first sighting was during a concurrent rebuild and
+     was re-verified afterwards, because a partial archive can fake a crash):
 
-  (* test find by capability *)
-  if(t.assert(findbycapability("code")==3;"3 models support code")){pass=pass+1}el{fail=fail+1};
+       reg.meetstier($interactive(0);45.0)   returns   ok
+       reg.meetstier($considered(0);45.0)    returns   ok
+       reg.meetstier($background(0);8.0)     SIGSEGV   <-- here
+       reg.meetstier($background(0);100.0)   SIGSEGV
+       reg.bestfortask(r;$chat(0);false;$background(0))  SIGSEGV
 
-  if(t.assert(findbycapability("chat")==4;"4 models support chat")){pass=pass+1}el{fail=fail+1};
+     The match is three arms, and the first two return a COMPARISON while the third returns
+     a literal:
 
-  if(t.assert(findbycapability("vision")==2;"2 models support vision")){pass=pass+1}el{fail=fail+1};
+       f=meetstier(tier:$modeltier;speedtoks:f64):bool{
+         <mt tier {
+           $interactive:v speedtoks > 40.0;
+           $considered:v speedtoks > 8.0;
+           $background:v true
+         }
+       };
 
-  if(t.assert(findbycapability("telekinesis")==0;"0 models support telekinesis")){pass=pass+1}el{fail=fail+1};
+     Only the third arm faults, which places it in the T-2 family — toke miscompiling a
+     match of three or more arms — rather than in anything about the tier's meaning.
 
-  (* test model tiers *)
-  if(t.assert(gettier("llama3")==tierlocal();"llama3 is local tier")){pass=pass+1}el{fail=fail+1};
+     THE CONSEQUENCE IS NOT COSMETIC. `bestfortask` calls `meetstier(tier;…)` once per
+     candidate, so ANY model selection at the background tier crashes. `$background` is the
+     tier for overnight and agent work — the whole of the "run it while the user is asleep"
+     path — so that path cannot select a model at all. It is also the tier a caller would
+     naturally pass for a batch job, and the crash is at the point of selection, before
+     anything is logged.
 
-  if(t.assert(gettier("gpt-4o")==tiercloud();"gpt-4o is cloud tier")){pass=pass+1}el{fail=fail+1};
+     What IS asserted above and below: the two tiers that work, including both strict
+     boundaries, and every selection that does not pass $background.
+     ───────────────────────────────────────────────────────────────────────────────── *)
 
-  if(t.assert(gettier("claude-sonnet")==tierpremium();"claude-sonnet is premium tier")){pass=pass+1}el{fail=fail+1};
+  (* ── bestfortask picks the BEST, not the first ───────────────────────────────
+     The defect was that it took the first acceptable candidate. Sonnet scores 0.95 and is
+     declared before Haiku at 0.82 and gpt-4o at 0.93, so "first" and "best" happen to
+     agree for chat — which is why the local case below is the one that discriminates:
+     qwen2.5:7b (0.72) is declared BEFORE qwen2.5:72b (0.88), so a first-match
+     implementation returns the worse model. *)
+  let best=reg.bestfortask(r;$chat(0);false;$interactive(0));
+  if(t.assert(reg.iscapability(best);"a model is selected for interactive chat")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(best.modelid;"claude-3-5-sonnet-20241022";"and it is the highest-quality one")){pass=pass+1}el{fail=fail+1};
 
-  (* test islocal *)
-  if(t.assert(islocal("llama3")==1;"llama3 is local")){pass=pass+1}el{fail=fail+1};
+  (* The "best, not first" discrimination, at the CONSIDERED tier rather than background,
+     because $background crashes — see the FINDING above. qwen2.5:72b runs at 8.0 tok/s,
+     which fails the considered floor too, so the local considered winner is qwen2.5:7b.
+     That still discriminates the defect this test exists for in the hosted case below. *)
+  let bestlocal=reg.bestfortask(r;$chat(0);true;$considered(0));
+  if(t.assert(reg.iscapability(bestlocal);"a local model is selected for considered chat")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bestlocal.local;"and it is local, because localonly was asked for")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(islocal("gpt-4o")==0;"gpt-4o is not local")){pass=pass+1}el{fail=fail+1};
+  (* The tier floor must actually exclude. qwen2.5:72b scores 0.88 against qwen2.5:7b's
+     0.72, so quality alone would pick the 72b — but it runs at 8.0 tok/s, which fails both
+     the interactive and the considered floor, so an interactive local chat must fall to
+     qwen2.5:7b at 45 tok/s. A real trade of quality for latency, and the assertion that
+     the speed floor is applied rather than ignored. *)
+  let bestlocalfast=reg.bestfortask(r;$chat(0);true;$interactive(0));
+  if(t.asserteq(bestlocalfast.modelid;"qwen2.5:7b";"an interactive local request takes the fast local model, because the better one is too slow for the tier")){pass=pass+1}el{fail=fail+1};
 
-  (* test model count *)
-  if(t.assert(modelcount()==4;"4 models registered")){pass=pass+1}el{fail=fail+1};
+  (* No model meets the constraints: the sentinel, not a crash and not an arbitrary model.
+     Local code REVIEW is declared only for qwen2.5:72b, which runs at 8.0 tok/s and fails
+     the interactive floor — so this combination genuinely has no answer. (An earlier draft
+     of this test used local EMBEDDING for the same purpose and was wrong: nomic-embed-text
+     is a local embedding model in the registry, and bestfortask correctly returns it. The
+     module was right and the assertion was not.) *)
+  let impossible:$modelcapability=reg.bestfortask(r;$codereview(0);true;$interactive(0));
+  if(t.assert(!reg.iscapability(impossible);"a request no model can satisfy yields the sentinel, not an arbitrary model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(impossible.modelid;"";"and the sentinel is the empty modelid, not element 0 of an empty candidate list")){pass=pass+1}el{fail=fail+1};
+
+  (* And a local embedding request IS answerable, which is what makes on-device embedding
+     for the semantic cache possible at all. *)
+  let localembed:$modelcapability=reg.bestfortask(r;$embedding(0);true;$interactive(0));
+  if(t.assert(reg.iscapability(localembed);"a LOCAL embedding model is available")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(localembed.local;"and it is genuinely local")){pass=pass+1}el{fail=fail+1};
+
+  (* ── capabilitybyid ─────────────────────────────────────────────────────────*)
+  let byid=reg.capabilitybyid(r;"gpt-4o");
+  if(t.assert(reg.iscapability(byid);"a known model is found by id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(byid.modelid;"gpt-4o";"and it is the one asked for")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.iscapability(reg.capabilitybyid(r;"no-such-model"));"an unknown id yields the sentinel rather than the first entry")){pass=pass+1}el{fail=fail+1};
+
+  (* ── register adds an entry and returns the registry ─────────────────────────
+     toke structs are values, so `register` must RETURN the registry — a caller that drops
+     the return registers nothing. *)
+  let extra=$modelcapability{
+    modelid:"unit-test-model";
+    provider:$provider{$local:0};
+    task:$tasktype{$chat:0};
+    qualityscore:0.99;
+    speedtoks:200.0;
+    contextwindow:8000;
+    supportstools:false;
+    local:true
+  };
+  let bigger=reg.register(r;extra);
+  if(t.assert(bigger.entries.len==r.entries.len+1;"register adds one entry")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.entries.len==reg.defaultentries().len;"and leaves the registry it was given alone: structs are values and register returns a new one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reg.iscapability(reg.capabilitybyid(bigger;"unit-test-model"));"the registered model is findable by id")){pass=pass+1}el{fail=fail+1};
+  let winner:$modelcapability=reg.bestfortask(bigger;$chat(0);true;$interactive(0));
+  if(t.asserteq(winner.modelid;"unit-test-model";"and a better, faster local model wins the selection it qualifies for")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

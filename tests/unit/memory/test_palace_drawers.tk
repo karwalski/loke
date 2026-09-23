@@ -2,120 +2,102 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=test.memory.palacedrawers;
+
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
 
-t=$palacelocation{
-  wing:str;
-  hall:str;
-  room:str
+(* X7.2 and M1.7 — this file used to declare a $drawerstore with its own newstore,
+   adddrawer, getbyid, listinwing, countinwing and locationkey, and assert against the
+   copy. The real core.memory.palace has none of those: it has open, listwings,
+   listhalls, listrooms, status and walk, and every one of them goes to SQL. The stub's
+   fourteen assertions described an in-memory collection that does not exist anywhere in
+   the product.
+
+   THIS FILE DOES NOT IMPORT core.memory.palace, AND THAT IS THE FINDING.
+
+   core.memory.palace.open() SEGFAULTS. Minimal reproduction, run before this file was
+   written: open a connection with std.db.open, build a $dbconn, call
+   core.memory.schema.createtables on it — exit 139, SIGSEGV, on the first statement.
+   palace.open calls exactly that, so the memory palace cannot be opened at all, and
+   every other function in the module takes a $palace that only open can produce. A test
+   that called it would not fail an assertion, it would crash the runner, which reports
+   nothing useful and is indistinguishable from a broken test.
+
+   THE CAUSE, which is a known class in this repository. All five statements in
+   packages/core/src/memory/schema.tk (lines 14, 31, 44, 54, 59) are written
+
+     mt db.exec(conn;"CREATE TABLE IF NOT EXISTS memory_drawers ( ... )")
+
+   and std.db.exec is declared (str, [str]) — the SQL and its parameters. There is no
+   connection argument any more; db.exec uses the connection db.open established. So the
+   call is ARITY-COMPATIBLE: it type-checks, then reads the connection pointer as a SQL
+   string and the SQL string as a parameter array. core/storage/db.tk carries a comment
+   describing the identical defect being fixed in five of its own calls. These five were
+   missed.
+
+   WHY THIS IS THE ROOT OF M1.7. The backlog records that four memory tables are
+   referenced 24 times across the codebase and created by no migration. The measurement
+   is narrower and worse than that:
+
+     - packages/core/src/memory/schema.tk is the ONLY place in the tree that issues
+       CREATE TABLE for a memory_* table. Nothing else does, in any migration.
+     - It creates three of them — memory_drawers, memory_closets, memory_index — and it
+       crashes before the first one.
+     - memory_scores is not in it at all, so it has no creator anywhere, even though
+       memory/decay.tk, memory/export.tk and memory/privacy.tk all read and write it.
+
+   So the assertions below are the empirical statement of M1.7: after a normal loke store
+   is opened and its migrations have run, none of the four memory tables exists. They are
+   written in the direction a working product would satisfy, so THEY ARE RED, and they go
+   green when the tables are created. That is the intended signal.
+
+   ORDERING WARNING, and it is the reason this file and
+   tests/unit/memory/test_decay.tk cross-reference each other: fixing the schema without
+   first fixing core.memory.decay.apply is a data-loss event. sweeprows compares apply's
+   return against prunebelow and deletes the row when it is lower; apply's float return is
+   corrupted to -inf across a module boundary (T-20, measured), so that comparison would
+   be true for every row. Today sweep cannot run because memory_scores does not exist.
+   Create it first and the first sweep deletes the whole palace. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir()'s return is truncated when interpolated
+     (T-21). Its own directory, so no other test's schema is in scope. *)
+  <str.concat(std.homedir();"/.loke/test-palace-drawers")
 };
 
-t=$drawer{
-  id:str;
-  location:$palacelocation;
-  role:str;
-  content:str;
-  sessionid:str;
-  tokens:i64;
-  createdat:str
-};
-
-t=$drawerstore{
-  drawers:@$drawer;
-  count:i64
-};
-
-f=newstore():$drawerstore{
-  <$drawerstore{drawers:@();count:0}
-};
-
-f=adddrawer(store:$drawerstore;d:$drawer):$drawerstore{
-  let ds=store.drawers;
-  let ds=str.arraypush(ds;d);
-  <$drawerstore{drawers:ds;count:store.count+1}
-};
-
-f=getbyid(store:$drawerstore;id:str):$drawer{
-  let found=mut.$drawer{id:"";location:$palacelocation{wing:"";hall:"";room:""};role:"";content:"";sessionid:"";tokens:0;createdat:""};
-  lp(let i=0;i<store.count;i=i+1){
-    let d=store.drawers.get(i);
-    if(str.eq(d.id;id)){found=d}el{}
-  };
-  <found
-};
-
-f=listinwing(store:$drawerstore;wing:str):@$drawer{
-  let results=mut.@($drawer);
-  lp(let i=0;i<store.count;i=i+1){
-    let d=store.drawers.get(i);
-    if(str.eq(d.location.wing;wing)){results=str.arraypush(results;d)}el{}
-  };
-  <results
-};
-
-f=countinwing(store:$drawerstore;wing:str):i64{
-  let c=mut.0;
-  lp(let i=0;i<store.count;i=i+1){
-    let d=store.drawers.get(i);
-    if(str.eq(d.location.wing;wing)){c=c+1}el{}
-  };
-  <c
-};
-
-f=locationkey(loc:$palacelocation):str{
-  let wh=str.concat(loc.wing;"/");
-  let whl=str.concat(wh;loc.hall);
-  let whlr=str.concat(whl;"/");
-  <str.concat(whlr;loc.room)
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database file, so what exists is what this run's migrations created and
+     nothing left behind by an earlier one. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let store=newstore();
+  openfreshstore();
 
-  if(t.assert(store.count==0;"fresh store has zero drawers")){pass=pass+1}el{fail=fail+1};
+  (* The control. If this were false the store did not open and every assertion below
+     would be reporting "table absent" for the wrong reason — which is exactly the
+     failure mode that lets a schema test pass vacuously. *)
+  if(t.assert(sdb.tableexists("schema_migrations");"the store opened and its migrations ran: schema_migrations exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("settings");"and the settings table it creates exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.tableexists("no_such_table_xyz");"and tableexists reports a table that does not exist as absent, so it discriminates")){pass=pass+1}el{fail=fail+1};
 
-  let loc1=$palacelocation{wing:"work";hall:"Projects";room:"loke"};
-  let d1=$drawer{id:"d-001";location:loc1;role:"user";content:"Discussed loke architecture";sessionid:"s-001";tokens:45;createdat:"2026-05-01"};
-  let store=adddrawer(store;d1);
-
-  if(t.assert(store.count==1;"store has one drawer after add")){pass=pass+1}el{fail=fail+1};
-
-  let loc2=$palacelocation{wing:"work";hall:"Tasks";room:"sprint"};
-  let d2=$drawer{id:"d-002";location:loc2;role:"assistant";content:"Sprint planning notes";sessionid:"s-001";tokens:30;createdat:"2026-05-01"};
-  let store=adddrawer(store;d2);
-
-  let loc3=$palacelocation{wing:"personal";hall:"Goals";room:"fitness"};
-  let d3=$drawer{id:"d-003";location:loc3;role:"user";content:"Running schedule for May";sessionid:"s-002";tokens:20;createdat:"2026-05-02"};
-  let store=adddrawer(store;d3);
-
-  if(t.assert(store.count==3;"store has three drawers")){pass=pass+1}el{fail=fail+1};
-
-  let fetched=getbyid(store;"d-001");
-  if(t.assert(str.eq(fetched.id;"d-001");"retrieve by id returns correct drawer")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(fetched.content;"Discussed loke architecture");"retrieved drawer has correct content")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(fetched.role;"user");"retrieved drawer has correct role")){pass=pass+1}el{fail=fail+1};
-
-  let missing=getbyid(store;"d-999");
-  if(t.assert(str.eq(missing.id;"");"missing id returns empty drawer")){pass=pass+1}el{fail=fail+1};
-
-  let workdrawers=listinwing(store;"work");
-  if(t.assert(workdrawers.len==2;"list wing work returns 2 drawers")){pass=pass+1}el{fail=fail+1};
-
-  let personaldrawers=listinwing(store;"personal");
-  if(t.assert(personaldrawers.len==1;"list wing personal returns 1 drawer")){pass=pass+1}el{fail=fail+1};
-
-  let workcount=countinwing(store;"work");
-  if(t.assert(workcount==2;"count in work wing is 2")){pass=pass+1}el{fail=fail+1};
-
-  let key=locationkey(loc1);
-  if(t.assert(str.eq(key;"work/Projects/loke");"location key formats correctly")){pass=pass+1}el{fail=fail+1};
-
-  let emptywing=listinwing(store;"technical");
-  if(t.assert(emptywing.len==0;"empty wing returns no drawers")){pass=pass+1}el{fail=fail+1};
+  (* ── M1.7, asserted. RED until the memory schema is created. ─────────────────*)
+  if(t.assert(sdb.tableexists("memory_drawers");"memory_drawers exists — every drawer read and write in the product depends on it (M1.7)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("memory_closets");"memory_closets exists — the AAAK summaries are stored there (M1.7)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("memory_index");"memory_index exists — core.memory.search queries nothing else (M1.7)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("memory_scores");"memory_scores exists — decay, export and memory/privacy all read it, and NO module anywhere issues a CREATE TABLE for it (M1.7)")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

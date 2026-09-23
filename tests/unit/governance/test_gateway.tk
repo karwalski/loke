@@ -5,85 +5,174 @@ m=test.governance.gateway;
 
 i=t:std.test;
 i=str:std.str;
+i=types:shared.types;
+i=gt:core.governance.types;
+i=gw:core.governance.gateway;
 
-(* --- stub governance gateway functions --- *)
+(* shared.types is imported for $risktier, $sensitivitylevel, $policydecision, $provider
+   and $modelspec. Without it a sum-variant literal in an ARGUMENT position compiles and
+   passes garbage while the same type in a `let` annotation errors E3011 — see the note in
+   tests/unit/governance/test_policy.tk.
 
-(* policy results *)
-f=policyallow():i64{ <1 };
-f=policydeny():i64{ <0 };
+   X7.2 — this file used to declare its own gateway struct and its own submit:
 
-(* check if a request action is permitted by policy *)
-f=checkpolicy(action:str;userrole:str):i64{
-  (* admin can do anything *)
-  if(str.eq(userrole;"admin")){<policyallow()};
-  (* deny dangerous actions for non-admins *)
-  if(str.eq(action;"delete_all")){<policydeny()};
-  if(str.eq(action;"export_raw")){<policydeny()};
-  if(str.eq(action;"disable_privacy")){<policydeny()};
-  (* allow standard actions *)
-  if(str.eq(action;"query")){<policyallow()};
-  if(str.eq(action;"submit")){<policyallow()};
-  if(str.eq(action;"view")){<policyallow()};
-  (* deny unknown actions by default *)
-  <policydeny()
+     f=submit(killswitch:bool;sensitivity:i64):i64{ if(killswitch){<deny()}; ... }
+     ... t.assert(submit(true;senrestricted())==deny();"kill switch denies a restricted request")
+
+   That assertion is story T4.5's acceptance criterion — "gateway blocks RESTRICTED request
+   when kill switch engaged" — checked against an `if` written three lines above it.
+   Importing the real module produced two findings, and the first one is why this file does
+   NOT call gw.submit.
+
+   ══ FINDING 1: core.governance.gateway.submit SEGFAULTS on a valid request ══════
+   Reproduced, minimised and localised. `gw.submitinner(gw.new();req)` with
+   `req.usecaseid="chat-completion"` — a built-in use case — dies with SIGSEGV. Every
+   component it calls works standalone, checked one at a time:
+
+     uc.newregistry()                          returns a registry          OK
+     uc.find(reg;"chat-completion")            returns the use case, id intact   OK
+     found.risklevel                           reads as the i64 0          OK
+     pol.classifyrisk(public;$risktier{$low:0};0.0)  returns LOW           OK
+     gw.submitinnerunknownuc(req)              returns a DENY decision     OK
+     gw.new()                                  returns a gateway           OK
+     gw.submitinner(g;req)                     SIGSEGV
+
+   The mechanism is a type mismatch the compiler cannot see, at gateway.tk:92-94:
+
+     f=submitinnerwithuc(gw:$gateway;req:$gatewayrequest;founduc:i64):...{
+       let risk=pol.classifyrisk(req.sensitivity;founduc.risklevel;req.estimatedcost);
+
+   `founduc` is declared **i64**, so `founduc.risklevel` is not type-checked against
+   anything, and `$usecasedef.risklevel` is a plain **i64** (0, 1 or 2). But
+   `pol.classifyrisk` declares its second parameter as **$risktier**, a sum. A raw small
+   integer is passed where a tagged value is expected and the first `mt` on it dereferences
+   it. Reading a field off a mis-matched value segfaults rather than returning nonsense,
+   which is exactly what happens.
+
+   `submitinner`'s own `mt uc.find(...)` compounds it: T-18 takes the FIRST arm whatever
+   the value is, so `submitinnerunknownuc` — the deny path written for an unknown use case
+   — is unreachable dead code, and an unknown use case takes the $ok arm with the error
+   payload bound as the use case.
+
+   ══ FINDING 2: the gateway's kill switch cannot be engaged ══════════════════════
+   gateway.tk:148-158:
+
+     f=activatekillswitch(gw:$gateway;reason:str):void{
+       gw.killswitchactive==true;
+       gw.killswitchreason==reason;
+
+   Both lines are `==`, a comparison whose result is discarded — T-26 followed to its
+   conclusion, since `gw.killswitchactive=true` raises E2002 whose advice is "use ==" and
+   that advice is a silent no-op. It could not work with `=` either: `gw` is a value
+   parameter and a toke callee cannot mutate the caller's struct, and a `:void` signature
+   has no way to return a new one. `new()` sets killswitchactive:false, nothing can set it
+   true, so the deny branch at the top of `submit` is unreachable in the product.
+
+   ══ SCOPE — what is and is not shipping ════════════════════════════════════════
+   `core.governance.gateway` IS imported by packages/cli/src/ask.tk:12 and
+   packages/browser/extensions/core.tk:11, but grep shows neither calls `submit`:
+   ask.tk:186 calls only `gw.defaultrouting()` and extensions/core.tk:41 only `gw.new()`.
+   So the governance gateway is imported, constructed, and never used to gate a request.
+   Nothing crashes today because nothing calls the crashing function — and nothing is
+   governed by it either. loke's WORKING kill switch is core.governance.killswitch, which
+   is settings-backed, verified in tests/unit/governance/test_kill_switch.tk, and not
+   connected to this gateway.
+
+   Reported, not fixed. This file therefore covers everything that CAN be exercised —
+   construction, the deny-decision builder, the blocked predicate, the routing placeholder
+   and the inert setter — and deliberately does NOT call `submit` or `submitinner`. A test
+   that segfaults reports as CRASH, takes the runner's exit status with it, and buries the
+   finding instead of recording it. *)
+
+f=request(usecaseid:str;sensitivity:$sensitivitylevel;cost:f64):$gatewayrequest{
+  <$gatewayrequest{
+    requestid:"req-1";
+    usecaseid:usecaseid;
+    text:"hello";
+    modelid:"claude-3.5-sonnet";
+    provider:$provider{$anthropic:0};
+    sensitivity:sensitivity;
+    estimatedcost:cost;
+    correlationid:"corr-1"
+  }
 };
 
-(* submit a request through the gateway — returns request ID or 0 on deny *)
-f=submitrequest(action:str;userrole:str;payload:str):i64{
-  if(checkpolicy(action;userrole)==policydeny()){<0};
-  (* simulate request ID generation *)
-  <str.len(payload)+1000
+f=decisionwith(p:$policydecision):$gatewaydecision{
+  <$gatewaydecision{
+    requestid:"req-1";
+    policydecision:p;
+    risktier:$risktier{$low:0};
+    routing:gw.defaultrouting();
+    controlsapplied:@();
+    explanation:"";
+    timestamp:""
+  }
 };
 
-(* rate limit check: returns 1 if within limit, 0 if exceeded *)
-f=ratelimitok(requestcount:i64;maxpermin:i64):i64{
-  if(requestcount>maxpermin){<0};
-  <1
+f=controlstr(controls:@str):str{
+  <str.join(",";controls)
 };
-
-(* gateway status *)
-f=gatewayenabled():i64{ <1 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test policy allow for standard actions *)
-  if(t.assert(checkpolicy("query";"user")==policyallow();"user can query")){pass=pass+1}el{fail=fail+1};
+  (* ── A fresh gateway ─────────────────────────────────────────────────────────*)
+  let g=gw.new();
+  if(t.assert(!g.killswitchactive;"a new gateway starts with its kill switch disengaged")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(g.killswitchreason;"";"and no reason")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(checkpolicy("submit";"user")==policyallow();"user can submit")){pass=pass+1}el{fail=fail+1};
+  (* ── isblocked, on every decision variant ────────────────────────────────────
+     This is the predicate a caller would use to decide whether to proceed, and it is the
+     one piece of the gateway that a caller could use correctly today. Getting it wrong in
+     the permissive direction sends data that should have been held, so all four variants
+     are asserted rather than the two obvious ones. *)
+  if(t.assert(!gw.isblocked(decisionwith($policydecision{$allow:""}));"an ALLOW is not blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!gw.isblocked(decisionwith($allowwithwarning("careful")));"an ALLOW_WITH_WARNING is not blocked — a warning is not a block")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gw.isblocked(decisionwith($requireapproval("ask first")));"a REQUIRE_APPROVAL IS blocked until somebody approves it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gw.isblocked(decisionwith($deny("no")));"and a DENY is blocked")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(checkpolicy("view";"user")==policyallow();"user can view")){pass=pass+1}el{fail=fail+1};
+  (* ── The deny-decision builder ───────────────────────────────────────────────
+     `submitinnerunknownuc` is unreachable through `submitinner` (Finding 1), but it is
+     exported and it works, so what it produces is worth pinning: an unknown use case must
+     come back DENY at HIGH risk, not allowed by default. Fail-closed is the whole point of
+     a gateway, and this function is where that intent is written down. *)
+  let unknown=gw.submitinnerunknownuc(request("no-such-use-case";$sensitivitylevel{$public:0};0.0));
+  if(t.asserteq(gt.decisionlabel(unknown.policydecision);"DENY";"an unknown use case is DENIED, not allowed by default")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(unknown.risktier);"HIGH";"and treated as HIGH risk")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(unknown.explanation;"Unknown use case");"with an explanation naming the problem")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(unknown.explanation;"no-such-use-case");"and the use case id that was not recognised")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(unknown.requestid;"req-1";"carrying the request id through, so the refusal can be correlated")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(controlstr(unknown.controlsapplied);"audit-logging";"and recording that the refusal itself is audited")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(unknown.timestamp) as i64)>0;"and stamped with a time")){pass=pass+1}el{fail=fail+1};
 
-  (* test policy deny for dangerous actions *)
-  if(t.assert(checkpolicy("delete_all";"user")==policydeny();"user cannot delete_all")){pass=pass+1}el{fail=fail+1};
+  (* ── defaultrouting ──────────────────────────────────────────────────────────
+     Every decision carries it and it is deliberately a placeholder: routing happens
+     elsewhere. Asserted so that "pending" cannot quietly become a real-looking model id
+     with a zero cost attached beside it — which would be a fabricated figure of the kind
+     found in core.governance.forecast and core.governance.scorecard. *)
+  let routing=gw.defaultrouting();
+  if(t.asserteq(routing.reason;"pending";"the gateway's routing is an explicit placeholder, not a fabricated decision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(routing.estimatedcost==0.0;"with no cost estimate")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routing.model.id;"";"and no model chosen")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(routing.estimatedlatencyms==(0 as u32);"and no latency claim")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(checkpolicy("export_raw";"user")==policydeny();"user cannot export_raw")){pass=pass+1}el{fail=fail+1};
+  (* ── The setter, proven inert (Finding 2) ────────────────────────────────────
+     Characterising, not asserting-as-correct. If activatekillswitch is ever repaired
+     these two go red, and that is the intended signal. *)
+  let before=gw.new();
+  gw.activatekillswitch(before;"an incident");
+  if(t.assert(!before.killswitchactive;"DEFECT CHARACTERISED: activatekillswitch leaves killswitchactive FALSE — both its lines are `==` comparisons, not assignments (T-26)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(before.killswitchreason;"";"DEFECT CHARACTERISED: and the reason is not stored either")){pass=pass+1}el{fail=fail+1};
+  gw.deactivatekillswitch(before);
+  if(t.assert(!before.killswitchactive;"DEFECT CHARACTERISED: deactivatekillswitch is the same no-op, in the other direction")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(checkpolicy("disable_privacy";"user")==policydeny();"user cannot disable privacy")){pass=pass+1}el{fail=fail+1};
-
-  (* test admin overrides *)
-  if(t.assert(checkpolicy("delete_all";"admin")==policyallow();"admin can delete_all")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(checkpolicy("disable_privacy";"admin")==policyallow();"admin can disable privacy")){pass=pass+1}el{fail=fail+1};
-
-  (* test unknown action denied by default *)
-  if(t.assert(checkpolicy("hack_system";"user")==policydeny();"unknown action denied")){pass=pass+1}el{fail=fail+1};
-
-  (* test submit request returns ID on allow *)
-  let rid=submitrequest("query";"user";"test payload");
-  if(t.assert(rid>0;"submit returns positive request ID on allow")){pass=pass+1}el{fail=fail+1};
-
-  (* test submit request returns 0 on deny *)
-  if(t.assert(submitrequest("delete_all";"user";"payload")==0;"submit returns 0 on deny")){pass=pass+1}el{fail=fail+1};
-
-  (* test rate limiting *)
-  if(t.assert(ratelimitok(5;60)==1;"5 requests within 60/min limit")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(ratelimitok(61;60)==0;"61 requests exceeds 60/min limit")){pass=pass+1}el{fail=fail+1};
-
-  (* test gateway enabled *)
-  if(t.assert(gatewayenabled()==1;"gateway is enabled")){pass=pass+1}el{fail=fail+1};
+  (* T4.5's acceptance criterion — "gateway blocks RESTRICTED request when kill switch
+     engaged" — is NOT asserted here, and it is not an omission. Reaching the deny branch
+     requires a $gateway with killswitchactive true, which nothing in the product can
+     produce (Finding 2); and submitting any request at all to reach the branch calls
+     submitinner, which segfaults (Finding 1). The row is a REOPEN, recorded in
+     docs/epics-and-stories.md rather than as a crashing test. *)
 
   <fail
 };

@@ -5,75 +5,110 @@ m=test.agents.scheduler;
 
 i=t:std.test;
 i=str:std.str;
+i=sch:core.agents.scheduler;
+i=at:core.agents.types;
 
-(* --- stub scheduler functions --- *)
+(* X7.2 — this file used to declare its own cronmatches/duenow/nextrun and assert against
+   them, including a hand-rolled cron matcher the product does not have. It therefore
+   reported a working scheduler while saying nothing about core.agents.scheduler.
 
-f=shouldtrigger(schedtype:str;currenthour:i64;targethour:i64):bool{
-  if(str.eq(schedtype;"hourly")){<true};
-  if(str.eq(schedtype;"daily")){<currenthour==targethour};
-  if(str.eq(schedtype;"manual")){<false};
-  <false
+   What the real module does is much less than the stub pretended, and the point of this
+   file is to pin that down rather than paper over it. checkcron recognises exactly THREE
+   literal cron strings by string equality — "0 * * * *", "0 2 * * *", "0 2 * * 0" — and
+   for each of them it answers shouldrun=true. It never looks at the clock. There is no
+   cron parser; the module says so itself in the reason it returns ("schedule check
+   pending full cron parser"), which is honest debt rather than a hidden defect, and the
+   assertions below record it as debt so that the day a real parser lands they go red and
+   somebody has to update them deliberately.
+
+   The consequence is worth stating plainly because it is not obvious from the reason
+   string: checkdue takes `currenttimeepoch` and never reads it, so an agent on a
+   recognised schedule is reported DUE ON EVERY CHECK. Whatever calls checkalldue on a
+   timer will fire every scheduled agent every time it ticks. That is asserted directly
+   below — the same agent, two timestamps a year apart, the same answer. *)
+
+(* A full $agentdef literal rather than at.newagent plus a field assignment: toke has NO
+   assignment to a struct field (T-26), and `x.trigger=v` raises E2002 whose suggested fix
+   is a silent no-op. *)
+f=agentwith(id:str;tr:$triggertype):$agentdef{
+  <$agentdef{
+    id:id;
+    name:"test agent";
+    description:"";
+    schedule:"";
+    trigger:tr;
+    modelpreference:"";
+    latencytolerance:0;
+    risklevel:"low";
+    permissions:@();
+    maxcostperrun:0.10;
+    requiresapproval:true;
+    owner:"";
+    enabled:true;
+    prompttemplate:""
+  }
 };
-
-f=triggertype(schedtype:str):str{
-  if(str.eq(schedtype;"hourly")){<"time"};
-  if(str.eq(schedtype;"daily")){<"time"};
-  if(str.eq(schedtype;"manual")){<"user"};
-  if(str.eq(schedtype;"webhook")){<"event"};
-  <"unknown"
-};
-
-f=createschedule(agent:str;schedtype:str;hour:i64):str{
-  let s=str.concat("{\"agent\":\"";agent);
-  let s=str.concat(s;"\",\"type\":\"");
-  let s=str.concat(s;schedtype);
-  let s=str.concat(s;"\",\"hour\":");
-  let s=str.concat(s;str.fromint(hour));
-  let s=str.concat(s;"}");
-  <s
-};
-
-f=isvalidtype(schedtype:str):bool{
-  if(str.eq(schedtype;"hourly")){<true};
-  if(str.eq(schedtype;"daily")){<true};
-  if(str.eq(schedtype;"manual")){<true};
-  if(str.eq(schedtype;"webhook")){<true};
-  <false
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* hourly always triggers *)
-  if(t.assert(shouldtrigger("hourly";3;9);"hourly triggers at any hour")){pass=pass+1}el{fail=fail+1};
+  (* ── The three recognised patterns ───────────────────────────────────────────*)
+  let hourly=sch.checkcron("a-1";"0 * * * *");
+  if(t.assert(hourly.shouldrun;"the hourly pattern is recognised")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(hourly.agentid;"a-1";"and the verdict names the agent it is about")){pass=pass+1}el{fail=fail+1};
 
-  (* daily triggers at target hour *)
-  if(t.assert(shouldtrigger("daily";9;9);"daily triggers at target hour")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sch.checkcron("a-1";"0 2 * * *").shouldrun;"the daily-at-0200 pattern is recognised")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sch.checkcron("a-1";"0 2 * * 0").shouldrun;"the weekly-Sunday-0200 pattern is recognised")){pass=pass+1}el{fail=fail+1};
 
-  (* daily does not trigger at wrong hour *)
-  if(t.assert(!shouldtrigger("daily";3;9);"daily does not trigger at wrong hour")){pass=pass+1}el{fail=fail+1};
+  (* ── Anything else is refused, and says why ──────────────────────────────────
+     Refusal is the right direction: an unparsed schedule that defaulted to "due" would
+     run an agent on a cadence nobody asked for. *)
+  let odd=sch.checkcron("a-1";"*/5 * * * *");
+  if(t.assert(!odd.shouldrun;"an unrecognised cron pattern does NOT fire — an unparsed schedule must not default to due")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(odd.reason;"unrecognised cron pattern");"and the reason says the pattern was not recognised")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(odd.reason;"*/5 * * * *");"and quotes the pattern, so an operator can see which one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sch.checkcron("a-1";"").shouldrun;"an empty schedule does not fire")){pass=pass+1}el{fail=fail+1};
 
-  (* manual never auto-triggers *)
-  if(t.assert(!shouldtrigger("manual";9;9);"manual never auto-triggers")){pass=pass+1}el{fail=fail+1};
+  (* Whitespace and case are not normalised — string equality is the whole matcher. This
+     is asserted because it is the trap: "0 2 * * *" with two spaces is the same schedule
+     to a human and a different string here. *)
+  if(t.assert(!sch.checkcron("a-1";"0  2 * * *").shouldrun;"an extra space makes a recognised schedule unrecognised: the matcher is string equality, not a parser")){pass=pass+1}el{fail=fail+1};
 
-  (* trigger types *)
-  if(t.assert(str.eq(triggertype("hourly");"time");"hourly is time trigger")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(triggertype("daily");"time");"daily is time trigger")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(triggertype("manual");"user");"manual is user trigger")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(triggertype("webhook");"event");"webhook is event trigger")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(triggertype("unknown_type");"unknown");"unknown type returns unknown")){pass=pass+1}el{fail=fail+1};
+  (* The provisional reason is part of the contract for now. When a real parser lands this
+     assertion goes red, which is the intended signal to revisit this file. *)
+  if(t.assert(str.contains(hourly.reason;"pending full cron parser");"a recognised schedule reports that the check is PROVISIONAL — there is no cron parser yet")){pass=pass+1}el{fail=fail+1};
 
-  (* schedule creation *)
-  let s=createschedule("reviewer";"daily";9);
-  if(t.assert(str.contains(s;"reviewer");"schedule contains agent name")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(s;"daily");"schedule contains type")){pass=pass+1}el{fail=fail+1};
+  (* ── checkdue dispatches on the trigger type ─────────────────────────────────
+     Only $schedule can auto-fire. Every other trigger is event-driven, and one of them
+     reporting due would mean a webhook agent running on a timer. *)
+  let manual=sch.checkdue(agentwith("m-1";$triggertype{$manual:0});1790000000 as u64);
+  if(t.assert(!manual.shouldrun;"a MANUAL trigger never auto-fires")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(manual.reason;"manual trigger");"and says so")){pass=pass+1}el{fail=fail+1};
 
-  (* valid type checks *)
-  if(t.assert(isvalidtype("hourly");"hourly is valid type")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!isvalidtype("biweekly");"biweekly is not valid type")){pass=pass+1}el{fail=fail+1};
+  let fc=sch.checkdue(agentwith("f-1";$triggertype{$filechange:"/tmp/x"});1790000000 as u64);
+  if(t.assert(!fc.shouldrun;"a FILECHANGE trigger does not auto-fire — file watching is elsewhere")){pass=pass+1}el{fail=fail+1};
+
+  let wh=sch.checkdue(agentwith("w-1";$triggertype{$webhook:"/hook"});1790000000 as u64);
+  if(t.assert(!wh.shouldrun;"a WEBHOOK trigger does not auto-fire")){pass=pass+1}el{fail=fail+1};
+
+  let ev=sch.checkdue(agentwith("e-1";$triggertype{$mcpevent:"tool.called"});1790000000 as u64);
+  if(t.assert(!ev.shouldrun;"an MCPEVENT trigger does not auto-fire")){pass=pass+1}el{fail=fail+1};
+
+  (* A $schedule trigger delegates to checkcron, which is the one path that can fire. *)
+  let due=sch.checkdue(agentwith("s-1";$triggertype{$schedule:"0 2 * * *"});1790000000 as u64);
+  if(t.assert(due.shouldrun;"a SCHEDULE trigger on a recognised pattern is reported due")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(due.agentid;"s-1";"and the verdict carries the agent id through the dispatch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sch.checkdue(agentwith("s-2";$triggertype{$schedule:"@hourly"});1790000000 as u64).shouldrun;"and on an unrecognised one it is not")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The gap, asserted directly ──────────────────────────────────────────────
+     The same agent, two timestamps a year apart. If the answer is identical, the clock is
+     not being consulted — which is exactly what the reason string admits, and it means a
+     scheduled agent is due on every tick rather than on its schedule. Asserted as the
+     CURRENT behaviour, labelled, so the fix has to come past this line. *)
+  let early=sch.checkdue(agentwith("s-3";$triggertype{$schedule:"0 2 * * *"});1000000000 as u64);
+  let late=sch.checkdue(agentwith("s-3";$triggertype{$schedule:"0 2 * * *"});1790000000 as u64);
+  if(t.assert(early.shouldrun==late.shouldrun;"checkdue IGNORES currenttimeepoch: two timestamps 25 years apart give the same verdict, so a scheduled agent is due on every check")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

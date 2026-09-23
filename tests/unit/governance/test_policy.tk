@@ -5,113 +5,133 @@ m=test.governance.policy;
 
 i=t:std.test;
 i=str:std.str;
+i=types:shared.types;
+i=gt:core.governance.types;
+i=pol:core.governance.policy;
 
-(* --- stub risk tier and sensitivity constants --- *)
+(* X7.2 — this file used to re-declare the whole of core.governance.policy as integers
+   and assert against the re-declaration. The damning part is not that it was a copy; it
+   is that the copy was a copy of the CORRECT behaviour while the module was broken:
 
-f=risklow():i64{ <0 };
-f=riskmedium():i64{ <1 };
-f=riskhigh():i64{ <2 };
+     f=controlcount(risk:i64;sensitivity:i64):i64{
+       let base=3;
+       let extra=mut.0;
+       if(risk==riskmedium()){extra=2}el{ if(risk==riskhigh()){extra=4}el{} };
+       ...
+     }
 
-f=senpublic():i64{ <0 };
-f=seninternal():i64{ <1 };
-f=senconfidential():i64{ <2 };
-f=senrestricted():i64{ <3 };
+   and then `t.assert(controlcount(riskhigh();senpublic())==7;"high risk has 7 controls")`.
+   Seven is right. But for the whole life of LS1.1a the real `controlsforrisk` returned
+   THREE controls for every tier, because each arm was written
+   `controls==@(controls;"human-visible-preview";…)` — a discarded COMPARISON wrapped
+   around a nesting literal, inside a match whose value was also discarded. A HIGH risk
+   decision demanded no enhanced audit, no explainability trace, no cost confirmation and
+   no human-visible preview, and this test asserted that it demanded four of them — of
+   its own arithmetic. Same for `classifyrisk`: the stub escalated confidential correctly,
+   the module did not (`basetier==$medium` discarded, `basetier` not `mut`).
 
-(* --- stub policy decision constants --- *)
-f=allow():i64{ <0 };
-f=allowwithwarning():i64{ <1 };
-f=requireapproval():i64{ <2 };
-f=deny():i64{ <3 };
+   `tests/integration/test_policy_evaluation_e2e.tk` does import the real module, and it
+   is where the variant-level assertions live. What is here is what that file cannot
+   catch, and one thing it demonstrably could not:
 
-(* --- stub classifyrisk mirroring core.governance.policy --- *)
-f=classifyrisk(sensitivity:i64;usecaserisk:i64;estimatedcost:f64):i64{
-  (* restricted always high *)
-  if(sensitivity==senrestricted()){<riskhigh()};
-  let basetier=mut.usecaserisk;
-  (* confidential bumps low to medium *)
-  if(sensitivity==senconfidential()){
-    if(basetier==risklow()){ basetier=riskmedium() }el{}
-  }el{};
-  (* high cost bumps tier up *)
-  if(estimatedcost>1.0){
-    if(basetier==risklow()){ <riskmedium() }el{
-      if(basetier==riskmedium()){ <riskhigh() }el{ <riskhigh() }
-    }
-  }el{
-    <basetier
-  }
-};
+     f=testcontrolslow():bool{
+       let controls=policy.controlsforrisk($risktier{$low:0};$sensitivitylevel{$public:0});
+       let hascontrols=controls.len>2;
+       <t.assert(hascontrols;"low risk includes at least 3 base controls")
+     }
 
-(* --- stub evaluate mirroring core.governance.policy --- *)
-f=evaluate(risk:i64;sensitivity:i64):i64{
-  if(risk==risklow()){
-    if(sensitivity==senconfidential()){<allowwithwarning()};
-    if(sensitivity==senrestricted()){<allowwithwarning()};
-    <allow()
-  };
-  if(risk==riskmedium()){<allowwithwarning()};
-  (* high risk *)
-  if(sensitivity==senrestricted()){<requireapproval()};
-  <allowwithwarning()
-};
+   `controls.len>2` is TRUE under the LS1.1a defect, which returned exactly 3 for every
+   tier. A `>` against a lower bound cannot see a control set that never grows. So the
+   control sets are asserted here EXACTLY, by contents and in order. *)
 
-(* --- stub controlsforrisk mirroring core.governance.policy --- *)
-f=controlcount(risk:i64;sensitivity:i64):i64{
-  let base=3; (* anonymisation, audit-logging, guardian-prompt *)
-  let extra=mut.0;
-  if(risk==riskmedium()){extra=2}el{
-    if(risk==riskhigh()){extra=4}el{}
-  };
-  let localonly=mut.0;
-  if(sensitivity==senrestricted()){localonly=1}el{};
-  <base+extra+localonly
+(* shared.types is imported for $risktier, $sensitivitylevel and $policydecision, and the
+   import is load-bearing in a way worth recording.
+
+   HAZARD, found writing this file. Without `i=types:shared.types;` every assertion below
+   FAILED — escalate(high) reported MEDIUM, classifyrisk(restricted) reported LOW,
+   controlsforrisk returned three controls for every tier — which reads exactly like the
+   LS1.1a defect having never been fixed. The module is fine. A sum-variant literal such
+   as `$risktier{$low:0}` in an ARGUMENT position compiles with the declaring module
+   unimported and passes a garbage value; the same type name in a `let` ANNOTATION
+   correctly errors E3011 "identifier 'risktier' is not declared". So the compiler can
+   see the name is unresolved and says so in one position and not the other. Anyone
+   de-stubbing a test against these sum types will hit this and conclude the module is
+   broken. It is not. *)
+
+(* The exact set, as one string, so a missing OR reordered OR extra control fails. T-23:
+   str.join takes the separator first. *)
+f=controlstr(controls:@str):str{
+  <str.join(",";controls)
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test risk classification: restricted sensitivity always high *)
-  if(t.assert(classifyrisk(senrestricted();risklow();0.0)==riskhigh();"restricted sensitivity always classifies as high")){pass=pass+1}el{fail=fail+1};
+  (* ── escalate, one tier at a time ────────────────────────────────────────────
+     The ladder must not fork and must saturate. `escalate` is the single definition
+     both escalation rules in classifyrisk go through, so a wrong step here is wrong
+     twice over. *)
+  if(t.asserteq(gt.risklabel(pol.escalate($risktier{$low:0}));"MEDIUM";"escalate takes low to medium")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.escalate($risktier{$medium:0}));"HIGH";"and medium to high")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.escalate($risktier{$high:0}));"HIGH";"and saturates at high rather than wrapping")){pass=pass+1}el{fail=fail+1};
 
-  (* test risk classification: public + low + low cost stays low *)
-  if(t.assert(classifyrisk(senpublic();risklow();0.5)==risklow();"public low cost stays low")){pass=pass+1}el{fail=fail+1};
+  (* ── classifyrisk: the full matrix, both escalation rules and their composition ──
+     The confidential rule is the one LS1.1a silently dropped: a confidential request
+     with a low use-case risk was classified LOW, and only the cost rule could raise it.
+     Sensitivity chooses the route and the gate, so this decided which providers the
+     request was permitted to reach. *)
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$restricted:0};$risktier{$low:0};0.0));"HIGH";"restricted is HIGH whatever the use case risk and cost")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$restricted:0};$risktier{$high:0};99.0));"HIGH";"and restricted does not escalate past HIGH")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$public:0};$risktier{$low:0};0.5));"LOW";"public, low use case, sub-threshold cost stays LOW")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$internal:0};$risktier{$low:0};0.5));"LOW";"and internal does not escalate")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$confidential:0};$risktier{$low:0};0.5));"MEDIUM";"CONFIDENTIAL escalates a low use case to MEDIUM — the rule LS1.1a dropped")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$confidential:0};$risktier{$medium:0};0.5));"HIGH";"and escalates a medium use case to HIGH")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$public:0};$risktier{$low:0};2.0));"MEDIUM";"a cost above 1.0 escalates low to MEDIUM")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$public:0};$risktier{$medium:0};2.0));"HIGH";"and medium to HIGH")){pass=pass+1}el{fail=fail+1};
+  (* The threshold itself: strictly greater than 1.0, so exactly 1.0 must NOT escalate.
+     An off-by-one on a cost threshold shows up as a tier nobody can account for. *)
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$public:0};$risktier{$low:0};1.0));"LOW";"a cost of exactly 1.0 does NOT escalate: the test is > 1.0")){pass=pass+1}el{fail=fail+1};
+  (* Composition. Both rules apply in order, so confidential AND expensive is two steps. *)
+  if(t.asserteq(gt.risklabel(pol.classifyrisk($sensitivitylevel{$confidential:0};$risktier{$low:0};2.0));"HIGH";"confidential AND expensive escalates TWICE, low to high")){pass=pass+1}el{fail=fail+1};
 
-  (* test risk classification: confidential bumps low to medium *)
-  if(t.assert(classifyrisk(senconfidential();risklow();0.5)==riskmedium();"confidential bumps low to medium")){pass=pass+1}el{fail=fail+1};
+  (* ── evaluate: the decision and its message ─────────────────────────────────
+     The variant is asserted in the e2e test. What is asserted here is the message,
+     because the message is what the user is shown and what the audit trail records —
+     a decision that is right with the wrong explanation is a governance defect of its
+     own. *)
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$low:0};$sensitivitylevel{$public:0};"m";"uc"));"ALLOW";"low risk + public is a plain allow")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$low:0};$sensitivitylevel{$internal:0};"m";"uc"));"ALLOW";"and so is low risk + internal")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$low:0};$sensitivitylevel{$confidential:0};"m";"uc"));"ALLOW_WITH_WARNING";"low risk + confidential warns")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$low:0};$sensitivitylevel{$restricted:0};"m";"uc"));"ALLOW_WITH_WARNING";"low risk + restricted warns — it does NOT require approval at this tier")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$medium:0};$sensitivitylevel{$public:0};"m";"uc"));"ALLOW_WITH_WARNING";"every medium risk warns, whatever the sensitivity")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$medium:0};$sensitivitylevel{$restricted:0};"m";"uc"));"ALLOW_WITH_WARNING";"including medium + restricted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$high:0};$sensitivitylevel{$public:0};"m";"uc"));"ALLOW_WITH_WARNING";"high risk + public warns")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluate($risktier{$high:0};$sensitivitylevel{$restricted:0};"m";"uc"));"REQUIRE_APPROVAL";"and only high risk + restricted requires explicit approval")){pass=pass+1}el{fail=fail+1};
 
-  (* test risk classification: high cost bumps low to medium *)
-  if(t.assert(classifyrisk(senpublic();risklow();2.0)==riskmedium();"high cost bumps low to medium")){pass=pass+1}el{fail=fail+1};
+  (* evaluatelow and evaluatehigh are exported separately and are what `evaluate`
+     delegates to. Asserted directly so a future change to the match cannot quietly
+     bypass one of them. *)
+  if(t.asserteq(gt.decisionlabel(pol.evaluatelow($sensitivitylevel{$public:0}));"ALLOW";"evaluatelow allows public")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(pol.evaluatehigh($sensitivitylevel{$restricted:0}));"REQUIRE_APPROVAL";"evaluatehigh requires approval for restricted")){pass=pass+1}el{fail=fail+1};
 
-  (* test risk classification: high cost bumps medium to high *)
-  if(t.assert(classifyrisk(senpublic();riskmedium();2.0)==riskhigh();"high cost bumps medium to high")){pass=pass+1}el{fail=fail+1};
+  (* ── controlsforrisk: the EXACT set, which is the point of this file ─────────
+     Three base controls always, then the tier's extras in order, then local-only
+     routing when the data is restricted. Compared as one joined string so a missing,
+     extra or reordered control fails — unlike `controls.len>2`, which the LS1.1a
+     defect satisfied. *)
+  let base="anonymisation,audit-logging,guardian-prompt";
+  if(t.asserteq(controlstr(pol.controlsforrisk($risktier{$low:0};$sensitivitylevel{$public:0}));base;"low risk requires exactly the three base controls")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(controlstr(pol.controlsforrisk($risktier{$medium:0};$sensitivitylevel{$public:0}));str.concat(base;",human-visible-preview,cost-confirmation");"medium risk ADDS a human-visible preview and cost confirmation")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(controlstr(pol.controlsforrisk($risktier{$high:0};$sensitivitylevel{$public:0}));str.concat(base;",human-visible-preview,cost-confirmation,enhanced-audit,explainability-trace");"high risk ADDS enhanced audit and an explainability trace on top")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(controlstr(pol.controlsforrisk($risktier{$low:0};$sensitivitylevel{$restricted:0}));str.concat(base;",local-only-routing");"restricted data adds local-only routing, which is the control that keeps it off the network")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(controlstr(pol.controlsforrisk($risktier{$high:0};$sensitivitylevel{$restricted:0}));str.concat(base;",human-visible-preview,cost-confirmation,enhanced-audit,explainability-trace,local-only-routing");"and the worst case carries all seven")){pass=pass+1}el{fail=fail+1};
 
-  (* test evaluate: low risk + public = allow *)
-  if(t.assert(evaluate(risklow();senpublic())==allow();"low risk public is allow")){pass=pass+1}el{fail=fail+1};
-
-  (* test evaluate: low risk + confidential = allow with warning *)
-  if(t.assert(evaluate(risklow();senconfidential())==allowwithwarning();"low risk confidential is allow with warning")){pass=pass+1}el{fail=fail+1};
-
-  (* test evaluate: medium risk = allow with warning *)
-  if(t.assert(evaluate(riskmedium();senpublic())==allowwithwarning();"medium risk is allow with warning")){pass=pass+1}el{fail=fail+1};
-
-  (* test evaluate: high risk + restricted = require approval *)
-  if(t.assert(evaluate(riskhigh();senrestricted())==requireapproval();"high risk restricted requires approval")){pass=pass+1}el{fail=fail+1};
-
-  (* test evaluate: high risk + non-restricted = allow with warning *)
-  if(t.assert(evaluate(riskhigh();senpublic())==allowwithwarning();"high risk non-restricted is allow with warning")){pass=pass+1}el{fail=fail+1};
-
-  (* test controls: low risk has base 3 controls *)
-  if(t.assert(controlcount(risklow();senpublic())==3;"low risk has 3 base controls")){pass=pass+1}el{fail=fail+1};
-
-  (* test controls: medium risk adds 2 controls *)
-  if(t.assert(controlcount(riskmedium();senpublic())==5;"medium risk has 5 controls")){pass=pass+1}el{fail=fail+1};
-
-  (* test controls: high risk adds 4 controls *)
-  if(t.assert(controlcount(riskhigh();senpublic())==7;"high risk has 7 controls")){pass=pass+1}el{fail=fail+1};
-
-  (* test controls: restricted adds local-only-routing *)
-  if(t.assert(controlcount(risklow();senrestricted())==4;"restricted adds local-only-routing control")){pass=pass+1}el{fail=fail+1};
+  (* extracontrols on its own, so the tier ladder is pinned independently of the base
+     set it gets appended to. *)
+  if(t.assert(pol.extracontrols($risktier{$low:0}).len==0;"low risk adds no extra controls")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pol.extracontrols($risktier{$medium:0}).len==2;"medium adds two")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pol.extracontrols($risktier{$high:0}).len==4;"high adds four — three under the LS1.1a defect would have been zero")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

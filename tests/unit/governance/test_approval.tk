@@ -5,75 +5,134 @@ m=test.governance.approval;
 
 i=t:std.test;
 i=str:std.str;
+i=ap:core.governance.approval;
 
-(* --- stub approval workflow logic mirroring core.governance.approval --- *)
+(* X7.2 — this file used to declare its own approval mode constants and its own
+   requiresapproval, then assert the copy:
 
-(* check if approval is required based on mode, sensitivity, provider, and suppression rules *)
-f=requiresapproval(mode:str;sensitivity:str;providerid:str;tasktype:str;suppressed:i64):i64{
-  (* if task type is suppressed via dont-ask-again, no approval needed *)
-  if(suppressed==1){<0};
-  if(str.eq(mode;"always")){<1};
-  if(str.eq(mode;"never")){<0};
-  if(str.eq(mode;"by_sensitivity")){
-    if(str.eq(sensitivity;"confidential")){<1};
-    if(str.eq(sensitivity;"restricted")){<1};
-    <0
-  };
-  if(str.eq(mode;"by_provider")){
-    if(str.eq(providerid;"ollama")){<0};
-    if(str.eq(providerid;"mlx")){<0};
-    <1
-  };
-  <0
+     f=requiresapproval(mode:i64;sensitivity:i64):i64{
+       if(mode==modealways()){<1}; if(mode==modenever()){<0}; ...
+     }
+
+   The real function takes FIVE parameters, not two — mode, sensitivity, provider, task
+   type and a list of "don't ask again" rules — and it is the list that carries the
+   interesting behaviour. The stub had no notion of it, so the suppression path, which is
+   the only way this control can be turned OFF, was never exercised by anything.
+
+   CONTEXT WORTH HAVING BEFORE READING THE ASSERTIONS: `requiresapproval` and
+   `generatediff` have NO CALLER anywhere in packages/ or src/. Checked by grep. The
+   approval gate is a module nothing invokes. Both defects recorded below are therefore
+   latent rather than shipping, and that is the only reason the assertions characterise
+   the behaviour instead of failing against the intended contract. *)
+
+f=norules():@$dontaskrule{
+  <@()
 };
 
-(* generate diff line count between original and transformed *)
-f=difflinecount(origlines:i64;translines:i64):i64{
-  if(origlines>translines){<origlines}el{<translines}
+f=ruleforchat():@$dontaskrule{
+  <@($dontaskrule{tasktype:"chat";providerid:"ollama";maxsensitivity:"internal";createdat:0})
 };
 
-(* classify diff line type *)
-f=difflinetype(origline:str;transline:str):str{
-  if(str.eq(origline;transline)){<"unchanged"};
-  <"changed"
+f=typeat(lines:@$diffline;i:i64):str{
+  let l:$diffline=lines.get(i);
+  <l.linetype
+};
+
+f=contentat(lines:@$diffline;i:i64):str{
+  let l:$diffline=lines.get(i);
+  <l.content
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test always mode requires approval *)
-  if(t.assert(requiresapproval("always";"public";"openai";"chat";0)==1;"always mode requires approval")){pass=pass+1}el{fail=fail+1};
+  let none=norules();
 
-  (* test never mode skips approval *)
-  if(t.assert(requiresapproval("never";"restricted";"openai";"chat";0)==0;"never mode skips approval")){pass=pass+1}el{fail=fail+1};
+  (* ── The modes, with no suppression rules in play ────────────────────────────*)
+  if(t.assert(ap.requiresapproval("always";"public";"ollama";"chat";none);"mode always requires approval even for public data on a local provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ap.requiresapproval("never";"restricted";"anthropic";"chat";none);"mode never requires none even for restricted data on a hosted provider")){pass=pass+1}el{fail=fail+1};
 
-  (* test by_sensitivity: confidential requires approval *)
-  if(t.assert(requiresapproval("by_sensitivity";"confidential";"openai";"chat";0)==1;"confidential requires approval in by_sensitivity mode")){pass=pass+1}el{fail=fail+1};
+  (* by_sensitivity: confidential and restricted require approval, public and internal
+     do not. This is the mode a user who wants to be asked about sensitive prompts would
+     choose, so the boundary is the whole feature. *)
+  if(t.assert(!ap.requiresapproval("by_sensitivity";"public";"anthropic";"chat";none);"by_sensitivity does not ask for public data")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ap.requiresapproval("by_sensitivity";"internal";"anthropic";"chat";none);"nor for internal")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ap.requiresapproval("by_sensitivity";"confidential";"anthropic";"chat";none);"but it does for confidential")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ap.requiresapproval("by_sensitivity";"restricted";"anthropic";"chat";none);"and for restricted")){pass=pass+1}el{fail=fail+1};
 
-  (* test by_sensitivity: restricted requires approval *)
-  if(t.assert(requiresapproval("by_sensitivity";"restricted";"openai";"chat";0)==1;"restricted requires approval in by_sensitivity mode")){pass=pass+1}el{fail=fail+1};
+  (* by_provider: the two LOCAL providers are exempt, everything else is asked about.
+     That is the right shape — a prompt that never leaves the machine needs no
+     disclosure decision — and it is asserted in both directions so a provider added to
+     the exempt list by accident shows up here. *)
+  if(t.assert(!ap.requiresapproval("by_provider";"restricted";"ollama";"chat";none);"by_provider exempts ollama, which runs locally")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ap.requiresapproval("by_provider";"restricted";"mlx";"chat";none);"and mlx, which also runs locally")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ap.requiresapproval("by_provider";"public";"anthropic";"chat";none);"and asks about anthropic, which does not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ap.requiresapproval("by_provider";"public";"openai";"chat";none);"and about openai")){pass=pass+1}el{fail=fail+1};
 
-  (* test by_sensitivity: public does not require approval *)
-  if(t.assert(requiresapproval("by_sensitivity";"public";"openai";"chat";0)==0;"public does not require approval in by_sensitivity mode")){pass=pass+1}el{fail=fail+1};
+  (* An unrecognised mode must not ask. Asserted because the fall-through is silent:
+     a typo in a settings value takes this branch, and the user who typed
+     "by_sensitvity" gets no approval prompts at all. *)
+  if(t.assert(!ap.requiresapproval("by_sensitvity";"restricted";"anthropic";"chat";none);"a MISSPELLED mode silently requires no approval — the fall-through is not fail-closed")){pass=pass+1}el{fail=fail+1};
 
-  (* test by_provider: ollama is local so no approval *)
-  if(t.assert(requiresapproval("by_provider";"public";"ollama";"chat";0)==0;"ollama does not require approval")){pass=pass+1}el{fail=fail+1};
+  (* ── The suppression list ────────────────────────────────────────────────────*)
+  let chatrule=ruleforchat();
+  if(t.assert(!ap.requiresapproval("always";"public";"ollama";"chat";chatrule);"a don't-ask rule for this task type suppresses approval")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ap.requiresapproval("always";"public";"ollama";"code-gen";chatrule);"and a rule for a DIFFERENT task type does not")){pass=pass+1}el{fail=fail+1};
 
-  (* test by_provider: mlx is local so no approval *)
-  if(t.assert(requiresapproval("by_provider";"public";"mlx";"chat";0)==0;"mlx does not require approval")){pass=pass+1}el{fail=fail+1};
+  (* FINDING, latent — packages/core/src/governance/approval.tk:45-50.
+     The suppression loop matches on tasktype ALONE:
 
-  (* test by_provider: openai requires approval *)
-  if(t.assert(requiresapproval("by_provider";"public";"openai";"chat";0)==1;"openai requires approval in by_provider mode")){pass=pass+1}el{fail=fail+1};
+       lp(let i=0;i<rules.len;i=i+1){ let rule:$dontaskrule=rules.get(i);
+         if(str.eq(rule.tasktype;tasktype)){ suppressed=true }el{} };
+       if(suppressed){<false}el{};
 
-  (* test suppressed task type overrides all modes *)
-  if(t.assert(requiresapproval("always";"restricted";"openai";"chat";1)==0;"suppressed task bypasses approval")){pass=pass+1}el{fail=fail+1};
+     `$dontaskrule` declares `providerid` and `maxsensitivity` and NEITHER IS EVER READ.
+     So a "don't ask again" created for a chat to OLLAMA at INTERNAL sensitivity also
+     suppresses approval for a RESTRICTED chat to ANTHROPIC — the rule escapes both
+     scopes it declares, and it does so for the exact combination the control exists to
+     catch. The check also runs before the mode is consulted, so it overrides
+     mode "always".
 
-  (* test diff line type: unchanged *)
-  if(t.assert(str.eq(difflinetype("hello";"hello");"unchanged");"identical lines are unchanged")){pass=pass+1}el{fail=fail+1};
+     The two assertions below characterise what the code does, and they are deliberately
+     worded so that a reader cannot mistake them for the intended contract. They are NOT
+     red because nothing calls this function; if it is ever wired up, they become the
+     failing tests that describe the hole. *)
+  if(t.assert(!ap.requiresapproval("always";"restricted";"anthropic";"chat";chatrule);"DEFECT CHARACTERISED: a rule scoped to ollama/internal also suppresses restricted-to-anthropic, because providerid and maxsensitivity are never read")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ap.requiresapproval("by_sensitivity";"restricted";"openai";"chat";chatrule);"DEFECT CHARACTERISED: and it overrides by_sensitivity for restricted data too")){pass=pass+1}el{fail=fail+1};
 
-  (* test diff line type: changed *)
-  if(t.assert(str.eq(difflinetype("hello";"world");"changed");"different lines are changed")){pass=pass+1}el{fail=fail+1};
+  (* ── generatediff ───────────────────────────────────────────────────────────
+     This is what a user is shown before approving: which lines of their prompt were
+     changed by anonymisation. A wrong diff here is a disclosure decision made on wrong
+     information. *)
+  let same=ap.generatediff("one
+two";"one
+two");
+  if(t.asserteq(typeat(same;0);"unchanged";"an identical first line is unchanged")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(typeat(same;1);"unchanged";"and so is the second")){pass=pass+1}el{fail=fail+1};
+
+  let changed=ap.generatediff("hello alice
+tail";"hello [NAME_1]
+tail");
+  if(t.asserteq(typeat(changed;0);"removed";"a changed line is reported as removed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(contentat(changed;0);"hello alice";"carrying the ORIGINAL text")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(typeat(changed;1);"added";"followed by the added line")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(contentat(changed;1);"hello [NAME_1]";"carrying the TRANSFORMED text, so the user sees what will be sent")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(typeat(changed;2);"unchanged";"and the untouched tail line follows")){pass=pass+1}el{fail=fail+1};
+
+  (* FINDING, latent — packages/core/src/governance/approval.tk:81.
+     The loop condition is `!(i>maxlen)`, which runs maxlen+1 times: one iteration past
+     the last line. On that extra pass both sides are "", str.eq("";"") is true, and an
+     "unchanged" line with EMPTY content is appended to every diff. A two-line prompt
+     produces three diff lines. It is the find_offbyone_loops class, and the visible
+     symptom is a blank row at the bottom of every approval dialog.
+
+     Characterised, not asserted-as-correct, for the same reason as above: nothing calls
+     generatediff. The correct length for the two-line case is 2, and for the changed
+     case 3. *)
+  if(t.assert(same.len==3;"DEFECT CHARACTERISED: a 2-line identical diff yields THREE lines — one blank trailing 'unchanged' from a loop that runs maxlen+1 times")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(contentat(same;2);"";"DEFECT CHARACTERISED: and that extra line is empty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(changed.len==4;"DEFECT CHARACTERISED: the changed case yields FOUR lines rather than three, for the same reason")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

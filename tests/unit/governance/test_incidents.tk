@@ -5,136 +5,163 @@ m=test.governance.incidents;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=inc:core.governance.incidents;
 
-t=$incident{
-  id:str;
-  incidenttype:str;
-  severity:str;
-  title:str;
-  description:str;
-  autocreated:bool;
-  createdat:i64;
-  resolvedat:i64;
-  resolved:bool;
-  resolutionnotes:str;
-  relatedrequestids:@str
+(* X7.2 — this file used to declare its own $incident array plus openincident,
+   updatestatus, resolve, listopen and severity constants, and assert against them. It
+   never labelled itself a stub, which is the same pattern with less honesty about it.
+   Its severity "test" was:
+
+     f=sevp0():str{ <"P0" };
+     ... t.assert(str.eq(sevp0();"P0");"P0 severity constant")
+
+   — a function in the test returning a literal, compared to the same literal. The real
+   constants live in core.governance.incidents and are what the incidents table stores,
+   so they are the contract between a writer and the `status != 'resolved'` predicate in
+   listopen. A silent change to `statusresolved()` would leave resolved incidents on the
+   open list forever, and nothing would have caught it.
+
+   The lifecycle is exercised against the real table, because the interesting assertion
+   is not that a struct field changed — it is that a resolved incident LEAVES the open
+   list, which is a SQL predicate, not a field read. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-incidents")
 };
 
-t=$incidentstore{
-  incidents:@$incident
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh file: the counts below are exact. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
 
-f=newstore():$incidentstore{
-  <$incidentstore{incidents:@()}
+f=countof(rows:@$row):i64{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowi64(r;"cnt")
+  }el{
+    <0-1
+  }
 };
 
-f=create(st:$incidentstore;incidenttype:str;severity:str;title:str;description:str;autocreated:bool):$incidentstore{
-  let inc=$incident{
-    id:str.concat("inc-";str.fromint(st.incidents.len));
-    incidenttype:incidenttype;
-    severity:severity;
-    title:title;
-    description:description;
-    autocreated:autocreated;
-    createdat:0;
-    resolvedat:0;
-    resolved:false;
-    resolutionnotes:"";
-    relatedrequestids:@()
-  };
-  <$incidentstore{incidents:st.incidents.push(inc)}
+f=totalincidents():i64{
+  <mt db.many("SELECT COUNT(1) AS cnt FROM incidents";@()) {
+    $ok:rows countof(rows);
+    $err:e 0-1
+  }
 };
 
-f=resolve(st:$incidentstore;id:str;notes:str):$incidentstore{
-  let newlist=mut.@();
-  lp(let ii=0;ii<st.incidents.len;ii=ii+1){
-    let inc=st.incidents.get(ii);
-    if(str.eq(inc.id;id)){
-      newlist=newlist.push($incident{
-        id:inc.id;
-        incidenttype:inc.incidenttype;
-        severity:inc.severity;
-        title:inc.title;
-        description:inc.description;
-        autocreated:inc.autocreated;
-        createdat:inc.createdat;
-        resolvedat:1;
-        resolved:true;
-        resolutionnotes:notes;
-        relatedrequestids:inc.relatedrequestids
-      })
-    }el{
-      newlist=newlist.push(inc)
-    }
-  };
-  <$incidentstore{incidents:newlist}
+f=firstcol(rows:@$row;col:str):str{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowstr(r;col)
+  }el{
+    <""
+  }
 };
 
-f=listopen(st:$incidentstore):@$incident{
-  let result=mut.@();
-  lp(let ii=0;ii<st.incidents.len;ii=ii+1){
-    let inc=st.incidents.get(ii);
-    if(!inc.resolved){
-      result=result.push(inc)
+f=colof(id:str;col:str):str{
+  <mt db.many(str.concat("SELECT ";str.concat(col;" FROM incidents WHERE id=? LIMIT 1"));@(id)) {
+    $ok:rows firstcol(rows;col);
+    $err:e ""
+  }
+};
+
+f=hasid(list:@$incident;wanted:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<list.len;i=i+1){
+    let e:$incident=list.get(i);
+    if(str.eq(e.id;wanted)){
+      found=true
     }el{}
   };
-  <result
-};
-
-f=listall(st:$incidentstore):@$incident{
-  <st.incidents
+  <found
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let st=newstore();
-  t.assert(st.incidents.len==0;"new store has zero incidents");
-  if(st.incidents.len==0){ pass=pass+1 }el{ fail=fail+1 };
+  let store=openfreshstore();
 
-  let st2=create(st;"privacy_breach";"critical";"PII leak detected";"Unredacted name in outbound request";true);
-  t.assert(st2.incidents.len==1;"store has 1 incident after create");
-  if(st2.incidents.len==1){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── The constants, from the module rather than from the test ────────────────
+     These are the literals the table stores, and `statusresolved()` is half of
+     listopen's WHERE clause. *)
+  if(t.asserteq(inc.sevp0();"P0";"the severity ladder is P0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(inc.sevp1();"P1";"P1")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(inc.sevp2();"P2";"P2")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(inc.sevp3();"P3";"and P3")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(inc.statusopen();"open";"a new incident is 'open'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(inc.statusinvestigating();"investigating";"then 'investigating'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(inc.statusresolved();"resolved";"and 'resolved', which is the exact string listopen's WHERE clause excludes")){pass=pass+1}el{fail=fail+1};
 
-  let inc=st2.incidents.get(0);
-  t.assert(str.eq(inc.title;"PII leak detected");"incident title matches");
-  if(str.eq(inc.title;"PII leak detected")){ pass=pass+1 }el{ fail=fail+1 };
+  if(t.assert(inc.ensuretable(store);"the incidents table is created")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("incidents");"and really exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==0;"with no rows in it")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(str.eq(inc.severity;"critical");"incident severity is critical");
-  if(str.eq(inc.severity;"critical")){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── Opening an incident ─────────────────────────────────────────────────────*)
+  let id=inc.openincident(store;"Pipeline degraded";inc.sevp1();"Recall dropped below threshold");
+  if(t.assert((str.len(id) as i64)==32;"openincident returns a 32-character id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==1;"and writes exactly one row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"status");"open";"a new incident starts open, set by the module and not by the caller")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"severity");"P1";"with the severity it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"title");"Pipeline degraded";"and the title")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"resolution_note");"";"and no resolution note yet")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(str.eq(inc.incidenttype;"privacy_breach");"incident type is privacy_breach");
-  if(str.eq(inc.incidenttype;"privacy_breach")){ pass=pass+1 }el{ fail=fail+1 };
+  let open1=inc.listopen(store);
+  if(t.assert(open1.len==1;"listopen returns it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(open1;id);"by its own id")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(inc.autocreated==true;"incident autocreated flag is true");
-  if(inc.autocreated){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── Investigating is still OPEN ─────────────────────────────────────────────
+     This is the assertion that makes listopen's predicate meaningful. `status !=
+     'resolved'` must keep an incident under investigation on the list; an operator who
+     starts investigating and thereby loses sight of the incident is worse off than
+     before they touched it. *)
+  if(t.assert(inc.updatestatus(store;id;inc.statusinvestigating());"an incident can move to investigating")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"status");"investigating";"and the row says so")){pass=pass+1}el{fail=fail+1};
+  let open2=inc.listopen(store);
+  if(t.assert(hasid(open2;id);"an incident under INVESTIGATION is still on the open list")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(inc.resolved==false;"new incident is not resolved");
-  if(!inc.resolved){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── Resolving takes it off ──────────────────────────────────────────────────*)
+  if(t.assert(inc.resolve(store;id;"pattern re-anchored");"an incident can be resolved")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"status");"resolved";"the row records it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colof(id;"resolution_note");"pattern re-anchored";"with the note, which is the only record of WHY it was closed")){pass=pass+1}el{fail=fail+1};
+  let open3=inc.listopen(store);
+  if(t.assert(!hasid(open3;id);"and it is no longer on the open list")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==1;"while the row itself is retained — an incident log that deletes on resolve has no history")){pass=pass+1}el{fail=fail+1};
 
-  let incid=inc.id;
-  let st3=resolve(st2;incid;"False positive after review");
-  let resolved=st3.incidents.get(0);
-  t.assert(resolved.resolved==true;"incident is resolved after resolve call");
-  if(resolved.resolved){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── autoopenifdegraded, and its threshold ───────────────────────────────────
+     The rule is `thumbsuprate < 0.5`. Both sides of the boundary are asserted, and the
+     row count is checked after each, because "returns false" and "opened nothing" are
+     different claims and only the second one matters. *)
+  let before=totalincidents();
+  if(t.assert(!inc.autoopenifdegraded(store;"claude-3.5-sonnet";0.9);"a healthy thumbs-up rate opens no incident")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==before;"and writes no row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!inc.autoopenifdegraded(store;"claude-3.5-sonnet";0.5);"exactly 0.5 does NOT open one: the test is < not <=")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==before;"and still writes no row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(inc.autoopenifdegraded(store;"claude-3.5-sonnet";0.3);"a degraded rate DOES open one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(totalincidents()==before+1;"and writes exactly one row")){pass=pass+1}el{fail=fail+1};
 
-  t.assert(str.eq(resolved.resolutionnotes;"False positive after review");"resolution notes match");
-  if(str.eq(resolved.resolutionnotes;"False positive after review")){ pass=pass+1 }el{ fail=fail+1 };
+  let auto=inc.listopen(store);
+  if(t.assert(auto.len==1;"which appears on the open list")){pass=pass+1}el{fail=fail+1};
+  let autoinc:$incident=auto.get(0);
+  if(t.asserteq(autoinc.severity;"P2";"an auto-opened quality incident is P2")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(autoinc.title;"claude-3.5-sonnet");"and names the model in its title, so the incident is actionable")){pass=pass+1}el{fail=fail+1};
 
-  let st4=create(st3;"policy_violation";"high";"Quota exceeded";"Provider quota breached";false);
-  let openlist=listopen(st4);
-  t.assert(openlist.len==1;"list open excludes resolved incidents");
-  if(openlist.len==1){ pass=pass+1 }el{ fail=fail+1 };
-
-  let alllist=listall(st4);
-  t.assert(alllist.len==2;"list all includes both resolved and open");
-  if(alllist.len==2){ pass=pass+1 }el{ fail=fail+1 };
-
-  let st5=create(st4;"compliance";"low";"Minor log gap";"Audit log missed one entry";true);
-  let low=st5.incidents.get(2);
-  t.assert(str.eq(low.severity;"low");"low severity incident created correctly");
-  if(str.eq(low.severity;"low")){ pass=pass+1 }el{ fail=fail+1 };
+  (* ── The operator's view ─────────────────────────────────────────────────────*)
+  let table=inc.formatincidents(auto);
+  if(t.assert(str.contains(table;"Severity");"the formatted table has a Severity column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(table;"P2");"and carries the severity of the incident in it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(table;"claude-3.5-sonnet");"and the title")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

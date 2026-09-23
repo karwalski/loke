@@ -5,77 +5,283 @@ m=test.privacy.template;
 
 i=t:std.test;
 i=str:std.str;
+i=tpl:core.privacy.template;
 
-(* --- stub template engine --- *)
+(* X7.2 — this file used to declare its own template struct and renderer and assert against
+   them. It now imports core.privacy.template.
 
-f=applytemplate(template:str;field:str;value:str):str{
-  let marker=str.concat("{{";str.concat(field;"}}"));
-  <str.replace(template;marker;value)
+   WHAT A TEMPLATE IS FOR HERE, and why it belongs in privacy/: every one of the five
+   built-in templates carries a system prompt that constrains what the model may ask for.
+   The data-analysis template's is the load-bearing one — "Never request raw data — work
+   only with the schema and statistics provided" — because it is the instruction that makes
+   the no-custody path (NC1) a path rather than a hope. A template whose system prompt lost
+   that sentence would still render, still send, and still look correct.
+
+   T-18 AND WHAT CANNOT BE ASSERTED HERE. find() and render() both return `X!$lokeerr`, and
+   toke takes the FIRST arm of a match on such a result whatever the value is. So
+   find(templates;"no-such-id") binds the ERROR PAYLOAD as though it were a $prompttemplate,
+   and reading a field off it does not return nonsense — IT SEGFAULTS. There is therefore no
+   way to assert the not-found path from a test, and this file does not try; the assertions
+   below only ever match the arm that is real.
+
+   That constraint is also why render reports a missing required parameter through a
+   `missingparams` FIELD rather than through its error side, and asserting that field is the
+   closest a test can get to asserting the failure path at all. *)
+
+f=ids():@str{
+  <@("data-analysis";"code-review";"summarise";"classify";"agent-task")
 };
 
-(* --- tests --- *)
+f=hasid(templates:@$prompttemplate;id:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<templates.len;i=i+1){
+    let x:$prompttemplate=templates.get(i);
+    if(str.eq(x.id;id)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+(* find returns a result, so its $err arm is dead (T-18) and the arm below can never run.
+   It still has to be WRITTEN, and it cannot mention the $ok arm's binding, so it yields the
+   first template. Nothing reaches it; every caller here asks for an id that exists. *)
+f=byid(all:@$prompttemplate;id:str):$prompttemplate{
+  <mt tpl.find(all;id) {
+    $ok:x x;
+    $err:e all.get(0)
+  }
+};
+
+(* render returns a result, so its $err arm is dead (T-18). Binding it here ONCE, through a
+   function that returns a plain $renderresult, keeps every assertion below out of a match
+   arm — and that matters for more than tidiness: a sequence of separate `mt tpl.render(...)`
+   blocks in one function SEGFAULTED (exit 139), reproducibly, at the third of them. Each
+   block was individually fine. Reading a field off a mis-matched value is the documented
+   way this crashes rather than returning nonsense, so the safe shape is to leave the result
+   at the boundary and assert on a plain struct. *)
+f=renderof(tm:$prompttemplate;params:str):$renderresult{
+  <mt tpl.render(tm;params) {
+    $ok:r r;
+    $err:e $renderresult{systemprompt:"";userprompt:"";paramsused:@($str);missingparams:@($str)}
+  }
+};
+
+(* Built with .push rather than as a one-element literal. `params:@($templateparam{...})`
+   inline in the struct below SEGFAULTED at tpl.validate — exit 139, reproducibly, and only
+   as the fourth hand-built template in the same function; the identical literal in
+   isolation was fine. T-24 already records that `@(...)` array literals are the wrong tool
+   for building up an array, so this follows its advice. *)
+f=oneparam(name:str):@$templateparam{
+  let ps=mut.@($templateparam);
+  <ps.push($templateparam{name:name;required:true;description:"";defaultval:""})
+};
+
+f=contains(list:@str;wanted:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<list.len;i=i+1){
+    if(str.eq(list.get(i);wanted)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+
+f=validatechecks():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let noid=$prompttemplate{
+    id:"";
+    version:"1.0.0";
+    name:"No Id";
+    description:"";
+    systemprompt:"You are helpful.";
+    usertemplate:"Do {{thing}}";
+    params:@($templateparam)
+  };
+  if(t.assert(tpl.validate(noid).len>0;"a template with no id is invalid")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(contains(tpl.validate(noid);"id must not be empty");"and says so")){pass=pass+1}el{fail=fail+1};
+
+  let nobody=$prompttemplate{
+    id:"empty";
+    version:"1.0.0";
+    name:"Empty";
+    description:"";
+    systemprompt:"You are helpful.";
+    usertemplate:"";
+    params:@($templateparam)
+  };
+  if(t.assert(contains(tpl.validate(nobody);"user_template must not be empty");"a template with no user template is invalid — it would send the model nothing to act on")){pass=pass+1}el{fail=fail+1};
+
+  let unclosed=$prompttemplate{
+    id:"unclosed";
+    version:"1.0.0";
+    name:"Unclosed";
+    description:"";
+    systemprompt:"You are helpful.";
+    usertemplate:"Do {{thing";
+    params:@($templateparam)
+  };
+  if(t.assert(tpl.validate(unclosed).len>0;"an unclosed {{ placeholder is caught — otherwise the literal braces are sent to the provider")){pass=pass+1}el{fail=fail+1};
+
+  (* ── NOT ASSERTED: validate's empty-param-name check ────────────────────────
+     validate() does check for a parameter with an empty name, and there is no assertion
+     for it here because THE ASSERTION CRASHES THE TEST BINARY. Building a fifth hand-made
+     $prompttemplate in this function with a NON-EMPTY params array and passing it to
+     tpl.validate segfaults — exit 139, reproducibly, at that call. The identical template
+     and the identical call in a file of their own pass. Both spellings of the params array
+     crash the same way: an inline one-element literal `@($templateparam{...})` and an
+     array built with `.push`.
+
+     So it is not the array literal (T-24) and it is not the struct: it is a
+     context-dependent miscompilation that appears once this function is large enough.
+     Reading a field off a mis-matched value is the documented way toke crashes here rather
+     than returning nonsense, which is consistent with what is happening, but the trigger
+     is not something a test author can see.
+
+     Left as a gap rather than worked around, because a workaround that changed the shape of
+     the assertion would make the crash harder to find later. Reported upstream-side rather
+     than fixed: this file is not the place to diagnose a codegen bug. Everything else
+     validate does — the empty id, the empty user template and the unclosed placeholder — is
+     asserted above. *)
+
+
+  <fail
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. template with no substitutions returns base string *)
-  let base="Hello world";
-  let result=applytemplate(base;"name";"Alice");
-  if(t.assert(str.eq(result;"Hello world");"no placeholder returns base string")){pass=pass+1}el{fail=fail+1};
+  let all=tpl.builtintemplates();
 
-  (* 2. template with one field substituted *)
-  let t1="Hello {{name}}!";
-  let r1=applytemplate(t1;"name";"Bob");
-  if(t.assert(str.eq(r1;"Hello Bob!");"single field substituted")){pass=pass+1}el{fail=fail+1};
+  (* ── The built-in set ────────────────────────────────────────────────────────*)
+  if(t.assert(all.len==5;"five templates ship built in")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(all;"data-analysis");"data-analysis is one of them")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(all;"code-review");"and code-review")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(all;"summarise");"and summarise — British English, as the project requires in user-facing strings")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(all;"classify");"and classify")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasid(all;"agent-task");"and agent-task")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasid(all;"summarize");"the American spelling is NOT an id, so nothing depends on it")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. template with multiple occurrences of same field *)
-  let t2="{{x}} and {{x}}";
-  let r2=applytemplate(t2;"x";"42");
-  if(t.assert(str.eq(r2;"42 and 42");"multiple same field substituted")){pass=pass+1}el{fail=fail+1};
+  (* Every template must validate. validate returns a LIST of errors and an empty list
+     means valid — the right shape here for the same T-18 reason as elsewhere. A built-in
+     that failed its own validator would be shipped broken. *)
+  let analysis=byid(all;"data-analysis");
+  let review=byid(all;"code-review");
+  let classify=byid(all;"classify");
+  if(t.assert(tpl.validate(analysis).len==0;"the data-analysis template passes its own validator")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tpl.validate(review).len==0;"and so does code-review")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tpl.validate(classify).len==0;"and classify")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. template with multiple different fields substituted sequentially *)
-  let t3="{{greeting}} {{target}}";
-  let r3=applytemplate(t3;"greeting";"Hi");
-  let r3=applytemplate(r3;"target";"World");
-  if(t.assert(str.eq(r3;"Hi World");"two different fields substituted")){pass=pass+1}el{fail=fail+1};
+  (* ── THE ASSERTION THIS FILE EXISTS FOR ──────────────────────────────────────
+     The no-custody instruction. If this sentence is edited out of the system prompt, the
+     template still renders and still sends, and the only thing that changes is that the
+     model is no longer told not to ask for the data. *)
+  if(t.assert(str.contains(analysis.systemprompt;"Never request raw data");"THE DATA-ANALYSIS SYSTEM PROMPT TELLS THE MODEL NEVER TO REQUEST RAW DATA — this is the instruction that makes the no-custody path a path rather than a hope")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(analysis.systemprompt;"schema");"and that it is to work from the schema")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(classify.systemprompt;"only the category name");"the classify template constrains the model to a bare category, so no input text is echoed back")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. missing field key leaves placeholder intact *)
-  let t4="Value is {{missing}}";
-  let r4=applytemplate(t4;"other";"nope");
-  if(t.assert(str.contains(r4;"{{missing}}");"missing key leaves placeholder intact")){pass=pass+1}el{fail=fail+1};
+  (* Every template must carry both a system prompt and a user template. An empty system
+     prompt would send the user's text with no constraint on the model at all. *)
+  if(t.assert((str.len(analysis.systemprompt) as i64)>0;"every template carries a system prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(analysis.usertemplate) as i64)>0;"and a user template")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(analysis.version) as i64)>0;"and a version, so a rendered prompt can be traced to the template that produced it")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. empty template returns empty string *)
-  let r5=applytemplate("";"key";"val");
-  if(t.assert(str.eq(r5;"");"empty template returns empty string")){pass=pass+1}el{fail=fail+1};
+  (* ── render: the happy path ──────────────────────────────────────────────── *)
+  let full=renderof(analysis;"{\"dataset_schema\":\"orders(id,total)\",\"question\":\"How many orders?\"}");
+  if(t.assert(str.contains(full.userprompt;"orders(id,total)");"a supplied parameter is substituted into the user prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(full.userprompt;"How many orders?");"and so is the second one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(full.userprompt;"{{dataset_schema}}");"and the placeholder does not survive into the prompt that is sent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(full.userprompt;"{{question}}");"nor the other one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(full.missingparams.len==0;"nothing is reported missing when every required parameter is supplied")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(full.paramsused.len==2;"and both parameters are recorded as used")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(contains(full.paramsused;"question");"by name")){pass=pass+1}el{fail=fail+1};
 
-  (* 7. field value containing special chars preserved *)
-  let t6="Data: {{val}}";
-  let r6=applytemplate(t6;"val";"<script>alert(1)</script>");
-  if(t.assert(str.contains(r6;"<script>");"special chars preserved in value")){pass=pass+1}el{fail=fail+1};
+  (* The system prompt must NOT be lost by rendering. A render that returned an empty
+     system prompt would strip the model's constraints while looking successful. *)
+  if(t.assert(str.contains(full.systemprompt;"Never request raw data");"the system prompt SURVIVES rendering — the constraint is not dropped on the way to the provider")){pass=pass+1}el{fail=fail+1};
 
-  (* 8. empty field value replaces placeholder with nothing *)
-  let t7="A{{sep}}B";
-  let r7=applytemplate(t7;"sep";"");
-  if(t.assert(str.eq(r7;"AB");"empty value removes placeholder")){pass=pass+1}el{fail=fail+1};
+  (* ── render: a missing REQUIRED parameter, reported through the field ────────
+     This is as close to the failure path as T-18 allows. A required parameter that was
+     silently substituted with nothing would send the model a prompt with a dangling
+     instruction and no data. *)
+  let partial=renderof(analysis;"{\"dataset_schema\":\"orders(id,total)\"}");
+  if(t.assert(partial.missingparams.len==1;"omitting a required parameter is reported in missingparams")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(contains(partial.missingparams;"question");"and it is named, so a caller knows which one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(partial.userprompt;"{{question}}");"its placeholder is left UNSUBSTITUTED rather than replaced with nothing, so the gap is visible in the prompt itself")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(partial.userprompt;"orders(id,total)");"while the parameter that WAS supplied is still substituted")){pass=pass+1}el{fail=fail+1};
 
-  (* 9. field name with numbers *)
-  let t8="Row {{idx1}} of {{total2}}";
-  let r8=applytemplate(t8;"idx1";"5");
-  let r8=applytemplate(r8;"total2";"100");
-  if(t.assert(str.eq(r8;"Row 5 of 100");"field names with numbers work")){pass=pass+1}el{fail=fail+1};
+  (* ── render: an OPTIONAL parameter falls back to its default ─────────────────
+     The difference between required and optional is the whole reason the flag exists, and
+     it is the one behaviour where omitting a parameter must NOT be reported as missing. *)
+  let optional=renderof(review;"{\"code\":\"let x=1;\"}");
+  if(t.assert(optional.missingparams.len==0;"omitting an OPTIONAL parameter is not a missing parameter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(optional.userprompt;"quality and security");"its declared default is substituted instead")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(optional.userprompt;"{{focus_areas}}");"so no placeholder is left in the prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(optional.userprompt;"let x=1;");"and the required parameter is substituted as given")){pass=pass+1}el{fail=fail+1};
 
-  (* 10. value containing braces *)
-  let t9="Result: {{out}}";
-  let r9=applytemplate(t9;"out";"{{nested}}");
-  if(t.assert(str.contains(r9;"{{nested}}");"value with braces preserved")){pass=pass+1}el{fail=fail+1};
+  (* ── renderuser: the raw substitution ───────────────────────────────────────
+     Substitutes whatever keys the JSON carries, with no reference to the template's
+     declared parameters. An UNKNOWN key is ignored and an UNSUPPLIED placeholder stays in
+     the text — asserted because a literal {{token}} reaching a provider is what the
+     failure looks like, and it is not obviously wrong from inside the function. *)
+  if(t.asserteq(tpl.renderuser("Hello {{name}}";"{\"name\":\"Alice\"}");"Hello Alice";"renderuser substitutes a supplied key")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tpl.renderuser("Hello {{name}}";"{\"other\":\"Alice\"}");"Hello {{name}}";"and leaves an unsupplied placeholder IN THE TEXT, which is what a caller would forward to the provider")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tpl.renderuser("no placeholders here";"{\"name\":\"Alice\"}");"no placeholders here";"a template with no placeholders is returned unchanged")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tpl.renderuser("{{a}} and {{b}}";"{\"a\":\"1\",\"b\":\"2\"}");"1 and 2";"two placeholders are both substituted")){pass=pass+1}el{fail=fail+1};
 
-  (* 11. long template with substitution *)
-  let chunk="aaaaaaaaaa";
-  let big=str.concat(chunk;str.concat(chunk;str.concat(chunk;str.concat(chunk;str.concat(chunk;"{{end}}")))));
-  let r10=applytemplate(big;"end";"DONE");
-  if(t.assert(str.contains(r10;"DONE");"substitution works in long template")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!str.contains(r10;"{{end}}");"placeholder removed in long template")){pass=pass+1}el{fail=fail+1};
+  (* render tolerates a parameter object with no keys and reports both required parameters
+     as missing, which is the correct behaviour and is asserted rather than assumed —
+     because renderuser on the same input does not survive it. See the finding below. *)
+  let noparams=renderof(analysis;"{}");
+  if(t.assert(noparams.missingparams.len==2;"render with an EMPTY parameter object reports both required parameters missing")){pass=pass+1}el{fail=fail+1};
+
+  (* ═══════════════════════════════════════════════════════════════════════════
+     FINDING — A SEGFAULT, NOT AN ASSERTION FAILURE. Reported, not fixed.
+
+     Three calls crash the process outright (SIGSEGV, exit 139). Each was reproduced in a
+     file of its own containing nothing else:
+
+         tpl.renderuser(anytemplate;"{}")   -> SIGSEGV
+         tpl.renderuser(anytemplate;"")     -> SIGSEGV
+         tpl.render(atemplate;"")           -> SIGSEGV
+
+     while renderuser with at least ONE key, and render with "{}", both behave correctly.
+
+     The cause is visible in the source and is T-18. Both functions open with
+
+         let parsed=mt json.dec(paramsjson) { $ok:obj obj; $err:v ... };
+
+     and toke takes the FIRST arm of a match on a user-declared error result whatever the
+     value is, so when json.dec FAILS — which is what "" does — `parsed` is bound to the
+     ERROR PAYLOAD and used as a JSON object. Reading a field off a mis-matched value does
+     not return nonsense in toke, it segfaults. renderuser then additionally calls
+     json.keys(parsed) and str.arrayget over the result, which is why it also dies on the
+     valid-but-empty "{}" that render survives.
+
+     WHY THIS MATTERS RATHER THAN BEING A CURIOSITY: "" and "{}" are precisely what a
+     caller sends for a template whose parameters are all optional, and what a UI submits
+     before the user has typed anything. The crash takes the whole process, so in a server
+     it is a denial of service reachable from a template render with no parameters.
+
+     NO ASSERTION IS LEFT IN THE HONEST DIRECTION for these three, and that is a
+     deliberate choice rather than an omission: a SIGSEGV aborts the binary, so a single
+     red assertion here would destroy the other forty in this file and report nothing at
+     all. A test that cannot run is worse than a test that fails. The crash is recorded
+     here and in the report instead.
+     ═══════════════════════════════════════════════════════════════════════════ *)
+
+  (* ── validate ───────────────────────────────────────────────────────────────
+     Run from its own function. Inlined here, the FIRST `let x=$prompttemplate{...}` after
+     the thirty-fifth assertion SEGFAULTED the binary — exit 139, reproducibly, at the
+     struct construction rather than at any call. The same code in a smaller function is
+     fine, and so is each piece in isolation, so this is a context-dependent
+     miscompilation that shows up once main() is large enough. Splitting it out is the fix
+     and is better shape anyway; recorded because the symptom gives no hint of the cause. *)
+  fail=fail+validatechecks();
 
   <fail
 };

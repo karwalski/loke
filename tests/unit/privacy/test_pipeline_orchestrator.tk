@@ -5,103 +5,186 @@ m=test.privacy.pipelineorchestrator;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=pl:core.privacy.pipeline;
 
-(* --- stub pipeline orchestrator functions --- *)
+(* X7.2 — this file used to declare its own orchestrator and assert against it. The
+   giveaway is the classifier it invented:
 
-(* sensitivity levels *)
-f=sensitivitylow():i64{ <0 };
-f=sensitivitymedium():i64{ <1 };
-f=sensitivityhigh():i64{ <2 };
-f=sensitivitycritical():i64{ <3 };
+     f=classifysensitivity(text:str):i64{
+       if(str.contains(text;"credit card")){<sensitivitycritical()};
+       if(str.contains(text;"@")){<sensitivityhigh()};
+       ...
 
-(* classify sensitivity of input text *)
-f=classifysensitivity(text:str):i64{
-  if(str.contains(text;"credit card")){<sensitivitycritical()};
-  if(str.contains(text;"passport")){<sensitivitycritical()};
-  if(str.contains(text;"@")){<sensitivityhigh()};
-  if(str.contains(text;"phone")){<sensitivitymedium()};
-  <sensitivitylow()
+   It classified a prompt as CRITICAL when the prompt contained the ENGLISH WORDS "credit
+   card", and as HIGH when it contained an at-sign. core.privacy.pipeline has no such
+   function, has no "critical" level at all — the four levels are public, internal,
+   confidential, restricted — and classifies on detected ENTITIES rather than on
+   vocabulary. So the fifteen assertions described a design that has never existed, and
+   the two the module does have an equivalent of ("email is high sensitivity") named a
+   level that does not.
+
+   WHAT IT COVERS NOW. tests/unit/privacy/test_fail_closed.tk covers the layer-count
+   refusal and tests/unit/privacy/test_pipeline_full.tk covers anonymisetext,
+   maxsensitivity and dedup, so this file does not repeat them. It takes the
+   orchestration surface neither touches: the config the pipeline is constructed with,
+   the sensitivity ranking that a chain of `==` on a sum got wrong for every pair, the
+   two entity counters that have to speak BOTH detection vocabularies, the run summary
+   whose label was branch-scoped and therefore always wrong in one direction, and the
+   three configuration setters that do nothing at all.
+
+   Presidio and NER are pointed at unprivileged ports nothing listens on, following
+   test_fail_closed.tk: the only live layer is then the in-process regex one, which
+   cannot be unavailable, and no assertion here waits on a network timeout. Port 1 would
+   be wrong — binding a privileged port fails with EACCES and the reachability probe
+   reads a failed bind as "something is listening". *)
+
+f=configlocalonly():$pipelineconfig{
+  <pl.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
 };
 
-(* simulate PII detection — returns count of PII items found *)
-f=detectpiicount(text:str):i64{
-  let count=mut.0;
-  if(str.contains(text;"@")){count=count+1};
-  if(str.contains(text;"credit card")){count=count+1};
-  if(str.contains(text;"passport")){count=count+1};
-  if(str.contains(text;"phone")){count=count+1};
-  if(str.contains(text;"4111")){count=count+1};
-  <count
-};
-
-(* anonymise text — replace PII patterns with placeholders *)
-f=anonymise(text:str):str{
-  if(str.contains(text;"alice@example.com")){
-    <"Please contact [EMAIL_1] for details"
-  };
-  if(str.contains(text;"4111-1111-1111-1111")){
-    <"My credit card is [CREDIT_CARD_1]"
-  };
-  if(str.contains(text;"passport AB123456")){
-    <"My passport is [PASSPORT_1]"
-  };
-  if(str.contains(text;"0412 345 678")){
-    <"Call me on [PHONE_AU_1]"
-  };
-  <text
-};
-
-(* check if text is clean (no PII) *)
-f=isclean(text:str):i64{
-  if(detectpiicount(text)==0){<1};
-  <0
-};
-
-(* pipeline pass-through for clean text *)
-f=pipelineprocess(text:str):str{
-  if(isclean(text)==1){<text};
-  <anonymise(text)
+(* start/end are declared i64 and cast here: an integer literal does not implicitly
+   widen to the u32 the struct field wants, and spelling `0 as u32` at thirty call sites
+   would bury the assertions. *)
+f=entity(etype:str;value:str;start:i64;end:i64;conf:f64):$piientity{
+  <$piientity{
+    entitytype:etype;
+    value:value;
+    start:start as u32;
+    end:end as u32;
+    confidence:conf;
+    placeholder:""
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test PII text gets anonymised *)
-  if(t.assert(str.contains(anonymise("Please contact alice@example.com for details");"[EMAIL_1]");"email PII is anonymised to placeholder")){pass=pass+1}el{fail=fail+1};
+  (* ── The config the pipeline is constructed with ──────────────────────────────
+     Both optional layers default ON and dryrun defaults OFF. A default that silently
+     flipped `usepresidio` to false would take a detection layer out of every
+     installation with no diagnostic, because a disabled layer is not a degraded layer
+     and does not raise layersdegraded. *)
+  let cfg=configlocalonly();
+  if(t.asserteq(cfg.presidiourl;"http://127.0.0.1:59998";"newconfig keeps the Presidio URL it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cfg.ollamaurl;"http://127.0.0.1:59999";"and the Ollama URL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cfg.usepresidio;"Presidio defaults ON, so a missing sidecar shows up as degraded rather than as absent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cfg.usener;"and so does NER")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cfg.dryrun;"dryrun defaults OFF — a pipeline that silently dry-ran would anonymise nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(cfg.nermodelid) as i64)>0;"and a NER model is named rather than left empty")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.contains(anonymise("My credit card is 4111-1111-1111-1111");"[CREDIT_CARD_1]");"credit card PII is anonymised")){pass=pass+1}el{fail=fail+1};
+  (* ── The sensitivity ranking ─────────────────────────────────────────────────
+     This was a chain of `==` on a sum. `levela==$restricted` is FALSE even when levela
+     is restricted, because == compares the handle and the level arrived from another
+     function (T-14). The old chain also answered false for every (public, anything)
+     pair, which meant maxsensitivity never escalated past its initial value — the
+     pipeline computed PUBLIC for a prompt full of card numbers. Both directions are
+     asserted, and so is the public pair specifically. *)
+  if(t.assert(pl.ishighersensitivity(sh.restricted();sh.confidential());"restricted outranks confidential")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.ishighersensitivity(sh.confidential();sh.internal());"confidential outranks internal")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.ishighersensitivity(sh.internal();sh.public());"internal outranks public — the pair the old == chain answered false for")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.ishighersensitivity(sh.restricted();sh.public());"and restricted outranks public")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.ishighersensitivity(sh.public();sh.restricted());"the relation is not symmetric")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.ishighersensitivity(sh.confidential();sh.confidential());"and a level does not outrank itself, so maxsensitivity cannot creep")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.contains(anonymise("My passport is passport AB123456");"[PASSPORT_1]");"passport PII is anonymised")){pass=pass+1}el{fail=fail+1};
+  (* ── seenvalue: the dedup predicate over values ──────────────────────────────*)
+  let two=@(entity("email";"a@b.com";0;7;0.95);entity("phone_au";"0412 345 678";20;32;0.92));
+  if(t.assert(pl.seenvalue(two;"a@b.com");"seenvalue finds a value already kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.seenvalue(two;"c@d.com");"and does not find one that is absent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.seenvalue(@($piientity);"a@b.com");"nothing is seen in an empty list")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.contains(anonymise("Call me on 0412 345 678");"[PHONE_AU_1]");"phone PII is anonymised")){pass=pass+1}el{fail=fail+1};
+  (* ── strictlyshadows: overlap decided on SPANS ───────────────────────────────
+     Both sides need end>start, so a spanless entity neither shadows nor is shadowed.
+     Before PL1.7 every entity from the regex layer was spanless, which made this
+     predicate answer false for all of them and dedup keep overlapping pairs. *)
+  let longer=entity("person";"Bob Jones";0;9;0.90);
+  let prefix=entity("person";"Bob";0;3;0.80);
+  let elsewhere=entity("person";"Carol";40;45;0.90);
+  let spanless=entity("person";"Bob";0;0;0.80);
+  if(t.assert(pl.strictlyshadows(longer;prefix);"a longer, more confident, span-containing entity shadows the prefix inside it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.strictlyshadows(prefix;longer);"and the prefix does not shadow the longer one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.strictlyshadows(longer;elsewhere);"an entity elsewhere in the text is not shadowed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.strictlyshadows(longer;spanless);"a SPANLESS entity is not shadowed, because an empty span decides nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.strictlyshadows(spanless;prefix);"and a spanless entity shadows nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.shadowedbyany(@(longer;elsewhere);prefix);"shadowedbyany finds the shadow anywhere in the list")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.shadowedbyany(@(elsewhere;spanless);prefix);"and reports none when nothing in the list shadows")){pass=pass+1}el{fail=fail+1};
 
-  (* test clean text passes through unchanged *)
-  let clean="The weather is nice today";
-  if(t.assert(str.eq(pipelineprocess(clean);clean);"clean text passes through unchanged")){pass=pass+1}el{fail=fail+1};
+  (* ── The two counters, across BOTH detection vocabularies ────────────────────
+     The regex layer emits lowercase snake_case (credit_card, au_tfn, email) and Presidio
+     emits SCREAMING_SNAKE (CREDIT_CARD, US_SSN, EMAIL_ADDRESS). These counters feed the
+     run summary a user reads, so a counter that knew only one vocabulary would report
+     "0 RESTRICTED" on a prompt whose card number came from the other layer. Asserted in
+     both spellings, deliberately — the naming split is real (X7.6) and until it is
+     settled these functions have to speak both. *)
+  let restrictedlower=@(entity("credit_card";"4111111111111111";0;16;0.99);entity("au_tfn";"123456782";20;29;0.99));
+  if(t.assert(pl.countrestricted(restrictedlower)==2 as u32;"countrestricted counts lowercase credit_card and au_tfn")){pass=pass+1}el{fail=fail+1};
+  let restrictedupper=@(entity("CREDIT_CARD";"4111111111111111";0;16;0.99);entity("US_SSN";"123-45-6789";20;31;0.99));
+  if(t.assert(pl.countrestricted(restrictedupper)==2 as u32;"and the Presidio spellings CREDIT_CARD and US_SSN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(@(entity("api_key";"sk-ant-abcdefghijklmnopqrst";0;27;0.99)))==1 as u32;"an API key is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(@(entity("ip_v4";"192.168.1.1";0;11;0.80);entity("url";"https://x.test";20;34;0.60)))==0 as u32;"an IP address and a URL are NOT restricted, so the count is not merely an entity count")){pass=pass+1}el{fail=fail+1};
 
-  let clean2="Please summarise this document";
-  if(t.assert(str.eq(pipelineprocess(clean2);clean2);"another clean text passes through")){pass=pass+1}el{fail=fail+1};
+  let confidlower=@(entity("email";"a@b.com";0;7;0.95);entity("phone_au";"0412 345 678";20;32;0.92));
+  if(t.assert(pl.countconfidential(confidlower)==2 as u32;"countconfidential counts lowercase email and phone_au")){pass=pass+1}el{fail=fail+1};
+  let confidupper=@(entity("PERSON";"Bob Jones";0;9;0.90);entity("EMAIL_ADDRESS";"a@b.com";20;27;0.95));
+  if(t.assert(pl.countconfidential(confidupper)==2 as u32;"and the Presidio spellings PERSON and EMAIL_ADDRESS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countconfidential(restrictedlower)==0 as u32;"a restricted entity is not also counted as confidential, so the two figures do not double-count")){pass=pass+1}el{fail=fail+1};
 
-  (* test sensitivity classification *)
-  if(t.assert(classifysensitivity("hello world")==sensitivitylow();"plain text is low sensitivity")){pass=pass+1}el{fail=fail+1};
+  (* ── pipelinenerskip: a layer that failed must SAY it was skipped ────────────
+     A skipped layer that reported itself completed would make a run with no NER scan
+     indistinguishable from one where NER found nothing — which is the distinction NC1.9
+     exists to preserve. *)
+  let skip=pl.pipelinenerskip("req-skip");
+  if(t.assert(skip.skipped;"a failed NER scan is reported as skipped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(skip.entitiesfound==0 as u32;"finding nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(skip.skipreason) as i64)>0;"and with a reason, so a degraded run can say what was missing")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classifysensitivity("call my phone please")==sensitivitymedium();"phone mention is medium sensitivity")){pass=pass+1}el{fail=fail+1};
+  (* ── The run, end to end ─────────────────────────────────────────────────────*)
+  let dirty=pl.run("contact alice@example.com about card 4111 1111 1111 1111";"";configlocalonly());
+  if(t.assert(dirty.layerscompleted>0 as u32;"a run completes at least the in-process regex layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dirty.totalentities>1 as u32;"and finds both identifiers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(dirty);"a run with a completed layer may be forwarded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dirty.layersdegraded>0 as u32;"the two unreachable layers are counted as DEGRADED, not silently ignored")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(dirty.result.sensitivity);"restricted";"the run's sensitivity is the maximum over what was found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(dirty.requestid) as i64)>0;"and the run carries a request id, which is what salts its placeholders")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(dirty.result.anonymised;"alice@example.com");"the anonymised text does not contain the email address")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classifysensitivity("send to user@test.com")==sensitivityhigh();"email is high sensitivity")){pass=pass+1}el{fail=fail+1};
+  let clean=pl.run("the weather is nice today";"";configlocalonly());
+  if(t.assert(clean.totalentities==0 as u32;"ordinary prose yields no entities")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(clean.layerscompleted>0 as u32;"but a layer still SCANNED it — zero entities and zero layers are different facts (NC1.9)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(clean.result.sensitivity);"public";"and the prompt stays public")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classifysensitivity("my credit card is 4111")==sensitivitycritical();"credit card is critical sensitivity")){pass=pass+1}el{fail=fail+1};
+  (* ── summariserun ────────────────────────────────────────────────────────────
+     The label used to be declared with a `let` INSIDE the if, which created a second
+     branch-local binding, so the summary always read "Anonymised." — including on a run
+     where nothing was detected and nothing was anonymised. A user reading that had been
+     told their clean prompt was redacted. Both branches are asserted. *)
+  if(t.assert(str.contains(pl.summariserun(clean);"No PII detected.");"a run that found nothing says so, rather than claiming it anonymised something")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pl.summariserun(dirty);"Anonymised.");"and a run that found something says it anonymised it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pl.summariserun(dirty);"RESTRICTED");"the summary breaks the count down by sensitivity")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pl.summariserun(dirty);"stages");"and names how many stages ran")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classifysensitivity("my passport number")==sensitivitycritical();"passport is critical sensitivity")){pass=pass+1}el{fail=fail+1};
+  (* ── rundry ──────────────────────────────────────────────────────────────────
+     A dry run still has to SCAN — the point of it is to report what would be redacted —
+     so it must complete a layer and detect the entities. *)
+  let dry=pl.rundry("contact alice@example.com today";configlocalonly());
+  if(t.assert(dry.layerscompleted>0 as u32;"a dry run still completes a scan")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dry.totalentities>0 as u32;"and still detects the entity it would have redacted")){pass=pass+1}el{fail=fail+1};
 
-  (* test PII detection count *)
-  if(t.assert(detectpiicount("hello world")==0;"no PII in clean text")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, recorded rather than asserted as correct ───────────────────────
+     applypreset, setentityenabled and setlayerenabled each ignore every argument but
+     the first and return it unchanged (pipeline.tk:727, 731, 735). They are complete
+     no-ops: a privacy-settings screen wired to them would report success and change
+     nothing about which entity types or layers are active.
 
-  if(t.assert(detectpiicount("email user@ and phone mention")==2;"detects multiple PII types")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(isclean("just a normal sentence")==1;"clean text flagged as clean")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(isclean("contact alice@example.com")==0;"PII text flagged as not clean")){pass=pass+1}el{fail=fail+1};
+     They have NO caller anywhere in the repository, which is the only reason this is a
+     latent defect rather than a shipped one — so the assertions below record the
+     no-op contract rather than the intended one, following the precedent in
+     tests/unit/storage/test_backup.tk. When they are implemented, these go RED, and
+     that is the signal to write the real assertions. *)
+  if(t.assert(pl.applypreset(7;"strict")==7;"applypreset is a NO-OP: it returns its config unchanged and ignores the preset")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.setentityenabled(7;"email";false)==7;"setentityenabled is a NO-OP: disabling an entity type does nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.setlayerenabled(7;"presidio";false)==7;"setlayerenabled is a NO-OP: disabling a layer does nothing")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

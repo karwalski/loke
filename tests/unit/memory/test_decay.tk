@@ -5,96 +5,86 @@ m=test.memory.decay;
 
 i=t:std.test;
 i=str:std.str;
+i=dec:core.memory.decay;
 
-(* --- stub decay scoring functions --- *)
+(* X7.2 — this file used to declare its own decay curve and assert arithmetic against it:
 
-(* simulate timestamp as integer seconds since epoch *)
-f=now():i64{ <1715600000 };
+     f=now():i64{ <1715600000 };
+     f=decayscore(timestamp:i64):i64{ let agedays=(now()-timestamp)/86400; let score=1000-agedays; ... }
+     ...
+     t.assert(decayscore(weekold)==993;"7-day-old item scores 993")
 
-(* decay score: newer items score higher, older items score lower *)
-(* score = max(0, 1000 - (now - timestamp) / 86400) *)
-(* i.e. loses 1 point per day, max 1000 *)
-f=decayscore(timestamp:i64):i64{
-  let agedays=(now()-timestamp)/86400;
-  let score=1000-agedays;
-  if(score<0){<0};
-  <score
-};
+   The curve in the test was LINEAR — one point lost per day out of a thousand. The curve
+   in core.memory.decay is EXPONENTIAL: a half-life in days, applied with math.pow. They
+   are not approximations of each other — after 30 days the stub says 970/1000 and the
+   module says half — and fourteen assertions agreed with the stub perfectly while saying
+   nothing whatever about the module.
 
-(* sweep threshold — items below this score should be swept *)
-f=sweepthreshold():i64{ <100 };
+   FINDING, MEASURED: `apply` RETURNS GARBAGE ACROSS A MODULE BOUNDARY.
 
-(* check if a memory should be swept *)
-f=shouldsweep(timestamp:i64):i64{
-  if(decayscore(timestamp)<sweepthreshold()){<1};
-  <0
-};
+   This is why almost nothing about the curve is asserted below. Called from this file,
+   core.memory.decay.apply returns 2 for a memory created now (correct answer: 1.0) and
+   -inf for every decayed one — measured at ages of 30, 60 and 3650 days and at starting
+   scores of 0.4, 0.8 and 1.0. The struct fields of $decayconfig read back perfectly from
+   the same module in the same run (30, 0.1, 0.05), which is the signature of T-20: a bare
+   FLOAT RETURN is corrupted across a module boundary while parameters and struct fields
+   are intact. T-20 is recorded for f64; this is the same defect for f32.
 
-(* boost score for pinned memories *)
-f=boostedscore(timestamp:i64;pinned:i64):i64{
-  let base=decayscore(timestamp);
-  if(pinned==1){<base+500};
-  <base
-};
+   It is LATENT, and that is checked rather than assumed: nothing outside
+   packages/core/src/memory/decay.tk imports this module, so no production caller reads
+   the corrupted value. The only consumer is `sweeprows`, whose call to `apply` is
+   intra-module and therefore not subject to the boundary defect.
 
-(* recency rank: 0=most recent tier, 1=recent, 2=old, 3=ancient *)
-f=recencytier(timestamp:i64):i64{
-  let score=decayscore(timestamp);
-  if(score>800){<0};
-  if(score>500){<1};
-  if(score>100){<2};
-  <3
-};
+   WHY IT STILL MATTERS, because the failure mode is not a wrong score. sweeprows does:
+
+     let decayed=apply(basescore;createdat;now;cfg);
+     if(decayed < cfg.prunebelow){ DELETE FROM memory_scores ...; DELETE FROM memory_drawers ... }
+
+   If that comparison ever sees -inf it is TRUE FOR EVERY ROW, and the sweep deletes the
+   user's entire memory palace. Today it cannot run at all — memory_scores does not exist,
+   so db.many fails and sweep returns sweepqueryfail(); see
+   tests/unit/memory/test_palace_drawers.tk for that measurement. So the day M1.7 creates
+   the missing tables, the first sweep is a total data loss unless this is fixed first.
+   That ordering is the reason this is written down here rather than left as a curiosity.
+
+   One assertion below is deliberately RED as the marker for it. Everything else asserts
+   what does hold: the retention policy in defaultconfig, which is the part a reviewer
+   needs to be able to read off a test.
+
+   `sweep` and `refresh` are not exercised: both need the memory_scores table. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test that very recent item scores near max *)
-  let recent=now()-86400;
-  if(t.assert(decayscore(recent)==999;"1-day-old item scores 999")){pass=pass+1}el{fail=fail+1};
+  let c=dec.defaultconfig();
 
-  (* test that item from today scores max *)
-  if(t.assert(decayscore(now())==1000;"current-time item scores 1000")){pass=pass+1}el{fail=fail+1};
+  (* ── The default retention policy ────────────────────────────────────────────
+     Four numbers that decide what the product FORGETS. They come back across the
+     boundary intact because they are struct fields, not returns. *)
+  if(t.assert(c.halflifedays>29.0 as f32;"the default half-life is 30 days (lower bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.halflifedays<31.0 as f32;"the default half-life is 30 days (upper bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.minscore>0.0 as f32;"there is a non-zero score FLOOR, so a memory never decays to exactly nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.minscore<1.0 as f32;"and the floor is below a full score, or nothing ever decays at all")){pass=pass+1}el{fail=fail+1};
 
-  (* test that older item scores lower *)
-  let weekold=now()-(86400*7);
-  if(t.assert(decayscore(weekold)==993;"7-day-old item scores 993")){pass=pass+1}el{fail=fail+1};
+  (* The ordering of the two thresholds is the load-bearing part. prunebelow is a DELETE
+     threshold and minscore is a clamp: if prunebelow were at or above the floor, every
+     memory would become eligible for deletion the moment it reached the floor, which is
+     every memory eventually. *)
+  if(t.assert(c.prunebelow<c.minscore;"the PRUNE threshold is strictly BELOW the score floor — otherwise every memory becomes deletable on reaching the floor")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.prunebelow>0.0 as f32;"and it is positive, so a zero score is not a special case")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.sweepintervalhours>0;"the sweep interval is positive, or the sweeper never runs")){pass=pass+1}el{fail=fail+1};
 
-  (* test that very old item scores near zero *)
-  let old=now()-(86400*950);
-  if(t.assert(decayscore(old)==50;"950-day-old item scores 50")){pass=pass+1}el{fail=fail+1};
+  (* ── THE MARKER, DELIBERATELY RED ────────────────────────────────────────────
+     A decay factor is a probability-like quantity: whatever the age, the result must be
+     finite and must lie between the configured floor and the starting score. This single
+     assertion covers the whole class — a corrupted return fails it however it is
+     corrupted — and it is the one that has to go green before core.memory.decay can be
+     called from anywhere but itself.
 
-  (* test that ancient item floors at zero *)
-  let ancient=now()-(86400*2000);
-  if(t.assert(decayscore(ancient)==0;"2000-day-old item floors at 0")){pass=pass+1}el{fail=fail+1};
-
-  (* test sweep threshold *)
-  if(t.assert(sweepthreshold()==100;"sweep threshold is 100")){pass=pass+1}el{fail=fail+1};
-
-  (* test shouldsweep for old item *)
-  let sweepable=now()-(86400*950);
-  if(t.assert(shouldsweep(sweepable)==1;"950-day-old item should be swept")){pass=pass+1}el{fail=fail+1};
-
-  (* test shouldsweep for recent item *)
-  if(t.assert(shouldsweep(recent)==0;"1-day-old item should not be swept")){pass=pass+1}el{fail=fail+1};
-
-  (* test boosted score for pinned memory *)
-  if(t.assert(boostedscore(recent;1)==1499;"pinned recent item gets +500 boost")){pass=pass+1}el{fail=fail+1};
-
-  (* test unboosted score *)
-  if(t.assert(boostedscore(recent;0)==999;"unpinned item has normal score")){pass=pass+1}el{fail=fail+1};
-
-  (* test recency tiers *)
-  if(t.assert(recencytier(now())==0;"current item is tier 0 (most recent)")){pass=pass+1}el{fail=fail+1};
-
-  let midade=now()-(86400*300);
-  if(t.assert(recencytier(midade)==1;"300-day-old item is tier 1 (recent)")){pass=pass+1}el{fail=fail+1};
-
-  let older=now()-(86400*800);
-  if(t.assert(recencytier(older)==2;"800-day-old item is tier 2 (old)")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(recencytier(ancient)==3;"ancient item is tier 3")){pass=pass+1}el{fail=fail+1};
+     Measured today: fresh=2, and every aged value is -inf. See the note at the top. *)
+  let fresh=dec.apply(1.0 as f32;0;0;c);
+  if(t.assert(fresh<=1.0 as f32;"apply returns a decay factor no greater than the score it was given — RED: T-20 corrupts the f32 return across the module boundary, measured as 2 for a fresh memory and -inf once aged")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

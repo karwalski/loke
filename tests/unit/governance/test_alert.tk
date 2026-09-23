@@ -5,89 +5,105 @@ m=test.governance.alert;
 
 i=t:std.test;
 i=str:std.str;
+i=al:core.governance.alert;
 
-(* --- stub alert logic mirroring core.governance.alert --- *)
+(* X7.2 — this file used to declare its own $alert, $alertconfig and $quotastatus plus
+   makealert / shouldquotaalert / severityfor, and assert against them. The threshold
+   comparison it "tested" was its own:
 
-(* create an alert and return its kind *)
-f=makealert(kind:str;severity:str;message:str):str{
-  <str.concat(kind;str.concat(":";severity))
-};
+     f=shouldquotaalert(remaining:f64;threshold:f64):bool{ <remaining<threshold }
+     ... t.assert(shouldquotaalert(10.0;20.0);"10% remaining alerts at a 20% threshold")
 
-(* default config values *)
-f=defaultthreshold():i64{ <20 };
-f=defaultlogonly():i64{ <1 };
+   which asserts that 10 is less than 20. The real rule is in
+   core.governance.alert.quotaalert and has two halves the stub had neither of: an
+   `exceeded` flag that forces an alert whatever the remaining percentage says, and a
+   severity that becomes "critical" rather than "warn" when it fires. A governance alert
+   that fires at the wrong severity is routed to the wrong place.
 
-(* format alert as JSON-like string *)
-f=alerttojson(kind:str;severity:str;message:str):str{
-  <str.concat(
-    str.concat(
-      str.concat(
-        str.concat("{\"kind\":\"";kind);
-        "\",\"severity\":\"");
-      severity);
-    str.concat("\",\"message\":\"";str.concat(message;"\"}"))
-  )
-};
+   What cannot be tested here, said plainly rather than stubbed: the WEBHOOK delivery
+   path. `send` posts through std.http when logonly is false and a URL is set, and there
+   is no loopback listener in this suite. Every assertion below therefore runs with
+   logonly true — which is also the default — and covers the decision to alert and the
+   severity it carries, not the transport. *)
 
-(* determine if quota alert should fire *)
-f=shouldquotaalert(remainingpct:i64;thresholdpct:i64;exceeded:i64):i64{
-  if(exceeded==1){<1};
-  if(remainingpct<thresholdpct){<1};
-  <0
-};
-
-(* determine quota alert severity *)
-f=quotaseverity(exceeded:i64):str{
-  if(exceeded==1){<"critical"};
-  <"warn"
-};
-
-(* determine policy alert severity *)
-f=policyseverity(action:str):str{
-  if(str.eq(action;"DENY")){<"critical"};
-  <"warn"
+f=critical(config:$alertconfig;status:$quotastatus):bool{
+  <al.quotaalert(config;status)
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test makealert encodes kind and severity *)
-  let a=makealert("quota";"warn";"low tokens");
-  if(t.assert(str.contains(a;"quota");"alert contains kind")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(a;"warn");"alert contains severity")){pass=pass+1}el{fail=fail+1};
+  (* ── The default configuration ───────────────────────────────────────────────
+     logonly defaults TRUE and the webhook URL defaults EMPTY. Both matter: a default
+     that posted somewhere would send governance alerts off the device from a product
+     whose whole claim is that it does not do that without being asked. *)
+  let cfg=al.defaultconfig();
+  if(t.assert(cfg.logonly;"alerts default to log-only, so nothing leaves the device unconfigured")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(cfg.webhookurl) as i64)==0;"and the default webhook URL is empty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cfg.quotathresholdpct>(0.0 as f32);"the default quota threshold is a positive percentage, not zero — zero would never alert")){pass=pass+1}el{fail=fail+1};
 
-  (* test default config threshold is 20% *)
-  if(t.assert(defaultthreshold()==20;"default quota threshold is 20%")){pass=pass+1}el{fail=fail+1};
+  (* ── makealert ───────────────────────────────────────────────────────────────*)
+  let a=al.makealert("quota";"warn";"a message");
+  if(t.asserteq(a.kind;"quota";"makealert carries the kind through")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.severity;"warn";"and the severity")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.message;"a message";"and the message")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(a.id) as i64)==32;"the id is 32 hex characters from randhex(16)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.ts>0;"and it is stamped with a real time, not zero")){pass=pass+1}el{fail=fail+1};
 
-  (* test default config is log-only *)
-  if(t.assert(defaultlogonly()==1;"default config is log-only")){pass=pass+1}el{fail=fail+1};
+  (* Two alerts must not share an id. An alert store keyed on a colliding id loses one
+     of them, and the one it loses is silent. *)
+  let b=al.makealert("quota";"warn";"a message");
+  if(t.assert(!str.eq(a.id;b.id);"two alerts made with identical arguments get different ids")){pass=pass+1}el{fail=fail+1};
 
-  (* test alerttojson includes all fields *)
-  let json=alerttojson("policy";"critical";"violation detected");
-  if(t.assert(str.contains(json;"\"kind\":\"policy\"");"JSON includes kind")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(json;"\"severity\":\"critical\"");"JSON includes severity")){pass=pass+1}el{fail=fail+1};
+  (* ── alerttojson ─────────────────────────────────────────────────────────────
+     Asserted field by field, because this string is what a webhook receives. *)
+  let js=al.alerttojson(a);
+  if(t.assert(str.contains(js;"\"kind\":\"quota\"");"the JSON carries the kind")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;"\"severity\":\"warn\"");"and the severity")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;"\"message\":\"a message\"");"and the message")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;str.concat("\"id\":\"";a.id));"and the id it was given, not a fresh one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;"\"ts\":");"and the timestamp as a bare number, not a quoted string")){pass=pass+1}el{fail=fail+1};
 
-  (* test quota alert fires when remaining below threshold *)
-  if(t.assert(shouldquotaalert(15;20;0)==1;"15% remaining triggers alert at 20% threshold")){pass=pass+1}el{fail=fail+1};
+  (* ── send, on the only path this suite can exercise ──────────────────────────*)
+  if(t.assert(al.send(cfg;a);"send succeeds in log-only mode")){pass=pass+1}el{fail=fail+1};
+  (* logonly false with an EMPTY url is also a local no-op and must not be reported as a
+     failed delivery — otherwise a user who cleared the webhook field sees errors. *)
+  let nourl=$alertconfig{quotathresholdpct:20.0 as f32;webhookurl:"";logonly:false};
+  if(t.assert(al.send(nourl;a);"and with delivery enabled but no URL configured, which is a no-op rather than a failure")){pass=pass+1}el{fail=fail+1};
 
-  (* test quota alert does not fire when above threshold *)
-  if(t.assert(shouldquotaalert(50;20;0)==0;"50% remaining does not trigger alert")){pass=pass+1}el{fail=fail+1};
+  (* ── quotaalert: the decision, and the two halves of it ──────────────────────
+     Returns true when it alerted, false when it decided not to. *)
+  let plenty=$quotastatus{ruleid:"r-plenty";usedtokens:10;usedcost:0.10 as f32;remainingpct:80.0 as f32;exceeded:false};
+  if(t.assert(!al.quotaalert(cfg;plenty);"80% remaining against a 20% threshold does NOT alert")){pass=pass+1}el{fail=fail+1};
 
-  (* test quota alert fires when exceeded regardless of remaining *)
-  if(t.assert(shouldquotaalert(50;20;1)==1;"exceeded flag forces alert")){pass=pass+1}el{fail=fail+1};
+  (* The boundary. The test is strictly less-than, so exactly at the threshold must not
+     fire — otherwise every quota alerts the moment it is created with a round number. *)
+  let atthreshold=$quotastatus{ruleid:"r-at";usedtokens:80;usedcost:0.80 as f32;remainingpct:20.0 as f32;exceeded:false};
+  if(t.assert(!al.quotaalert(cfg;atthreshold);"exactly at the threshold does not alert: the test is < not <=")){pass=pass+1}el{fail=fail+1};
 
-  (* test quota severity: exceeded is critical *)
-  if(t.assert(str.eq(quotaseverity(1);"critical");"exceeded quota is critical")){pass=pass+1}el{fail=fail+1};
+  let low=$quotastatus{ruleid:"r-low";usedtokens:90;usedcost:0.90 as f32;remainingpct:5.0 as f32;exceeded:false};
+  if(t.assert(al.quotaalert(cfg;low);"5% remaining against a 20% threshold alerts")){pass=pass+1}el{fail=fail+1};
 
-  (* test quota severity: not exceeded is warn *)
-  if(t.assert(str.eq(quotaseverity(0);"warn");"non-exceeded quota is warn")){pass=pass+1}el{fail=fail+1};
+  (* The second half, which the stub had no notion of: `exceeded` forces an alert
+     whatever the remaining percentage claims. A quota that is over but reports 80%
+     remaining is a reporting bug, and this is the guard that makes it loud instead of
+     silent. *)
+  let exceeded=$quotastatus{ruleid:"r-over";usedtokens:200;usedcost:2.00 as f32;remainingpct:80.0 as f32;exceeded:true};
+  if(t.assert(al.quotaalert(cfg;exceeded);"an EXCEEDED quota alerts even when remainingpct says there is plenty left")){pass=pass+1}el{fail=fail+1};
 
-  (* test policy severity: DENY action is critical *)
-  if(t.assert(str.eq(policyseverity("DENY");"critical");"DENY action is critical")){pass=pass+1}el{fail=fail+1};
+  (* ── policyalert, and the severity that decides where it is routed ───────────*)
+  if(t.assert(al.policyalert(cfg;"rule-7";"GDPR";"DENY");"a policy violation alerts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(al.policyalert(cfg;"rule-7";"GDPR";"WARN");"and so does a warning-level action")){pass=pass+1}el{fail=fail+1};
 
-  (* test policy severity: non-DENY action is warn *)
-  if(t.assert(str.eq(policyseverity("WARN");"warn");"WARN action severity is warn")){pass=pass+1}el{fail=fail+1};
+  (* The message a human reads. All three identifiers have to be in it: an alert that
+     says "policy violation" without naming the rule or the regulation cannot be acted
+     on, and there is nowhere else the reader can look. *)
+  let pa=al.makealert("policy";"critical";"Policy violation — rule=rule-7 regulation=GDPR action=DENY");
+  let pj=al.alerttojson(pa);
+  if(t.assert(str.contains(pj;"rule=rule-7");"the policy alert names the rule")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pj;"regulation=GDPR");"and the regulation")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pj;"action=DENY");"and the action taken")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

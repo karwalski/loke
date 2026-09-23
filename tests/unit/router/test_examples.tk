@@ -5,94 +5,177 @@ m=test.router.examples;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=json:std.json;
+i=ex:core.router.examples;
 
-(* --- stub routing example functions --- *)
+(* X7.2 — this file declared six stand-ins for core.router.examples, including its own
+   JSON parser:
 
-(* format a single example line *)
-f=formatline(modelid:str;snippet:str):str{
-  let open=str.concat("(";modelid);
-  let mid=str.concat(open;") ");
-  <str.concat(mid;snippet)
+     f=parsemodel(payload:str):str{ ... };
+     f=isvalid(payload:str):i64{ ... };
+     ...
+     let model=parsemodel("{\"model\":\"gpt-4o\",\"snippet\":\"write code\",\"at\":1000}");
+     if(t.assert(str.eq(model;"gpt-4o");"parsemodel extracts gpt-4o")){...}
+
+   The module has no `parsemodel`, no `parsesnippet`, no `isvalid` and no `formatline`; it
+   has `parseexample`, which takes a decoded JSON HANDLE rather than a string, and
+   `formatexamples`, which takes an array rather than three scalars. Nine assertions, none
+   of which could be made against the module, and one of them — `isvalid` rejecting a
+   payload with no `snippet` — asserted a validation step that does not exist anywhere: the
+   real `parseexample` returns empty fields instead, which the assertions below pin.
+
+   The vector store round trip is covered here end to end because it turned out to work,
+   which was not obvious: `std.vecstore` links into a test binary and `addexample` /
+   `findsimilar` both function. *)
+
+f=dir():str{
+  (* str.concat, not interpolation: a string returned by std.homedir() is truncated when
+     interpolated (T-21). Its own directory, so no other test shares the collection. *)
+  <str.concat(std.homedir();"/.loke/test-router-examples")
 };
 
-(* format multiple examples — newline separated *)
-f=formatexamples(models:str;snippets:str;count:i64):str{
-  if(count==0){
-    <"(no routing examples)"
-  }el{
-    (* stub: build from first entry only for simplicity *)
-    <formatline(models;snippets)
+(* The on-disk name std.vecstore would use: "<datadir>/<collection>.vecs". *)
+f=vecsfile():str{
+  <str.concat(dir();"/routing_examples.vecs")
+};
+
+f=handle(payload:str):i64{
+  (* $ok FIRST. With the error arm first, `mt` binds positionally and this would hand back
+     the error value for a payload that parsed perfectly. *)
+  <mt json.dec(payload) {
+    $ok:o o;
+    $jsonerr:e 0
   }
 };
 
-(* parse payload: extract model from JSON-like string *)
-f=parsemodel(payload:str):str{
-  if(str.contains(payload;"claude-3-5-sonnet")){<"claude-3-5-sonnet"};
-  if(str.contains(payload;"gpt-4o")){<"gpt-4o"};
-  if(str.contains(payload;"llama3")){<"llama3"};
-  <""
-};
-
-(* parse snippet from payload *)
-f=parsesnippet(payload:str):str{
-  if(str.contains(payload;"write code")){<"write code"};
-  if(str.contains(payload;"summarise")){<"summarise"};
-  <""
-};
-
-(* validate example has required fields *)
-f=isvalid(payload:str):i64{
-  let hasmodel=str.contains(payload;"model");
-  let hassnippet=str.contains(payload;"snippet");
-  let hasat=str.contains(payload;"at");
-  if(hasmodel){
-    if(hassnippet){
-      if(hasat){<1}
-    }
-  };
-  <0
+f=example(modelid:str;snippet:str;at:i64):$routingexample{
+  <$routingexample{promptsnippet:snippet;modelid:modelid;confirmedat:at}
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* T1: formatexamples with zero examples *)
-  let empty=formatexamples("";"";0);
-  if(t.assert(str.eq(empty;"(no routing examples)");"empty examples returns placeholder text")){pass=pass+1}el{fail=fail+1};
+  (* ── formatexamples ──────────────────────────────────────────────────────────
+     This string goes into a prompt as few-shot routing guidance, so its shape is a
+     contract with the model rather than cosmetic. *)
+  if(t.asserteq(ex.formatexamples(@($routingexample));"(no routing examples)";"an empty list formats as an explicit placeholder, not as an empty string that would silently vanish from a prompt")){pass=pass+1}el{fail=fail+1};
 
-  (* T2: formatline produces correct format *)
-  let line=formatline("gpt-4o";"write a function");
-  if(t.assert(str.contains(line;"(gpt-4o)");"format line contains model in parens")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(line;"write a function");"format line contains snippet")){pass=pass+1}el{fail=fail+1};
+  let one=ex.formatexamples(@(example("gpt-4o";"write a function";1000)));
+  if(t.assert(str.contains(one;"(gpt-4o)");"a formatted line carries the model id in parentheses")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(one;"write a function");"and the prompt snippet")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(one;"(gpt-4o) write a function";"in exactly that order, with one space between them")){pass=pass+1}el{fail=fail+1};
 
-  (* T3: formatexamples with entries *)
-  let formatted=formatexamples("claude-3-5-sonnet";"summarise this";1);
-  if(t.assert(str.contains(formatted;"claude-3-5-sonnet");"formatted examples contain model id")){pass=pass+1}el{fail=fail+1};
+  (* Two examples are newline-joined, in the order given. Order matters for few-shot
+     prompting, and a join that reversed or collapsed them would be invisible to a
+     contains-based assertion. *)
+  let two=ex.formatexamples(@(
+    example("gpt-4o";"write a function";1000);
+    example("qwen2.5:7b";"summarise this";2000)
+  ));
+  if(t.assert(str.contains(two;"(gpt-4o) write a function");"the first example is present")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(two;"(qwen2.5:7b) summarise this");"the second is too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(two;"gpt-4o")<str.indexof(two;"qwen2.5:7b");"and they are in the order given, not reversed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(two;"
+");"joined by a newline")){pass=pass+1}el{fail=fail+1};
 
-  (* T4: parsemodel extracts model from payload *)
-  let model=parsemodel("{\"model\":\"gpt-4o\",\"snippet\":\"write code\",\"at\":1000}");
-  if(t.assert(str.eq(model;"gpt-4o");"parsemodel extracts gpt-4o")){pass=pass+1}el{fail=fail+1};
+  (* A snippet is user prompt text, so it can contain anything. It must survive verbatim —
+     this string is about to be put in front of a model, and a mangled snippet is
+     misleading few-shot guidance. *)
+  let odd=ex.formatexamples(@(example("gpt-4o";"say \"hello\" (politely)";1)));
+  if(t.assert(str.contains(odd;"say \"hello\" (politely)");"a snippet containing quotes and parentheses survives formatting verbatim")){pass=pass+1}el{fail=fail+1};
 
-  (* T5: parsesnippet extracts snippet *)
-  let snippet=parsesnippet("{\"model\":\"gpt-4o\",\"snippet\":\"write code\",\"at\":1000}");
-  if(t.assert(str.eq(snippet;"write code");"parsesnippet extracts snippet text")){pass=pass+1}el{fail=fail+1};
+  (* ── parseexample ────────────────────────────────────────────────────────────
+     Reads the payload addexample wrote. The two functions are inverse and a drift between
+     them would silently empty every stored example. *)
+  let good=ex.parseexample(handle("{\"model\":\"gpt-4o\",\"snippet\":\"write code\",\"at\":1000}"));
+  if(t.asserteq(good.modelid;"gpt-4o";"parseexample reads the model id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(good.promptsnippet;"write code";"the snippet")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(good.confirmedat==1000;"and the timestamp")){pass=pass+1}el{fail=fail+1};
 
-  (* T6: isvalid accepts complete payload *)
-  let valid=isvalid("{\"model\":\"llama3\",\"snippet\":\"hello\",\"at\":123}");
-  if(t.assert(valid==1;"valid payload passes validation")){pass=pass+1}el{fail=fail+1};
+  (* A payload missing a field yields an EMPTY field, not a crash and not a stale value.
+     There is no validation step — the stub asserted one — so this is the behaviour a
+     caller has to handle, and it is asserted rather than assumed. *)
+  let nosnippet=ex.parseexample(handle("{\"model\":\"llama3\",\"at\":123}"));
+  if(t.asserteq(nosnippet.modelid;"llama3";"a payload with no snippet still yields its model id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(nosnippet.promptsnippet)==0;"and an EMPTY snippet — there is no validation step that would reject it")){pass=pass+1}el{fail=fail+1};
 
-  (* T7: isvalid rejects payload missing model *)
-  let invalid1=isvalid("{\"snippet\":\"hello\",\"at\":123}");
-  if(t.assert(invalid1==0;"payload without model is invalid")){pass=pass+1}el{fail=fail+1};
+  let nomodel=ex.parseexample(handle("{\"snippet\":\"hello\",\"at\":123}"));
+  if(t.assert(str.len(nomodel.modelid)==0;"a payload with no model yields an empty model id rather than a stale one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(nomodel.promptsnippet;"hello";"while the snippet it does have survives")){pass=pass+1}el{fail=fail+1};
 
-  (* T8: isvalid rejects payload missing snippet *)
-  let invalid2=isvalid("{\"model\":\"llama3\",\"at\":123}");
-  if(t.assert(invalid2==0;"payload without snippet is invalid")){pass=pass+1}el{fail=fail+1};
+  let noat=ex.parseexample(handle("{\"model\":\"llama3\",\"snippet\":\"hello\"}"));
+  if(t.assert(noat.confirmedat==0;"a missing timestamp reads as 0, which a caller can tell from a real one")){pass=pass+1}el{fail=fail+1};
 
-  (* T9: parsemodel returns empty for unknown model *)
-  let unknown=parsemodel("{\"model\":\"unknown-model\"}");
-  if(t.assert(str.eq(unknown;"");"unknown model returns empty string")){pass=pass+1}el{fail=fail+1};
+  (* ── tryappendexample / logexampleparsefail ──────────────────────────────────
+     The two arms of findsimilar's parse match. The success arm must GROW the list and the
+     failure arm must leave it exactly as it was — a failure arm that dropped the
+     accumulated list would lose every example parsed before the bad one. *)
+  let start=@($routingexample);
+  let grown=ex.tryappendexample(start;handle("{\"model\":\"gpt-4o\",\"snippet\":\"a\",\"at\":1}"));
+  if(t.assert(grown.len==1;"tryappendexample appends one example")){pass=pass+1}el{fail=fail+1};
+  let grown2=ex.tryappendexample(grown;handle("{\"model\":\"llama3\",\"snippet\":\"b\",\"at\":2}"));
+  if(t.assert(grown2.len==2;"and appends rather than replacing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ex.logexampleparsefail(grown2).len==2;"the parse-failure arm returns the accumulated list UNCHANGED — it must not discard examples parsed before the bad one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ex.logexampleparsefail(start).len==0;"and an empty list stays empty")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The vector store, end to end ────────────────────────────────────────────
+     open -> collection -> addexample -> findsimilar. This is the only path in the module
+     that is not pure, and it works. *)
+  file.mkdir(dir());
+  let store=ex.open(dir());
+  let col=ex.collection(store);
+  if(t.assert(store!=0;"the example store opens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(col!=0;"and the routing_examples collection is reachable")){pass=pass+1}el{fail=fail+1};
+
+  let emb=@(1.0 as f32;0.0 as f32;0.0 as f32);
+  if(t.assert(ex.addexample(col;emb;"gpt-4o";"write a sorting function");"addexample stores a confirmed routing choice")){pass=pass+1}el{fail=fail+1};
+
+  (* The same embedding is an exact match, so it must come back. If this returns nothing,
+     confirmed routing choices are being written and never read. *)
+  let hits=ex.findsimilar(col;emb;5 as i32);
+  if(t.assert((hits.len as i64)>0;"findsimilar returns the example that was just added")){pass=pass+1}el{fail=fail+1};
+  let first:$routingexample=hits.get(0);
+  if(t.asserteq(first.modelid;"gpt-4o";"and it round-trips its model id through the payload")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(first.promptsnippet;"write a sorting function";"and its snippet")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(first.confirmedat>0;"and a real timestamp, not 0")){pass=pass+1}el{fail=fail+1};
+
+  (* The 0.85 similarity floor has to exclude something, or every query returns every
+     example and the few-shot guidance is noise. An orthogonal vector is the clearest case. *)
+  let orthogonal=@(0.0 as f32;0.0 as f32;1.0 as f32);
+  let misses=ex.findsimilar(col;orthogonal;5 as i32);
+  if(t.assert((misses.len as i64)==0;"an orthogonal query returns nothing: the 0.85 similarity floor excludes, so the examples are guidance rather than noise")){pass=pass+1}el{fail=fail+1};
+
+  (* A second, similar example, to show the store accumulates rather than overwriting. *)
+  let emb2=@(0.99 as f32;0.1 as f32;0.0 as f32);
+  ex.addexample(col;emb2;"qwen2.5:7b";"summarise this document");
+  let both=ex.findsimilar(col;emb;5 as i32);
+  if(t.assert((both.len as i64)>1;"a second similar example accumulates rather than overwriting the first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(ex.formatexamples(both))>0;"and the set formats into non-empty few-shot guidance")){pass=pass+1}el{fail=fail+1};
+
+  (* ── FINDING, latent: nothing is ever written to the data directory ───────────
+     `open` takes a datadir and `std.vecstore` does have an on-disk format — it writes
+     "<datadir>/<collection>.vecs" — but `collection_save` is called from exactly one place
+     in the stdlib, `vecstore_close`, and NOTHING in this repository calls
+     `vecstore.close`: the alias is not even imported in `core.router.examples`, which
+     exposes `open` and `collection` and no counterpart to shut them.
+
+     So every confirmed routing example lives in memory for the life of the process and is
+     discarded when it exits. The feature is "remember which model the user confirmed for
+     this kind of prompt", and it remembers until restart.
+
+     Measured below rather than argued: after two successful `addexample` calls and two
+     successful searches in this same process, the file std.vecstore would have written does
+     not exist.
+
+     Characterised rather than left red, because `core.router.examples` has **no importer
+     anywhere** in `packages/**` or `src/**` — it is not wired into the router yet, so
+     nothing depends on the persistence today. A first caller will need either a close on
+     the shutdown path or an explicit flush; the assertion below is what turns red when
+     persistence arrives, which is the signal to delete it. *)
+  if(t.assert(!file.exists(vecsfile());"nothing is persisted: routing examples live in memory only, because collection_save runs solely from vecstore.close and nothing calls it")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

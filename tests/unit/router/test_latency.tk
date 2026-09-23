@@ -5,79 +5,154 @@ m=test.router.latency;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=sel:core.router.selector;
+i=lat:core.router.latencyrouter;
 
-(* --- stub latency router functions --- *)
+(* X7.2 — this file declared eight stand-ins for core.router.latencyrouter and asserted
+   against them:
 
-(* tier constants *)
-f=interactive():i64{ <0 };
-f=considered():i64{ <1 };
-f=background():i64{ <2 };
+     f=constraintinteractive():i64{ <500 };
+     f=constraintfor(tier:i64):i64{ if(tier==0){<constraintinteractive()}; ... };
+     ...
+     if(t.assert(constraintfor(interactive())==500;"interactive TTFT is 500ms")){...}
 
-(* constraint record: tolerance, maxttftms, maxtotalms *)
-f=constraintinteractive():i64{ <500 };
-f=constraintconsidered():i64{ <2000 };
-f=constraintbackground():i64{ <30000 };
+   The real `constraintfor` takes a `$modeltier` and returns a `$latencyconstraint` struct
+   with three fields; the copy took an i64 and returned one number. This stub is a useful
+   example of why an import count is a better instrument than a plausibility read: its
+   NUMBERS were all correct — 500/2000/30000 TTFT and 10000/60000/3600000 total — so the
+   file looked like a faithful mirror and reviewed as one, while still being unable to fail
+   if the module changed any of them. A stub that agrees with its subject today is not a
+   test; it is a second copy of the same decision.
 
-(* constraintfor: tier to max TTFT ms *)
-f=constraintfor(tier:i64):i64{
-  if(tier==0){<constraintinteractive()};
-  if(tier==1){<constraintconsidered()};
-  <constraintbackground()
-};
-
-(* max total ms per tier *)
-f=maxtotalfor(tier:i64):i64{
-  if(tier==0){<10000};
-  if(tier==1){<60000};
-  <3600000
-};
-
-(* should force local: interactive tier forces local *)
-f=shouldforcelocal(tier:i64):i64{
-  if(tier==0){<1};
-  <0
-};
-
-(* apply latency routing: returns 1 if preferlocal was set/upgraded *)
-f=applylatency(tier:i64;preferlocal:i64):i64{
-  let forcelocal=shouldforcelocal(tier);
-  if(forcelocal==1){<1};
-  <preferlocal
-};
+   The module has **no caller anywhere** in `packages/**` or `src/**`, which is why the
+   defect recorded at the bottom of this file is characterised rather than left red. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* T1: interactive tier has low TTFT constraint *)
-  if(t.assert(constraintfor(interactive())==500;"interactive TTFT is 500ms")){pass=pass+1}el{fail=fail+1};
+  (* ── The three constraints ───────────────────────────────────────────────────
+     Read as struct FIELDS of a returned struct, which cross a module boundary intact.
+     maxttftms and maxtotalms are i32, not f64, so T-20 does not apply here. *)
+  let ia:$latencyconstraint=lat.constraintinteractive();
+  if(t.assert((ia.maxttftms as i64)==500;"the interactive constraint allows 500ms to first token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((ia.maxtotalms as i64)==10000;"and 10s in total")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ia.tolerance==0;"and carries tolerance 0")){pass=pass+1}el{fail=fail+1};
 
-  (* T2: considered tier has moderate TTFT *)
-  if(t.assert(constraintfor(considered())==2000;"considered TTFT is 2000ms")){pass=pass+1}el{fail=fail+1};
+  let co:$latencyconstraint=lat.constraintconsidered();
+  if(t.assert((co.maxttftms as i64)==2000;"the considered constraint allows 2s to first token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((co.maxtotalms as i64)==60000;"and 60s in total")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(co.tolerance==1;"and carries tolerance 1")){pass=pass+1}el{fail=fail+1};
 
-  (* T3: background tier has high TTFT allowance *)
-  if(t.assert(constraintfor(background())==30000;"background TTFT is 30000ms")){pass=pass+1}el{fail=fail+1};
+  let bg:$latencyconstraint=lat.constraintbackground();
+  if(t.assert((bg.maxttftms as i64)==30000;"the background constraint allows 30s to first token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((bg.maxtotalms as i64)==3600000;"and an hour in total")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(bg.tolerance==2;"and carries tolerance 2")){pass=pass+1}el{fail=fail+1};
 
-  (* T4: interactive max total is 10 seconds *)
-  if(t.assert(maxtotalfor(interactive())==10000;"interactive max total is 10000ms")){pass=pass+1}el{fail=fail+1};
+  (* The three must be strictly ORDERED. A collision would make two tiers indistinguishable
+     and, via the sub-1000ms test in filterbylatency, would change which tier restricts the
+     candidate pool. *)
+  if(t.assert(ia.maxttftms<co.maxttftms;"interactive is stricter than considered on first token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(co.maxttftms<bg.maxttftms;"and considered stricter than background")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ia.maxtotalms<co.maxtotalms;"and the same on total time")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(co.maxtotalms<bg.maxtotalms;"throughout")){pass=pass+1}el{fail=fail+1};
 
-  (* T5: background max total is 1 hour *)
-  if(t.assert(maxtotalfor(background())==3600000;"background max total is 3600000ms")){pass=pass+1}el{fail=fail+1};
+  (* Only the interactive constraint is below the 1000ms figure filterbylatency tests, so
+     the tier-to-behaviour mapping rests on this boundary. *)
+  if(t.assert((ia.maxttftms as i64)<1000;"the interactive TTFT is below the 1000ms threshold filterbylatency branches on")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((co.maxttftms as i64)>=1000;"and no other tier is")){pass=pass+1}el{fail=fail+1};
 
-  (* T6: interactive forces local *)
-  if(t.assert(shouldforcelocal(interactive())==1;"interactive tier forces local")){pass=pass+1}el{fail=fail+1};
+  (* ── constraintfor: the tier mapping ─────────────────────────────────────────
+     A `mt` on a plain user sum, so all three arms are live. Asserted through the returned
+     struct's fields rather than by identity, because that is what a caller reads. *)
+  let forinteractive:$latencyconstraint=lat.constraintfor($modeltier{$interactive:0});
+  if(t.assert((forinteractive.maxttftms as i64)==500;"the interactive tier maps to the interactive constraint")){pass=pass+1}el{fail=fail+1};
+  let forconsidered:$latencyconstraint=lat.constraintfor($modeltier{$considered:0});
+  if(t.assert((forconsidered.maxttftms as i64)==2000;"the considered tier to the considered constraint")){pass=pass+1}el{fail=fail+1};
+  let forbackground:$latencyconstraint=lat.constraintfor($modeltier{$background:0});
+  if(t.assert((forbackground.maxttftms as i64)==30000;"and the background tier to the background constraint")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(forinteractive.maxttftms!=forbackground.maxttftms;"the three arms are DISTINGUISHABLE — a collapsed mt cannot pass this")){pass=pass+1}el{fail=fail+1};
 
-  (* T7: considered does not force local *)
-  if(t.assert(shouldforcelocal(considered())==0;"considered tier does not force local")){pass=pass+1}el{fail=fail+1};
+  (* ── applylatencyrouting ─────────────────────────────────────────────────────
+     The interactive tier upgrades preferlocal to true, and nothing else does. This is the
+     T-14 fix: the comparison was `==` on a sum, which compares the handle rather than the
+     variant, so it was never true and the upgrade never happened. Asserted in both
+     directions so a regression to `==` fails here. *)
+  let cloudy=$selectioncriteria{
+    task:$tasktype{$chat:0};
+    sensitivity:$sensitivitylevel{$public:0};
+    tolerance:$latencytolerance{$instant:0};
+    preferlocal:false;
+    maxcostper1k:0.05;
+    requiretools:false
+  };
+  let upgraded:$selectioncriteria=lat.applylatencyrouting(cloudy;$modeltier{$interactive:0});
+  if(t.assert(upgraded.preferlocal;"the interactive tier upgrades preferlocal to true — the T-14 fix, which a regression to == on a sum would undo")){pass=pass+1}el{fail=fail+1};
 
-  (* T8: background does not force local *)
-  if(t.assert(shouldforcelocal(background())==0;"background tier does not force local")){pass=pass+1}el{fail=fail+1};
+  let notupgraded:$selectioncriteria=lat.applylatencyrouting(cloudy;$modeltier{$considered:0});
+  if(t.assert(!notupgraded.preferlocal;"the considered tier does NOT, so the upgrade is a rule and not a constant")){pass=pass+1}el{fail=fail+1};
+  let bgnotupgraded:$selectioncriteria=lat.applylatencyrouting(cloudy;$modeltier{$background:0});
+  if(t.assert(!bgnotupgraded.preferlocal;"and neither does background")){pass=pass+1}el{fail=fail+1};
 
-  (* T9: applylatency upgrades preferlocal for interactive *)
-  if(t.assert(applylatency(interactive();0)==1;"interactive upgrades preferlocal to true")){pass=pass+1}el{fail=fail+1};
+  (* An already-local request stays local whatever the tier: the function may only ever
+     tighten the preference, never relax it. *)
+  let alreadylocal=$selectioncriteria{
+    task:$tasktype{$chat:0};
+    sensitivity:$sensitivitylevel{$public:0};
+    tolerance:$latencytolerance{$instant:0};
+    preferlocal:true;
+    maxcostper1k:0.05;
+    requiretools:false
+  };
+  if(t.assert(lat.applylatencyrouting(alreadylocal;$modeltier{$background:0}).preferlocal;"an already-local request is never RELAXED to cloud-eligible, whatever the tier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lat.applylatencyrouting(alreadylocal;$modeltier{$interactive:0}).preferlocal;"nor on the interactive tier")){pass=pass+1}el{fail=fail+1};
 
-  (* T10: applylatency preserves preferlocal for considered *)
-  if(t.assert(applylatency(considered();0)==0;"considered preserves preferlocal=false")){pass=pass+1}el{fail=fail+1};
+  (* Every other field must survive the rebuild. The function reconstructs the struct
+     rather than assigning to it (T-26 forbids field assignment), so a dropped field is a
+     realistic way for this to go wrong — and a dropped `sensitivity` would silently
+     release a RESTRICTED request. *)
+  if(t.assert(sh.senseq(upgraded.sensitivity;cloudy.sensitivity);"the sensitivity survives the rebuild — dropping it would release a RESTRICTED request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(upgraded.maxcostper1k==cloudy.maxcostper1k;"the cost ceiling survives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(upgraded.requiretools==cloudy.requiretools;"and the tools flag")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sel.tiertostr(sel.tierfromtolerance(upgraded.tolerance));sel.tiertostr(sel.tierfromtolerance(cloudy.tolerance));"and the tolerance, which is separate from the tier argument")){pass=pass+1}el{fail=fail+1};
+
+  let restricted=$selectioncriteria{
+    task:$tasktype{$chat:0};
+    sensitivity:$sensitivitylevel{$restricted:0};
+    tolerance:$latencytolerance{$background:0};
+    preferlocal:true;
+    maxcostper1k:0.05;
+    requiretools:false
+  };
+  let carried:$selectioncriteria=lat.applylatencyrouting(restricted;$modeltier{$background:0});
+  if(t.assert(sh.senseq(carried.sensitivity;$sensitivitylevel{$restricted:0});"a RESTRICTED sensitivity is carried through unchanged")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(carried.preferlocal;"and its local-only preference with it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── FINDING, latent: filterbylatency filters nothing ────────────────────────
+     On the interactive tier it logs "restricted to local models" and returns
+     `t.filtermodels(candidates;true)`. `shared.types.filtermodels` is
+
+       f=filtermodels(models:i64;filter:str):i64{ <models };
+
+     an identity pass-through — and the call also passes `@i64` where `i64` is declared and
+     a `bool` where `str` is declared. So the candidate list comes back unchanged and the
+     log line asserts a restriction that did not occur. A log that claims a privacy-adjacent
+     control was applied when it was not is worse than silence.
+
+     Characterised rather than left red, on the same reasoning as the NULL from
+     core.storage.keychain.getkey: `filterbylatency` and `applylatencyrouting` have **no
+     caller anywhere** in `packages/**` or `src/**`, so nothing is relying on the
+     restriction today. The assertions below pin the behaviour that actually exists, and the
+     one after them is the contract a first caller would need — written as a comment rather
+     than an assertion so that this file stays green until the module is wired up.
+
+       A first caller MUST NOT assume filterbylatency narrows anything. Wiring it requires
+       filtermodels to be implemented first, or the interactive tier will silently permit
+       cloud models it reports having excluded. *)
+  let three=@(1;2);
+  if(t.assert(lat.filterbylatency(three;lat.constraintinteractive()).len==2;"filterbylatency returns its input UNCHANGED on the interactive tier, despite logging that it restricted to local models — shared.types.filtermodels is an identity stub")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lat.filterbylatency(three;lat.constraintbackground()).len==2;"and unchanged on the background tier, where it is not supposed to filter at all")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

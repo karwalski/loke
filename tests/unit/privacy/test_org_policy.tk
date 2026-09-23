@@ -5,113 +5,149 @@ m=test.privacy.orgpolicy;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=op:core.privacy.orgpolicy;
 
-(* --- stub org policy functions (mirrors core.privacy.orgpolicy) --- *)
+(* X7.2 — this file used to declare its own policy struct and validator and assert against
+   them, seventeen times. It now imports core.privacy.orgpolicy and writes real policy
+   files to disk.
 
-t=$orgprivacypolicy{
-  minimumlayers:i64;
-  requiredlayers:str;
-  lockedconsensus:str;
-  bannedlayers:str;
-  maxconfidencethreshold:f64;
-  enforced:bool
+   ═══════════════════════════════════════════════════════════════════════════════
+   FOUR FINDINGS in loadpolicy and validate, all recorded rather than asserted as
+   correct. This is an ENFORCEMENT module: an organisation writes a policy file saying how
+   many detection layers must be active and which consensus strategy is mandatory, and
+   this decides whether the running configuration complies. Every one of these makes it
+   report something other than what the file says.
+
+   FINDING 1 — minimumlayers IS NOT PARSED. The body is:
+
+       let ml=mut.1;
+       if(str.len(minlayers)>0){ml=2}el{};
+
+   Any non-empty minimum_layers value in the file yields the literal 2. An organisation
+   requiring five active detection layers gets a policy requiring two, and a
+   three-layer configuration validates clean against it. That is fail-OPEN on the one
+   number the file exists to state.
+
+   FINDING 2 — enforced IS A SUBSTRING SEARCH OVER THE WHOLE FILE:
+
+       let enforced=str.contains(content;"enforced");
+
+   `{"enforced": false}` loads as enforced:true, because the WORD is present. So an
+   organisation cannot turn enforcement off by saying so, and the word appearing in a
+   comment or in an unrelated key turns it on.
+
+   FINDING 3 — maxconfidencethreshold IS NEVER READ from the file. It is hardcoded 1.0 in
+   both defaultpolicy and loadpolicy, so the field is inert.
+
+   FINDING 4 — validate IGNORES requiredlayers AND bannedlayers. It checks the layer COUNT
+   and the consensus strategy, and nothing else. A configuration running a BANNED layer
+   validates with no violation, which is the check most likely to have been the reason for
+   writing a policy file in the first place.
+
+   NONE IS FIXED HERE: the module has NO importer anywhere in the repository, so no
+   organisation's policy is being mis-enforced today. The assertions below record the
+   behaviour as it is, following the precedent in tests/unit/storage/test_backup.tk, and
+   each turns RED when the corresponding field is actually parsed or checked.
+   ═══════════════════════════════════════════════════════════════════════════════ *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir()'s return is truncated when
+     interpolated (T-21). *)
+  <str.concat(std.homedir();"/.loke/test-org-policy")
 };
 
-f=defaultpolicy():$orgprivacypolicy{
-  <$orgprivacypolicy{
-    minimumlayers:1;
-    requiredlayers:"";
-    lockedconsensus:"";
-    bannedlayers:"";
-    maxconfidencethreshold:1.0;
-    enforced:false
-  }
+f=policypath(name:str):str{
+  <str.concat(testdir();str.concat("/";name))
 };
 
-f=validate(policy:$orgprivacypolicy;activelayers:i64;consensus:str):str{
-  let violations=mut."";
-  if(activelayers<policy.minimumlayers){
-    violations=str.concat(violations;"VIOLATION: fewer than minimum required layers active. ")
-  }el{};
-  if(str.len(policy.lockedconsensus)>0){
-    if(!str.eq(consensus;policy.lockedconsensus)){
-      violations=str.concat(violations;"VIOLATION: consensus strategy does not match org policy. ")
-    }el{}
-  }el{};
-  <violations
+f=writepolicy(name:str;content:str):str{
+  let path=policypath(name);
+  file.mkdir(testdir());
+  mt file.write(path;content) {
+    $ok:v 1;
+    $err:e 0
+  };
+  <path
 };
-
-f=isenforced(policy:$orgprivacypolicy):bool{
-  <policy.enforced
-};
-
-f=formatpolicy(policy:$orgprivacypolicy):str{
-  <str.concat("Org Policy: min_layers=";str.concat(str.fromint(policy.minimumlayers);str.concat(" required=";str.concat(policy.requiredlayers;str.concat(" consensus=";str.concat(policy.lockedconsensus;str.concat(" enforced=";str.concat(str.fromint(policy.enforced as i64);""))))))))
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. default policy has enforced=false *)
-  let dp=defaultpolicy();
-  if(t.assert(!dp.enforced;"default policy enforced is false")){pass=pass+1}el{fail=fail+1};
+  (* ── The default policy: unenforced, and permissive ──────────────────────────
+     A default that enforced something would apply an organisational control to every
+     individual install, which is the wrong direction for a local-first product. A
+     default that required zero layers would be worse: it would validate a configuration
+     in which nothing scans the text. *)
+  let dflt=op.defaultpolicy();
+  if(t.assert(!op.isenforced(dflt);"the default policy is NOT enforced, so a personal install is not subject to an organisational control it never opted into")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dflt.minimumlayers==1;"but it still requires at least ONE active layer, so a configuration where nothing scans the text does not validate")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dflt.requiredlayers;"";"no particular layer is required by default")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dflt.lockedconsensus;"";"and no consensus strategy is locked")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dflt.bannedlayers;"";"and no layer is banned")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. default policy has minimumlayers=1 *)
-  if(t.assert(dp.minimumlayers==1;"default policy minimumlayers is 1")){pass=pass+1}el{fail=fail+1};
+  (* ── validate: the minimum-layer check ──────────────────────────────────────
+     Returns a string of violations. Empty means compliant, which is the right shape here
+     precisely because T-18 would make a result type's error arm dead. *)
+  if(t.asserteq(op.validate(dflt;1;"most-restrictive");"";"one active layer satisfies a minimum of one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(op.validate(dflt;3;"most-restrictive");"";"and so do three")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(op.validate(dflt;0;"most-restrictive");"VIOLATION");"ZERO active layers is a violation — nothing scanned the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(op.validate(dflt;0;"most-restrictive");"minimum required layers");"and the violation says which rule was broken")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. default policy has empty requiredlayers *)
-  if(t.asserteq(dp.requiredlayers;"";"default policy requiredlayers is empty")){pass=pass+1}el{fail=fail+1};
-
-  (* 4. default policy has empty lockedconsensus *)
-  if(t.asserteq(dp.lockedconsensus;"";"default policy lockedconsensus is empty")){pass=pass+1}el{fail=fail+1};
-
-  (* 5. default policy maxconfidencethreshold is 1.0 *)
-  if(t.assert(dp.maxconfidencethreshold==1.0;"default policy maxconfidencethreshold is 1.0")){pass=pass+1}el{fail=fail+1};
-
-  (* 6. validation passes when layers >= minimum *)
-  let v1=validate(dp;3;"any");
-  if(t.asserteq(v1;"";"no violations when layers >= minimum")){pass=pass+1}el{fail=fail+1};
-
-  (* 7. validation fails when layers < minimum *)
-  let strict=$orgprivacypolicy{
-    minimumlayers:3;
-    requiredlayers:"openai-privacy-filter";
-    lockedconsensus:"most-restrictive";
-    bannedlayers:"";
-    maxconfidencethreshold:0.95;
+  (* ── validate: the locked consensus check ───────────────────────────────────*)
+  let locked=$orgprivacypolicy{
+    minimumlayers:2;
+    requiredlayers:"regex";
+    lockedconsensus:"unanimous";
+    bannedlayers:"presidio";
+    maxconfidencethreshold:0.5;
     enforced:true
   };
-  let v2=validate(strict;1;"most-restrictive");
-  if(t.assert(str.contains(v2;"VIOLATION");"violation when layers < minimum")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(v2;"fewer than minimum");"message mentions fewer than minimum")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(op.validate(locked;2;"unanimous");"";"a configuration matching the locked consensus strategy is compliant")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(op.validate(locked;2;"most-restrictive");"consensus strategy");"and one using a different strategy is a violation")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(op.validate(locked;1;"most-restrictive");"minimum");"two violations are both reported, not just the first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(op.validate(locked;1;"most-restrictive");"consensus");"— the second one too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(op.isenforced(locked);"an enforced policy says so")){pass=pass+1}el{fail=fail+1};
 
-  (* 8. locked consensus violation detected *)
-  let v3=validate(strict;5;"least-restrictive");
-  if(t.assert(str.contains(v3;"consensus strategy does not match");"consensus violation detected")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 4, recorded: requiredlayers and bannedlayers are never checked ──*)
+  if(t.asserteq(op.validate(locked;2;"unanimous");"";"a configuration running the BANNED layer and omitting the REQUIRED one validates with NO violation — validate reads neither field")){pass=pass+1}el{fail=fail+1};
 
-  (* 9. no consensus violation when strategy matches *)
-  let v4=validate(strict;5;"most-restrictive");
-  if(t.asserteq(v4;"";"no violation when consensus matches")){pass=pass+1}el{fail=fail+1};
+  (* ── loadpolicy: a missing or trivial file falls back to the default ─────────
+     This is the right direction: a policy file that cannot be read must not be treated
+     as a policy that permits everything. *)
+  if(t.assert(!op.isenforced(op.loadpolicy(policypath("does-not-exist.json")));"a policy file that does not exist falls back to the unenforced default rather than to an empty policy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(op.loadpolicy(policypath("does-not-exist.json")).minimumlayers==1;"and still requires one layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(op.loadpolicy(writepolicy("tiny.json";"{}")).minimumlayers==1;"a file too short to be a policy does the same")){pass=pass+1}el{fail=fail+1};
 
-  (* 10. isenforced returns true for enforced policy *)
-  if(t.assert(isenforced(strict);"strict policy is enforced")){pass=pass+1}el{fail=fail+1};
+  (* ── loadpolicy: the fields it DOES read ────────────────────────────────────*)
+  let full=op.loadpolicy(writepolicy("full.json";"{\"minimum_layers\":\"5\",\"required_layers\":\"regex,ner\",\"locked_consensus\":\"unanimous\",\"banned_layers\":\"presidio\",\"enforced\":true}"));
+  if(t.asserteq(full.requiredlayers;"regex,ner";"required_layers is read from the file")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(full.lockedconsensus;"unanimous";"and locked_consensus")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(full.bannedlayers;"presidio";"and banned_layers")){pass=pass+1}el{fail=fail+1};
 
-  (* 11. isenforced returns false for default policy *)
-  if(t.assert(!isenforced(dp);"default policy is not enforced")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 1, recorded: minimum_layers is not parsed ──────────────────────*)
+  if(t.assert(full.minimumlayers==2;"minimum_layers of FIVE loads as TWO — the value is not parsed, only tested for non-emptiness, so an organisation requiring five layers gets a policy requiring two")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(op.validate(full;2;"unanimous");"";"and a two-layer configuration therefore validates clean against a five-layer policy — fail OPEN on the one number the file exists to state")){pass=pass+1}el{fail=fail+1};
 
-  (* 12. formatpolicy produces readable output *)
-  let fmt=formatpolicy(strict);
-  if(t.assert(str.contains(fmt;"Org Policy:");"format contains Org Policy prefix")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(fmt;"min_layers=");"format contains min_layers")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(fmt;"enforced=");"format contains enforced")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 2, recorded: enforced is a substring search ────────────────────*)
+  let offpolicy=op.loadpolicy(writepolicy("off.json";"{\"minimum_layers\":\"1\",\"enforced\":false}"));
+  if(t.assert(op.isenforced(offpolicy);"a policy saying \"enforced\": FALSE loads as ENFORCED — the check is str.contains over the whole file, so the word's presence is enough")){pass=pass+1}el{fail=fail+1};
+  let wordpolicy=op.loadpolicy(writepolicy("word.json";"{\"note\":\"enforced by the security team out of band\"}"));
+  if(t.assert(op.isenforced(wordpolicy);"and the word appearing in an unrelated string turns enforcement on")){pass=pass+1}el{fail=fail+1};
+  let silent=op.loadpolicy(writepolicy("silent.json";"{\"minimum_layers\":\"1\",\"required_layers\":\"regex\"}"));
+  if(t.assert(!op.isenforced(silent);"while a policy that never mentions the word is not enforced, which is the only case it gets right")){pass=pass+1}el{fail=fail+1};
 
-  (* 13. both violations at once *)
-  let v5=validate(strict;1;"wrong");
-  if(t.assert(str.contains(v5;"fewer than minimum");"combined: layer violation present")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(v5;"consensus strategy");"combined: consensus violation present")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 3, recorded: maxconfidencethreshold is inert ───────────────────*)
+  let thresholded=op.loadpolicy(writepolicy("threshold.json";"{\"minimum_layers\":\"1\",\"max_confidence_threshold\":0.5,\"enforced\":true}"));
+  if(t.assert(thresholded.maxconfidencethreshold>0.9;"max_confidence_threshold in the file is IGNORED: it loads as the hardcoded 1.0, so the field is inert")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The summary an administrator reads ─────────────────────────────────────*)
+  let line=op.formatpolicy(locked);
+  if(t.assert(str.contains(line;"min_layers=2");"the summary states the minimum layer count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"unanimous");"and the locked consensus strategy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(line;"enforced=1");"and whether the policy is enforced at all, which is the first thing to check")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

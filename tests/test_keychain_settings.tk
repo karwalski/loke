@@ -2,86 +2,78 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=tests.testkeychainsettings;
+
 i=t:std.test;
 i=str:std.str;
+i=kc:core.storage.keychain;
+i=set:browser.pages.api.settings;
 
-(* --- stub keychain for testing roundtrip --- *)
+(* X7.2 — this file used to be two module-level `mut` strings and a pair of functions
+   that wrote and read them:
 
-(* simulated keychain store keyed by provider *)
-let storedanthropickey=mut."";
-let storedopenaikey=mut."";
+     let storedanthropickey=mut."";
+     f=stubsetapikey(provider:str;key:str):bool{ if(str.eq(provider;"anthropic")){ storedanthropickey=key; <true } ... };
+     f=stubgetapikey(provider:str):str{ if(str.eq(provider;"anthropic")){ <storedanthropickey } ... };
 
-f=stubsetapikey(provider:str;key:str):bool{
-  if(str.eq(provider;"anthropic")){
-    storedanthropickey=key;
-    <true
-  }el{};
-  if(str.eq(provider;"openai")){
-    storedopenaikey=key;
-    <true
-  }el{};
-  <false
-};
+   Nine assertions, all against those two variables. "anthropic key roundtrip" asserted
+   that a string assigned to a local on one line comes back on the next. It named neither
+   core.storage.keychain nor the settings endpoint, so it could not have failed if either
+   had been deleted.
 
-f=stubgetapikey(provider:str):str{
-  if(str.eq(provider;"anthropic")){
-    <storedanthropickey
-  }el{};
-  if(str.eq(provider;"openai")){
-    <storedopenaikey
-  }el{};
-  <""
-};
+   The file's NAME is the useful part, and it names the one thing that was actually
+   untested: the JOIN between the keychain and the settings endpoint. Each side has its
+   own test now — tests/unit/storage/test_keychain.tk and
+   tests/unit/browser/test_settings_handler.tk — and neither crosses the boundary. This
+   one does, through browser.pages.api.settings.keyfordisplay, which reads the keychain
+   and decides what a user is shown.
 
-(* mask key: first 4 chars + **** *)
-f=maskkey(key:str):str{
-  if(str.len(key)<5){<""}el{};
-  <str.concat(str.slice(key;0;4);"****")
-};
+   The interesting case is the ABSENT key, and it is interesting because of a defect this
+   epic turned up: core.storage.keychain.getkey forwards std.keychain.get unchecked, and
+   on a miss that is a NULL string rather than "". str.len(NULL) is 0, so keyfordisplay's
+   `if(str.len(fromkeychain)>0)` guard takes the right branch — but str.eq(NULL;"") is
+   FALSE, so had that guard been spelled the other obvious way, an absent key would have
+   been treated as present and "(null)" would have been masked and rendered as though a
+   key were configured. The assertion below is what pins the working spelling in place. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test 1: set and get anthropic key roundtrip *)
-  stubsetapikey("anthropic";"sk-ant-abc123xyz");
-  let got1=stubgetapikey("anthropic");
-  if(t.assert(str.eq(got1;"sk-ant-abc123xyz");"anthropic key roundtrip")){pass=pass+1}el{fail=fail+1};
+  (* ── A key that IS in the keychain reaches the endpoint, masked ───────────────
+     Stored through the real module under a provider name unique to this test, then read
+     back through the endpoint's own display path. Nothing here reconstructs the account
+     name: if setapikey and keyfordisplay ever disagree about the api_key. prefix, this
+     assertion is what says so. *)
+  kc.setapikey("unitkcs_present";"sk-unitkcs-supersecretvalue");
+  let shown=set.keyfordisplay("unitkcs_present";"unitkcs_present_api_key");
+  if(t.assert(str.contains(shown;"****");"a stored provider key reaches the settings endpoint masked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(shown;"supersecret");"and the secret itself is NOT in what the endpoint returns")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(shown;"not set");"a key that is present is not reported as absent")){pass=pass+1}el{fail=fail+1};
 
-  (* test 2: set and get openai key roundtrip *)
-  stubsetapikey("openai";"sk-oai-def456uvw");
-  let got2=stubgetapikey("openai");
-  if(t.assert(str.eq(got2;"sk-oai-def456uvw");"openai key roundtrip")){pass=pass+1}el{fail=fail+1};
+  (* ── A key that is NOT in the keychain ───────────────────────────────────────
+     "not set" is the whole assertion. Anything else here — a masked value, an empty
+     string rendered into the JSON, the six characters (null) — tells a user a key is
+     configured when none is, and the symptom is a request that fails at the provider
+     with no local explanation. *)
+  let absent=set.keyfordisplay("unitkcs_absent";"unitkcs_absent_api_key");
+  if(t.asserteq(absent;"not set";"a provider with no stored key is reported as not set, not as a masked non-key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(absent;"null");"and specifically not as the text (null), which is what getkey returns for a miss")){pass=pass+1}el{fail=fail+1};
 
-  (* test 3: unknown provider returns empty *)
-  let got3=stubgetapikey("unknown");
-  if(t.assert(str.eq(got3;"");"unknown provider returns empty")){pass=pass+1}el{fail=fail+1};
+  (* The boundary maskordefault turns on, asserted on both sides of it. Four characters
+     is the masking prefix, so a value of four or fewer cannot be masked without being
+     shown in full — and "not set" is the correct answer for a value that short. *)
+  if(t.asserteq(set.maskordefault("");"not set";"an empty value is not set")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(set.maskordefault("abcd");"not set";"a four-character value is too short to mask and is not shown")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(set.maskordefault("abcde");"****");"a five-character value is masked rather than refused")){pass=pass+1}el{fail=fail+1};
 
-  (* test 4: overwrite existing key *)
-  stubsetapikey("anthropic";"sk-ant-new999");
-  let got4=stubgetapikey("anthropic");
-  if(t.assert(str.eq(got4;"sk-ant-new999");"overwrite anthropic key")){pass=pass+1}el{fail=fail+1};
+  (* ── The rendered body ───────────────────────────────────────────────────────
+     The join, once more, at the level a browser actually sees. *)
+  let body=set.settingsjson();
+  if(t.assert(!str.contains(body;"supersecret");"the settings response never carries a whole key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body;"(null)");"and never renders a missing key as (null)")){pass=pass+1}el{fail=fail+1};
 
-  (* test 5: openai key unchanged after anthropic overwrite *)
-  let got5=stubgetapikey("openai");
-  if(t.assert(str.eq(got5;"sk-oai-def456uvw");"openai key unchanged")){pass=pass+1}el{fail=fail+1};
-
-  (* test 6: mask key shows first 4 chars *)
-  let masked=maskkey("sk-ant-abc123xyz");
-  if(t.assert(str.eq(masked;"sk-a****");"mask shows first 4 chars")){pass=pass+1}el{fail=fail+1};
-
-  (* test 7: mask short key returns empty *)
-  let maskedshort=maskkey("abc");
-  if(t.assert(str.eq(maskedshort;"");"short key mask returns empty")){pass=pass+1}el{fail=fail+1};
-
-  (* test 8: empty provider rejected *)
-  let setresult=stubsetapikey("";"somekey");
-  if(t.assert(setresult==false;"empty provider rejected")){pass=pass+1}el{fail=fail+1};
-
-  (* test 9: get from empty keychain returns empty *)
-  let freshanthropickey=mut."";
-  let freshget=freshanthropickey;
-  if(t.assert(str.eq(freshget;"");"empty keychain returns empty string")){pass=pass+1}el{fail=fail+1};
+  (* Leave nothing behind for a differently-named binary to block the keychain on. *)
+  kc.deletekey("api_key.unitkcs_present");
 
   <fail
 };

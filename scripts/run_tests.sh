@@ -90,12 +90,37 @@ if [ -d "$OOKE_DIR/src/ooke" ]; then
   fi
 fi
 
-# A fixed database key for the suite.
+# LOKE_DB_KEY — no longer a key path, and that is the change X8.3 made.
 #
-# Without it, core.storage.db.ensuredbkey reads the macOS keychain, and
-# SecItemCopyMatching blocks on an authorisation dialog that a headless test process
-# can never answer — the run does not fail, it hangs. Two integration tests hung the
-# whole suite this way. This key is for tests only and is deliberately obvious.
+# WHAT IT USED TO BE. core.storage.db.ensuredbkey read this variable BEFORE the keychain
+# and returned it if it was 64 characters long. It was there because openstore called
+# ensuredbkey, ensuredbkey reached SecItemCopyMatching, and SecItemCopyMatching blocks on
+# an authorisation dialog a headless test process can never answer: the run did not fail,
+# it HUNG. Two integration tests hung the whole suite that way, and this export unhung
+# them.
+#
+# WHY IT IS NOT THAT ANY MORE. An environment variable is readable by any process running
+# as the user and writable by anything that can set the process environment, so a key
+# delivered that way is a key an attacker can both read and choose — which is exactly what
+# X8.3 forbids for the one key that protects the placeholder mapping. The fallback is gone
+# from the product, and NOT behind a build flag: a flag would leave a branch in the shipped
+# binary that takes a key from ambient state, with the security of the store resting on the
+# flag being false. Instead the reason the fallback was load-bearing was removed —
+#
+#   * openstore no longer calls ensuredbkey at all. It called it to feed the `PRAGMA key`
+#     that X8.1 deleted, so since X8.1 it had been fetching a secret nothing used. That was
+#     the only reason merely OPENING a database could block on the keychain. Opening a
+#     store now touches no secret material, so the suite needs no key to open one.
+#   * The one consumer, core.privacy.placeholderstore, takes the secret as a PARAMETER.
+#     Production resolves it from the keychain in one place with no branch; the tests in
+#     tests/unit/privacy/test_mapping_{encryption,deletion}.tk pass a 64-character literal
+#     of their own. The difference between a test and production is which function calls
+#     which, not which value some variable holds.
+#
+# WHY THE EXPORT IS STILL HERE. One assertion needs it: tests/unit/storage/test_db.tk
+# checks that core.storage.db.dbkeyfromenv() reads a 64-character key from the environment.
+# dbkeyfromenv is now read by nothing in the product — see the comment above it — and this
+# line exists for that assertion alone. Nothing hangs if it is removed; that test fails.
 export LOKE_DB_KEY="${LOKE_DB_KEY:-0000000000000000000000000000000000000000000000000000000000000001}"
 
 PASS=0

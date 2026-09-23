@@ -5,108 +5,162 @@ m=test.router.sensitivity;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=sens:core.router.sensitivity;
 
-(* --- stub sensitivity classification functions --- *)
+(* X7.2 — this file declared eight stand-ins for core.router.sensitivity and asserted
+   against them. The damning one:
 
-(* sensitivity levels *)
-f=levelpublic():i64{ <0 };
-f=levelinternal():i64{ <1 };
-f=levelconfidential():i64{ <2 };
-f=levelrestricted():i64{ <3 };
+     f=requireslocal(level:i64):i64{
+       if(level>1){<1};
+       <0
+     };
+     ...
+     if(t.assert(requireslocal(levelconfidential())==1;"confidential requires local")){...}
 
-(* classify text sensitivity *)
-f=classify(text:str):i64{
-  (* restricted: financial, health, government IDs *)
-  if(str.contains(text;"credit card")){<levelrestricted()};
-  if(str.contains(text;"passport")){<levelrestricted()};
-  if(str.contains(text;"medical record")){<levelrestricted()};
-  if(str.contains(text;"tax file")){<levelrestricted()};
-  (* confidential: personal contact info *)
-  if(str.contains(text;"@")){<levelconfidential()};
-  if(str.contains(text;"phone number")){<levelconfidential()};
-  if(str.contains(text;"home address")){<levelconfidential()};
-  (* internal: business context *)
-  if(str.contains(text;"internal memo")){<levelinternal()};
-  if(str.contains(text;"proprietary")){<levelinternal()};
-  if(str.contains(text;"company strategy")){<levelinternal()};
-  (* default: public *)
-  <levelpublic()
-};
+   The real module's predicate is `canusecloud`, and it permits CONFIDENTIAL to leave the
+   machine — only RESTRICTED is refused. So this file asserted, and passed on, a routing
+   rule the product does not implement and has never implemented. It got the boundary
+   wrong by one whole level, in the direction that matters: had the copy been the
+   implementation, every confidential request would have been held locally; because it was
+   only a copy, the assertion told the reader that confidential data was held locally when
+   it was not.
 
-(* label for sensitivity level *)
-f=levellabel(level:i64):str{
-  if(level==0){<"public"};
-  if(level==1){<"internal"};
-  if(level==2){<"confidential"};
-  if(level==3){<"restricted"};
-  <"unknown"
-};
+   That is the worst instance of the stub pattern in this repository, because the subject
+   is a disclosure boundary rather than a number. `canusecloud` is what decides whether a
+   prompt may reach a cloud provider, and nothing exercised it.
 
-(* check if level requires local-only routing *)
-f=requireslocal(level:i64):i64{
-  if(level>1){<1};
-  <0
-};
+   The other stub was wrong in a second way: its `classify` keyed CONFIDENTIAL off the
+   presence of "@" and RESTRICTED off "medical record". The real `scorefromcontent` does
+   not look at "@" at all — that is the regex layer's job — and it rates "medical record"
+   CONFIDENTIAL, not RESTRICTED. Both of those fixture strings appear in the assertions
+   below against the real thresholds.
 
-(* check if level requires audit logging *)
-f=requiresaudit(level:i64):i64{
-  if(level>0){<1};
-  <0
-};
+   Every function here is a plain form: levelrank, scorefrompii, scorefromcontent, combine,
+   canusecloud and leveltostr all return plain values, so there is no result type and no
+   T-18 exposure anywhere in this file. *)
 
-(* get the higher of two sensitivity levels *)
-f=maxlevel(a:i64;b:i64):i64{
-  if(a>b){<a};
-  <b
-};
+f=public():$sensitivitylevel{ <$sensitivitylevel{$public:0} };
+f=internal():$sensitivitylevel{ <$sensitivitylevel{$internal:0} };
+f=confidential():$sensitivitylevel{ <$sensitivitylevel{$confidential:0} };
+f=restricted():$sensitivitylevel{ <$sensitivitylevel{$restricted:0} };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test sensitivity level values are ordered *)
-  if(t.assert(levelpublic()<levelinternal();"public < internal")){pass=pass+1}el{fail=fail+1};
+  (* ── levelrank ───────────────────────────────────────────────────────────────
+     The ordering every other function in the module is built on. `combine` compares
+     ranks, so a collision here silently makes one of two levels win arbitrarily. *)
+  if(t.assert((sens.levelrank(public()) as i64)==0;"PUBLIC ranks 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((sens.levelrank(internal()) as i64)==1;"INTERNAL ranks 1")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((sens.levelrank(confidential()) as i64)==2;"CONFIDENTIAL ranks 2")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((sens.levelrank(restricted()) as i64)==3;"RESTRICTED ranks 3")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(levelinternal()<levelconfidential();"internal < confidential")){pass=pass+1}el{fail=fail+1};
+  (* The four ranks must be DISTINCT, asserted directly rather than inferred from the four
+     equalities above — a `mt` that returned the same arm for two tags would satisfy one of
+     those and not this. *)
+  if(t.assert(sens.levelrank(public())<sens.levelrank(internal());"PUBLIC ranks below INTERNAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sens.levelrank(internal())<sens.levelrank(confidential());"INTERNAL below CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sens.levelrank(confidential())<sens.levelrank(restricted());"CONFIDENTIAL below RESTRICTED")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(levelconfidential()<levelrestricted();"confidential < restricted")){pass=pass+1}el{fail=fail+1};
+  (* ── canusecloud: THE DISCLOSURE BOUNDARY ────────────────────────────────────
+     All four levels, in both directions, because this single predicate decides whether a
+     prompt may leave the machine. `$restricted` is the FIRST arm of its match, which is
+     exactly the shape that inverts when `mt` dispatches positionally — so each tag is
+     asserted separately rather than by testing one and reasoning about the rest. *)
+  if(t.assert(!sens.canusecloud(restricted());"RESTRICTED must NOT reach a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sens.canusecloud(confidential());"CONFIDENTIAL may — the product's boundary is at RESTRICTED, not at CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sens.canusecloud(internal());"INTERNAL may")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sens.canusecloud(public());"PUBLIC may")){pass=pass+1}el{fail=fail+1};
 
-  (* test classification *)
-  if(t.assert(classify("hello world")==levelpublic();"plain text is public")){pass=pass+1}el{fail=fail+1};
+  (* And that the predicate DISCRIMINATES. A constant-false canusecloud would satisfy the
+     one assertion that matters for safety and break routing entirely; a constant-true one
+     would satisfy the other three and disclose restricted data. Neither can pass this. *)
+  if(t.assert(sens.canusecloud(public())!=sens.canusecloud(restricted());"cloud-eligible and cloud-refused are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classify("see the internal memo")==levelinternal();"internal memo is internal")){pass=pass+1}el{fail=fail+1};
+  (* ── scorefrompii ────────────────────────────────────────────────────────────
+     How a detection result becomes a level. The escalation rule is the load-bearing part:
+     several CONFIDENTIAL entities in one prompt make it RESTRICTED, which by the predicate
+     above means it stops being cloud-eligible. So this function can flip the disclosure
+     boundary, and the threshold is worth pinning exactly. *)
+  if(t.assert(sh.senseq(sens.scorefrompii(confidential();0 as u32);confidential());"no entities leaves the level as the detector reported it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefrompii(confidential();1 as u32);confidential());"one confidential entity stays CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefrompii(confidential();3 as u32);confidential());"three stays CONFIDENTIAL — the threshold is ABOVE three, not at it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefrompii(confidential();4 as u32);restricted());"FOUR confidential entities escalate to RESTRICTED, which removes cloud eligibility")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classify("email user@test.com")==levelconfidential();"email is confidential")){pass=pass+1}el{fail=fail+1};
+  (* RESTRICTED never de-escalates, whatever the count. *)
+  if(t.assert(sh.senseq(sens.scorefrompii(restricted();1 as u32);restricted());"one restricted entity is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefrompii(restricted();99 as u32);restricted());"and many still are — it never de-escalates")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classify("my credit card number")==levelrestricted();"credit card is restricted")){pass=pass+1}el{fail=fail+1};
+  (* A count with no PII level behind it must not invent one. *)
+  if(t.assert(sh.senseq(sens.scorefrompii(public();5 as u32);public());"five PUBLIC entities do not escalate: only CONFIDENTIAL accumulates")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefrompii(internal();5 as u32);internal());"nor does INTERNAL")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classify("send medical record")==levelrestricted();"medical record is restricted")){pass=pass+1}el{fail=fail+1};
+  (* ── scorefromcontent ────────────────────────────────────────────────────────
+     The keyword layer. It runs on the prompt text and is the only thing that can raise
+     sensitivity when the regex detector finds nothing — a prompt asking "what is my
+     password" carries no PII entity and must still not go to a cloud provider. *)
+  if(t.assert(sh.senseq(sens.scorefromcontent("what is my password");restricted());"password makes a prompt RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("rotate the api key");restricted());"an api key does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("the client secret");restricted());"a secret does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("my credential store");restricted());"a credential does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("paste the private key");restricted());"a private key does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("refresh the access token");restricted());"an access token does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("my bank account details");restricted());"bank account does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("this credit card was declined");restricted());"credit card does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("bsb and account");restricted());"an AU bsb does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("the iban for the transfer");restricted());"an iban does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("the routing number");restricted());"a routing number does")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(classify("proprietary algorithm")==levelinternal();"proprietary content is internal")){pass=pass+1}el{fail=fail+1};
+  (* Every one of those eleven must ALSO be refused the cloud, which is the only reason the
+     classification matters. Asserted through the predicate rather than assumed from the
+     level, because the two are separate functions. *)
+  if(t.assert(!sens.canusecloud(sens.scorefromcontent("what is my password"));"and a RESTRICTED prompt is then refused the cloud, end to end")){pass=pass+1}el{fail=fail+1};
 
-  (* test level labels *)
-  if(t.assert(str.eq(levellabel(0);"public");"level 0 is public")){pass=pass+1}el{fail=fail+1};
+  (* CONFIDENTIAL, which is a different boundary: these stay cloud-eligible. The stub had
+     "medical record" as RESTRICTED; the module rates it CONFIDENTIAL. That difference is
+     the difference between a diagnosis staying on the machine and not, so it is asserted
+     against the module rather than against the old fixture. *)
+  if(t.assert(sh.senseq(sens.scorefromcontent("the internal roadmap");confidential());"internal is CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("marked confidential");confidential());"confidential is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("please do not share this");confidential());"do not share is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("proprietary algorithm");confidential());"proprietary is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("the diagnosis was");confidential());"a diagnosis is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("a prescription for");confidential());"a prescription is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("send medical record");confidential());"a medical record is CONFIDENTIAL, NOT restricted — the stub had this wrong")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("the patient arrived");confidential());"a patient is")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(levellabel(3);"restricted");"level 3 is restricted")){pass=pass+1}el{fail=fail+1};
+  (* The negative case, which is what stops the layer crying wolf over everything. *)
+  if(t.assert(sh.senseq(sens.scorefromcontent("hello world");public());"ordinary text is PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.scorefromcontent("");public());"and so is empty text")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(levellabel(99);"unknown");"invalid level is unknown")){pass=pass+1}el{fail=fail+1};
+  (* The email case the stub asserted. scorefromcontent does NOT look for "@" — detecting
+     an address is the regex layer's job and this layer would double-count it. Asserted so
+     that the division of labour is recorded rather than rediscovered. *)
+  if(t.assert(sh.senseq(sens.scorefromcontent("email user@test.com");public());"an address alone is PUBLIC to THIS layer: entity detection belongs to core.privacy.regex, not here")){pass=pass+1}el{fail=fail+1};
 
-  (* test requireslocal *)
-  if(t.assert(requireslocal(levelpublic())==0;"public does not require local")){pass=pass+1}el{fail=fail+1};
+  (* Restricted beats confidential when a prompt trips both, because the scan is ordered
+     and the first match wins. *)
+  if(t.assert(sh.senseq(sens.scorefromcontent("the internal password policy");restricted());"a prompt tripping both keyword sets takes the HIGHER level")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(requireslocal(levelconfidential())==1;"confidential requires local")){pass=pass+1}el{fail=fail+1};
+  (* ── combine ─────────────────────────────────────────────────────────────────
+     The pipeline takes the maximum of the PII level and the content level. Taking the
+     minimum, or either side unconditionally, is how a restricted prompt would become
+     cloud-eligible, so both orders are asserted. *)
+  if(t.assert(sh.senseq(sens.combine(public();restricted());restricted());"combine takes the higher level when the content side is higher")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.combine(restricted();public());restricted());"and when the PII side is higher")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.combine(confidential();internal());confidential());"CONFIDENTIAL beats INTERNAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.combine(public();internal());internal());"INTERNAL beats PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(sens.combine(confidential();confidential());confidential());"equal levels combine to themselves")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sens.canusecloud(sens.combine(public();restricted()));"and a combined RESTRICTED is refused the cloud, so the maximum rule is load-bearing")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(requireslocal(levelrestricted())==1;"restricted requires local")){pass=pass+1}el{fail=fail+1};
-
-  (* test requiresaudit *)
-  if(t.assert(requiresaudit(levelpublic())==0;"public does not require audit")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(requiresaudit(levelinternal())==1;"internal requires audit")){pass=pass+1}el{fail=fail+1};
-
-  (* test maxlevel *)
-  if(t.assert(maxlevel(1;3)==3;"max of 1 and 3 is 3")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(maxlevel(2;0)==2;"max of 2 and 0 is 2")){pass=pass+1}el{fail=fail+1};
+  (* ── leveltostr ──────────────────────────────────────────────────────────────
+     What an audit row and a user-facing warning carry. A wrong label is a wrong record. *)
+  if(t.asserteq(sens.leveltostr(public());"PUBLIC";"PUBLIC renders as PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sens.leveltostr(internal());"INTERNAL";"INTERNAL renders as INTERNAL")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sens.leveltostr(confidential());"CONFIDENTIAL";"CONFIDENTIAL renders as CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sens.leveltostr(restricted());"RESTRICTED";"RESTRICTED renders as RESTRICTED")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

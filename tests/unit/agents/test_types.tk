@@ -5,76 +5,96 @@ m=test.agents.types;
 
 i=t:std.test;
 i=str:std.str;
+i=at:core.agents.types;
 
-(* --- stub agent type functions --- *)
+(* X7.2 — this file used to declare its own $agent struct with its own constructor and
+   assert the defaults it had just written:
 
-f=createagent(name:str;desc:str;provider:str):str{
-  let a=str.concat("{\"name\":\"";name);
-  let a=str.concat(a;"\",\"description\":\"");
-  let a=str.concat(a;desc);
-  let a=str.concat(a;"\",\"provider\":\"");
-  let a=str.concat(a;provider);
-  let a=str.concat(a;"\",\"enabled\":true,\"max_turns\":10}");
-  <a
+     f=newagent(id:str;name:str):$agent{ <$agent{...;enabled:0;...} };
+     ...
+     t.assert(a.enabled==0;"new agent is disabled by default")
+
+   The assertion is true of the copy by construction and says nothing about
+   core.agents.types. That matters more here than in most of the suite, because the
+   defaults are a GOVERNANCE control: an agent is something that runs on a schedule,
+   spends money and touches files without a human present, and the difference between
+   `enabled:false;requiresapproval:true` and the opposite is the difference between an
+   opt-in automation and one that starts working the moment it is defined.
+
+   So every default below is asserted against the real constructor. If someone flips one,
+   this goes red — which is the only reason to have the file. *)
+
+f=triggername(tr:$triggertype):str{
+  (* Bound with a declared type before the match: toke emits duplicate basic-block labels
+     for a 3-or-more-arm `mt` on a struct field read inline, and clang then rejects the
+     whole module (T-2). A plain user sum DOES discriminate, unlike a result. *)
+  <mt tr {
+    $manual:v "manual";
+    $schedule:c str.concat("schedule:";c);
+    $filechange:p str.concat("filechange:";p);
+    $webhook:p str.concat("webhook:";p);
+    $mcpevent:n str.concat("mcpevent:";n)
+  }
 };
 
-f=defaultprovider():str{
-  <"ollama"
+f=runstatusname(st:$agentrunstatus):str{
+  <mt st {
+    $idle:v "idle";
+    $running:v "running";
+    $scheduled:v "scheduled";
+    $paused:v "paused";
+    $errored:m str.concat("errored:";m);
+    $disabled:v "disabled"
+  }
 };
-
-f=defaultmaxturns():i64{
-  <10
-};
-
-f=agentname(agentjson:str):str{
-  if(str.contains(agentjson;"\"name\":\"reviewer\"")){<"reviewer"};
-  if(str.contains(agentjson;"\"name\":\"summariser\"")){<"summariser"};
-  <""
-};
-
-f=agentenabled(agentjson:str):bool{
-  <str.contains(agentjson;"\"enabled\":true")
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* agent construction: name present *)
-  let a1=createagent("reviewer";"Reviews code";"anthropic");
-  if(t.assert(str.contains(a1;"reviewer");"agent contains name")){pass=pass+1}el{fail=fail+1};
+  let a=at.newagent("agent-1";"Nightly triage";"Sorts yesterday's incidents";"Summarise: {input}");
 
-  (* agent construction: description present *)
-  if(t.assert(str.contains(a1;"Reviews code");"agent contains description")){pass=pass+1}el{fail=fail+1};
+  (* The four arguments are carried through, which is the least this must do. *)
+  if(t.asserteq(a.id;"agent-1";"newagent carries the id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.name;"Nightly triage";"and the name")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.description;"Sorts yesterday's incidents";"and the description")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.prompttemplate;"Summarise: {input}";"and the prompt template, which is what actually gets sent")){pass=pass+1}el{fail=fail+1};
 
-  (* agent construction: provider present *)
-  if(t.assert(str.contains(a1;"anthropic");"agent contains provider")){pass=pass+1}el{fail=fail+1};
+  (* ── The governance defaults ─────────────────────────────────────────────────
+     Each of these is the safe side of a decision, and each is asserted because the
+     unsafe side is one character away. *)
+  if(t.assert(!a.enabled;"a NEW AGENT IS DISABLED: defining one must not start it running")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.requiresapproval;"a NEW AGENT REQUIRES APPROVAL: the user is the authority, so an unattended run is opt-in")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.risklevel;"low";"and starts at the lowest risk level rather than inheriting a permissive one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.permissions.len==0;"and holds NO permissions: no file read, no file write, no MCP tool, no model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.schedule;"";"and carries no schedule")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(triggername(a.trigger);"manual";"and its trigger is manual, so nothing fires it but a person")){pass=pass+1}el{fail=fail+1};
 
-  (* agent construction: enabled by default *)
-  if(t.assert(agentenabled(a1);"agent is enabled by default")){pass=pass+1}el{fail=fail+1};
+  (* The cost ceiling. A struct FIELD holding an f64 crosses a module boundary intact —
+     it is a bare f64 RETURN that is corrupted (T-20) — so this is readable here. A
+     default of zero would be worse than it looks: it is not "free", it is "no ceiling
+     was set", and any check written as `cost>maxcostperrun` would then block every run
+     while a check written as `max>0` would allow every one. *)
+  if(t.assert(a.maxcostperrun>0.0;"a new agent has a NON-ZERO cost ceiling, so a spend check has something to compare against")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.maxcostperrun<1.0;"and it is small — a default ceiling nobody notices is not a ceiling")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(a.owner;"";"ownership is unset rather than guessed: an agent with a fabricated owner has fabricated accountability")){pass=pass+1}el{fail=fail+1};
 
-  (* agent construction: max_turns present *)
-  if(t.assert(str.contains(a1;"\"max_turns\":10");"agent has max_turns default")){pass=pass+1}el{fail=fail+1};
+  (* ── A run ───────────────────────────────────────────────────────────────────*)
+  let r=at.newrun("agent-1";"manual");
+  if(t.asserteq(r.agentid;"agent-1";"a new run names the agent it belongs to")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.trigger;"manual";"and what triggered it, which is the audit question")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(runstatusname(r.status);"running";"and starts in the running state, not idle — it has begun by the time it exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(r.startedat)>0;"and is stamped with a start time")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.completedat;"";"and has no completion time yet")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.outcome;"";"nor an outcome")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.error;"";"nor an error")){pass=pass+1}el{fail=fail+1};
 
-  (* agent name extraction *)
-  if(t.assert(str.eq(agentname(a1);"reviewer");"agent name extracted correctly")){pass=pass+1}el{fail=fail+1};
-
-  (* second agent *)
-  let a2=createagent("summariser";"Summarises text";"ollama");
-  if(t.assert(str.contains(a2;"summariser");"second agent name present")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(agentname(a2);"summariser");"second agent name extracted")){pass=pass+1}el{fail=fail+1};
-
-  (* defaults *)
-  if(t.assert(str.eq(defaultprovider();"ollama");"default provider is ollama")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(defaultmaxturns()==10;"default max turns is 10")){pass=pass+1}el{fail=fail+1};
-
-  (* agent JSON is non-empty *)
-  if(t.assert(str.len(a1)>0;"agent JSON is non-empty")){pass=pass+1}el{fail=fail+1};
-
-  (* agent JSON is well-formed *)
-  if(t.assert(str.contains(a1;"{");"agent JSON starts with brace")){pass=pass+1}el{fail=fail+1};
+  (* The id is randhex(16), so 32 hex characters. Length is asserted rather than the
+     value, and uniqueness separately: two runs sharing an id would make the run log
+     unreadable and any per-run cost attribution wrong. *)
+  if(t.assert((str.len(r.id) as i64)==32;"a run id is 32 hex characters")){pass=pass+1}el{fail=fail+1};
+  let r2=at.newrun("agent-1";"manual");
+  if(t.assert(!str.eq(r.id;r2.id);"and two runs of the same agent get DIFFERENT ids")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

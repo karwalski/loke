@@ -5,85 +5,197 @@ m=test.governance.monitoring;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=mon:core.governance.monitoring;
 
-(* --- stub quality signal and trend logic mirroring core.governance.monitoring --- *)
+(* X7.2 — this file used to declare its own $qualitysignal and its own rate arithmetic:
 
-(* build a quality trend from aggregated counts *)
-f=buildtrend(totalsignals:i64;thumbsupcount:i64;coherencesum:f64;relevancesum:f64):i64{
-  (* encode: returns thumbsuprate * 100 as integer for easy assertion *)
-  if(totalsignals==0){<0};
-  let rate=(thumbsupcount*100)/totalsignals;
-  <rate
+     f=thumbsuprate(up:i64;total:i64):f64{ <str.tofloat(str.fromint(up))/str.tofloat(str.fromint(total)) };
+     ... t.assert(thumbsuprate(3;4)>0.7;"3 of 4 is above the 0.7 threshold")
+
+   which asserts that 0.75 > 0.7. The real module computes that rate from rows in a
+   `quality_signals` table inside a time window, and it is the WINDOW, not the division,
+   that is broken. Importing the module is how the following came to light.
+
+   ── FINDING, latent: the trend window matches EVERY row, always ─────────────────
+   packages/core/src/governance/monitoring.tk:63 writes created_at as a SQL LITERAL:
+
+     INSERT INTO quality_signals (...,created_at) VALUES (?,?,?,?,?,?,?,?,'now()')
+
+   SQL functions are not evaluated inside a quoted literal, so every row's created_at is
+   the seven characters n-o-w-(-). computetrend then filters with
+
+     WHERE model_id=? AND created_at >= datetime('now','-N days')
+
+   which compares the text "now()" against "2026-08-24 07:00:00". 'n' sorts after '2', so
+   the predicate is TRUE for every row in the table forever. A 1-day trend and a
+   3650-day trend are the same number, and a model whose quality collapsed a year ago
+   still drags down today's figure.
+
+   This is the GA5.1 defect (the literal 'now()') and the GA5.11 defect (a window
+   comparing incomparable text) in the same two lines. Both were fixed in audit_log; both
+   are still live here. LATENT: core.governance.monitoring is imported by nothing in
+   packages/ or src/ — checked by grep — so no user sees these trends today.
+
+   Reported, not fixed. The two assertions marked DEFECT CHARACTERISED below prove it
+   rather than describe it: they compare a one-day window against a ten-year one and
+   assert they are EQUAL, which no working window could satisfy. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-monitoring")
 };
 
-(* detect degradation: rate < 70% and more than 10 signals *)
-f=degradationdetected(totalsignals:i64;thumbsuprate:i64):i64{
-  if(totalsignals>10){
-    if(thumbsuprate<70){<1}el{<0}
-  }el{<0}
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh file: the signal counts below are exact. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
 };
 
-(* thumbs down rate = 100 - thumbs up rate *)
-f=thumbsdownrate(thumbsuprate:i64):i64{
-  <100-thumbsuprate
+f=signal(model:str;up:bool):$qualitysignal{
+  <$qualitysignal{
+    requestid:"req-1";
+    modelid:model;
+    provider:"anthropic";
+    usecase:"browser-chat";
+    thumbsup:up;
+    coherencescore:0.80;
+    relevancescore:0.90
+  }
 };
 
-(* validate quality signal fields *)
-f=validsignal(requestid:str;modelid:str;provider:str):i64{
-  if(str.len(requestid)==0){<0};
-  if(str.len(modelid)==0){<0};
-  if(str.len(provider)==0){<0};
-  <1
+f=record(store:i64;model:str;up:bool):i64{
+  (* recordsignal returns i64!$lokeerr and T-18 makes its $err arm dead, so the arms here
+     exist to satisfy the type. Whether the write happened is asserted through the row
+     count instead. *)
+  <mt mon.recordsignal(store;signal(model;up)) {
+    $ok:v v;
+    $err:e 0-1
+  }
 };
 
-(* format percentage string *)
-f=pctstr(ratepct:i64):str{
-  <str.concat(str.fromint(ratepct);"%")
+f=trend(store:i64;model:str;days:u32):$qualitytrend{
+  <mt mon.computetrend(store;model;days) {
+    $ok:tr tr;
+    $err:e mon.buildtrend(@();model;days)
+  }
 };
 
-(* pad right to width *)
-f=padright(s:str;width:i64):str{
-  let len=str.len(s);
-  if(len>width){<s};
-  <str.concat(s;"                    ")
+f=firstcol(rows:@$row;col:str):str{
+  if(rows.len>0){
+    let r:$row=rows.get(0);
+    <sdb.rowstr(r;col)
+  }el{
+    <""
+  }
+};
+
+f=createdatof(model:str):str{
+  <mt db.many("SELECT created_at FROM quality_signals WHERE model_id=? LIMIT 1";@(model)) {
+    $ok:rows firstcol(rows;"created_at");
+    $err:e ""
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test buildtrend returns 0 for empty signals *)
-  if(t.assert(buildtrend(0;0;0.0;0.0)==0;"empty signals returns 0 rate")){pass=pass+1}el{fail=fail+1};
+  let store=openfreshstore();
 
-  (* test buildtrend computes correct thumbs-up rate *)
-  if(t.assert(buildtrend(10;8;0.0;0.0)==80;"8/10 thumbs up = 80%")){pass=pass+1}el{fail=fail+1};
+  mt mon.ensuretable(store) { $ok:v v; $err:e 0 };
+  if(t.assert(sdb.tableexists("quality_signals");"the quality_signals table is created")){pass=pass+1}el{fail=fail+1};
 
-  (* test buildtrend 100% thumbs up *)
-  if(t.assert(buildtrend(5;5;0.0;0.0)==100;"5/5 thumbs up = 100%")){pass=pass+1}el{fail=fail+1};
+  (* ── An empty trend ──────────────────────────────────────────────────────────
+     Zero signals must give zero, not a division by zero and not a spurious rate. And it
+     must NOT report degradation: a model nobody has rated is not a model that is
+     failing. *)
+  let empty=trend(store;"unrated-model";7 as u32);
+  if(t.assert(empty.totalsignals==(0 as u32);"a model with no signals has none")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(empty.thumbsuprate==0.0;"and a zero rate rather than a division by zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!empty.degradationdetected;"and is NOT reported as degraded — no evidence is not bad evidence")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(empty.modelid;"unrated-model";"the trend names the model it was asked about")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(empty.perioddays==(7 as u32);"and the window it was asked for")){pass=pass+1}el{fail=fail+1};
 
-  (* test degradation detected when rate < 70% and signals > 10 *)
-  if(t.assert(degradationdetected(20;50)==1;"50% rate with 20 signals is degraded")){pass=pass+1}el{fail=fail+1};
+  (* ── The rate, computed from real rows ───────────────────────────────────────
+     Three up, one down. *)
+  record(store;"model-a";true);
+  record(store;"model-a";true);
+  record(store;"model-a";true);
+  record(store;"model-a";false);
+  let a=trend(store;"model-a";7 as u32);
+  if(t.assert(a.totalsignals==(4 as u32);"four signals are counted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.thumbsuprate==0.75;"three of four is a thumbs-up rate of 0.75")){pass=pass+1}el{fail=fail+1};
 
-  (* test no degradation when rate >= 70% *)
-  if(t.assert(degradationdetected(20;80)==0;"80% rate with 20 signals is not degraded")){pass=pass+1}el{fail=fail+1};
+  (* Signals are per model. A trend for one model must not include another's, or every
+     model converges on the fleet average and the comparison is worthless. *)
+  record(store;"model-b";false);
+  let b=trend(store;"model-b";7 as u32);
+  if(t.assert(b.totalsignals==(1 as u32);"a second model's signals are counted separately")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(b.thumbsuprate==0.0;"with its own rate")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(trend(store;"model-a";7 as u32).totalsignals==(4 as u32);"and the first model's count is unaffected")){pass=pass+1}el{fail=fail+1};
 
-  (* test no degradation when signals <= 10 even with low rate *)
-  if(t.assert(degradationdetected(5;30)==0;"low rate with few signals is not degraded")){pass=pass+1}el{fail=fail+1};
+  (* ── Degradation needs more than ten signals ─────────────────────────────────
+     `if(total > 10)` guards the check. Worth asserting in both directions: it is a
+     deliberate choice not to cry wolf on a handful of ratings, and it also means a model
+     with ten straight thumbs-down is NOT flagged. Both facts belong on the record. *)
+  if(t.assert(!a.degradationdetected;"four signals is too few to declare degradation, even at 0.75")){pass=pass+1}el{fail=fail+1};
 
-  (* test thumbs down rate computation *)
-  if(t.assert(thumbsdownrate(80)==20;"thumbs down rate is 100 - thumbs up rate")){pass=pass+1}el{fail=fail+1};
+  record(store;"model-c";false); record(store;"model-c";false); record(store;"model-c";false);
+  record(store;"model-c";false); record(store;"model-c";false); record(store;"model-c";false);
+  record(store;"model-c";false); record(store;"model-c";false); record(store;"model-c";false);
+  record(store;"model-c";false);
+  let c10=trend(store;"model-c";7 as u32);
+  if(t.assert(c10.totalsignals==(10 as u32);"ten signals recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c10.thumbsuprate==0.0;"all of them negative")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!c10.degradationdetected;"and TEN consecutive thumbs-down is still not flagged: the guard is total > 10, not >= 10")){pass=pass+1}el{fail=fail+1};
 
-  (* test valid signal validation *)
-  if(t.assert(validsignal("req1";"gpt4";"openai")==1;"valid signal accepted")){pass=pass+1}el{fail=fail+1};
+  record(store;"model-c";false);
+  let c11=trend(store;"model-c";7 as u32);
+  if(t.assert(c11.totalsignals==(11 as u32);"the eleventh signal arrives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c11.degradationdetected;"and degradation is detected at eleven")){pass=pass+1}el{fail=fail+1};
 
-  (* test invalid signal: empty request ID *)
-  if(t.assert(validsignal("";"gpt4";"openai")==0;"empty request ID rejected")){pass=pass+1}el{fail=fail+1};
+  (* The 0.7 threshold, from above. Eight up of eleven is 0.727 and must NOT be flagged. *)
+  record(store;"model-d";true); record(store;"model-d";true); record(store;"model-d";true);
+  record(store;"model-d";true); record(store;"model-d";true); record(store;"model-d";true);
+  record(store;"model-d";true); record(store;"model-d";true);
+  record(store;"model-d";false); record(store;"model-d";false); record(store;"model-d";false);
+  let d=trend(store;"model-d";7 as u32);
+  if(t.assert(d.totalsignals==(11 as u32);"eleven signals for a healthy model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(d.thumbsuprate>0.7;"eight of eleven is above the 0.7 threshold")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!d.degradationdetected;"so it is not flagged as degraded")){pass=pass+1}el{fail=fail+1};
 
-  (* test invalid signal: empty model ID *)
-  if(t.assert(validsignal("req1";"";"openai")==0;"empty model ID rejected")){pass=pass+1}el{fail=fail+1};
+  (* ── THE WINDOW ──────────────────────────────────────────────────────────────*)
+  if(t.asserteq(createdatof("model-a");"now()";"DEFECT CHARACTERISED: created_at stores the literal string now(), not a timestamp — the GA5.1 defect, still live here")){pass=pass+1}el{fail=fail+1};
 
-  (* test pctstr formatting *)
-  if(t.assert(str.eq(pctstr(80);"80%");"pctstr formats 80 as 80%")){pass=pass+1}el{fail=fail+1};
+  let oneday=trend(store;"model-a";1 as u32);
+  let tenyears=trend(store;"model-a";3650 as u32);
+  if(t.assert(oneday.totalsignals==tenyears.totalsignals;"DEFECT CHARACTERISED: a ONE-DAY window and a TEN-YEAR window return the identical signal count — the predicate compares 'now()' to a datetime string and is true for every row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(oneday.thumbsuprate==tenyears.thumbsuprate;"DEFECT CHARACTERISED: and the identical rate, so the trend is not a trend")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The averages, and what they are computed through ────────────────────────
+     coherence_score and relevance_score are REAL columns read back through
+     rowf64hundredths, so the averages are exact to the hundredth. 0.80 and 0.90 were
+     recorded for every signal, so the averages must be those values back. *)
+  if(t.assert(a.avgcoherence==0.80;"the coherence average comes back exactly as recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.avgrelevance==0.90;"and the relevance average")){pass=pass+1}el{fail=fail+1};
+
+  (* ── pctstr and the report ───────────────────────────────────────────────────*)
+  if(t.assert(str.contains(mon.pctstr(0.75);"%");"pctstr renders a percentage sign")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(mon.pctstr(0.75);"75");"and scales the fraction to 75 rather than printing 0.75")){pass=pass+1}el{fail=fail+1};
+
+  let report=mon.formatqualityreport(@(a;c11));
+  if(t.assert(str.contains(report;"Quality Report");"the report is titled")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(report;"model-a");"and lists each model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(report;"[DEGRADED] model-c");"marking a degraded model so a reader cannot skim past it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(report;"below threshold");"and saying why")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

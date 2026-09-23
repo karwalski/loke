@@ -5,86 +5,197 @@ m=test.governance.compliance;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=comp:core.governance.compliance;
 
-(* --- stub compliance check logic mirroring core.governance.compliance --- *)
+(* X7.2 — this file used to declare its own $compliancecheck and its own overallstatus,
+   then assert the copy:
 
-(* compute overall status from individual check statuses *)
-f=overallstatus(statuses:@str):str{
-  let result=mut."PASS";
-  lp(let i=0;i<statuses.len;i=i+1){
-    let s=statuses.get(i);
-    if(str.eq(s;"FAIL")){
-      result="FAIL"
-    }el{
-      if(str.eq(s;"WARN")){
-        if(str.eq(result;"FAIL")){}el{
-          result="WARN"
-        }
-      }el{}
-    }
-  };
-  <result
+     f=overallstatus(nfail:i64;nwarn:i64):str{
+       if(nfail>0){<"FAIL"}; if(nwarn>0){<"WARN"}; <"PASS"
+     }
+     ... t.assert(str.eq(overallstatus(1;0);"FAIL");"one failure makes the report FAIL")
+
+   It took counts, where the real function takes the checks themselves and inspects their
+   status strings — so the actual thing that can go wrong, a status string the ladder does
+   not recognise, was unreachable. And there was no database, so none of the five real
+   checks ran at all: `checkauditrecording`, `checkappendonly`,
+   `checkaudittrailcomplete`, `checkencryptionatrest` and `checkconsentrecorded` all read
+   live state, and all five were entirely untested while being the substance of every
+   compliance report this project emits.
+
+   The ladder is the most load-bearing pure function in the module: a report whose
+   `overall` reads PASS while one of its checks says FAIL is a compliance lie with a
+   document behind it. It is asserted in both directions, including the ASSERTED status,
+   which is deliberately NON-BLOCKING and must therefore not drag an otherwise-passing
+   report down. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-compliance")
 };
 
-(* GDPR preset: returns count of checks *)
-f=gdprcheckcount():i64{ <5 };
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh file, because the first assertions are about an EMPTY audit trail and a
+     leftover row from a previous run would invert them. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
 
-(* HIPAA preset: returns count of checks *)
-f=hipaacheckcount():i64{ <4 };
+f=sampleevent(corrid:str):$auditevent{
+  <$auditevent{
+    eventtype:"llm_request";
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:"anthropic";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:150;
+    tokensout:200;
+    costusd:0.0;
+    durationms:320;
+    correlationid:corrid
+  }
+};
 
-(* GDPR has 3 PASS and 2 WARN checks *)
-f=gdprpasscount():i64{ <3 };
-f=gdprwarncount():i64{ <2 };
-
-(* HIPAA has 2 PASS and 2 WARN checks *)
-f=hipaapasscount():i64{ <2 };
-f=hipaawarncount():i64{ <2 };
-
-(* simulate GDPR overall — has WARNs but no FAILs *)
-f=gdproverall():str{ <"WARN" };
-
-(* simulate HIPAA overall — has WARNs but no FAILs *)
-f=hipaaoverall():str{ <"WARN" };
-
-(* format report includes framework name *)
-f=formatreport(framework:str;overall:str):str{
-  <str.concat(framework;str.concat(" Compliance Report\nOverall: ";overall))
+f=statusof(report:$compliancereport;name:str):str{
+  let found=mut."<absent>";
+  lp(let i=0;i<report.checks.len;i=i+1){
+    let c:$compliancecheck=report.checks.get(i);
+    if(str.eq(c.name;name)){
+      found=c.status
+    }el{}
+  };
+  <found
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test overallstatus: all PASS returns PASS *)
-  if(t.assert(str.eq(overallstatus(@("PASS";"PASS";"PASS"));"PASS");"all PASS gives PASS")){pass=pass+1}el{fail=fail+1};
+  let store=openfreshstore();
 
-  (* test overallstatus: any WARN without FAIL returns WARN *)
-  if(t.assert(str.eq(overallstatus(@("PASS";"WARN";"PASS"));"WARN");"WARN present gives WARN")){pass=pass+1}el{fail=fail+1};
+  (* ── The status ladder, on real $compliancecheck values ──────────────────────
+     FAIL dominates WARN dominates PASS, and ASSERTED is non-blocking. *)
+  let allpass=@(
+    $compliancecheck{name:"a";status:"PASS";detail:""};
+    $compliancecheck{name:"b";status:"PASS";detail:""}
+  );
+  if(t.asserteq(comp.overallstatus(allpass);"PASS";"all checks passing gives PASS")){pass=pass+1}el{fail=fail+1};
 
-  (* test overallstatus: any FAIL returns FAIL *)
-  if(t.assert(str.eq(overallstatus(@("PASS";"WARN";"FAIL"));"FAIL");"FAIL present gives FAIL")){pass=pass+1}el{fail=fail+1};
+  let onewarn=@(
+    $compliancecheck{name:"a";status:"PASS";detail:""};
+    $compliancecheck{name:"b";status:"WARN";detail:""}
+  );
+  if(t.asserteq(comp.overallstatus(onewarn);"WARN";"one warning makes the report WARN")){pass=pass+1}el{fail=fail+1};
 
-  (* test overallstatus: FAIL takes precedence over WARN *)
-  if(t.assert(str.eq(overallstatus(@("FAIL";"WARN";"PASS"));"FAIL");"FAIL takes precedence over WARN")){pass=pass+1}el{fail=fail+1};
+  let onefail=@(
+    $compliancecheck{name:"a";status:"PASS";detail:""};
+    $compliancecheck{name:"b";status:"FAIL";detail:""}
+  );
+  if(t.asserteq(comp.overallstatus(onefail);"FAIL";"one failure makes the report FAIL")){pass=pass+1}el{fail=fail+1};
 
-  (* test GDPR preset has expected check count *)
-  if(t.assert(gdprcheckcount()==5;"GDPR has 5 checks")){pass=pass+1}el{fail=fail+1};
+  (* FAIL must dominate WARN whichever order they arrive in. A ladder that returned the
+     LAST status it saw would pass one of these two and fail the other. *)
+  let failthenwarn=@(
+    $compliancecheck{name:"a";status:"FAIL";detail:""};
+    $compliancecheck{name:"b";status:"WARN";detail:""}
+  );
+  if(t.asserteq(comp.overallstatus(failthenwarn);"FAIL";"FAIL dominates WARN when the failure comes first")){pass=pass+1}el{fail=fail+1};
+  let warnthenfail=@(
+    $compliancecheck{name:"a";status:"WARN";detail:""};
+    $compliancecheck{name:"b";status:"FAIL";detail:""}
+  );
+  if(t.asserteq(comp.overallstatus(warnthenfail);"FAIL";"and when it comes second")){pass=pass+1}el{fail=fail+1};
 
-  (* test HIPAA preset has expected check count *)
-  if(t.assert(hipaacheckcount()==4;"HIPAA has 4 checks")){pass=pass+1}el{fail=fail+1};
+  (* ASSERTED is non-blocking by design — it marks a control held somewhere other than
+     stored state. It must not make a report WARN, or every GDPR report would warn
+     forever on rows that are working as intended. *)
+  let asserted=@(
+    comp.asserted("held elsewhere";"a detail");
+    $compliancecheck{name:"b";status:"PASS";detail:""}
+  );
+  if(t.asserteq(comp.overallstatus(asserted);"PASS";"ASSERTED is non-blocking and does not drag a passing report down")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(comp.asserted("n";"d").status;"ASSERTED";"and that is the status it carries")){pass=pass+1}el{fail=fail+1};
 
-  (* test GDPR overall is WARN (has consent and erasure warnings) *)
-  if(t.assert(str.eq(gdproverall();"WARN");"GDPR overall is WARN")){pass=pass+1}el{fail=fail+1};
+  (* An empty check list. Vacuous PASS is the right answer and it is worth pinning:
+     the alternative — a crash or a FAIL — would make a framework with no checks
+     unreportable. *)
+  if(t.asserteq(comp.overallstatus(@());"PASS";"an empty check list is a vacuous PASS, not a crash")){pass=pass+1}el{fail=fail+1};
 
-  (* test HIPAA overall is WARN (has encryption and access control warnings) *)
-  if(t.assert(str.eq(hipaaoverall();"WARN");"HIPAA overall is WARN")){pass=pass+1}el{fail=fail+1};
+  (* ── checkauditrecording on an EMPTY trail ───────────────────────────────────
+     This must be FAIL, and the module's own comment records why: it used to report PASS,
+     which meant a compliance report said the audit log was enabled on an installation
+     that had never recorded a single request. *)
+  if(t.asserteq(comp.checkauditrecording().status;"FAIL";"an EMPTY audit_log FAILS the audit-recording check — it used to report PASS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(comp.auditrowcount()==0;"and the row count agrees it is empty")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(comp.checkaudittrailcomplete(store).status;"FAIL";"and an empty trail cannot be complete")){pass=pass+1}el{fail=fail+1};
 
-  (* test format report includes framework name *)
-  let report=formatreport("GDPR";"WARN");
-  if(t.assert(str.contains(report;"GDPR");"report includes framework name")){pass=pass+1}el{fail=fail+1};
+  (* ── The same two checks with a real trail ───────────────────────────────────*)
+  audit.insertevent(store;sampleevent("corr-comp-1"));
+  audit.insertevent(store;sampleevent("corr-comp-2"));
+  if(t.assert(comp.auditrowcount()==2;"two events are counted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(comp.checkauditrecording().status;"PASS";"a non-empty audit_log passes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(comp.checkauditrecording().detail;"2 event(s)");"and the detail states how many, so the row is evidence rather than a claim")){pass=pass+1}el{fail=fail+1};
 
-  (* test format report includes overall status *)
-  if(t.assert(str.contains(report;"Overall: WARN");"report includes overall status")){pass=pass+1}el{fail=fail+1};
+  (* Completeness RUNS the verifier rather than citing the story that would have written
+     one. The detail must therefore be the verifier's own words. *)
+  let complete=comp.checkaudittrailcomplete(store);
+  if(t.asserteq(complete.status;"PASS";"an intact chain passes the completeness check")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(complete.detail;"audit chain intact");"and the detail is the verifier's own verdict, not a story number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(complete.detail;"GA5.3");"a compliance row that quotes an unfinished story is a placeholder; this one no longer does")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Append-only, read back from the database ────────────────────────────────*)
+  if(t.asserteq(comp.checkappendonly().status;"PASS";"the append-only triggers are installed, read back from sqlite_master")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(comp.checkappendonly().detail;"DROP TRIGGER");"and the detail states the LIMIT of the control rather than overselling it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Encryption at rest: WARN, and derived ───────────────────────────────────
+     This must not say PASS while the toolchain links plain SQLite. It is derived from
+     core.storage.db's one predicate so it cannot drift from reality. *)
+  let enc=comp.checkencryptionatrest();
+  if(t.asserteq(enc.status;"WARN";"encryption at rest WARNS — it does not claim PASS on plain SQLite")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(enc.detail;"NOT encrypted at rest");"and says so in the detail")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Consent, before the table exists ────────────────────────────────────────
+     A missing consent table is a WARN, not a FAIL: consent capture is a feature that may
+     legitimately not be in use. It must not be a PASS. *)
+  let cons=comp.checkconsentrecorded();
+  if(t.asserteq(cons.status;"WARN";"no consent_records table is a WARN, never a PASS")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The two framework reports ───────────────────────────────────────────────*)
+  let gdpr=comp.rungdprchecks(store);
+  if(t.asserteq(gdpr.framework;"GDPR";"the GDPR report names its framework")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gdpr.checks.len==6;"and carries six checks")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gdpr.generatedat>0;"stamped with a real time")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(gdpr;"Audit log enabled");"PASS";"its audit-log row reflects the live table")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(gdpr;"Audit trail append-only");"PASS";"and its append-only row the live triggers")){pass=pass+1}el{fail=fail+1};
+  (* Overall must be WARN, not PASS: the erasure row and the consent row both warn. A
+     GDPR report that came out PASS here would be asserting a right-to-erasure capability
+     that X8.4 has not delivered. *)
+  if(t.asserteq(gdpr.overall;"WARN";"the GDPR report is overall WARN, because erasure and consent both warn — it does not come out PASS")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gdpr.overall;comp.overallstatus(gdpr.checks);"and its overall is derived from its own checks rather than set independently")){pass=pass+1}el{fail=fail+1};
+
+  let hipaa=comp.runhipaachecks(store);
+  if(t.asserteq(hipaa.framework;"HIPAA";"the HIPAA report names its framework")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hipaa.checks.len==5;"and carries five checks")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(hipaa.overall;"WARN";"and is overall WARN: encryption at rest and access controls both warn")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(hipaa.overall;comp.overallstatus(hipaa.checks);"derived from its own checks")){pass=pass+1}el{fail=fail+1};
+
+  (* ── formatreport ────────────────────────────────────────────────────────────
+     Every check has to appear. A formatter that dropped a FAIL row while the overall
+     still said FAIL would leave a reader unable to find out what failed. *)
+  let out=comp.formatreport(gdpr);
+  if(t.assert(str.contains(out;"GDPR Compliance Report");"the formatted report is titled")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"[PASS] Audit log enabled");"and renders each check with its status")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"[ASSERTED]");"including the non-blocking ASSERTED rows, which must not be hidden")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"Overall: WARN");"and states the overall verdict")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

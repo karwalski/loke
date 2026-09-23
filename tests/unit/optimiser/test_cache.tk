@@ -5,80 +5,172 @@ m=test.optimiser.cache;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=inf:core.models.infer;
+i=ch:core.optimiser.cache;
 
-(* --- stub cache functions --- *)
+(* X7.2 — this file used to declare six stand-ins for core.optimiser.cache and assert
+   against them. Two of the six are the reason it had to be rewritten rather than extended:
 
-(* default config values *)
-f=defaultthreshold():i64{ <92 };
-f=defaultttl():i64{ <86400 };
+     f=defaultthreshold():i64{ <92 };
+     f=defaultttl():i64{ <86400 };
+     ...
+     if(t.assert(defaultthreshold()==92;"default similarity threshold is 92")){...}
 
-(* simulate cache: store entries in stub *)
-f=isexpired(createdat:i64;now:i64;ttl:i64):i64{
-  let age=now-createdat;
-  if(age>ttl){<1};
-  <0
-};
+   The module's threshold is an f64 of 0.92 on a $cacheconfig, not an i64 of 92, and the
+   module has no `defaultthreshold` or `defaultttl` at all — it has `defaultconfig(datadir)`.
+   The stub also declared its own `lookup(score;age;ttl;threshold):i64` and asserted a
+   hit/miss decision over four integers, while the real `lookup` takes a collection handle, a
+   prompt, an inference pool and a config, and answers with a $cachehit.
 
-(* similarity score check against threshold *)
-f=isabovethreshold(score:i64;threshold:i64):i64{
-  if(score>=threshold){<1};
-  <0
-};
+   So the stub could not have caught either of the two defects this module actually carried:
 
-(* format stats string *)
-f=formatstats(hits:i64;misses:i64;entries:i64;evictions:i64):str{
-  let hitspart=str.concat("Cache: ";str.fromi64(hits));
-  let misspart=str.concat(hitspart;str.concat(" hits / ";str.fromi64(misses)));
-  let entrypart=str.concat(misspart;str.concat(" misses / ";str.fromi64(entries)));
-  let evictpart=str.concat(entrypart;str.concat(" entries / ";str.fromi64(evictions)));
-  <str.concat(evictpart;" evicted")
-};
+     - `formatstats`'s whole body was a bare expression with no `<`, so toke evaluated the
+       concatenation and discarded it and the function returned GARBAGE (the wider form of
+       T-19). The stub had its own formatstats, which worked.
+     - GA1.6: `lookup` returned a $cacheresult whose `$some` carried an i64, and it
+       constructed `$some:0` on every hit — so a hit returned the literal zero and the
+       response could never be handed over. The stub's lookup returned 1 for a hit.
 
-(* simulate lookup result: 0=miss, 1=hit *)
-f=lookup(score:i64;age:i64;ttl:i64;threshold:i64):i64{
-  if(score<threshold){<0};
-  if(age>ttl){<0};
-  <1
+   WHAT IT COVERS NOW, and the part that matters most: **no embedding model means a MISS,
+   never a guess.** `inf.embedtext` used to return a constant 0, so every lookup and every
+   store searched with the same zero embedding and the semantic cache matched on nothing to
+   do with the prompt. A cache that guesses is worse than no cache, and in a privacy product
+   the failure mode is serving one user's cached answer in place of another's. An empty
+   inference pool is exactly the state of a machine that has not pulled nomic-embed-text, so
+   that path is asserted here against the real module. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: a string returned by std.homedir() is truncated when
+     interpolated (T-21). Its own directory so no other test's entries are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-cache-unit")
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* T1: default threshold is 92% *)
-  if(t.assert(defaultthreshold()==92;"default similarity threshold is 92")){pass=pass+1}el{fail=fail+1};
+  let dir=testdir();
+  file.mkdir(dir);
 
-  (* T2: default TTL is 86400 seconds (24 hours) *)
-  if(t.assert(defaultttl()==86400;"default TTL is 86400 seconds")){pass=pass+1}el{fail=fail+1};
+  (* ── The configuration a user gets without configuring anything ──────────────*)
+  if(t.asserteq(ch.embedmodel();"nomic-embed-text";"the cache embeds with nomic-embed-text")){pass=pass+1}el{fail=fail+1};
 
-  (* T3: entry within TTL is not expired *)
-  if(t.assert(isexpired(1000;1100;86400)==0;"entry 100s old with 86400s TTL is not expired")){pass=pass+1}el{fail=fail+1};
+  let cfg=ch.defaultconfig(dir);
+  if(t.assert((cfg.ttlseconds as i64)==86400;"the default TTL is 86400 seconds — twenty-four hours")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cfg.datadir;dir;"and the config carries the data directory it was given")){pass=pass+1}el{fail=fail+1};
+  (* threshold is an f64 FIELD of a struct, which crosses a module boundary intact — only a
+     bare f64 RETURN is corrupted (T-20). Bounded rather than compared for equality, so the
+     assertion does not rest on how 0.92 is rendered. A threshold this high is the whole
+     safety margin of a semantic cache: at 0.5 it would serve answers to different
+     questions. *)
+  if(t.assert(cfg.threshold>0.90;"the similarity threshold is above 0.90")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cfg.threshold<0.95;"and below 0.95 — it is 0.92, not an integer 92")){pass=pass+1}el{fail=fail+1};
 
-  (* T4: entry beyond TTL is expired *)
-  if(t.assert(isexpired(1000;100000;86400)==1;"entry 99000s old with 86400s TTL is expired")){pass=pass+1}el{fail=fail+1};
+  (* ── The sentinel ───────────────────────────────────────────────────────────
+     $cachehit is a plain struct with a predicate, not a result, because a result whose
+     error side is a user-declared sum cannot be discriminated by its caller — toke takes
+     the FIRST arm whatever the value is (T-18) — and reading a field off the mis-bound
+     value segfaults. A cache is the wrong place for that. *)
+  if(t.assert(!ch.ishit(ch.nohit());"nohit() is not a hit")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ch.nohit().response;"";"and carries no response")){pass=pass+1}el{fail=fail+1};
 
-  (* T5: score above threshold is a hit *)
-  if(t.assert(isabovethreshold(95;92)==1;"score 95 above threshold 92")){pass=pass+1}el{fail=fail+1};
+  (* An EMPTY response means no hit, so the sentinel cannot collide with real data: a
+     provider that returned nothing is not something worth serving from a cache. *)
+  if(t.assert(!ch.ishit(ch.hitfrom("";0.99;5));"an empty response collapses to the sentinel even at a perfect score")){pass=pass+1}el{fail=fail+1};
 
-  (* T6: score below threshold is a miss *)
-  if(t.assert(isabovethreshold(88;92)==0;"score 88 below threshold 92")){pass=pass+1}el{fail=fail+1};
+  let hit=ch.hitfrom("the cached answer";0.97;42);
+  if(t.assert(ch.ishit(hit);"a non-empty response IS a hit")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(hit.response;"the cached answer";"and it carries the response — GA1.6, where a hit used to carry the literal zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((hit.ageseconds as i64)==42;"and the age it was built with")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hit.score>0.96;"and the similarity score, as a struct field rather than a bare f64 return")){pass=pass+1}el{fail=fail+1};
 
-  (* T7: score exactly at threshold is a hit *)
-  if(t.assert(isabovethreshold(92;92)==1;"score equal to threshold counts as hit")){pass=pass+1}el{fail=fail+1};
+  (* An unparseable payload is a miss, not a served answer. *)
+  if(t.assert(!ch.ishit(ch.cacheparsewarn());"a payload that will not parse is a miss")){pass=pass+1}el{fail=fail+1};
 
-  (* T8: lookup hit — high score, within TTL *)
-  if(t.assert(lookup(95;100;86400;92)==1;"lookup with high score and fresh entry is a hit")){pass=pass+1}el{fail=fail+1};
+  (* ── tof64: the float-width conversion ──────────────────────────────────────
+     std.models.infer.embed answers with @f32 and std.vecstore takes @f64. Handing one
+     straight to the other is a mismatch toke accepts with NO diagnostic — 4-byte floats
+     read as 8-byte ones — so every stored vector and every query vector was a different
+     vector from the one the embedding model produced. tof64 converts element by element,
+     which is the only honest way across.
 
-  (* T9: lookup miss — high score but expired *)
-  if(t.assert(lookup(95;100000;86400;92)==0;"lookup with expired entry is a miss")){pass=pass+1}el{fail=fail+1};
+     ONLY THE LENGTH IS ASSERTED, AND THAT IS A FINDING, NOT A CHOICE.
 
-  (* T10: lookup miss — low score *)
-  if(t.assert(lookup(80;100;86400;92)==0;"lookup with low similarity score is a miss")){pass=pass+1}el{fail=fail+1};
+     Reading an element out of an `@f32` is broken in this toolchain. Measured, with the
+     module out of the picture entirely:
 
-  (* T11: formatstats produces correct output *)
-  let stats=formatstats(5;3;10;2);
-  if(t.assert(str.contains(stats;"5 hits");"stats contains hit count")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(stats;"3 misses");"stats contains miss count")){pass=pass+1}el{fail=fail+1};
+       let a=1.5 as f32;      str.fromfloat(a as f64)        -> "1.5"          correct
+       let d=@(1.5;2.5);      str.fromfloat(d.get(0))        -> "1.5"          correct
+       let s=@(1.5 as f32);   str.fromfloat(s.get(0) as f64) -> "4.60943e+18"  WRONG
+       push instead of a literal: same "4.60943e+18"
+
+     4.60943e+18 is 4609434218613702656, which is the IEEE-754 double bit pattern of 1.5
+     (0x3FF8000000000000) read as a number. So an @f32 element access hands back the raw
+     8-byte slot instead of widening a 4-byte float. A scalar f32 is fine and an @f64 array
+     is fine; it is specifically @f32 element access. Same family as T-22, where the
+     interface and the implementation disagree about a float's representation.
+
+     Why that matters beyond this test: `tof64`'s body is
+     `out.push(v.get(i) as f64)` — it uses exactly the accessor measured broken above. If
+     `inf.embed`'s `[f32]` is laid out the way a toke-built `@f32` is, then the conversion
+     added to FIX the width mismatch is itself converting garbage, and the semantic cache's
+     similarity scores are meaningless. That cannot be settled from here: it needs a loaded
+     nomic-embed-text to produce a real embedding, and the assertions below establish that
+     no such model is present in this environment. Reported, not fixed. *)
+  let f32s=@(1.5 as f32;2.5 as f32;0.0 as f32);
+  let f64s=ch.tof64(f32s);
+  if(t.assert(f64s.len==3;"tof64 preserves the length of the embedding — its element VALUES cannot be asserted from toke, see above")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The vector store ───────────────────────────────────────────────────────
+     vs.open returns VecStore!VecErr and vs.collection returns VecCollection!VecErr. Both
+     bodies used to return those RESULT wrappers as bare i64 handles, so what a caller held
+     was a pointer to a result and not to a store. A std.* result DOES discriminate, so the
+     module matches them and uses 0 as the "no store" sentinel. *)
+  let store=ch.open(cfg);
+  if(t.assert(store!=0;"the vector store opens and yields a handle, not a pointer to a result")){pass=pass+1}el{fail=fail+1};
+  let col=ch.collection(store);
+  if(t.assert(col!=0;"and the prompt_cache collection opens on it")){pass=pass+1}el{fail=fail+1};
+
+  (* The guard. `collection` takes its parameter as `vstore` and not `store` because this
+     module declares f=store, and a parameter of that name resolves to the FUNCTION — which
+     is why the guard could not be written at all until the parameter was renamed. *)
+  if(t.assert(ch.collection(0)==0;"collection(0) refuses rather than dereferencing a null store")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The fail-safe: no embedding model is a MISS, never a guess ──────────────
+     An empty pool is the state of any machine that has not pulled the embedding model.
+     embed returns an empty @f32, and both lookup and store must decline. *)
+  let pool=inf.newpool(dir);
+  if(t.assert(!inf.isloaded(pool;ch.embedmodel());"the embedding model is not loaded in a fresh pool")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(inf.embed(pool;ch.embedmodel();"anything").len==0;"so embedding yields nothing")){pass=pass+1}el{fail=fail+1};
+
+  let lookedup=ch.lookup(col;"what is the capital of France?";pool;cfg);
+  if(t.assert(!ch.ishit(lookedup);"a lookup with no embedding model is a MISS — it must never match on a zero vector")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lookedup.response;"";"and hands back no response")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(!ch.store(col;"a prompt";"a response";pool);"and store declines rather than writing an entry keyed on a zero vector")){pass=pass+1}el{fail=fail+1};
+
+  (* The same miss through the kept result wrapper. $cacheresult is a plain user sum, so
+     `mt` DOES discriminate here — T-18 kills only the error arm of an X!$err. *)
+  mt ch.lookupresult(col;"what is the capital of France?";pool;cfg) {
+    $none:v if(t.assert(true;"lookupresult reports the same miss as $none")){pass=pass+1}el{fail=fail+1};
+    $some:v if(t.assert(false;"lookupresult must not report a hit when there is no embedding model")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* ── Eviction on an empty collection removes nothing and does not fail ───────*)
+  if(t.assert((ch.evictexpired(col;86400) as i64)==0;"evicting an empty collection removes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── formatstats: the T-19 regression ───────────────────────────────────────
+     The whole body was a bare expression with no `<`, so the concatenation was evaluated
+     and discarded and the function returned whatever was in the return register. Every
+     assertion below was garbage. *)
+  let stats=ch.formatstats($cachestats{hits:5;misses:3;entries:10;evictions:2});
+  if(t.assert(str.contains(stats;"5 hits");"the stats line reports the hit count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stats;"3 misses");"and the miss count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stats;"10 entries");"and the entry count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stats;"2 evicted");"and the eviction count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stats;"Cache:");"and is labelled, rather than being a bare number or the garbage a discarded tail returns")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

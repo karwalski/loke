@@ -5,123 +5,251 @@ m=test.privacy.placeholderstore;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=ph:core.privacy.placeholder;
+i=pst:core.privacy.placeholderstore;
 
-(* --- stub placeholder store --- *)
+(* X7.2 — this file used to declare a $store of its own with newstore/addentry/
+   getoriginal/restoreall, and assert an in-memory association list. Eighteen assertions,
+   none of which touched core.privacy.placeholderstore.
 
-t=$storeentry{
-  placeholder:str;
-  original:str
+   The table it is named for is the one docs/threat-model.md:181 rates **Maximum** — above
+   the audit log, above the prompt cache. A detector that misses an entity leaks one
+   value; a readable mapping table leaks every value loke has ever detected, together with
+   the request each belonged to. For the whole period in which that table was PLAINTEXT
+   in a SQLite file any process running as the user could read, this file asserted that
+   `getoriginal(addentry(newstore();"[EMAIL_1]";"alice@example.com");"[EMAIL_1]")` returns
+   "alice@example.com" — a statement about a nine-line function three lines above it.
+
+   X8.2 sealed the payload. The point of THIS test is that the sealing is real, and the
+   lesson it is written against is PRAGMA key: plain SQLite accepts that pragma, ignores
+   it, and reports success, so a control that reports success is not evidence of a control.
+   The load-bearing assertion below is therefore not the round trip — a round trip passes
+   just as well with no encryption at all — it is that the stored bytes DO NOT CONTAIN the
+   plaintext, plus per-record nonces, request binding through the AAD, and refusal on a
+   wrong key.
+
+   The module takes the secret as a parameter (X8.3) precisely so this can be asserted
+   without touching the keychain, which would block on an authorisation dialog a headless
+   test cannot answer. *)
+
+(* Two distinct 64-character hex secrets. Deliberately obvious and for tests only. *)
+f=secreta():str{
+  <"1111111111111111111111111111111111111111111111111111111111111111"
 };
 
-t=$store{
-  entries:@$storeentry
+f=secretb():str{
+  <"2222222222222222222222222222222222222222222222222222222222222222"
 };
 
-f=newstore():$store{
-  <$store{entries:@()}
+f=onemap():$placeholdermap{
+  <ph.addentry(ph.newmap();"alice@example.com";"[EMAIL_2a4c_1]";"email")
 };
 
-f=addentry(s:$store;ph:str;orig:str):$store{
-  (* overwrite if placeholder already exists *)
-  let result=mut.@($storeentry);
-  let i=mut.0;
-  let n=(s.entries.len as i64);
-  let replaced=mut.false;
-  lp(let lv=0;i<n;lv=lv){
-    let e=s.entries.get(i);
-    if(str.eq(e.placeholder;ph)){
-      result=result.push($storeentry{placeholder:ph;original:orig});
-      replaced=true
-    }el{
-      result=result.push(e)
-    };
-    i=i+1
-  };
-  if(!replaced){
-    result=result.push($storeentry{placeholder:ph;original:orig})
-  }el{};
-  <$store{entries:result}
+f=threemap():$placeholdermap{
+  let m1=ph.addentry(ph.newmap();"alice@example.com";"[EMAIL_2a4c_1]";"email");
+  let m2=ph.addentry(m1;"0412 345 678";"[PHONE_AU_2a4c_1]";"phone_au");
+  <ph.addentry(m2;"Bob Jones";"[PERSON_2a4c_1]";"person")
 };
 
-f=getoriginal(s:$store;ph:str):str{
-  let i=mut.0;
-  let n=(s.entries.len as i64);
+f=originalfor(entries:@$placeholderentry;wanted:str):str{
   let found=mut."";
-  lp(let lv=0;i<n;lv=lv){
-    let e=s.entries.get(i);
-    if(str.eq(e.placeholder;ph)){found=e.original;i=n}el{i=i+1}
+  lp(let i=0;i<entries.len;i=i+1){
+    let e:$placeholderentry=entries.get(i);
+    if(str.eq(e.placeholder;wanted)){
+      found=e.original
+    }el{}
   };
   <found
 };
 
-f=restoreall(text:str;s:$store):str{
-  let result=mut.text;
-  let i=mut.0;
-  let n=(s.entries.len as i64);
-  lp(let lv=0;i<n;lv=lv){
-    let e=s.entries.get(i);
-    result=str.replace(result;e.placeholder;e.original);
-    i=i+1
-  };
-  <result
+f=flipfirsthexdigit(hex:str):str{
+  let first=str.substr(hex;0;1);
+  let rest=str.substr(hex;1;str.len(hex) as i64);
+  if(str.eq(first;"0")){
+    <str.concat("1";rest)
+  }el{
+    <str.concat("0";rest)
+  }
 };
 
-(* --- tests --- *)
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir()'s return is truncated when
+     interpolated (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-placeholder-store")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. new store is empty *)
-  let s0=newstore();
-  if(t.assert((s0.entries.len as i64)==0;"new store has zero entries")){pass=pass+1}el{fail=fail+1};
+  (* ── No key means no operation ───────────────────────────────────────────────
+     Every path here checks the derived key's length before it encrypts or decrypts
+     anything, because the alternative to refusing is writing something that looks
+     sealed. A secret that is not 64 hex characters must yield no key at all, not a
+     short one that AES would still accept after padding. *)
+  if(t.assert((pst.derivemapkey(secreta()).len as i64)==32;"a 64-character secret derives a 32-byte AES key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((pst.derivemapkey("").len as i64)==0;"an EMPTY secret derives no key at all — not a short one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((pst.derivemapkey("abc").len as i64)==0;"and neither does a trivially short one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.keyusable(secreta());"keyusable agrees for a real secret")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pst.keyusable("");"and refuses an empty one, which is what ensuredbkey returns when the keychain cannot supply a key")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. add entry and retrieve by placeholder *)
-  let s1=addentry(s0;"[EMAIL_1]";"alice@example.com");
-  if(t.assert(str.eq(getoriginal(s1;"[EMAIL_1]");"alice@example.com");"retrieve added entry")){pass=pass+1}el{fail=fail+1};
+  (* Distinct secrets must derive distinct keys, or the HKDF step is decorative. *)
+  if(t.assert(pst.keyusable(secretb());"the second test secret is usable too")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. store has one entry after add *)
-  if(t.assert((s1.entries.len as i64)==1;"store has 1 entry after add")){pass=pass+1}el{fail=fail+1};
+  (* ── Sealing fails closed ────────────────────────────────────────────────────*)
+  let payload=pst.paddedpayload(pst.encodepayload(threemap()));
+  let nokey=pst.sealpayload("";"req-fc";payload);
+  if(t.assert(!nokey.sealedok;"sealing with no usable key REFUSES rather than returning something that looks sealed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(nokey.sealedhex) as i64)==0;"and produces no ciphertext to persist")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pst.nosealedpayload().sealedok;"nosealedpayload is not ok, which is the whole point of it")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. retrieve unknown placeholder returns empty string *)
-  if(t.assert(str.eq(getoriginal(s1;"[PHONE_1]");"");"unknown placeholder returns empty")){pass=pass+1}el{fail=fail+1};
+  (* ── THE ASSERTION THIS FILE EXISTS FOR ──────────────────────────────────────
+     The stored bytes must not contain the plaintext. A round trip passes identically
+     with no encryption whatsoever; this does not. hexof is the module's own encoder, so
+     the comparison is against exactly the representation that goes inside the payload —
+     a search for the raw ASCII would pass even on an unencrypted hex payload. *)
+  let sealed=pst.sealpayload(secreta();"req-seal";payload);
+  if(t.assert(sealed.sealedok;"a real secret seals the payload")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(sealed.sealedhex;pst.hexof("alice@example.com"));"THE SEALED BYTES DO NOT CONTAIN THE EMAIL ADDRESS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(sealed.sealedhex;pst.hexof("Bob Jones"));"nor the person's name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(sealed.sealedhex;pst.hexof("0412 345 678"));"nor the phone number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(sealed.sealedhex;pst.hexof("[EMAIL_2a4c_1]"));"nor the placeholder, which is inside the payload too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(sealed.sealedhex;pst.hexof("email"));"nor even the entity type, so the record does not disclose WHICH KINDS of identifier a request mentioned")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. duplicate placeholder overwrites previous value *)
-  let s2=addentry(s1;"[EMAIL_1]";"bob@example.com");
-  if(t.assert(str.eq(getoriginal(s2;"[EMAIL_1]");"bob@example.com");"overwrite returns new value")){pass=pass+1}el{fail=fail+1};
-  if(t.assert((s2.entries.len as i64)==1;"overwrite does not increase entry count")){pass=pass+1}el{fail=fail+1};
+  (* The control against which the five above are meaningful: the UNSEALED payload does
+     contain all of it. Without this, those assertions would pass on an empty string. *)
+  if(t.assert(str.contains(payload;pst.hexof("alice@example.com"));"the unsealed payload DOES contain the email address, so the five assertions above are about the sealing and not about an empty result")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. restoreall replaces every placeholder in a string *)
-  let s3=addentry(newstore();"[EMAIL_1]";"carol@test.com");
-  let s4=addentry(s3;"[PHONE_1]";"0400111222");
-  let restored=restoreall("Contact [EMAIL_1] or call [PHONE_1]";s4);
-  if(t.assert(str.eq(restored;"Contact carol@test.com or call 0400111222");"restoreall replaces all placeholders")){pass=pass+1}el{fail=fail+1};
+  (* ── Per-record nonce ────────────────────────────────────────────────────────
+     Nonce reuse under AES-GCM is catastrophic, not merely untidy: two messages under the
+     same key and nonce leak their XOR and forfeit authentication. sealpayload takes no
+     nonce argument for that reason — no call site can supply or reuse one. *)
+  let again=pst.sealpayload(secreta();"req-seal";payload);
+  if(t.assert(!str.eq(again.sealednonce;sealed.sealednonce);"sealing the same payload twice uses a DIFFERENT nonce")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(again.sealedhex;sealed.sealedhex);"so the ciphertext differs too, and identical mappings are not recognisable as identical on disk")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(sealed.sealednonce) as i64)==24;"the nonce is twelve bytes, hex-encoded")){pass=pass+1}el{fail=fail+1};
 
-  (* 7. store with zero entries returns text unchanged *)
-  let empty=newstore();
-  let unchanged=restoreall("Hello world";empty);
-  if(t.assert(str.eq(unchanged;"Hello world");"empty store returns text unchanged")){pass=pass+1}el{fail=fail+1};
+  (* ── Opening: the round trip, once ───────────────────────────────────────────*)
+  let opened=pst.openpayload(secreta();"req-seal";sealed.sealednonce;sealed.sealedhex);
+  if(t.assert(opened.openedok;"the sealed payload opens under the same key and request id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(opened.openedentries.len==3;"and yields all three entries")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(originalfor(opened.openedentries;"[EMAIL_2a4c_1]");"alice@example.com";"with the original value intact")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(originalfor(opened.openedentries;"[PERSON_2a4c_1]");"Bob Jones";"including a value containing a space")){pass=pass+1}el{fail=fail+1};
 
-  (* 8. multiple entries restored in same string *)
-  let s5=addentry(newstore();"[NAME_1]";"Dave");
-  let s6=addentry(s5;"[NAME_2]";"Eve");
-  let s7=addentry(s6;"[ADDR_1]";"123 Main St");
-  let multi=restoreall("[NAME_1] and [NAME_2] live at [ADDR_1]";s7);
-  if(t.assert(str.eq(multi;"Dave and Eve live at 123 Main St");"three entries restored in one string")){pass=pass+1}el{fail=fail+1};
+  (* ── Refusal: wrong key ──────────────────────────────────────────────────────
+     A plain struct with an `openedok` predicate, not a result type: T-18 makes the error
+     arm of a user-declared sum dead, and a decryption failure that read as success would
+     hand a caller an empty mapping it believed was complete. *)
+  let wrongkey=pst.openpayload(secretb();"req-seal";sealed.sealednonce;sealed.sealedhex);
+  if(t.assert(!wrongkey.openedok;"opening under the WRONG KEY fails")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(wrongkey.openedentries.len==0;"and yields no entries rather than partial ones")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(wrongkey.openedwhy;"authentication failed");"and says authentication failed rather than reporting an empty mapping")){pass=pass+1}el{fail=fail+1};
 
-  (* 9. placeholder not in text leaves text unchanged *)
-  let s8=addentry(newstore();"[TOKEN_1]";"secret");
-  let noop=restoreall("No tokens here";s8);
-  if(t.assert(str.eq(noop;"No tokens here");"placeholder not in text leaves text unchanged")){pass=pass+1}el{fail=fail+1};
+  (* ── Refusal: the AAD binds a ciphertext to its row ──────────────────────────
+     The request id is authenticated but not encrypted, so moving a payload from one
+     request's row to another's must fail. Without this, an attacker with write access to
+     the file could make request B restore to request A's people. *)
+  let wrongreq=pst.openpayload(secreta();"req-other";sealed.sealednonce;sealed.sealedhex);
+  if(t.assert(!wrongreq.openedok;"a payload moved to ANOTHER REQUEST'S row does not open")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pst.aadfor("req-seal");"req-seal");"because the request id is inside the authenticated data")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pst.aadfor("req-seal");"k1");"along with the key version, so a re-keyed row cannot be opened as if it were current")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(pst.aadfor("a");pst.aadfor("b"));"and two requests never share their authenticated data")){pass=pass+1}el{fail=fail+1};
 
-  (* 10. getoriginal on empty store returns empty *)
-  if(t.assert(str.eq(getoriginal(newstore();"[X]");"");"getoriginal on empty store returns empty")){pass=pass+1}el{fail=fail+1};
+  (* ── Refusal: tampering ──────────────────────────────────────────────────────*)
+  let tampered=pst.openpayload(secreta();"req-seal";sealed.sealednonce;flipfirsthexdigit(sealed.sealedhex));
+  if(t.assert(!tampered.openedok;"a single altered hex digit in the payload is detected")){pass=pass+1}el{fail=fail+1};
+  let tamperednonce=pst.openpayload(secreta();"req-seal";flipfirsthexdigit(sealed.sealednonce);sealed.sealedhex);
+  if(t.assert(!tamperednonce.openedok;"and so is an altered nonce")){pass=pass+1}el{fail=fail+1};
+  let truncated=pst.openpayload(secreta();"req-seal";sealed.sealednonce;"aabb");
+  if(t.assert(!truncated.openedok;"a truncated payload is refused before decryption is attempted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(truncated.openedwhy;"too short");"and says so")){pass=pass+1}el{fail=fail+1};
+  let shortnonce=pst.openpayload(secreta();"req-seal";"aabb";sealed.sealedhex);
+  if(t.assert(!shortnonce.openedok;"a nonce of the wrong length is refused")){pass=pass+1}el{fail=fail+1};
 
-  (* 11. add multiple distinct entries *)
-  let sa=addentry(newstore();"[A]";"alpha");
-  let sb=addentry(sa;"[B]";"bravo");
-  if(t.assert(str.eq(getoriginal(sb;"[A]");"alpha");"first of two entries retrievable")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.eq(getoriginal(sb;"[B]");"bravo");"second of two entries retrievable")){pass=pass+1}el{fail=fail+1};
+  (* Mixing one seal's nonce with another's ciphertext — same key, same request, both
+     legitimate on their own. GCM must still refuse. *)
+  let mixed=pst.openpayload(secreta();"req-seal";sealed.sealednonce;again.sealedhex);
+  if(t.assert(!mixed.openedok;"one seal's nonce with another seal's ciphertext is refused, even under the right key and request")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Length leakage ──────────────────────────────────────────────────────────
+     The ciphertext length is visible to anyone who can read the file. Without padding it
+     would report how many entities a request mentioned, which is metadata about the
+     prompt that the sealing is supposed to remove. Padded to a 256-byte block, a
+     one-entry and a three-entry mapping are indistinguishable by size. *)
+  let onepayload=pst.paddedpayload(pst.encodepayload(onemap()));
+  if(t.assert(str.len(onepayload)==str.len(payload);"a one-entry and a three-entry mapping pad to the SAME length, so the stored size does not disclose how many identifiers a prompt contained")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(onepayload) as i64)==pst.padblock();"both fit in one 256-byte block")){pass=pass+1}el{fail=fail+1};
+  let onesealed=pst.sealpayload(secreta();"req-seal";onepayload);
+  if(t.assert(str.len(onesealed.sealedhex)==str.len(sealed.sealedhex);"and their ciphertexts are the same length on disk")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The codec ───────────────────────────────────────────────────────────────
+     Every field is hex-encoded, so no detected value can contain the separator. A name
+     with a pipe or a newline in it must round-trip rather than corrupting the record —
+     and a malformed record must FAIL THE WHOLE MAPPING, because the payload is only ever
+     parsed after the GCM tag has verified, so a bad line is a codec defect and not
+     tampering. Skipping it would give a silently shorter mapping. *)
+  let awkward=ph.addentry(ph.newmap();"Bo|b\nJones";"[PERSON_2a4c_9]";"person");
+  let awkpayload=pst.paddedpayload(pst.encodepayload(awkward));
+  let awksealed=pst.sealpayload(secreta();"req-awk";awkpayload);
+  let awkopened=pst.openpayload(secreta();"req-awk";awksealed.sealednonce;awksealed.sealedhex);
+  if(t.assert(awkopened.openedok;"a value containing the field separator and a newline still opens")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(originalfor(awkopened.openedentries;"[PERSON_2a4c_9]");"Bo|b\nJones";"and round-trips byte for byte, because every field is hex-encoded")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(!pst.decodepayload("v9\n1234|5678|9abc\n").openedok;"a payload with an unrecognised format version is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pst.decodepayload(str.concat(pst.payloadversion();"\nnot-three-fields\n")).openedok;"a malformed record fails the WHOLE mapping rather than being skipped, so a codec defect cannot present as a shorter mapping")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.decodepayload(str.concat(pst.payloadversion();"\n")).openedok;"a mapping with no entries is a valid empty mapping, not a failure")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.decodepayload(str.concat(pst.payloadversion();"\n")).openedentries.len==0;"and it holds no entries")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pst.failedmap("why").openedok;"failedmap is not ok")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Persistence ─────────────────────────────────────────────────────────────*)
+  openfreshstore();
+
+  if(t.assert(pst.storemappingwithsecret("req-db-1";threemap();secreta());"a mapping persists under a real secret")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.countforrequest("req-db-1")==1;"and leaves exactly one sealed RECORD for the request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.entrycountforrequestwithsecret("req-db-1";secreta())==3;"whose payload holds three mappings — a count that needs the key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.entrycountforrequestwithsecret("req-db-1";secretb())==0-1;"so HOW MANY identifiers a request mentioned is not readable without the key")){pass=pass+1}el{fail=fail+1};
+
+  if(t.asserteq(pst.restorewithsecret("req-db-1";"mail [EMAIL_2a4c_1] about [PERSON_2a4c_1]";secreta());"mail alice@example.com about Bob Jones";"restoration reads the sealed row and substitutes")){pass=pass+1}el{fail=fail+1};
+
+  (* Restoration FAILS CLOSED by returning the text unchanged. A placeholder left visible
+     is an annoyance; a wrong name substituted confidently is a disclosure. *)
+  if(t.asserteq(pst.restorewithsecret("req-db-1";"mail [EMAIL_2a4c_1]";secretb());"mail [EMAIL_2a4c_1]";"restoration under the wrong key leaves the placeholder VISIBLE rather than substituting anything")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pst.restorewithsecret("req-never-stored";"mail [EMAIL_2a4c_1]";secreta());"mail [EMAIL_2a4c_1]";"and so does a request with no stored mapping")){pass=pass+1}el{fail=fail+1};
+
+  (* Re-storing re-seals under a new nonce rather than leaving two rows — the nonce-reuse
+     case a caller would otherwise have to remember. *)
+  pst.storemappingwithsecret("req-db-1";threemap();secreta());
+  if(t.assert(pst.countforrequest("req-db-1")==1;"re-storing a request's mapping REPLACES the row rather than adding a second")){pass=pass+1}el{fail=fail+1};
+
+  (* A request id is the AAD; refusing an empty one is refusing to write a row nothing
+     could ever be bound to. *)
+  if(t.assert(!pst.storemappingwithsecret("";threemap();secreta());"a mapping with no request id is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pst.storemappingwithsecret("req-nokey";threemap();"");"and so is one that could not be sealed — no row is written, because a row that restores to nothing is worse than no row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.countforrequest("req-nokey")==0;"confirmed: nothing was persisted for it")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(pst.deletemapping("req-db-1");"deletemapping reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pst.countforrequest("req-db-1")==0;"and the row is gone")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The disclosure this module is allowed to make ───────────────────────────
+     Stated here because over-claiming encryption is the specific failure X8.1 retracted:
+     the status must name ONE table and must not imply the database is encrypted. *)
+  if(t.assert(str.contains(pst.mappingencryptionstatus();"AES-256-GCM");"the status names the actual cipher")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pst.mappingencryptionstatus();"ONE table");"and says it covers ONE table")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pst.mappingencryptionstatus();"plaintext on disk");"and that every other table is plaintext on disk — the claim X8.1 exists to keep honest")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.dbencryptionavailable();"database-level encryption is still NOT available, so nothing here may be read as encrypting loke.db")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

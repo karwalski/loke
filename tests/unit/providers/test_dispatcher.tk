@@ -5,85 +5,127 @@ m=test.providers.dispatcher;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=pt:core.providers.types;
+i=disp:core.providers.dispatcher;
 
-(* --- stub dispatcher functions --- *)
+(* X7.2 — this file used to declare its own provider-selection function and assert against
+   it. The module's own comment records what that cost:
 
-f=route(anthropickey:str;openaikey:str;preferred:str):str{
-  (* if anthropic key is set and preferred is anthropic or empty, use anthropic *)
-  if(str.len(anthropickey)>0){
-    if(str.eq(preferred;"openai")){
-      if(str.len(openaikey)>0){
-        <"openai"
-      }el{
-        <"anthropic"
-      }
-    }el{
-      <"anthropic"
-    }
-  }el{
-    if(str.len(openaikey)>0){
-      <"openai"
-    }el{
-      <"ollama"
-    }
+     "Every dispatch* function below returns $completionresponse!$lokeerr, whose error side
+      is a user-declared sum, and toke takes the FIRST arm of a match on such a result
+      whatever the value is (T-18). So none of the seven told its caller anything: every
+      `$err:` arm in this module was dead code, and — verified with a probe — reading a field
+      off the mis-bound value SEGFAULTS rather than yielding nonsense."
+
+   And the arm list of `trydispatch` was `$anthropic, $openai, $ollama, $local, $ok` — so
+   $google, $mistral and $openrouter had NO ARM AT ALL, and `$ok` is not a variant of
+   $provider. toke accepted the bogus arm name with no diagnostic. A stub that reimplemented
+   "which provider does this go to" could not see either problem, because it was not matching
+   the real $provider sum.
+
+   WHAT THIS FILE COVERS. The two things in this module that are decidable without a network:
+   provider SELECTION across all seven variants, including the three that used to fall
+   through; and the GUARDIAN system prompt, which is a privacy control and the highest-value
+   thing here.
+
+   The trydispatch* functions for anthropic/openai/ollama/local all reach a network, so they
+   are not called. `trydispatchunsupported` does not, and it is what the three unsupported
+   variants resolve to, so selection is asserted through the sentinel's message. *)
+
+f=blankreq():$completionrequest{
+  <$completionrequest{
+    modelid:"some-model";
+    messages:@(pt.usermsg("hello"));
+    systemprompt:"";
+    maxtokens:256;
+    temperature:0.0;
+    stream:false
   }
 };
-
-f=iscloudprovider(name:str):bool{
-  if(str.eq(name;"anthropic")){<true};
-  if(str.eq(name;"openai")){<true};
-  <false
-};
-
-f=islocalprovider(name:str):bool{
-  <str.eq(name;"ollama")
-};
-
-f=defaultmodel(provider:str):str{
-  if(str.eq(provider;"anthropic")){<"claude-3-haiku-20240307"};
-  if(str.eq(provider;"openai")){<"gpt-3.5-turbo"};
-  if(str.eq(provider;"ollama")){<"llama3"};
-  <""
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* routing: anthropic key present, no preference *)
-  let r1=route("sk-ant-xxx";"";"");
-  if(t.assert(str.eq(r1;"anthropic");"anthropic key routes to anthropic")){pass=pass+1}el{fail=fail+1};
+  (* ── The dispatcher carries its configuration ───────────────────────────────*)
+  let keys=$apikeys{anthropic:"sk-ant-x";openai:"sk-oai-x"};
+  let d=disp.new(keys;"http://127.0.0.1:11434");
+  if(t.asserteq(d.ollamaurl;"http://127.0.0.1:11434";"the dispatcher carries the Ollama URL")){pass=pass+1}el{fail=fail+1};
+  (* The binding is annotated: `anthropic` and `openai` are field names on more than one
+     struct at different offsets, so an unannotated `d.keys.anthropic` raises E4034 and the
+     compiler cannot know which struct is meant. *)
+  let dkeys:$apikeys=d.keys;
+  if(t.asserteq(dkeys.anthropic;"sk-ant-x";"and the Anthropic key")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dkeys.openai;"sk-oai-x";"and the OpenAI key")){pass=pass+1}el{fail=fail+1};
 
-  (* routing: no keys, falls back to ollama *)
-  let r2=route("";"";"");
-  if(t.assert(str.eq(r2;"ollama");"no keys routes to ollama")){pass=pass+1}el{fail=fail+1};
+  (* ── The sentinel and its predicates ────────────────────────────────────────
+     isdispatched/dispatcherror delegate to core.providers.types. The sentinel is an EMPTY
+     MODELID, which cannot occur on a response that really came from a provider. *)
+  let unsup=disp.trydispatchunsupported("google");
+  if(t.assert(!disp.isdispatched(unsup);"an unsupported provider is not dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(disp.dispatcherror(unsup);"not yet supported");"and the reason says so")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(disp.dispatcherror(unsup);"google");"and names WHICH provider — the three unsupported variants used to have no arm, so the message could not")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(disp.dispatcherror(pt.nocompletion("boom"));"boom";"dispatcherror reads the reason off the sentinel")){pass=pass+1}el{fail=fail+1};
 
-  (* routing: openai key only *)
-  let r3=route("";"sk-openai-xxx";"");
-  if(t.assert(str.eq(r3;"openai");"openai key routes to openai")){pass=pass+1}el{fail=fail+1};
+  (* A real response IS dispatched, so the predicate separates the two. *)
+  let real=$completionresponse{content:"hi";modelid:"claude-sonnet-4";inputtokens:1;outputtokens:1;finishreason:"stop";costusd:0.0};
+  if(t.assert(disp.isdispatched(real);"a response carrying a modelid IS dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(disp.dispatcherror(real);"";"and has no error to report")){pass=pass+1}el{fail=fail+1};
 
-  (* routing: both keys, prefer openai *)
-  let r4=route("sk-ant-xxx";"sk-openai-xxx";"openai");
-  if(t.assert(str.eq(r4;"openai");"both keys prefer openai routes to openai")){pass=pass+1}el{fail=fail+1};
+  (* ── Provider selection: the three variants that used to fall through ────────
+     A match on a plain user SUM discriminates correctly across a module boundary — it is
+     only a result's user-declared error side that T-18 breaks — so this is trustworthy.
+     Each of these three must reach trydispatchunsupported and name itself. *)
+  let g=disp.trydispatch(d;blankreq();$google(0));
+  if(t.assert(!disp.isdispatched(g);"$google resolves to unsupported rather than falling through the match")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(disp.dispatcherror(g);"google");"and names google")){pass=pass+1}el{fail=fail+1};
 
-  (* routing: both keys, prefer anthropic *)
-  let r5=route("sk-ant-xxx";"sk-openai-xxx";"anthropic");
-  if(t.assert(str.eq(r5;"anthropic");"both keys prefer anthropic routes to anthropic")){pass=pass+1}el{fail=fail+1};
+  let m=disp.trydispatch(d;blankreq();$mistral(0));
+  if(t.assert(!disp.isdispatched(m);"$mistral resolves to unsupported")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(disp.dispatcherror(m);"mistral");"and names mistral")){pass=pass+1}el{fail=fail+1};
 
-  (* cloud provider checks *)
-  if(t.assert(iscloudprovider("anthropic");"anthropic is cloud provider")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(iscloudprovider("openai");"openai is cloud provider")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!iscloudprovider("ollama");"ollama is not cloud provider")){pass=pass+1}el{fail=fail+1};
+  let o=disp.trydispatch(d;blankreq();$openrouter(0));
+  if(t.assert(!disp.isdispatched(o);"$openrouter resolves to unsupported")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(disp.dispatcherror(o);"openrouter");"and names openrouter")){pass=pass+1}el{fail=fail+1};
 
-  (* local provider checks *)
-  if(t.assert(islocalprovider("ollama");"ollama is local provider")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!islocalprovider("anthropic");"anthropic is not local provider")){pass=pass+1}el{fail=fail+1};
+  (* The three must be distinguishable from one another: a match that collapsed them would
+     satisfy every assertion above except this one. *)
+  if(t.assert(!str.eq(disp.dispatcherror(g);disp.dispatcherror(m));"the three unsupported providers report distinct reasons, so the arms are genuinely separate")){pass=pass+1}el{fail=fail+1};
 
-  (* default models *)
-  if(t.assert(str.contains(defaultmodel("anthropic");"claude");"anthropic default is claude model")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(defaultmodel("openai");"gpt");"openai default is gpt model")){pass=pass+1}el{fail=fail+1};
+  (* ── The guardian system prompt — a privacy control ──────────────────────────
+     Every rule in it is load-bearing, and the one that matters most is rule 2: the model
+     must treat a placeholder as a black box and never try to reconstruct the value behind
+     it. If this text stops being prepended, the anonymisation still happens but nothing
+     tells the model not to guess at it.
+
+     T-26: there is no assignment to a struct field in toke, so the guarded request is
+     RECONSTRUCTED rather than patched — which is why asserting that the OTHER fields
+     survive is not redundant. *)
+  let guarded=disp.guardedrequest(blankreq();"");
+  if(t.assert(str.contains(guarded.systemprompt;"LOKE_GUARDIAN_v1.0.0");"the guardian prompt is prepended and carries its version marker")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(guarded.systemprompt;"PLACEHOLDER TOKENS");"it instructs the model about placeholder tokens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(guarded.systemprompt;"never attempt to guess, reconstruct, infer, or reveal the original value");"and specifically not to reconstruct the value behind one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(guarded.systemprompt;"PROMPT INJECTION");"it covers prompt injection")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(guarded.systemprompt;"PERSONAL INFORMATION");"and personal information")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(guarded.systemprompt;"AUDIT");"and audit logging")){pass=pass+1}el{fail=fail+1};
+
+  (* The request must survive reconstruction intact. A guarded request that lost its
+     messages would send the guardian prompt and no conversation. *)
+  if(t.asserteq(guarded.modelid;"some-model";"the model survives the reconstruction")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(guarded.messages.len==1;"and so do the messages — T-26 means the request is rebuilt, not patched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((guarded.maxtokens as i64)==256;"and maxtokens")){pass=pass+1}el{fail=fail+1};
+
+  (* A caller's own system prompt is KEPT, with the guardian in front of it. Replacing it
+     would silently drop whatever the application asked the model to do. *)
+  let withown=disp.guardedrequest(blankreq();"You are a helpful assistant.");
+  if(t.assert(str.contains(withown.systemprompt;"LOKE_GUARDIAN_v1.0.0");"the guardian is still prepended when the caller has its own system prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(withown.systemprompt;"You are a helpful assistant.");"and the caller's prompt is kept, not replaced")){pass=pass+1}el{fail=fail+1};
+
+  (* Idempotence. The guardian must not be stacked twice on a request that already carries
+     it — which is what the LOKE_GUARDIAN_v marker is for. *)
+  let twice=disp.guardedrequest(guarded;guarded.systemprompt);
+  if(t.asserteq(twice.systemprompt;guarded.systemprompt;"guarding an already-guarded request changes nothing: the version marker makes it idempotent")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

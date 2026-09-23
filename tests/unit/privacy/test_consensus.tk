@@ -5,95 +5,108 @@ m=test.privacy.consensus;
 
 i=t:std.test;
 i=str:std.str;
+i=cs:core.privacy.consensus;
 
-(* --- stub types and functions mirroring core.privacy.consensus --- *)
+(* X7.2 — this file used to declare its own overlap resolver and assert against it. It now
+   imports core.privacy.consensus.
 
-t=$layerdetection{
-  entitytype:str;
-  value:str;
-  start:i64;
-  end:i64;
-  confidence:f64;
-  layerid:str
+   ═══════════════════════════════════════════════════════════════════════════════
+   FINDING — resolveoverlaps RESOLVES NO OVERLAPS AND IGNORES ITS STRATEGY ARGUMENT.
+
+   Its whole body copies each input detection into a $resolvedentity one-for-one, sets
+   action:"mask", and pushes it. The `strategy` parameter is never read. So
+   "most-restrictive", "unanimous", "majority" and "first-match" all behave identically —
+   as a pass-through — and a detection reported by ONE layer out of three survives a
+   "unanimous" strategy that by name requires all three to agree.
+
+   What follows from that, concretely, is that the module named `consensus` performs none:
+   two layers reporting the SAME value at the SAME span come back as two separate resolved
+   entities with the same span, and detectinglayers names only one layer each rather than
+   crediting both. core.privacy.layerconfig ships consensusstrategy:"most-restrictive" and
+   nothing consumes it; core.privacy.pipeline does its own span-based dedup
+   (strictlyshadows / shadowedbyany) and never calls this module.
+
+   NOT FIXED HERE: the module has NO importer anywhere in the repository, so nothing is
+   relying on a strategy that is not implemented. The assertions below record the
+   behaviour as it is, following the precedent in tests/unit/storage/test_backup.tk. The
+   strategy-independence assertions turn RED the moment any strategy is implemented, which
+   is the signal to write the real ones.
+
+   strategyname IS implemented and is asserted normally: it is the label a user is shown
+   for the strategy they chose, and an unknown strategy must not be presented as a known
+   one.
+   ═══════════════════════════════════════════════════════════════════════════════ *)
+
+f=detection(etype:str;value:str;start:i64;end:i64;conf:f64;layer:str):$layerdetection{
+  <$layerdetection{
+    entitytype:etype;
+    value:value;
+    start:start;
+    end:end;
+    confidence:conf;
+    layerid:layer
+  }
 };
-
-t=$resolvedentity{
-  entitytype:str;
-  value:str;
-  start:i64;
-  end:i64;
-  finalconfidence:f64;
-  detectinglayers:str;
-  action:str
-};
-
-f=resolveoverlaps(detections:@$layerdetection;strategy:str):@$resolvedentity{
-  let results=mut.@();
-  lp(let i=0;i<detections.len;i=i+1){
-    let d=detections.get(i);
-    let resolved=$resolvedentity{
-      entitytype:d.entitytype;
-      value:d.value;
-      start:d.start;
-      end:d.end;
-      finalconfidence:d.confidence;
-      detectinglayers:d.layerid;
-      action:"mask"
-    };
-    results=results.push(resolved)
-  };
-  <results
-};
-
-f=strategyname(strategy:str):str{
-  if(str.eq(strategy;"most-restrictive")){<"Most Restrictive (union of all detections)"}el{};
-  if(str.eq(strategy;"first-match")){<"First Match (highest priority layer wins)"}el{};
-  if(str.eq(strategy;"unanimous")){<"Unanimous (all layers must agree)"}el{};
-  if(str.eq(strategy;"majority")){<"Majority (>50% of layers agree)"}el{};
-  <"Unknown strategy"
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. most-restrictive strategy name *)
-  if(t.assert(str.contains(strategyname("most-restrictive");"Most Restrictive");"most-restrictive strategy name correct")){pass=pass+1}el{fail=fail+1};
+  (* ── What passing a detection through preserves ──────────────────────────────
+     Span, value and type must survive, because the pipeline substitutes on spans and a
+     resolved entity whose span moved would redact the wrong characters. *)
+  let one=@(detection("email";"a@b.com";8;15;0.95;"regex"));
+  let resolved=cs.resolveoverlaps(one;"most-restrictive");
+  if(t.assert(resolved.len==1;"one detection resolves to one entity")){pass=pass+1}el{fail=fail+1};
+  let r0:$resolvedentity=resolved.get(0);
+  if(t.asserteq(r0.entitytype;"email";"the entity type survives resolution")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r0.value;"a@b.com";"and the value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.start==8;"and the start offset, which is what substitution uses")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.end==15;"and the end offset")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r0.detectinglayers;"regex";"and the layer that found it is credited")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r0.action;"mask";"and the action is to MASK it, not to report and forward")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.finalconfidence>0.9;"and the confidence is carried through")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. first-match strategy name *)
-  if(t.assert(str.contains(strategyname("first-match");"First Match");"first-match strategy name correct")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.resolveoverlaps(@($layerdetection);"most-restrictive").len==0;"no detections resolve to no entities")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. unanimous strategy name *)
-  if(t.assert(str.contains(strategyname("unanimous");"Unanimous");"unanimous strategy name correct")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, recorded: the same value from two layers is NOT merged ─────────
+     Two layers agreeing about one email address at one span. A consensus resolver would
+     return one entity crediting both layers. This returns two. *)
+  let agreed=@(detection("email";"a@b.com";8;15;0.95;"regex");detection("email";"a@b.com";8;15;0.88;"presidio"));
+  let bothkept=cs.resolveoverlaps(agreed;"most-restrictive");
+  if(t.assert(bothkept.len==2;"two layers agreeing on ONE value at ONE span yield TWO resolved entities — no merging happens")){pass=pass+1}el{fail=fail+1};
+  let first:$resolvedentity=bothkept.get(0);
+  if(t.asserteq(first.detectinglayers;"regex";"and each credits only its own layer, so agreement between layers is not recorded anywhere")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. majority strategy name *)
-  if(t.assert(str.contains(strategyname("majority");"Majority");"majority strategy name correct")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING, recorded: the strategy argument is ignored ────────────────────
+     A single detection from one layer, under a strategy whose NAME requires all layers to
+     agree. It survives. So does everything else, under every strategy. *)
+  let lonely=@(detection("person";"Bob Jones";0;9;0.70;"ner"));
+  if(t.assert(cs.resolveoverlaps(lonely;"unanimous").len==1;"a detection from ONE layer survives the UNANIMOUS strategy, which by name requires all layers to agree")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.resolveoverlaps(lonely;"majority").len==1;"and the MAJORITY strategy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.resolveoverlaps(lonely;"first-match").len==1;"and FIRST-MATCH")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.resolveoverlaps(lonely;"not-a-strategy-at-all").len==1;"and a strategy name that does not exist — the argument is never read")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.resolveoverlaps(agreed;"unanimous").len==cs.resolveoverlaps(agreed;"first-match").len;"two different strategies give identical results, which is the finding in one assertion")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. unknown strategy falls through *)
-  if(t.asserteq(strategyname("bogus");"Unknown strategy";"unknown strategy returns fallback")){pass=pass+1}el{fail=fail+1};
+  (* Overlapping detections of DIFFERENT lengths — the case the pipeline's own dedup
+     handles by dropping the shadowed prefix. Here both survive, so a caller relying on
+     this module to resolve overlaps would substitute the prefix first and strand the
+     surname in the clear. *)
+  let overlapping=@(detection("person";"Bob Jones";0;9;0.90;"presidio");detection("person";"Bob";0;3;0.80;"ner"));
+  if(t.assert(cs.resolveoverlaps(overlapping;"most-restrictive").len==2;"an overlapping prefix is NOT dropped either — core.privacy.pipeline.strictlyshadows is what actually does this, and it does not use this module")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. resolveoverlaps preserves detection count *)
-  let d1=$layerdetection{entitytype:"email";value:"a@b.com";start:0;end:7;confidence:0.95;layerid:"regex"};
-  let d2=$layerdetection{entitytype:"phone";value:"0412345678";start:10;end:20;confidence:0.90;layerid:"ner"};
-  let detections=@(d1;d2);
-  let resolved=resolveoverlaps(detections;"most-restrictive");
-  if(t.assert(resolved.len==2;"resolveoverlaps preserves two detections")){pass=pass+1}el{fail=fail+1};
-
-  (* 7. resolved entity preserves entitytype *)
-  let first=resolved.get(0);
-  if(t.asserteq(first.entitytype;"email";"resolved entity type preserved")){pass=pass+1}el{fail=fail+1};
-
-  (* 8. resolved entity action is mask *)
-  if(t.asserteq(first.action;"mask";"resolved entity action is mask")){pass=pass+1}el{fail=fail+1};
-
-  (* 9. resolveoverlaps with empty list *)
-  let empty=resolveoverlaps(@();"most-restrictive");
-  if(t.assert(empty.len==0;"empty detections returns empty resolved")){pass=pass+1}el{fail=fail+1};
-
-  (* 10. resolved entity confidence preserved *)
-  if(t.assert(first.finalconfidence>0.9;"confidence preserved through resolution")){pass=pass+1}el{fail=fail+1};
+  (* ── strategyname: the label a user is shown ────────────────────────────────
+     This one IS implemented. An unknown strategy must not be presented as a known one:
+     a user shown "Most Restrictive" for a strategy the system does not recognise would
+     believe a control is active that is not. *)
+  if(t.assert(str.contains(cs.strategyname("most-restrictive");"Most Restrictive");"most-restrictive has a human-readable label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cs.strategyname("most-restrictive");"union");"which explains what it does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cs.strategyname("unanimous");"Unanimous");"and so does unanimous")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cs.strategyname("majority");"Majority");"and majority")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cs.strategyname("first-match");"First Match");"and first-match")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cs.strategyname("no-such-strategy");"Unknown strategy";"and an UNRECOGNISED strategy is labelled unknown rather than being given a plausible name")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cs.strategyname("");"Unknown strategy";"as is an empty one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cs.strategyname("Most-Restrictive");"Unknown strategy";"the match is case-sensitive, so a mis-cased strategy is reported unknown rather than silently accepted")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

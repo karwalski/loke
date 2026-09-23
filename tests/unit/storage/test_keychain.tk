@@ -5,94 +5,82 @@ m=test.storage.keychain;
 
 i=t:std.test;
 i=str:std.str;
+i=kc:core.storage.keychain;
 
-(* --- stub keychain functions --- *)
+(* X7.2 — this file used to declare six stand-ins for core.storage.keychain: a
+   keychainstore/keychainretrieve pair with hardcoded credentials, a keychainexists built
+   on them, a maskcredential the module does not have, and a credentialcount that
+   returned the constant 2. It asserted, among other things, that retrieving the openai
+   key yields "sk-test-1234" — a value three lines above it in the same file.
 
-(* simulate a simple key-value credential store *)
-(* using function-based dispatch since we lack real data structures *)
+   tests/integration/test_keychain_e2e.tk already covers the round trip against the real
+   module, so this file was a candidate for deletion. It is kept because there is one
+   property neither it nor the e2e test covers, and it is the interesting one: the
+   ACCOUNT NAMING. setapikey and setdbkey do not store under the name they are given;
+   they prefix it. The e2e test "verifies" that prefix by concatenating the string itself
+   —
 
-f=keychainstore(service:str;key:str;value:str):i64{
-  if(str.len(service)==0){<0};
-  if(str.len(key)==0){<0};
-  if(str.len(value)==0){<0};
-  <1
-};
+     let account=str.concat("api_key.";provider);
+     <t.assert(str.eq(account;"api_key.anthropic");"API key is prefixed with api_key.")
 
-f=keychainretrieve(service:str;key:str):str{
-  (* stubbed known credentials *)
-  if(str.eq(service;"openai")){
-    if(str.eq(key;"apikey")){<"sk-test-1234"}
-  };
-  if(str.eq(service;"anthropic")){
-    if(str.eq(key;"apikey")){<"sk-ant-test-5678"}
-  };
-  <""
-};
+   — which asserts that str.concat works. Nothing anywhere checks that the MODULE applies
+   that prefix. It matters because the account name is the only thing tying a write to a
+   read across processes: if setapikey and getapikey ever disagree about it, every stored
+   provider key becomes unreadable and loke falls back to prompting for keys that are
+   already in the keychain.
 
-f=keychaindelete(service:str;key:str):i64{
-  if(str.len(service)==0){<0};
-  if(str.len(key)==0){<0};
-  (* simulate successful delete *)
-  <1
-};
-
-f=keychainexists(service:str;key:str):i64{
-  let val=keychainretrieve(service;key);
-  if(str.len(val)>0){<1};
-  <0
-};
-
-(* mask a credential for display *)
-f=maskcredential(value:str):str{
-  if(str.len(value)<8){<"****"};
-  <str.concat(str.slice(value;0;4);"****")
-};
-
-(* count stored credentials (stubbed) *)
-f=credentialcount():i64{ <2 };
+   All accounts below are unique to this test and deleted at the end. That is not
+   tidiness: core.storage.db's comment on ensuredbkey records that SecItemCopyMatching
+   BLOCKS on an authorisation dialog when the reading binary is not the one that stored
+   the item, and a headless test process can never answer it. Leaving items behind for a
+   differently-named binary to read later is how the suite hangs rather than fails. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test store succeeds with valid inputs *)
-  if(t.assert(keychainstore("openai";"apikey";"sk-test")==1;"store valid credential succeeds")){pass=pass+1}el{fail=fail+1};
+  (* The plain round trip, through the real module and the real keychain. *)
+  if(t.assert(kc.setkey("unit_kc_roundtrip";"secret-value");"setkey reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kc.getkey("unit_kc_roundtrip");"secret-value";"and getkey returns exactly what setkey stored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(kc.haskey("unit_kc_roundtrip");"haskey sees a stored account")){pass=pass+1}el{fail=fail+1};
 
-  (* test store rejects empty service *)
-  if(t.assert(keychainstore("";"apikey";"sk-test")==0;"empty service rejected")){pass=pass+1}el{fail=fail+1};
+  (* An account that was never written must read as EMPTY — asserted through str.len,
+     not through str.eq, and the difference is a finding rather than a preference.
 
-  (* test store rejects empty key *)
-  if(t.assert(keychainstore("openai";"";"sk-test")==0;"empty key rejected")){pass=pass+1}el{fail=fail+1};
+     FINDING, latent: core.storage.keychain.getkey forwards std.keychain.get unchecked,
+     and on a miss that is a NULL string pointer rather than "". Measured here:
+     str.len(NULL) is 0, so every `if(str.len(k)>0)` guard in the codebase holds — that
+     is what browser/pages/api/settings.tk:73 and core.storage.db.ensuredbkey both use,
+     so neither is broken. But str.eq(NULL;"") returns FALSE, and str.contains(NULL;…)
+     also returns false. So the idiomatic emptiness test gives the WRONG answer on a
+     missing account, and a caller that spells the check that way would treat an absent
+     key as present. No caller spells it that way today, which is the only reason this is
+     latent. Reported, not fixed: the module is not mine to change. *)
+  if(t.assert((str.len(kc.getkey("unit_kc_never_written")) as i64)==0;"an unknown account reads as zero-length")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!kc.haskey("unit_kc_never_written");"and haskey says so")){pass=pass+1}el{fail=fail+1};
 
-  (* test store rejects empty value *)
-  if(t.assert(keychainstore("openai";"apikey";"")==0;"empty value rejected")){pass=pass+1}el{fail=fail+1};
+  (* Overwrite, because a rotated key that reads back as the old one is worse than one
+     that fails to store. *)
+  kc.setkey("unit_kc_roundtrip";"rotated-value");
+  if(t.asserteq(kc.getkey("unit_kc_roundtrip");"rotated-value";"writing the same account again replaces the secret")){pass=pass+1}el{fail=fail+1};
 
-  (* test retrieve known credential *)
-  if(t.assert(str.eq(keychainretrieve("openai";"apikey");"sk-test-1234");"retrieve openai key")){pass=pass+1}el{fail=fail+1};
+  (* ── The account naming, which is the reason this file exists ────────────────
+     setapikey is asserted through getkey on the SPELLED-OUT account, not through
+     getapikey. Reading it back the way it was written would pass even if both sides
+     agreed on the wrong name — which is the failure that makes every stored key
+     unreadable. *)
+  kc.setapikey("unit_kc_provider";"sk-unit-abc123");
+  if(t.asserteq(kc.getkey("api_key.unit_kc_provider");"sk-unit-abc123";"setapikey stores under api_key.<provider>, applied by the MODULE and not by the test")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kc.getapikey("unit_kc_provider");"sk-unit-abc123";"and getapikey reads back the account setapikey wrote")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!kc.haskey("unit_kc_provider");"the unprefixed provider name is NOT an account: a reader that forgot the prefix finds nothing")){pass=pass+1}el{fail=fail+1};
 
-  if(t.assert(str.eq(keychainretrieve("anthropic";"apikey");"sk-ant-test-5678");"retrieve anthropic key")){pass=pass+1}el{fail=fail+1};
+  (* Delete, and that it is a delete. *)
+  if(t.assert(kc.deletekey("unit_kc_roundtrip");"deletekey reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!kc.haskey("unit_kc_roundtrip");"and the account is gone afterwards")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(kc.getkey("unit_kc_roundtrip")) as i64)==0;"a deleted account reads as zero-length, not as its old value")){pass=pass+1}el{fail=fail+1};
 
-  (* test retrieve unknown returns empty *)
-  if(t.assert(str.eq(keychainretrieve("unknown";"apikey");"");"unknown service returns empty")){pass=pass+1}el{fail=fail+1};
-
-  (* test exists *)
-  if(t.assert(keychainexists("openai";"apikey")==1;"openai key exists")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(keychainexists("unknown";"apikey")==0;"unknown key does not exist")){pass=pass+1}el{fail=fail+1};
-
-  (* test delete succeeds *)
-  if(t.assert(keychaindelete("openai";"apikey")==1;"delete succeeds")){pass=pass+1}el{fail=fail+1};
-
-  (* test delete rejects empty inputs *)
-  if(t.assert(keychaindelete("";"apikey")==0;"delete empty service rejected")){pass=pass+1}el{fail=fail+1};
-
-  (* test credential masking *)
-  if(t.assert(str.eq(maskcredential("sk-test-1234");"sk-t****");"mask shows first 4 chars")){pass=pass+1}el{fail=fail+1};
-
-  if(t.assert(str.eq(maskcredential("short");"****");"short credential fully masked")){pass=pass+1}el{fail=fail+1};
-
-  (* test credential count *)
-  if(t.assert(credentialcount()==2;"credential count is 2")){pass=pass+1}el{fail=fail+1};
+  (* Leave nothing for a differently-named binary to block on. *)
+  kc.deletekey("api_key.unit_kc_provider");
 
   <fail
 };

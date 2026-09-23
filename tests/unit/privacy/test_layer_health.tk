@@ -5,99 +5,102 @@ m=test.privacy.layerhealth;
 
 i=t:std.test;
 i=str:std.str;
+i=lh:core.privacy.layerhealth;
 
-(* --- stub types and functions mirroring core.privacy.layerhealth --- *)
+(* X7.2 — this file used to declare its own $layerstatus and $healthreport and assert
+   against them. It now imports core.privacy.layerhealth.
+   ═══════════════════════════════════════════════════════════════════════════════
+   TWO FINDINGS, RECORDED RATHER THAN ASSERTED AS CORRECT. Read before extending.
 
-t=$layerstatus{
-  id:str;
-  available:bool;
-  reason:str;
-  lastchecked:i64;
-  detectioncount:i64
-};
+   FINDING 1 — checkhealth PROBES NOTHING. Its whole body is:
 
-t=$healthreport{
-  layers:@$layerstatus;
-  totallayers:i64;
-  availablelayers:i64;
-  degraded:bool
-};
+       if(str.eq(id;"presidio")){isavail=false; reason="not installed"}el{};
 
-f=checkhealth(layerids:@str):$healthreport{
-  let statuses=mut.@();
-  let available=mut.0;
-  let total=layerids.len;
-  lp(let i=0;i<total;i=i+1){
-    let id=layerids.get(i);
-    let isavail=mut.true;
-    let reason=mut."operational";
-    if(str.eq(id;"presidio")){isavail=false; reason="not installed"}el{};
-    let status=$layerstatus{id:id;available:isavail;reason:reason;lastchecked:0;detectioncount:0};
-    statuses=statuses.push(status);
-    if(isavail){available=available+1}el{}
+   Every layer id other than the literal string "presidio" is reported available with
+   reason "operational", whatever is or is not running. No socket is opened, no process
+   is checked, no configuration is read. So checkhealth(@("ner")) reports NER healthy on a
+   machine with no Ollama, and checkhealth(@("presidio")) reports Presidio missing on a
+   machine where it is running. The report is fabricated in both directions. That is the
+   class of defect NC1.9 exists to remove elsewhere in the privacy code — a component
+   reporting that it looked when it did not.
+
+   FINDING 2 — an EMPTY layer list reports HEALTHY. degraded is availablelayers<totallayers,
+   which for an empty list is 0<0, false, so formathealthstatus says "HEALTHY: all 0 layers
+   available". issystemhealthy on the same report says false, because it tests
+   availablelayers>0. Two functions over one report disagree about whether no layers at
+   all is healthy, and the one a human reads is the one that says yes.
+
+   NEITHER IS FIXED HERE: this module has NO CALLER anywhere in the repository, which is
+   the only reason these are latent rather than shipped. core.privacy.pipeline counts
+   layerscompleted itself and does not consult this module. So the assertions below record
+   the behaviour as it actually is, following the precedent in
+   tests/unit/storage/test_backup.tk, and they turn RED when the module is given a real
+   probe — which is the signal to rewrite them.
+
+   Everything a real probe would need is here except the probe: the shape of the report,
+   the ratio, the degraded flag and the two summaries are all exercised.
+   ═══════════════════════════════════════════════════════════════════════════════ *)
+
+f=statusfor(report:$healthreport;id:str):$layerstatus{
+  let idx=mut.0;
+  lp(let i=0;i<report.layers.len;i=i+1){
+    let s:$layerstatus=report.layers.get(i);
+    if(str.eq(s.id;id)){
+      idx=i
+    }el{}
   };
-  <$healthreport{
-    layers:statuses;
-    totallayers:total;
-    availablelayers:available;
-    degraded:available<total
-  }
+  <report.layers.get(idx)
 };
-
-f=issystemhealthy(report:$healthreport):bool{
-  <report.availablelayers>0
-};
-
-f=formathealthstatus(report:$healthreport):str{
-  let avail=str.fromint(report.availablelayers);
-  let total=str.fromint(report.totallayers);
-  if(report.degraded){
-    <str.concat("DEGRADED: ";str.concat(avail;str.concat("/";str.concat(total;" layers available"))))
-  }el{
-    <str.concat("HEALTHY: all ";str.concat(total;" layers available"))
-  }
-};
-
-(* --- tests --- *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* 1. all available layers -- not degraded *)
-  let healthyreport=checkhealth(@("regex";"ner"));
-  if(t.assert(!healthyreport.degraded;"two healthy layers not degraded")){pass=pass+1}el{fail=fail+1};
+  (* ── The shape of a report ───────────────────────────────────────────────────*)
+  let three=lh.checkhealth(@("regex";"presidio";"ner"));
+  if(t.assert(three.totallayers==3;"the report accounts for every layer it was asked about")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(three.layers.len==3;"and carries a status for each")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(three.availablelayers==2;"two of the three are reported available")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(three.degraded;"so the report is degraded, which is what availablelayers<totallayers means")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lh.issystemhealthy(three);"and the system is still healthy, because a degraded pipeline is allowed — a missing Presidio sidecar must not take a local-first product offline")){pass=pass+1}el{fail=fail+1};
 
-  (* 2. system is healthy when layers available *)
-  if(t.assert(issystemhealthy(healthyreport);"system healthy with available layers")){pass=pass+1}el{fail=fail+1};
+  (* Every layer keeps the id it was given, in order. A report that renamed or reordered
+     its layers would be unreadable against the config that produced it. *)
+  if(t.asserteq(statusfor(three;"regex").id;"regex";"each status keeps its own layer id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(statusfor(three;"regex").reason) as i64)>0;"and carries a reason, so a status is never silently blank")){pass=pass+1}el{fail=fail+1};
 
-  (* 3. presidio triggers degraded mode *)
-  let degradedreport=checkhealth(@("regex";"presidio"));
-  if(t.assert(degradedreport.degraded;"presidio unavailable causes degraded mode")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 1, recorded ─────────────────────────────────────────────────────
+     "presidio" is hardcoded unavailable and everything else hardcoded available. These
+     four assertions describe that, and they are the ones that go red the moment the
+     module learns to probe. *)
+  if(t.assert(!statusfor(three;"presidio").available;"presidio is reported UNAVAILABLE — hardcoded, not probed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusfor(three;"presidio").reason;"not installed";"with a fixed reason that is not read from anywhere")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(statusfor(three;"ner").available;"NER is reported AVAILABLE with no Ollama running, because nothing is probed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lh.checkhealth(@("a-layer-that-does-not-exist")).availablelayers==1;"and so is a layer id that does not name any layer at all")){pass=pass+1}el{fail=fail+1};
 
-  (* 4. available count correct in degraded mode *)
-  if(t.assert(degradedreport.availablelayers==1;"one layer available in degraded mode")){pass=pass+1}el{fail=fail+1};
+  (* ── The healthy case ────────────────────────────────────────────────────────*)
+  let healthy=lh.checkhealth(@("regex";"ner"));
+  if(t.assert(!healthy.degraded;"a report with every layer available is not degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.formathealthstatus(healthy);"HEALTHY");"and formats as HEALTHY")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.formathealthstatus(three);"DEGRADED");"while a degraded one says DEGRADED rather than burying it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.formathealthstatus(three);"2/3");"and states the ratio, so an operator can see what is missing")){pass=pass+1}el{fail=fail+1};
 
-  (* 5. total layers count correct *)
-  if(t.assert(degradedreport.totallayers==2;"total layers is 2")){pass=pass+1}el{fail=fail+1};
+  (* ── The only-presidio case ──────────────────────────────────────────────────
+     The one configuration in which this module reports the system UNHEALTHY. It matters
+     because it is the fail-closed signal: no layer available means nothing scanned the
+     text, which must never read as a clean result. *)
+  let nolayers=lh.checkhealth(@("presidio"));
+  if(t.assert(nolayers.availablelayers==0;"with only Presidio configured, no layer is available")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!lh.issystemhealthy(nolayers);"and the system is UNHEALTHY — nothing would scan the text")){pass=pass+1}el{fail=fail+1};
 
-  (* 6. degraded system still healthy if at least one layer *)
-  if(t.assert(issystemhealthy(degradedreport);"degraded system still healthy")){pass=pass+1}el{fail=fail+1};
-
-  (* 7. healthy format contains HEALTHY *)
-  let healthystr=formathealthstatus(healthyreport);
-  if(t.assert(str.contains(healthystr;"HEALTHY");"healthy format starts with HEALTHY")){pass=pass+1}el{fail=fail+1};
-
-  (* 8. degraded format contains DEGRADED *)
-  let degradedstr=formathealthstatus(degradedreport);
-  if(t.assert(str.contains(degradedstr;"DEGRADED");"degraded format starts with DEGRADED")){pass=pass+1}el{fail=fail+1};
-
-  (* 9. degraded format shows layer counts *)
-  if(t.assert(str.contains(degradedstr;"1/2");"degraded format shows 1/2 layers")){pass=pass+1}el{fail=fail+1};
-
-  (* 10. single layer all healthy *)
-  let singlereport=checkhealth(@("regex"));
-  if(t.assert(!singlereport.degraded;"single healthy layer not degraded")){pass=pass+1}el{fail=fail+1};
+  (* ── FINDING 2, recorded ─────────────────────────────────────────────────────
+     An empty layer list. The two readers of the same report disagree, and the one a human
+     sees is the one that says everything is fine. *)
+  let empty=lh.checkhealth(@($str));
+  if(t.assert(empty.totallayers==0;"an empty layer list gives a report of no layers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!lh.issystemhealthy(empty);"issystemhealthy correctly says that is NOT healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!empty.degraded;"but degraded is FALSE for it, because 0<0 is false")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.formathealthstatus(empty);"HEALTHY");"so the human-readable summary reports HEALTHY for a pipeline with no layers at all — the two readers of this report disagree")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };
