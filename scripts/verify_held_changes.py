@@ -105,6 +105,7 @@ def check_licence_headers() -> list[str]:
             "HEAD", "--", "*.tk", "*.tkt").split("\n")
         if f.startswith("HEAD:") and not f[len("HEAD:"):].startswith("_archived")
     }
+    deletions: list[str] = []
     for f in tracked("*.tk") + tracked("*.tkt"):
         if f not in had_header:
             continue  # never had one; not this check's business
@@ -112,13 +113,32 @@ def check_licence_headers() -> list[str]:
             with open(f, encoding="utf-8") as fh:
                 cur = fh.read()
         except FileNotFoundError:
-            problems.append(f"{f}: deleted in the working tree but has a licence header at HEAD")
+            # A DELETED FILE IS NOT A STRIPPED HEADER, and reporting it as one made this
+            # check fail on three legitimate deletions: policy/regulations.tk (consolidated
+            # into policy/presets, with $regulation kept as a derived view) and two test
+            # files with ZERO production imports that X7 deleted as vacuous.
+            #
+            # The two events need telling apart. A stripped header is always wrong — a
+            # repo-wide rewriter did it to 520 files once (F10.6) and that is why this check
+            # exists. A deletion is a judgement, and the question for a deletion is whether
+            # the commit message says so, which is scripts/check_sweep_commit.py's job
+            # (X4.6). Conflating them means either this check fails on every honest deletion,
+            # or somebody relaxes it and the 520-file case stops being caught.
+            deletions.append(f)
             continue
         first = cur.split("\n", 1)[0]
         if LICENCE_MARK not in first:
             problems.append(f"{f}: licence header removed")
         elif "SPDX-License-Identifier: Apache-2.0" not in cur.split("\n", 3)[1]:
             problems.append(f"{f}: SPDX line removed or altered")
+    if deletions:
+        print(f"\n  {len(deletions)} file(s) DELETED in the working tree (not a lost header):",
+              file=sys.stderr)
+        for d in sorted(deletions):
+            print(f"    {d}", file=sys.stderr)
+        print("    A deletion is a judgement, not a defect, so it does not fail this check.\n"
+              "    Whether it is an INTENDED deletion is checked by scripts/check_sweep_commit.py\n"
+              "    against the commit message (X4.6). Name each one there.", file=sys.stderr)
     return problems
 
 

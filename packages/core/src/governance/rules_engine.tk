@@ -8,6 +8,7 @@ i=log:shared.log;
 i=time:std.time;
 i=json:std.json;
 i=s:core.storage.db;
+i=preg:core.policy.presets.registry;
 
 t=$ruleop{
   $and:i64;
@@ -298,4 +299,63 @@ f=defaultrules():@$compoundrule{
     severity:"high"
   };
   <@(rulehighsens;rulerateburst;ruleoffhours;ruleconfidentialexternal)
+};
+
+(* Bridge from a named policy preset to this engine's compound rules.
+
+   Only the two preset settings that $evalcontext can actually express are derived, and
+   nothing is synthesised beyond them: requireapprovalabove is a sensitivity threshold, and
+   crossborderallowed false is a prohibition on the external scope — the same field and
+   value the built-in default-confidential-external-scope rule already uses. The rest of a
+   preset is not expressible here. Its per-entity anonymisation actions, blocked entity
+   types, retention periods and provider permissions have no $condition field to match on,
+   so they are enforced through core.policy.loader.evaluate against the preset's own rule
+   list, not through this engine. Do not add conditions for them by inventing fields.
+
+   The approval rule's action is "approve", which is not in the vocabulary the built-in
+   rules use — allow, warn, throttle, deny. evaluate() copies the action through verbatim
+   and this module has no importers, so nothing is being misled; a future consumer must
+   handle "approve" as a recorded human decision. Downgrading it to "warn" here would make
+   the preset's control quietly weaker than the preset says it is. *)
+f=classificationrank(level:str):i64{
+  if(str.eq(level;"restricted")){ <3 }el{
+    if(str.eq(level;"confidential")){ <2 }el{
+      if(str.eq(level;"internal")){ <1 }el{
+        <0
+      }
+    }
+  }
+};
+
+f=presetrules(name:str):@$compoundrule{
+  let out=mut.@();
+  if(preg.isknownname(name)){
+    let threshold=preg.approvalthresholdfor(name);
+    let above=classificationrank(threshold);
+    out=out.push($compoundrule{
+      id:str.concat(name;"-approval-required");
+      name:str.concat("Preset requires a recorded approval above ";threshold);
+      logic:$ruleop{$and:0};
+      conditions:@(
+        $condition{ field:"sensitivity"; op:"gt"; value:str.fromint(above) }
+      );
+      action:"approve";
+      severity:"high"
+    });
+    if(preg.crossborderallowedfor(name)){}el{
+      out=out.push($compoundrule{
+        id:str.concat(name;"-no-cross-border");
+        name:"Preset forbids cross-border disclosure";
+        logic:$ruleop{$and:0};
+        conditions:@(
+          $condition{ field:"scope"; op:"contains"; value:"external" }
+        );
+        action:"deny";
+        severity:"high"
+      })
+    }
+  }el{
+    log.warn(str.concat("preset_rules: no preset registered under name: ";name);"rules_engine";"system")
+  };
+  <out
 };

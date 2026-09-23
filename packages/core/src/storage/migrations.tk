@@ -136,6 +136,69 @@ BEFORE DELETE ON audit_log
 BEGIN
   SELECT RAISE(ABORT, 'audit_log is append-only: DELETE is not permitted');
 END"
+    };
+    (* X8.2 — the sealed mapping table, and the deliberate absence of a plaintext column.
+
+       placeholder_maps, version 4 above, had `original TEXT NOT NULL` and
+       `placeholder TEXT NOT NULL`: the pairing that turns an anonymised transcript back
+       into named people, in the clear, in a file the user's other processes can read. It
+       is rated Maximum in docs/threat-model.md:181 and it is the highest-value data loke
+       holds.
+
+       This table has NO column a plaintext value fits in. That is the point of replacing
+       the table rather than adding columns to it: a future writer cannot put a name in
+       here by accident, because there is nowhere for one to go. request_id and the
+       timestamps are the only cleartext, and they have to be — the row is looked up by
+       request id and expired by date.
+
+       ONE ROW PER REQUEST, not one per entity, and that is a privacy property rather than
+       a normalisation preference. Per-entity rows would make the row count for a request
+       equal to the number of entities detected in it, so `SELECT COUNT() ... WHERE
+       request_id=?` would report how many people a prompt mentioned to anybody who can
+       read the file — metadata about the subject, derived without the key. With one row
+       the whole mapping list is a single sealed payload and that count is not there to be
+       read. What remains is payload LENGTH, which is padded to a 256-byte boundary before
+       sealing so that short maps are indistinguishable from one another; a long map still
+       falls into a visible bucket, and that residual is stated in placeholderstore rather
+       than papered over.
+
+       payload_hex and nonce_hex are TEXT holding lowercase hex, NOT blobs. A BLOB read
+       back as text is a value whose representation SQLite chooses, and this project has
+       been bitten twice by exactly that — str.fromfloat(0.0) writing "0" where a REAL
+       column returns "0.0" broke the audit chain. Hex in a TEXT column has one spelling,
+       so what is read is what was written, byte for byte.
+
+       key_version records which HKDF info label sealed the row, so the derived key can be
+       rotated without a migration that rewrites ciphertext. *)
+    $migration{
+      version:8;
+      description:"create placeholder_map_records: the sealed mapping table";
+      sql:"CREATE TABLE IF NOT EXISTS placeholder_map_records (
+  request_id TEXT PRIMARY KEY,
+  key_version INTEGER NOT NULL,
+  nonce_hex TEXT NOT NULL,
+  payload_hex TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT
+)"
+    };
+    (* And the old plaintext table goes. Nothing ever wrote to it — core.privacy.
+       placeholderstore was the only module that named it and no caller in the repository
+       called that module — so there are no rows to migrate and no data to lose. Leaving it
+       in place would leave a plaintext-shaped hole in the schema for a future writer to
+       fall into, which is the whole reason X8.2 replaces the table instead of extending
+       it.
+
+       DROP frees the table's pages. core.storage.db.openstore sets PRAGMA secure_delete
+       BEFORE running migrations so that on an installation which somehow does hold rows
+       here, those pages are zeroed rather than merely unlinked — measured to happen, see
+       applysecuredelete in that module. One statement per migration: the runner applies
+       only the first statement of a multi-statement string and reports success for the
+       rest. *)
+    $migration{
+      version:9;
+      description:"drop the plaintext placeholder_maps table, superseded by placeholder_map_records";
+      sql:"DROP TABLE IF EXISTS placeholder_maps"
     }
   )
 };

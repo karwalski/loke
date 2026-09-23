@@ -1,0 +1,291 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.mappingdeletion;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=ph:core.privacy.placeholder;
+i=pstore:core.privacy.placeholderstore;
+
+(* X8.4 — verifiable deletion. The assertion is a grep over the data directory, not an
+   inspection of the interface.
+
+   WHY IT IS A GREP. "Delete everything" is the easiest claim in this codebase to make
+   and the easiest to get wrong, because `DELETE FROM` returning success is what both a
+   real deletion and a useless one look like from inside the program. SQLite does not
+   zero freed pages by default, so a deleted row's bytes remain legible in the file; a
+   rollback journal or a WAL frame can hold a page image of the row after the row is
+   gone; and a VACUUM that was never run leaves both. None of that is visible to any
+   query. The only test that answers the question is reading the bytes.
+
+   WHAT MAKES IT PASS, and the two halves are not equally important:
+
+     1. The plaintext was never written. X8.2 seals the payload before it reaches SQLite,
+        so the value is absent from the file BEFORE any deletion — and therefore absent
+        from every freed page, journal, WAL frame and backup derived from it. This is the
+        load-bearing half, and the reason the test asserts the plaintext is missing both
+        before and after the delete.
+     2. PRAGMA secure_delete zeroes the freed pages, so the CIPHERTEXT goes too when the
+        row is deleted. Measured to be honoured by this toolchain rather than assumed —
+        the measurement is recorded in core.storage.db.applysecuredelete, and PRAGMA key
+        is exactly why nothing here trusts a pragma it has not tested.
+
+   A POSITIVE CONTROL COMES FIRST. A grep that can never find anything passes for the
+   wrong reason, and that is the single most likely way for this test to be worthless. So
+   before asserting that a value is absent, the same search is shown finding a value that
+   IS present: a marker written into a scratch table in the clear, in the same file, by
+   the same connection. Only when the search has demonstrably found something does its
+   failing to find the sealed values mean anything.
+
+   The control also measures the counterfactual directly: the plaintext marker is present
+   after INSERT, and gone after DELETE — which is secure_delete working, on this machine,
+   on this file, in this run. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir() is truncated when interpolated (T-21). *)
+  <str.concat(std.homedir();"/.loke/test-mapping-deletion")
+};
+
+f=secret():str{
+  <"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+};
+
+(* The fixture values. Distinctive enough that a chance occurrence in a page header is
+   not credible, and they are the only place in this file they appear as literals other
+   than the assertions themselves. *)
+f=subjectname():str{
+  <"Wilhelmina Featherstonehaugh"
+};
+
+f=subjectemail():str{
+  <"wilhelmina.featherstonehaugh@quarterdeck-example.org"
+};
+
+f=subjectphone():str{
+  <"0491 570 156"
+};
+
+f=plaintextmarker():str{
+  <"PLAINTEXT-CONTROL-MARKER-Featherstonehaugh"
+};
+
+f=opendb():i64{
+  let dir=testdir();
+  mt file.mkdir(dir) {$ok:v 1;$err:e 0};
+  (* The sidecars too. A rollback journal left behind by an earlier phase of this test
+     would hold a page image of that phase's rows, and the search below walks every file
+     in the tree — as it must. *)
+  mt file.delete(str.concat(dir;"/loke.db")) {$ok:v 1;$err:e 0};
+  mt file.delete(str.concat(dir;"/loke.db-journal")) {$ok:v 1;$err:e 0};
+  mt file.delete(str.concat(dir;"/loke.db-wal")) {$ok:v 1;$err:e 0};
+  mt file.delete(str.concat(dir;"/loke.db-shm")) {$ok:v 1;$err:e 0};
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* A byte-level search. file.read stops at the first NUL, and a SQLite page is full of
+   them, so a text search would report "not found" for a value sitting in plain sight —
+   a grep that always passes. *)
+f=bytescontain(haystack:@byte;needle:str):bool{
+  let nb=str.bytes(needle);
+  let n=(nb.len as i64);
+  let h=(haystack.len as i64);
+  if(n==0){
+    <false
+  }el{};
+  if(h<n){
+    <false
+  }el{};
+  let limit=h-n;
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>limit){
+      br
+    }el{
+      let j=mut.0;
+      let same=mut.true;
+      lp(let lv2=0;true;lv2=lv2){
+        if(j>=n){
+          br
+        }el{
+          if(haystack.get(i+j)==nb.get(j)){
+            j=j+1
+          }el{
+            same=false;
+            br
+          }
+        }
+      };
+      if(same){
+        <true
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+f=filecontains(path:str;needle:str):bool{
+  <mt file.readbytes(path) {
+    $ok:bytes bytescontain(bytes;needle);
+    $err:e false
+  }
+};
+
+(* EVERY file under the data directory, recursively — not just loke.db. A rollback
+   journal, a WAL frame and a -shm all carry page images, and a value surviving in one of
+   those has survived. file.listall walks the tree with nftw and returns relative paths,
+   so a file a future change adds under here is covered without this test being edited. *)
+f=treecontains(dir:str;needle:str):bool{
+  let names=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>=(names.len as i64)){
+      br
+    }el{
+      let path=str.concat(dir;str.concat("/";names.get(i)));
+      if(filecontains(path;needle)){
+        <true
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+f=filecount(dir:str):i64{
+  let names=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  <names.len as i64
+};
+
+f=subjectmap():$placeholdermap{
+  let m0=ph.newmap();
+  let m1=ph.addentry(m0;subjectname();"[PERSON_7f21_1]";"PERSON");
+  let m2=ph.addentry(m1;subjectemail();"[EMAIL_7f21_1]";"EMAIL");
+  <ph.addentry(m2;subjectphone();"[PHONE_7f21_1]";"PHONE")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let opened=opendb();
+  if(t.assert(opened!=0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.securedeleteenabled();"secure_delete is in effect, which is half of what makes deletion verifiable")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the positive control ────────────────────────────────────────────────────
+     A marker written to a scratch table with no encryption, in the same file, by the
+     same connection. If the search below cannot find THIS, it cannot find anything and
+     every absence assertion in this file is vacuous. *)
+  mt db.exec("CREATE TABLE IF NOT EXISTS deletion_control (id TEXT PRIMARY KEY, marker TEXT NOT NULL)";@()) {$ok:v 1;$err:e 0};
+  let ci=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(ci>=40){
+      br
+    }el{
+      mt db.exec("INSERT OR REPLACE INTO deletion_control (id,marker) VALUES (?,?)";@(str.fromint(ci);str.concat(plaintextmarker();str.fromint(ci)))) {$ok:v 1;$err:e 0};
+      ci=ci+1
+    }
+  };
+  db.close();
+  if(t.assert(treecontains(testdir();plaintextmarker());"CONTROL: the search finds a value written in the clear, so it is capable of finding one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── store the subject's mapping ─────────────────────────────────────────────*)
+  let reopened=opendb();
+  if(t.assert(reopened!=0;"the store reopens")){pass=pass+1}el{fail=fail+1};
+  mt db.exec("CREATE TABLE IF NOT EXISTS deletion_control (id TEXT PRIMARY KEY, marker TEXT NOT NULL)";@()) {$ok:v 1;$err:e 0};
+  mt db.exec("INSERT OR REPLACE INTO deletion_control (id,marker) VALUES (?,?)";@("keep";plaintextmarker())) {$ok:v 1;$err:e 0};
+
+  let stored=pstore.storemappingwithsecret("req-dsar-1";subjectmap();secret());
+  if(t.assert(stored;"the subject's mapping is stored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-dsar-1")==1;"as one sealed record")){pass=pass+1}el{fail=fail+1};
+  let readable=pstore.readmappingwithsecret("req-dsar-1";secret());
+  if(t.assert(readable.openedok;"and it is readable with the key while it exists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((readable.openedentries.len as i64)==3;"with all three mappings")){pass=pass+1}el{fail=fail+1};
+
+  (* Before deletion, and this is the load-bearing half of X8.4: the plaintext is not in
+     the file even now. Deletion cannot fail to remove what was never written. *)
+  db.close();
+  if(t.assert(treecontains(testdir();"req-dsar-1");"the request id is in the file, in the clear, as the schema intends")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();subjectname());"BEFORE deletion: the subject's name is already absent from every file, because it was never written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();subjectemail());"and so is the email address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();subjectphone());"and the phone number")){pass=pass+1}el{fail=fail+1};
+
+  (* ── delete ──────────────────────────────────────────────────────────────────*)
+  let reopenedagain=opendb();
+  if(t.assert(reopenedagain!=0;"the store reopens for the deletion")){pass=pass+1}el{fail=fail+1};
+  let restored=pstore.storemappingwithsecret("req-dsar-1";subjectmap();secret());
+  if(t.assert(restored;"the mapping is stored again, in the fresh file, so there is something to delete")){pass=pass+1}el{fail=fail+1};
+  mt db.exec("CREATE TABLE IF NOT EXISTS deletion_control (id TEXT PRIMARY KEY, marker TEXT NOT NULL)";@()) {$ok:v 1;$err:e 0};
+  let cj=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(cj>=40){
+      br
+    }el{
+      mt db.exec("INSERT OR REPLACE INTO deletion_control (id,marker) VALUES (?,?)";@(str.fromint(cj);str.concat(plaintextmarker();str.fromint(cj)))) {$ok:v 1;$err:e 0};
+      cj=cj+1
+    }
+  };
+
+  let deleted=pstore.deletemapping("req-dsar-1");
+  if(t.assert(deleted;"the mapping is deleted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-dsar-1")==0;"no sealed record remains for that request")){pass=pass+1}el{fail=fail+1};
+  let gone=pstore.readmappingwithsecret("req-dsar-1";secret());
+  if(t.assert(!gone.openedok;"and it cannot be read back even with the key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((gone.openedentries.len as i64)==0;"and yields no mappings")){pass=pass+1}el{fail=fail+1};
+
+  (* The plaintext control, deleted in the same transaction era. Present a moment ago,
+     and this is where secure_delete is measured on this file in this run rather than
+     read off a pragma. *)
+  mt db.exec("DELETE FROM deletion_control";@()) {$ok:v 1;$err:e 0};
+  db.close();
+
+  (* ── THE X8.4 ASSERTION ──────────────────────────────────────────────────────
+     No plaintext of the deleted subject's values in ANY file under the data directory. *)
+  if(t.assert(filecount(testdir())>0;"there are files under the data directory to search, so the search is not passing on an empty tree")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();subjectname());"AFTER deletion: no plaintext of the subject's name in any file under the data directory")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();subjectemail());"nor of the email address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();subjectphone());"nor of the phone number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"[PERSON_7f21_1]");"nor of the placeholder, which carries the entity type and the ordinal")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"Featherstonehaugh");"nor a fragment of the surname, which would survive a partial overwrite")){pass=pass+1}el{fail=fail+1};
+
+  (* And the counterfactual: the plaintext marker WAS in the file and is not any more.
+     Same search, same tree, same run — so the five assertions above are not passing
+     because the search is broken, and secure_delete is doing what the pragma says. *)
+  if(t.assert(!treecontains(testdir();plaintextmarker());"CONTROL: the plaintext marker, which the search found earlier, is gone from the freed pages too — secure_delete is real on this file")){pass=pass+1}el{fail=fail+1};
+
+  (* ── purge everything ────────────────────────────────────────────────────────*)
+  let reopenedfinal=opendb();
+  if(t.assert(reopenedfinal!=0;"the store reopens for the purge")){pass=pass+1}el{fail=fail+1};
+  let purge1=pstore.storemappingwithsecret("req-purge-1";subjectmap();secret());
+  let purge2=pstore.storemappingwithsecret("req-purge-2";subjectmap();secret());
+  if(t.assert(purge1;"the first mapping to purge is stored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(purge2;"and the second")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-purge-1")==1;"two mappings are stored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.purgeallmappings();"purge runs")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-purge-1")==0;"and removes the first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-purge-2")==0;"and the second")){pass=pass+1}el{fail=fail+1};
+
+  (* expireold used to be `db.exec(store.conn; sql)` on an i64 — a field access on an
+     integer and the wrong arity for std.db, which type-checked and crashed the first
+     time it ran. Nothing ever ran it, because nothing called this module. *)
+  if(t.assert(pstore.expireold();"expireold runs rather than crashing on a field access against an integer")){pass=pass+1}el{fail=fail+1};
+
+  db.close();
+  if(t.assert(!treecontains(testdir();subjectname());"and after a purge the subject's name is still nowhere under the data directory")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

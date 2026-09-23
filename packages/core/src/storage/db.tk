@@ -34,29 +34,54 @@ t=$msrange{
   ok:bool
 };
 
-(* GA2.2: retrieve or generate a 32-byte hex encryption key via OS keychain *)
-(* The environment is checked before the keychain, and that is not a convenience.
+(* X8.3 — the key comes from the OS keychain and from nowhere else.
 
-   core.storage.keychain.getdbkey reaches SecItemCopyMatching, which on macOS blocks
-   on an authorisation dialog when the calling binary is not the one that stored the
-   item. A headless process — CI, a test runner, loke started by launchd — can never
-   answer that dialog, so the read does not fail: it HANGS, indefinitely, with the
-   store half-open. Every integration test touching the database hung on this, and so
-   would a first run on a machine where the key already exists.
+   WHAT WAS HERE, AND WHY IT IS GONE. ensuredbkey used to read LOKE_DB_KEY from the
+   environment BEFORE the keychain and return it if it was 64 characters long. That is
+   exactly the fallback X8.3 forbids: an environment variable is readable by any process
+   running as the user and writable by anything that can set the process environment, so
+   a key delivered that way is a key an attacker can both read and choose. A store whose
+   records were sealed under an attacker-chosen key is a store the attacker can read.
 
-   toke offers no way to time-bound a keychain read, so loke cannot recover from the
-   block once it starts. Avoiding it is the only option available here.
+   It was not there out of laziness. core.storage.keychain.getdbkey reaches
+   SecItemCopyMatching, which on macOS blocks on an authorisation dialog when the calling
+   binary is not the one that stored the item. A headless process — CI, a test runner,
+   loke started by launchd — can never answer that dialog, so the read does not fail: it
+   HANGS, indefinitely, with the store half-open. toke offers no way to time-bound a
+   keychain read, so once the block starts loke cannot recover from it. Two integration
+   tests hung the whole suite on this, and the env fallback is what unhung them.
 
-   LOKE_DB_KEY is therefore read first. It is a 64-character hex key, it is intended
-   for CI and tests, and it is NOT the recommended way to run loke: an environment
-   variable is readable by any process running as the user, where the keychain item is
-   not. The keychain remains the default for an interactive install. *)
-(* std.db takes (sql, params) and uses the connection db.open established — there is no
-   connection argument any more. Five calls here still passed one, which is
-   ARITY-COMPATIBLE: db.exec(conn; sql) type-checks, then reads the connection pointer
-   as a SQL string and the SQL string as a parameter array. Every one of them crashed
-   the moment it ran, which is why openstore segfaulted and every test that touches the
-   database with it. The build could not see it. *)
+   THE FIX IS NOT A BUILD GATE. A flag saying "this is a test build" would still leave a
+   branch in the shipped binary that takes a key from ambient state, and the security of
+   the store would then rest on the flag being false — one more thing to get wrong, and
+   invisible in a crash report. Instead the reason the fallback was load-bearing has been
+   removed:
+
+     1. openstore no longer calls this function at all. It called it to feed a
+        `PRAGMA key` that X8.1 deleted, so since X8.1 it has been fetching a key it does
+        not use — which is the ONLY reason merely OPENING the database could block on the
+        keychain. Opening a store now touches no secret material whatsoever.
+     2. The one consumer of this key, core.privacy.placeholderstore, takes the secret as
+        a PARAMETER. Production resolves it here, once, with no branch; tests construct a
+        64-character secret of their own and pass it in. So there is no ambient input
+        anywhere on the production path that can redirect which key is used, and nothing
+        to gate: the difference between a test and production is which function calls
+        which, not which value some variable happens to hold.
+
+   What this costs, stated rather than hidden: the keychain read itself is not exercised
+   by the automated suite, because a headless process cannot answer the dialog it may
+   raise. The suite covers everything on both sides of it — key shape, derivation,
+   sealing, opening, fail-closed behaviour on a wrong key — and not that one call.
+
+   A failure returns "", not a result type. T-18 makes the error arm of a user-declared
+   sum dead, so a `str!$lokeerr` here would report every failure as success; "" is a
+   value no 64-character hex key can take and every caller has to test length before it
+   can derive anything. *)
+(* Kept, and read by NOTHING in the product. tests/unit/storage/test_db.tk asserts that
+   the suite has a 64-character LOKE_DB_KEY in its environment, which is the only reason
+   this function still exists; scripts/run_tests.sh sets it for that assertion alone.
+   Do not call this from a key path. If you are looking for the key, it is ensuredbkey
+   below, and the keychain is the only place it comes from. *)
 f=dbkeyfromenv():str{
   let fromenv=env.getor("LOKE_DB_KEY";"");
   if(str.len(fromenv)==64){
@@ -66,26 +91,71 @@ f=dbkeyfromenv():str{
   }
 };
 
-f=ensuredbkey():str!$lokeerr{
-  let fromenv=dbkeyfromenv();
-  if(str.len(fromenv)>0){
-    log.info("db: using the encryption key from LOKE_DB_KEY, not the keychain";"db";"system");
-    <$ok(fromenv)
-  }el{};
+(* The 64-character hex secret, from the keychain, generating and storing one on first
+   use. "" means no secret is available, which must fail the operation that wanted it
+   rather than fall back to anything.
+
+   NOT called by openstore — see the note above. Call it only where a key is actually
+   needed, so that no code path blocks on the keychain for a key it does not use. *)
+f=ensuredbkey():str{
   if(kc.haskey("db_encryption_key")){
     let existing=kc.getdbkey();
-    if(str.len(existing)>0){
-      <$ok(existing)
+    if(str.len(existing)==64){
+      <existing
     }el{};
   }el{};
   let keybytes=crypto.randombytes(32);
   let hexkey=crypto.tohex(keybytes);
+  if(str.len(hexkey)!=64){
+    log.warn("db: the generated database key is not 64 hex characters; refusing to store it";"db";"system");
+    <""
+  }el{};
   let stored=kc.setdbkey(hexkey);
   if(!stored){
-    <$err($storageerr("failed to store database encryption key in keychain"))
+    log.warn("db: could not store the database key in the keychain; field encryption is unavailable";"db";"system");
+    <""
   }el{};
   log.info("db: generated new database encryption key";"db";"system");
-  <$ok(hexkey)
+  <hexkey
+};
+
+(* X8.4 — PRAGMA secure_delete, and whether this toolchain honours it.
+
+   MEASURED, not assumed, because PRAGMA key taught this project that SQLite accepting a
+   pragma says nothing about SQLite acting on it. The measurement: insert 40 rows each
+   containing a distinctive marker, DELETE them, then read the database file's bytes and
+   look for the marker.
+
+     secure_delete=OFF  marker present after insert, present after DELETE
+     secure_delete=ON   marker present after insert, ABSENT  after DELETE
+     either             absent after VACUUM
+     secure_delete=ON   absent after DROP TABLE as well
+
+   So it is honoured, on sqlite3 3.51.0 as linked by this toolchain, and the difference
+   between the two settings is exactly the difference between a deleted value remaining
+   legible in a freed page and not remaining there at all. It is set on the connection
+   immediately after open, BEFORE migrations run, so that the migration which drops the
+   old plaintext placeholder_maps table frees its pages with zeroing enabled.
+
+   Read back rather than trusted: securedeleteenabled asks the database what the setting
+   now is. Note that it must read the value as TEXT. Every stdlib result in this toolchain
+   uses 0 for the error side, so row.i64 returning 0 is indistinguishable from row.i64
+   failing — which makes a pragma whose legitimate value is 0 unreadable through the
+   integer accessor. That cost an hour; it is the T-22 family again. *)
+f=applysecuredelete():bool{
+  mt db.exec("PRAGMA secure_delete=ON";@()) {
+    $ok:v 1;
+    $err:e 0
+  };
+  <securedeleteenabled()
+};
+
+f=securedeleteenabled():bool{
+  let value=mt db.one("PRAGMA secure_delete";@()) {
+    $ok:r rowstr(r;"secure_delete");
+    $err:e ""
+  };
+  <str.eq(value;"1")
 };
 
 (* Database-level encryption is NOT available, and saying so is the deliverable.
@@ -114,10 +184,11 @@ f=ensuredbkey():str!$lokeerr{
    states the same thing in prose.
 
    The mapping table — the highest-value data in the system, rated Maximum in
-   docs/threat-model.md:181 — is to be protected by FIELD-level encryption via
-   `std.encrypt` (`aes256gcmencrypt`/`decrypt`/`keygen`/`noncegen`, `hkdfsha256`, all
-   verified present in the toolchain) under X8.2. Do not reinstate a database-level
-   claim. *)
+   docs/threat-model.md:181 — is protected by FIELD-level encryption instead, in
+   core.privacy.placeholderstore, under X8.2. That is a narrower control than a database
+   key and the status string below says so: ONE table's payload is sealed, and every other
+   table in loke.db is plaintext. Do not widen the wording to "the database is encrypted",
+   and do not reinstate a database-level claim. *)
 f=dbencryptionavailable():bool{
   <false
 };
@@ -126,7 +197,7 @@ f=dbencryptionstatus():str{
   if(dbencryptionavailable()){
     <"database encrypted at rest"
   }el{
-    <"NOT encrypted at rest: the toolchain links plain SQLite, which has no encryption and silently accepts PRAGMA key. Field-level encryption of the mapping table is tracked as X8.2"
+    <"the DATABASE is NOT encrypted at rest: the toolchain links plain SQLite, which has no encryption and silently accepts PRAGMA key. One table is protected instead — the placeholder mapping payload is sealed field-by-field with AES-256-GCM under a key derived from the OS keychain secret (X8.2, core.privacy.placeholderstore). Every other table, including audit_log, settings and sessions, is plaintext on disk"
   }
 };
 
@@ -136,13 +207,19 @@ f=openstore(datadir:str):$store!$lokeerr{
     $ok:conn conn;
     $err:e $err($storageerr(str.concat("failed to open database: ";path)))
   };
-  (* No encryption step. See dbencryptionavailable() above: there was one, it could not
-     work, and its failure could not surface. ensuredbkey() is still called because the
-     key it manages is real and X8.2 will use it for field-level encryption — but it is
-     no longer fed to a PRAGMA that ignores it. *)
-  mt ensuredbkey() {
-    $ok:k k;
-    $err:e ""
+  (* No encryption step, and no keychain read. See dbencryptionavailable() above: there
+     was a PRAGMA key, it could not work, and its failure could not surface. ensuredbkey()
+     used to be called here to feed it, and since X8.1 deleted the pragma this call has
+     been fetching a secret nothing used — which is the only reason opening a database
+     could block on a keychain authorisation dialog. It is gone. The one consumer of the
+     key asks for it where it needs it (X8.3).
+
+     secure_delete goes on FIRST, before migrations, so that migration 9's drop of the old
+     plaintext placeholder_maps table frees its pages with zeroing enabled. Measured to be
+     honoured by this toolchain — see applysecuredelete. *)
+  let securedeleteon=applysecuredelete();
+  if(securedeleteon){}el{
+    log.warn("db: PRAGMA secure_delete did not take effect; deleted rows may remain legible in freed pages";"db";"system")
   };
   <mt runmigrations(conn) {
     $ok:v2 $ok($store{conn:conn;datadir:datadir});

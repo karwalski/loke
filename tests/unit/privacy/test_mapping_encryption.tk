@@ -1,0 +1,352 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.mappingencryption;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=encd:std.encoding;
+i=enc:std.encrypt;
+i=sdb:core.storage.db;
+i=ph:core.privacy.placeholder;
+i=pstore:core.privacy.placeholderstore;
+
+(* X8.2 — the mapping table is sealed at rest, and this asserts the properties the seal
+   is supposed to have rather than that a function returns a value.
+
+   It imports the REAL modules. A stub test of an encryption path is worth nothing: the
+   thing that has to be true is that the bytes on disk do not contain the name, and a
+   stub has no disk. The cautionary example was tests/test_db_encryption.tk, which
+   stubbed the keychain and then asserted that the malformed `PRAGMA key` string X8.1
+   DELETED was "well-formed" — green through the entire life of both the defect and its
+   removal, because it never touched the module it was named for.
+
+   The secret here is a literal, and that is the X8.3 mechanism rather than a hole in it:
+   sealing takes the secret as a PARAMETER, so production resolves it from the keychain
+   with no branch and a test passes one of its own. There is no environment variable
+   either side reads, so there is nothing a misconfiguration could flip. The keychain
+   read itself is not exercised here and cannot be: SecItemCopyMatching blocks on an
+   authorisation dialog a headless test process can never answer. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation: std.homedir() is truncated when interpolated (T-21).
+     Its own directory, so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-mapping-encryption")
+};
+
+f=secreta():str{
+  <"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+};
+
+f=secretb():str{
+  <"ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000"
+};
+
+f=opendb():i64{
+  let dir=testdir();
+  mt file.mkdir(dir) {$ok:v 1;$err:e 0};
+  (* A stale file from an earlier run would carry that run's rows and its schema. *)
+  mt file.delete(str.concat(dir;"/loke.db")) {$ok:v 1;$err:e 0};
+  mt file.delete(str.concat(dir;"/loke.db-journal")) {$ok:v 1;$err:e 0};
+  mt file.delete(str.concat(dir;"/loke.db-wal")) {$ok:v 1;$err:e 0};
+  mt file.delete(str.concat(dir;"/loke.db-shm")) {$ok:v 1;$err:e 0};
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* A byte-level search, because the target is a binary file. file.read stops at the
+   first NUL, which in a SQLite page is usually within the first few bytes, so a text
+   search would report "not found" for a value sitting in plain sight two pages later.
+   That is a grep that always passes, which is worse than no grep. *)
+f=bytescontain(haystack:@byte;needle:str):bool{
+  let nb=str.bytes(needle);
+  let n=(nb.len as i64);
+  let h=(haystack.len as i64);
+  if(n==0){
+    <false
+  }el{};
+  if(h<n){
+    <false
+  }el{};
+  let limit=h-n;
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>limit){
+      br
+    }el{
+      let j=mut.0;
+      let same=mut.true;
+      lp(let lv2=0;true;lv2=lv2){
+        if(j>=n){
+          br
+        }el{
+          if(haystack.get(i+j)==nb.get(j)){
+            j=j+1
+          }el{
+            same=false;
+            br
+          }
+        }
+      };
+      if(same){
+        <true
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+f=filecontains(path:str;needle:str):bool{
+  <mt file.readbytes(path) {
+    $ok:bytes bytescontain(bytes;needle);
+    $err:e false
+  }
+};
+
+(* Every file under the data directory, not just loke.db: a rollback journal, a WAL
+   frame or a -shm carries page images too, and a value that survives in one of those
+   has survived. file.listall walks the tree and returns paths relative to it. *)
+f=treecontains(dir:str;needle:str):bool{
+  let names=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>=(names.len as i64)){
+      br
+    }el{
+      let path=str.concat(dir;str.concat("/";names.get(i)));
+      if(filecontains(path;needle)){
+        <true
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+f=samplemap():$placeholdermap{
+  let m0=ph.newmap();
+  let m1=ph.addentry(m0;"Alice Smith";"[PERSON_a3f1_1]";"PERSON");
+  let m2=ph.addentry(m1;"bob.jones@example.com";"[EMAIL_a3f1_1]";"EMAIL");
+  <ph.addentry(m2;"0400 111 222";"[PHONE_a3f1_1]";"PHONE")
+};
+
+(* A known-answer check: encrypt a published vector and compare the ciphertext, tag and
+   all, against the published answer. See the block in main for why this is here. *)
+f=gcmvector(keyhex:str;ivhex:str;plainhex:str;aadhex:str):str{
+  let sealed=enc.aes256gcmencrypt(pstore.hexbytes(keyhex);pstore.hexbytes(ivhex);pstore.hexbytes(plainhex);pstore.hexbytes(aadhex));
+  <encd.hexencode(sealed)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── is it actually AES-256-GCM? ─────────────────────────────────────────────
+     This is the first thing asserted, and it is here because of PRAGMA key.
+
+     std.encrypt is NOT libsodium, whatever stdlib/encrypt.md says: toke's
+     src/stdlib/encrypt.c is 2,848 lines of hand-written C implementing AES, GCM,
+     SHA-512, X25519 and Ed25519 from scratch, with no third-party library behind it and
+     no known-answer test anywhere in the toolchain. Every other assertion in this file
+     would pass just as happily against a cipher that is not AES-GCM, or against a
+     weakened one, because they only ever check that what this implementation sealed this
+     implementation can open. A round trip proves self-consistency, not cryptography.
+     That is exactly the shape of the X8.1 defect — a control indistinguishable from a
+     real one from inside the program.
+
+     So: three of the published AES-256-GCM test vectors from the GCM specification
+     (McGrew & Viega, also NIST SP 800-38D's reference set) and RFC 5869's HKDF-SHA256
+     test case 1. They cover the empty-plaintext case, a single block with no AAD, and a
+     multi-block message with AAD and a partial final block — which is where a
+     hand-written GHASH or CTR is most likely to be wrong. If any of these four fails,
+     the mapping table is sealed with something that is not the algorithm this project
+     says it uses, and nothing else in this file matters. *)
+  if(t.asserteq(gcmvector("0000000000000000000000000000000000000000000000000000000000000000";"000000000000000000000000";"";"");"530f8afbc74536b9a963b4f1c4cb738b";"AES-256-GCM matches the published vector for an empty plaintext: the tag alone")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gcmvector("0000000000000000000000000000000000000000000000000000000000000000";"000000000000000000000000";"00000000000000000000000000000000";"");"cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919";"and for one block with a zero key and zero nonce")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gcmvector("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308";"cafebabefacedbaddecaf888";"d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39";"feedfacedeadbeeffeedfacedeadbeefabaddad2");"522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f66276fc6ece0f4e1768cddf8853bb2d551b";"and for a multi-block message with AAD and a partial final block, where GHASH and CTR are hardest to get right")){pass=pass+1}el{fail=fail+1};
+  let hkdfokm=encd.hexencode(enc.hkdfsha256(pstore.hexbytes("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");pstore.hexbytes("000102030405060708090a0b0c");pstore.hexbytes("f0f1f2f3f4f5f6f7f8f9");42));
+  if(t.asserteq(hkdfokm;"3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";"HKDF-SHA256 matches RFC 5869 test case 1, so the key derivation is the real thing too")){pass=pass+1}el{fail=fail+1};
+
+  let opened=opendb();
+  if(t.assert(opened!=0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the schema has nowhere to put a plaintext value ─────────────────────────
+     Migration 8 creates the sealed table and migration 9 drops the plaintext one. The
+     second half matters as much as the first: a table with an `original TEXT NOT NULL`
+     column left in the schema is somewhere a future writer can put a name. *)
+  if(t.assert(sdb.tableexists("placeholder_map_records");"the sealed mapping table exists after migrations")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.tableexists("placeholder_maps");"and the old plaintext mapping table is gone, not merely unused")){pass=pass+1}el{fail=fail+1};
+
+  (* ── PRAGMA secure_delete, read back rather than assumed ─────────────────────
+     PRAGMA key is why this is asserted and not trusted: plain SQLite accepts that one,
+     ignores it and reports success. This one is measured to work — the measurement is
+     in core.storage.db — and openstore sets it before migrations run. *)
+  if(t.assert(sdb.securedeleteenabled();"PRAGMA secure_delete is in effect on the connection openstore established")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the key ─────────────────────────────────────────────────────────────────
+     A secret that is not a 64-character hex string yields no key, and no key must mean
+     no operation rather than a weak one. *)
+  if(t.assert(pstore.keyusable(secreta());"a 64-character secret derives a usable 32-byte key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pstore.keyusable("");"an empty secret derives no key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pstore.keyusable("abc123");"and neither does a short one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pstore.keyusable(str.concat(secreta();"00"));"or an over-long one")){pass=pass+1}el{fail=fail+1};
+
+  (* Derivation is deterministic — otherwise nothing sealed could ever be opened — and
+     separated by secret. *)
+  let keya=encd.hexencode(pstore.derivemapkey(secreta()));
+  let keya2=encd.hexencode(pstore.derivemapkey(secreta()));
+  let keyb=encd.hexencode(pstore.derivemapkey(secretb()));
+  if(t.assert(str.eq(keya;keya2);"HKDF derivation is deterministic for one secret")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(keya;keyb);"and two secrets derive different keys")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(keya) as i64)==64;"the derived key is 32 bytes")){pass=pass+1}el{fail=fail+1};
+  (* The derived key is not the secret. Using the keychain secret directly as an AES key
+     would work and would be wrong: it would tie every future use of that secret to this
+     one. *)
+  if(t.assert(!str.eq(keya;secreta());"and the derived key is not the keychain secret itself")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a per-record nonce ──────────────────────────────────────────────────────
+     Two seals of the SAME payload under the SAME key must differ, in the nonce and
+     therefore in the ciphertext. A repeated nonce under AES-GCM leaks the XOR of the
+     two plaintexts and the GHASH subkey; this is the assertion that says it is not
+     happening. *)
+  let payload=pstore.paddedpayload(pstore.encodepayload(samplemap()));
+  let seal1=pstore.sealpayload(secreta();"req-nonce";payload);
+  let seal2=pstore.sealpayload(secreta();"req-nonce";payload);
+  if(t.assert(seal1.sealedok;"a payload seals")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(seal2.sealedok;"and seals again")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(seal1.sealednonce) as i64)==24;"the nonce is twelve bytes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(seal1.sealednonce;seal2.sealednonce);"two seals of the same payload use different nonces")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(seal1.sealedhex;seal2.sealedhex);"so the ciphertext differs too, which is the observable consequence")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pstore.sealpayload("";"req-nonce";payload).sealedok;"and a payload cannot be sealed without a usable key")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the round trip ──────────────────────────────────────────────────────────*)
+  let back=pstore.openpayload(secreta();"req-nonce";seal1.sealednonce;seal1.sealedhex);
+  if(t.assert(back.openedok;"a sealed payload opens with the right key and request id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((back.openedentries.len as i64)==3;"and yields the three mappings that went in")){pass=pass+1}el{fail=fail+1};
+  let first:$placeholderentry=back.openedentries.get(0);
+  if(t.asserteq(first.original;"Alice Smith";"the original value survives the round trip")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(first.placeholder;"[PERSON_a3f1_1]";"so does the placeholder")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(first.entitytype;"PERSON";"and so does the entity type")){pass=pass+1}el{fail=fail+1};
+
+  (* ── failing closed, in each of the three ways it can be attacked ────────────
+     Authentication failure has to be DISTINGUISHABLE from a successful decryption, and
+     it has to yield nothing. The order of these three is the order of the threat: a
+     stolen file opened with a guessed key, a row moved between requests, a flipped
+     byte. *)
+  let wrongkey=pstore.openpayload(secretb();"req-nonce";seal1.sealednonce;seal1.sealedhex);
+  if(t.assert(!wrongkey.openedok;"the wrong key does not open the payload")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((wrongkey.openedentries.len as i64)==0;"and yields no mappings at all, not a partial one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(wrongkey.openedwhy;"authentication failed");"and says authentication failed rather than reporting an empty mapping")){pass=pass+1}el{fail=fail+1};
+
+  (* The AAD binds the ciphertext to its request id. Moving a row from one request to
+     another is a realistic attack on a file the user can write, and it must not decrypt
+     into the wrong request's mapping. *)
+  let wrongrequest=pstore.openpayload(secreta();"req-other";seal1.sealednonce;seal1.sealedhex);
+  if(t.assert(!wrongrequest.openedok;"a payload moved to another request's row does not open")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((wrongrequest.openedentries.len as i64)==0;"and yields nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* A single flipped hex digit in the stored ciphertext. GCM's tag covers it. *)
+  let tampered=str.concat(str.replace(str.substr(seal1.sealedhex;0;8);"a";"b");str.substr(seal1.sealedhex;8;(str.len(seal1.sealedhex) as i64)-8));
+  let tamperedopen=pstore.openpayload(secreta();"req-nonce";seal1.sealednonce;tampered);
+  if(t.assert(!tamperedopen.openedok;"an altered ciphertext does not open")){pass=pass+1}el{fail=fail+1};
+
+  (* A truncated or non-hex column. encoding.hexdecode's declared error side is
+     unreachable — its wrapper returns zero bytes through the ok arm — so the length
+     check in hexbytes is the only thing between a corrupt column and an empty key or
+     an empty nonce. Both directions asserted. *)
+  let shortnonce=pstore.openpayload(secreta();"abcd";seal1.sealedhex;seal1.sealedhex);
+  if(t.assert(!shortnonce.openedok;"a nonce column that is not twelve bytes is refused")){pass=pass+1}el{fail=fail+1};
+  let nonhex=pstore.openpayload(secreta();"req-nonce";seal1.sealednonce;"not hex at all");
+  if(t.assert(!nonhex.openedok;"and so is a payload column that is not hex")){pass=pass+1}el{fail=fail+1};
+
+  (* ── through the database ────────────────────────────────────────────────────*)
+  let stored=pstore.storemappingwithsecret("req-store-1";samplemap();secreta());
+  if(t.assert(stored;"a mapping persists")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-store-1")==1;"as exactly one sealed record")){pass=pass+1}el{fail=fail+1};
+
+  let readback=pstore.readmappingwithsecret("req-store-1";secreta());
+  if(t.assert(readback.openedok;"and reads back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((readback.openedentries.len as i64)==3;"with all three mappings")){pass=pass+1}el{fail=fail+1};
+
+  let anonymised="Ask [PERSON_a3f1_1] at [EMAIL_a3f1_1] or ring [PHONE_a3f1_1]";
+  let restored=pstore.restorewithsecret("req-store-1";anonymised;secreta());
+  if(t.asserteq(restored;"Ask Alice Smith at bob.jones@example.com or ring 0400 111 222";"restoration through the sealed store replaces every placeholder")){pass=pass+1}el{fail=fail+1};
+
+  (* Fail closed on restore: the text comes back UNCHANGED, with its placeholders still
+     in it. Not partially restored, and above all not restored with something else's
+     value — a confidently wrong name is a disclosure where a visible placeholder is an
+     annoyance. *)
+  let notrestored=pstore.restorewithsecret("req-store-1";anonymised;secretb());
+  if(t.asserteq(notrestored;anonymised;"the wrong key leaves the text exactly as it was, placeholders intact")){pass=pass+1}el{fail=fail+1};
+  let missing=pstore.restorewithsecret("req-never-stored";anonymised;secreta());
+  if(t.asserteq(missing;anonymised;"and so does a request with no stored mapping")){pass=pass+1}el{fail=fail+1};
+
+  (* A mapping that could not be sealed writes NO row. A row with an empty payload would
+     look like a mapping that exists and restore to nothing, which a later reader cannot
+     tell from a request that had no entities. *)
+  let refused=pstore.storemappingwithsecret("req-nokey";samplemap();"");
+  if(t.assert(!refused;"storing without a usable key is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-nokey")==0;"and writes no row at all rather than an unreadable one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the entity census is not readable without the key ───────────────────────
+     One row per request rather than one per entity, so `SELECT COUNT() WHERE
+     request_id=?` cannot report how many people a prompt mentioned. Reading the count
+     of MAPPINGS requires opening the payload. *)
+  if(t.assert(pstore.entrycountforrequestwithsecret("req-store-1";secreta())==3;"the mapping count is readable with the key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.entrycountforrequestwithsecret("req-store-1";secretb())<0;"and not without it")){pass=pass+1}el{fail=fail+1};
+
+  (* Two requests with different numbers of short entities produce the same amount of
+     stored ciphertext, because the payload is padded to a 256-byte boundary. This is
+     the length channel being narrowed, not closed: a large mapping still lands in a
+     bigger bucket. *)
+  let onemap=ph.addentry(ph.newmap();"Zoe";"[PERSON_bbbb_1]";"PERSON");
+  let sealone=pstore.sealpayload(secreta();"req-pad-1";pstore.paddedpayload(pstore.encodepayload(onemap)));
+  let sealthree=pstore.sealpayload(secreta();"req-pad-3";pstore.paddedpayload(pstore.encodepayload(samplemap())));
+  if(t.assert(str.len(sealone.sealedhex)==str.len(sealthree.sealedhex);"one mapping and three seal to the same ciphertext length")){pass=pass+1}el{fail=fail+1};
+
+  (* ── values the codec must not mangle ────────────────────────────────────────
+     Every field is hex-encoded inside the payload, so the framing separators cannot
+     occur inside a value however odd a detected entity is. A pipe or a newline in a
+     name would otherwise split one record into two or three. *)
+  let awkward=ph.addentry(ph.newmap();"O'Brien | Smith\nsecond line";"[PERSON_cccc_1]";"PERSON");
+  let sealawkward=pstore.sealpayload(secreta();"req-awkward";pstore.paddedpayload(pstore.encodepayload(awkward)));
+  let openawkward=pstore.openpayload(secreta();"req-awkward";sealawkward.sealednonce;sealawkward.sealedhex);
+  if(t.assert(openawkward.openedok;"a value containing a pipe and a newline round-trips")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((openawkward.openedentries.len as i64)==1;"as ONE mapping, not three")){pass=pass+1}el{fail=fail+1};
+  let awkwardback:$placeholderentry=openawkward.openedentries.get(0);
+  if(t.asserteq(awkwardback.original;"O'Brien | Smith\nsecond line";"with its bytes intact")){pass=pass+1}el{fail=fail+1};
+
+  (* ── and the assertion that matters: nothing legible on disk ─────────────────
+     The values were stored a few dozen assertions ago. They must not appear anywhere
+     under the data directory, in any file, before any deletion — because the point of
+     sealing is that the plaintext is never written, not that it is cleaned up later.
+
+     The positive control comes first. A grep that cannot find anything proves nothing,
+     so it is first shown finding a string that IS stored in the clear: the request id.
+     Only then does its failure to find the values mean something. *)
+  db.close();
+  if(t.assert(treecontains(testdir();"req-store-1");"the grep can find the request id, which is stored in the clear")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"Alice Smith");"and finds no trace of the stored name anywhere under the data directory")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"bob.jones@example.com");"nor of the email address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"0400 111 222");"nor of the phone number")){pass=pass+1}el{fail=fail+1};
+  (* The placeholder and the entity type are inside the payload too, so neither the
+     surrogate nor the category census is readable from the file. *)
+  if(t.assert(!treecontains(testdir();"[PERSON_a3f1_1]");"nor of the placeholder, which carries the entity type and the ordinal")){pass=pass+1}el{fail=fail+1};
+
+  (* The status sentence, in one place so nothing restates it. It must not claim the
+     database is encrypted, because it is not. *)
+  if(t.assert(str.contains(pstore.mappingencryptionstatus();"AES-256-GCM");"the status names the algorithm")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pstore.mappingencryptionstatus();"every other table in loke.db is plaintext");"and says what is NOT covered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sdb.dbencryptionstatus();"NOT encrypted at rest");"and the database-level claim stays retracted")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

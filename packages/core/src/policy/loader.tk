@@ -8,6 +8,7 @@ i=json:std.json;
 i=str:std.str;
 i=time:std.time;
 i=t:core.policy.types;
+i=reg:core.policy.presets.registry;
 i=log:shared.log;
 
 t=$loaderconfig{ policydir:str; enterpriseurl:str; hotreload:bool; reloadintervalseconds:i32 };
@@ -114,6 +115,31 @@ f=checkreloadneeded(cfg:$loaderconfig;lastloadedat:i64):bool{
   <now - lastloadedat > (cfg.reloadintervalseconds * 1000)
 };
 
+(* Severity and sensitivity are different scales, and conflating them made `evaluate`
+   flag almost every rule.
+
+   `severityrank` knows critical/high/medium/low. A SENSITIVITY is
+   public/internal/confidential/restricted — none of which it knows, so it returned 0 for
+   every real sensitivity, and the third branch of `evaluate` tested
+   `severityrank(rule.severity) > 0`, true for every rule above severity "none". With the
+   eleven presets now loadable through `loadpreset` that was roughly 96 violations per
+   evaluation, whatever the input.
+
+   `sensitivityrank` exists so the two scales are at least named apart. It is not used by
+   `evaluate` — see the comment there for why no comparison between the two is defensible
+   with the fields `$policyrule` currently has. *)
+f=sensitivityrank(level:str):i32{
+  if(str.eq(level;"restricted")){ <4 as i32 }el{
+    if(str.eq(level;"confidential")){ <3 as i32 }el{
+      if(str.eq(level;"internal")){ <2 as i32 }el{
+        if(str.eq(level;"public")){ <1 as i32 }el{
+          <0 as i32
+        }
+      }
+    }
+  }
+};
+
 f=severityrank(sev:str):i32{
   if(str.eq(sev;"critical")){ <4 as i32 }el{
     if(str.eq(sev;"high")){ <3 as i32 }el{
@@ -126,9 +152,24 @@ f=severityrank(sev:str):i32{
   }
 };
 
+(* A rule matches on what the CONTEXT says, never on its own severity.
+
+   The third branch here used to be `severityrank(rule.severity) > severityrank(sensitivity)`,
+   which is a category error in both operands — see the comment on `sensitivityrank`. It is
+   removed rather than repaired, and that is a decision on the merits rather than a
+   convenience: **severity describes the consequence of violating a rule, not the
+   circumstances in which the rule applies.** A `critical` data-residency rule is critical
+   whether the data is public or restricted; ranking it against the data's sensitivity answers
+   no question anybody asked.
+
+   Deciding "does this rule apply at this sensitivity?" needs a threshold on the rule, and
+   `$policyrule` has no such field. Adding one is RG1.5 — deliberately a separate story,
+   because it changes when enforcement fires and that deserves its own review.
+
+   Nothing on the request path calls `evaluate` yet (the presets are loadable, not enforced),
+   so this narrows what it reports rather than changing live behaviour. *)
 f=evaluate(sets:@$policyset;context:str;sensitivity:str):@$policyviolation{
   let violations=mut.@();
-  let sensrank=severityrank(sensitivity);
   let si=mut.0;
   lp(let lv=0;si < sets.len;lv=lv){
     let ps=sets.get(si);
@@ -140,7 +181,6 @@ f=evaluate(sets:@$policyset;context:str;sensitivity:str):@$policyviolation{
         let rule=reg.rules.get(ki);
         let keywordmatch=str.contains(context;rule.id);
         let descmatch=str.contains(context;rule.description);
-        let severitymatch=severityrank(rule.severity) > sensrank;
         if(keywordmatch){
           let v=$policyviolation{
             ruleid:rule.id;
@@ -160,18 +200,7 @@ f=evaluate(sets:@$policyset;context:str;sensitivity:str):@$policyviolation{
               context:context
             };
             violations=violations.push(v)
-          }el{
-            if(severitymatch){
-              let v=$policyviolation{
-                ruleid:rule.id;
-                ruledesc:rule.description;
-                action:rule.action;
-                severity:rule.severity;
-                context:context
-              };
-              violations=violations.push(v)
-            }el{}
-          }
+          }el{}
         };
         ki=ki+1
       };
@@ -200,4 +229,39 @@ f=formatviolations(violations:@i64):str{
     i=i+1
   };
   <out
+};
+
+(* Named-preset loading. core.policy.presets is the single source of truth for what loke
+   ships as a regulatory default, and core.policy.regulations — a parallel hand-written set
+   of the same six regulations, with a ukgdpr() that was a verbatim copy of gdpr() — is
+   gone. The registry projects a preset into the $regulation and $policyset shapes evaluate()
+   already consumes, so a preset is loadable and enforceable rather than being a document.
+
+   presetnames() is the list of valid arguments. An unrecognised name returns a set whose
+   single regulation has an empty rule list, which evaluate() then finds nothing in: use
+   presetknown() to tell that apart from a preset that genuinely constrains nothing. It is a
+   sentinel and a predicate rather than a $policyset!$err because T-18 makes the $err arm of
+   a user-declared error side dead code. *)
+f=presetnames():@str{
+  <reg.names()
+};
+
+f=presetknown(name:str):bool{
+  <reg.hasname(name)
+};
+
+f=loadpreset(name:str):$policyset{
+  <reg.policysetfor(name)
+};
+
+f=loadpresets(wanted:@str):$policyset{
+  <reg.policysetformany(wanted)
+};
+
+f=builtinset():$policyset{
+  <reg.defaultset()
+};
+
+f=evaluatepreset(name:str;context:str;sensitivity:str):@$policyviolation{
+  <evaluate(@(loadpreset(name));context;sensitivity)
 };

@@ -60,6 +60,7 @@ already had and discarded.
 | **T-27** | **Silent code deletion** | **Comments nest, so `(*` inside a comment (e.g. `COUNT(*)`) swallows the rest of the file** | none at all |
 | **T-28** | Silent segfault | **`str.isdigit` crashes on a `str.charat` result** — the only producer of a character cannot feed the only classifier of one | none — SIGSEGV |
 | **T-29** | Minor | Control-flow keywords (`sc`, `mt`, `lp`, `el`, `br`, `if`) are reserved as import aliases and the diagnostic does not name the reserved word | E2002, unhelpful |
+| **T-30** | **Correctness, silent** | **`std.db` has ONE global connection; `db.open`'s returned handle selects nothing, so a two-database program silently queries whichever opened last** | none |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
 right. **T-13 to T-24 were found later, getting loke's test suite to run against real
@@ -1081,6 +1082,61 @@ compiler already knows which token it rejected.
 
 Same family as T-25 and T-26: the information needed to act is in the compiler's hand at the
 moment it emits the diagnostic, and is not in the diagnostic.
+
+---
+
+## T-30 — `std.db` has exactly one global connection, so a program cannot use two databases
+
+**Severity: correctness, silent, and it makes a two-database program impossible to write
+without knowing this.**
+
+`src/stdlib/db.c`:
+
+```c
+static sqlite3 *g_db = NULL;                      /* :10 */
+...
+if (sqlite3_open(dsn, &g_db) != SQLITE_OK) { ... } /* :20 — overwrites, does not close */
+...
+static sqlite3 *conn_db(int conn_id)               /* :199 */
+{
+    if (conn_id == 0) return g_db;
+    return NULL;
+}
+```
+
+`db.open` returns a `u64!DbErr`, which reads like a handle — but `conn_db` resolves **only
+conn_id 0**, to the single global. So the returned value cannot select a connection, every
+subsequent `db.one`/`db.many`/`db.exec` goes to whichever database was opened **last**, and
+opening a second one silently replaces the first without closing it.
+
+This is not hypothetical for us. loke opens two files in one process:
+
+- `core.storage.db.openstore(datadir)` → `datadir/loke.db` (audit trail, settings, sessions)
+- `core.memory.palace.openpalace(datadir)` → `datadir/memory.db` (drawers, closets, index)
+
+Whichever ran last receives every query from both subsystems. `audit_log` does not exist in
+`memory.db` and `memory_drawers` does not exist in `loke.db`, so the loser's queries fail —
+**silently**, because a failed read is mapped to `0` or `""` by the row accessors (see the
+related defect below). We found it only because a test that had never imported the real module
+was de-stubbed and started asserting that the memory tables exist.
+
+Three asks, in descending order of value:
+
+1. **Make `conn_db` honour the handle**, so `db.open`'s return value means what its type says.
+   A small table of open connections indexed by the returned id would do it, and the signature
+   already accommodates it.
+2. **If one connection is the intended design, say so in the type.** `db.open` returning
+   `u64` invites exactly this mistake; `void!DbErr` plus a `db.use(path)` would not. The
+   current signature documents a capability that does not exist.
+3. **Close the previous connection on re-open**, or refuse the second open. Overwriting the
+   pointer leaks the handle and its file lock.
+
+**Related, and worth fixing together: a stdlib result cannot carry a legitimate zero.** We hit
+this on `db.one("PRAGMA secure_delete")`, which returns 0 when the pragma is off — and `mt
+row.i64` takes that to `$err`. loke's own `rowi64`/`rowi32` wrappers then map the error side
+back to `0`, so **every integer column read in this codebase conflates "the value is 0" with
+"the read failed"**, including `tokens_in`, `tokens_out` and `duration_ms` in the audit trail.
+The same shape as T-22: a result whose error side is indistinguishable from a valid value.
 
 ---
 

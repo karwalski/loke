@@ -2,98 +2,667 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=core.privacy.placeholderstore;
-i=json:std.json;
-
-
-
 
 i=db:std.db;
 i=str:std.str;
+i=enc:std.encrypt;
+i=encd:std.encoding;
 i=log:shared.log;
-i=t:shared.types;
 i=s:core.storage.db;
+i=ph:core.privacy.placeholder;
 
-t=$persistentmap{
-  requestid:str;
-  store:i64
+(* ══════════════════════════════════════════════════════════════════════════════
+   X8.2 — the placeholder to value mapping, sealed at rest.
+
+   WHAT THIS PROTECTS. The mapping is the table that turns an anonymised transcript
+   back into named people. docs/threat-model.md:181 rates it Maximum, above the audit
+   log and above the prompt cache, and until now it was plaintext in a SQLite file any
+   process running as the user could read. Everything else loke does about privacy is
+   worth less than this one table: a detector that misses an entity leaks one value,
+   and a readable mapping table leaks every value loke ever detected, together with
+   which request each belonged to.
+
+   WHY FIELD LEVEL AND NOT DATABASE LEVEL. Database encryption is not available and
+   that was settled under X8.1: the toolchain links plain `-lsqlite3`, plain SQLite
+   accepts `PRAGMA key`, ignores it and reports success, and there is no SQLCipher
+   anywhere in the toolchain. `core.storage.db.dbencryptionavailable()` returns false
+   and says why. Nothing here reinstates a database-level claim.
+
+   WHAT IS AND IS NOT PROTECTED, precisely, because a control described loosely is a
+   control that gets over-claimed:
+
+     Sealed  the original value, the placeholder, and the entity type — all three, as
+             one payload. See "WHAT IS ENCRYPTED" below.
+     Clear   the request id, the key version, and the created/expires timestamps.
+     Clear   every other table in loke.db. audit_log, settings, sessions and the memory
+             tables are untouched by this and remain plaintext on disk.
+
+   So the honest sentence is "the placeholder mapping payload is encrypted at rest",
+   not "loke's database is encrypted at rest". mappingencryptionstatus() below is the
+   one place that sentence is written, so that anything asserting it derives it from
+   here rather than restating it.
+
+   ── WHAT IS ENCRYPTED, AND WHY NOT JUST THE VALUE ────────────────────────────
+   The obvious design encrypts `original` and leaves `placeholder` and `entity_type`
+   readable, because those are "just tokens". They are not.
+
+     - The entity type IS an attribute of the subject. A row saying this request
+       mentioned a MEDICAL_CONDITION, or a RELIGION, or a CRIMINAL_RECORD, discloses
+       something about a person without disclosing their name — and under GDPR Art. 9
+       the category is the sensitive part.
+     - The placeholder EMBEDS the entity type and an ordinal: `[PERSON_a3f1_3]` says
+       this request mentioned at least three people. Encrypting the type column while
+       leaving the placeholder readable protects nothing, because the placeholder
+       carries the type.
+     - Together with a request id, a readable placeholder column gives a per-request
+       census of entity types and counts. That is metadata about the subject of the
+       request, derivable with no key at all.
+
+   So all three fields go inside the AEAD, and the table below has no column any of
+   them fits in. Restore does not need a searchable placeholder column: it asks for
+   the mapping belonging to ONE request and decrypts it whole.
+
+   ── ONE ROW PER REQUEST, AND THE LENGTH THAT IS LEFT ─────────────────────────
+   One row per entity would make the row count for a request equal to the entity count
+   for that request, so the census the previous paragraph closes would be back,
+   readable by `SELECT COUNT() ... WHERE request_id=?`. One sealed payload per request
+   removes it.
+
+   Payload length still leaks, so the payload is padded with newlines to a 256-byte
+   boundary before sealing. What that buys, stated exactly: maps that encode to under
+   256 bytes — roughly the first half-dozen short entities — are indistinguishable in
+   length from one another. A larger map still falls into a visible 256-byte bucket, so
+   a 4KB payload does tell an observer that the request mentioned a lot of entities.
+   That residual is not closed here and should not be described as closed.
+
+   ── THE NONCE ────────────────────────────────────────────────────────────────
+   A fresh 12-byte nonce from `enc.aes256gcmnoncegen()` per SEAL, stored per row in
+   nonce_hex. Reusing a nonce under one AES-GCM key is not untidy, it is catastrophic:
+   two messages under the same key and nonce leak the XOR of their plaintexts and, via
+   the shared GHASH subkey, allow forgery. The defence is structural rather than a rule
+   somebody has to remember: `sealpayload` is the only function that encrypts, it
+   generates the nonce itself, and it takes no nonce parameter. There is no way to call
+   into this module with a nonce of your choosing. Re-storing a mapping for a request
+   that already has one is an INSERT OR REPLACE that re-seals under a NEW nonce, which
+   is the case a caller would otherwise get wrong.
+
+   The nonce length is checked before use. `aes256gcmnoncegen` returns an empty array if
+   its allocation fails, and a 0-byte nonce would be rejected by the AEAD but only after
+   this code had decided it was encrypting something.
+
+   ── KEY DERIVATION ───────────────────────────────────────────────────────────
+   The keychain secret is never used as an AES key. It goes through HKDF-SHA256:
+
+     ikm   the 64-character hex secret from core.storage.db.ensuredbkey, AS TEXT
+     salt  "loke/placeholder-map/hkdf-salt/v1"   — a fixed, non-secret label
+     info  "loke/placeholder-map/aes-256-gcm/v1" — purpose, algorithm, version
+     len   32
+
+   Three choices there, each with a reason:
+
+   ikm as TEXT rather than the decoded 32 bytes. HKDF-Extract HMACs the ikm, so the 64
+   hex characters carry exactly the same 256 bits of entropy as the 32 bytes they spell
+   and the derived key is no weaker. What it avoids is a decode step on the KEY path:
+   `encoding.hexdecode` is declared `[byte]!EncodingErr` but its wrapper returns a bare
+   packed array with no error tag, so invalid hex arrives as `$ok` holding ZERO bytes.
+   Decoding the secret would therefore turn a malformed keychain item into an empty
+   ikm — a silently weak key — where the length check on the text rejects it outright.
+   (That mismatch is measured, not inferred; see the note on hexbytes below.)
+
+   A CONSTANT salt, not a stored random one. RFC 5869's salt randomises the extract
+   step when the ikm is not uniformly random; here the ikm is `crypto.randombytes(32)`
+   rendered as hex, so there is nothing left to randomise and a stored salt would add no
+   entropy. It would add a failure mode: lose the salt row and the mapping table is
+   permanently unreadable even with the keychain intact. The salt's remaining job is
+   domain separation, which a constant does correctly and cannot lose.
+
+   info carries purpose, algorithm and version. Any other subsystem deriving from the
+   same keychain secret with a different info label gets an independent key, so a future
+   compromise of one derived key does not compromise the others. Bumping the version
+   rotates this key without touching the keychain, and key_version is stored per row so
+   rows sealed under the old label remain decryptable while new rows use the new one.
+
+   ── AUTHENTICATION, AND FAILING CLOSED ───────────────────────────────────────
+   The AAD binds the ciphertext to its identity: domain label, key version, request id.
+   A row lifted out of request A and pasted into request B's row therefore fails to
+   authenticate rather than decrypting into the wrong person's mapping. Measured: wrong
+   AAD returns err set and a zero-length plaintext.
+
+   `enc.aes256gcmdecrypt` returns `DecryptResult`, a plain two-field record — NOT a sum
+   type — so `result.err` is read directly and there is no T-18 exposure on the read
+   path at all. A failure is distinguished from a success by `err` being non-empty AND,
+   independently, by the plaintext being empty; both are checked, because a control that
+   depends on one field of one struct being right is a control with one point of failure.
+
+   FAILING CLOSED, for restoration, means returning the text UNCHANGED with its
+   placeholders still in it. That is the safe direction and it is worth being explicit
+   about why: the alternative failure — substituting whatever a partially decrypted or
+   mis-keyed payload yielded — would put a real name where it does not belong, which is
+   the PL1.1 defect (Bob Jones's action attributed to Alice Smith) reintroduced by the
+   storage layer. A visible `[PERSON_a3f1_1]` in an answer is a user-facing annoyance; a
+   confidently wrong name is a disclosure. Nothing in this module returns a partially
+   restored string.
+
+   NOTHING HERE LOGS A VALUE. The log lines carry a request id and a reason; no original,
+   no placeholder, no entity type, no ciphertext.
+
+   ── WHAT THIS DOES NOT DEFEND AGAINST ────────────────────────────────────────
+   An attacker who can read the keychain as the user, or read loke's memory while it
+   runs, or execute code as the user, gets the key and therefore the mapping. This
+   control is against a copied database file, a backup, a synced folder, a stolen disk
+   and every other process on the machine that can read the file but not the keychain.
+   That is a real and common threat and it is also the whole of what is claimed.
+   ══════════════════════════════════════════════════════════════════════════════ *)
+
+(* ══════════════════════════════════════════════════════════════════════════════
+   PL1.3 — placeholder scoping, decided.
+
+   THE DECISION: per-request salted scoping, with an opaque type-tagged surrogate.
+   Confirming the 2026-09-20 plan's option N on the first axis and REVISING it on the
+   second. Recorded here rather than in a document because this module is what makes
+   scoping observable — persistence is the thing that could make a placeholder outlive
+   the request that created it — and a decision recorded only in prose is a decision the
+   next writer can contradict without noticing.
+
+   The decision has to be made BEFORE persistence, not after, because the stored row's
+   key is what fixes the scope. A row keyed by request id can only ever answer "what did
+   THIS request mean by this placeholder", which is per-request scoping enforced by the
+   schema. Choosing session or global scoping later would mean re-keying the table, i.e.
+   a migration over the most sensitive data loke holds.
+
+   FIRST AXIS — scope. Per request. The salt is a 4-hex-character prefix of the request
+   id, landed under PL1.1 in core.privacy.placeholder.makesaltedplaceholder, so the same
+   real value gets a different surrogate in every request.
+
+   THE LINKAGE CONSEQUENCE, stated as the definitional trade-off it is and not as a
+   research finding — `docs/research/disclosure-measurement-findings.md` §8 item 3 is
+   explicit that "consistent placeholders create a linkage channel" is a definition, so
+   this project must not present it as something it discovered:
+
+     A placeholder that is CONSISTENT across requests IS a join key. That is what
+     consistency means. Two prompts a month apart that both contain `[PERSON_7f21_1]`
+     tell the recipient that they concern the same individual, without either prompt
+     containing a name. The recipient — a provider, or anyone reading provider-side
+     logs — can then accumulate attributes against that key across every request the
+     user ever sends, and the accumulation is easier to work with than the names would
+     have been, because the key is exact where names are ambiguous.
+
+     A placeholder that is PER REQUEST costs exactly the mirror of that: cross-request
+     utility. A follow-up question cannot refer back to the person in yesterday's
+     prompt, because yesterday's surrogate is not today's. Multi-turn coherence within
+     one request is unaffected — one request is one salt.
+
+   Per request is chosen because the cost falls on convenience and the benefit falls on
+   disclosure, and because a linkage channel is invisible to the user who is paying for
+   it while a broken follow-up is not. Also note the defence is not novel: published work
+   already scopes mappings per conversation (§2 of the same document). Do not describe it
+   as an innovation.
+
+   SECOND AXIS — surrogate style. An opaque type-tagged token, `[PERSON_a3f1_3]`, NOT a
+   type-consistent realistic surrogate ("Michael Brown" for "Bob Jones"). This revises
+   the plan's "type-consistent surrogates", and the reason is §8 items 1 and 2: the
+   project may not claim that surrogates preserve utility better than redaction, and may
+   not claim an LLM adversary cannot reverse them. Both of those are the only arguments
+   for realistic surrogates, and loke has measured neither. A realistic surrogate also
+   creates a failure mode an opaque one cannot: if restoration fails — and it CAN fail,
+   see the fail-closed note above — an opaque placeholder is visibly unresolved, whereas
+   a realistic surrogate reads as a real answer about a real person who does not exist.
+   That is a fabrication delivered with a straight face, and it is worse than the
+   annoyance it was meant to prevent.
+
+   WHAT IS NOT CLAIMED. Per-request scoping does not make the transcript anonymous, does
+   not prevent attribute inference from a single request, and does not prevent an
+   adversary from reversing a surrogate using context the prompt itself supplies. It
+   removes ONE channel: the cross-request join key. Nothing more.
+   ══════════════════════════════════════════════════════════════════════════════ *)
+
+(* The decrypted mapping, plus a predicate — a plain struct, not a result type.
+
+   T-18: `mt` on a user-declared error side ALWAYS takes the first arm, so `@$placeholderentry!$lokeerr`
+   would report every decryption failure as a successful empty mapping, and an empty
+   mapping restores nothing while looking exactly like a request that had no entities.
+   That is the failure mode this whole module exists to avoid, so the failure is carried
+   as a field every caller has to read. `openedwhy` never contains a value, only a
+   reason. *)
+t=$openedmap{
+  openedentries:@$placeholderentry;
+  openedok:bool;
+  openedwhy:str
 };
 
-
-
-f=newmap(store:i64;requestid:str):$persistentmap{
-  <$persistentmap{requestid:requestid;store:store}
+(* The stored form of one sealed payload. `sealedok` false means nothing may be written:
+   see storemappingwithsecret, which refuses rather than writing a row whose payload it
+   could not seal. A row with an empty payload_hex would look like a mapping that exists
+   and restore to nothing. *)
+t=$sealedpayload{
+  sealednonce:str;
+  sealedhex:str;
+  sealedok:bool
 };
 
+f=hkdfsalt():str{
+  <"loke/placeholder-map/hkdf-salt/v1"
+};
 
+f=hkdfinfo():str{
+  <"loke/placeholder-map/aes-256-gcm/v1"
+};
 
+(* Stored per row so the info label above can change without a migration that rewrites
+   ciphertext. Bumping it requires keeping the old label reachable for old rows. *)
+f=keyversion():i64{
+  <1
+};
 
-f=storeentry(pmap:$persistentmap;original:str;placeholder:str;entitytype:str):i64!$lokeerr{
-  let id=str.randhex(16);
-  let storeok=mt db.exec("INSERT INTO placeholder_maps (id,request_id,original,placeholder,entity_type,created_at,expires_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now','+1 day'))";@(id;pmap.requestid;original;placeholder;entitytype)) {
-    $ok:v 1;
-    $err:e $err($storageerr(str.concat("failed to store placeholder entry for request: ";pmap.requestid)))
+f=payloadversion():str{
+  <"v1"
+};
+
+(* Padding block for the sealed payload, in bytes. See the length note in the header. *)
+f=padblock():i64{
+  <256
+};
+
+(* The additional authenticated data: domain, key version, request id. Authenticated but
+   not encrypted, which is what binds a ciphertext to the row it was written for. *)
+f=aadfor(requestid:str):str{
+  let head=str.concat("loke/placeholder-map/v1|k";str.fromint(keyversion()));
+  <str.concat(head;str.concat("|";requestid))
+};
+
+f=mappingencryptionstatus():str{
+  <"placeholder mapping payloads are sealed at rest with AES-256-GCM, per-record nonce, key derived by HKDF-SHA256 from the OS keychain secret. The original value, the placeholder and the entity type are all inside the sealed payload; the request id, key version and timestamps are not. This covers ONE table: every other table in loke.db is plaintext on disk"
+};
+
+(* The AES key. 32 bytes, or an empty array when the secret is unusable — every caller
+   checks the length before it encrypts or decrypts anything, because a short key means
+   no key and no key must mean no operation. *)
+f=derivemapkey(secrethex:str):@byte{
+  if(str.len(secrethex)!=64){
+    <@()
+  }el{};
+  <enc.hkdfsha256(str.bytes(secrethex);str.bytes(hkdfsalt());str.bytes(hkdfinfo());32)
+};
+
+f=keyusable(secrethex:str):bool{
+  let key=derivemapkey(secrethex);
+  <(key.len as i64)==32
+};
+
+f=hexof(value:str):str{
+  <encd.hexencode(str.bytes(value))
+};
+
+(* Hex to bytes, with the length checked rather than trusted.
+
+   `encoding.hexdecode` is declared `[byte]!EncodingErr`, which in this toolchain would
+   normally discriminate — stdlib results pass 0 for the error side and `mt` reads that
+   correctly. This one does not: the wrapper returns `tk_bytes_pack("",0)` for invalid
+   input, which is a non-zero handle, so invalid hex arrives in the `$ok` arm holding
+   zero bytes and the `$err` arm is unreachable. Measured, not read off the interface:
+   `hexdecode("zz")` and `hexdecode("abc")` both return length 0 through `$ok`.
+
+   So the check is arithmetic. n hex characters must decode to exactly n/2 bytes; an odd
+   length, a non-hex character or a truncated column all fail that, and all of them
+   return an empty array here, which the callers treat as no data. *)
+f=hexbytes(hex:str):@byte{
+  let want=(str.len(hex) as i64)/2;
+  let out=mt encd.hexdecode(hex) {
+    $ok:b b;
+    $err:e @()
   };
-  log.debug("stored placeholder entry";"placeholder_store";pmap.requestid);
-  <$ok(storeok)
+  if((out.len as i64)!=want){
+    <@()
+  }el{};
+  <out
 };
 
+f=hextext(hex:str):str{
+  let raw=hexbytes(hex);
+  if((raw.len as i64)==0){
+    <""
+  }el{};
+  <mt str.frombytes(raw) {
+    $ok:text text;
+    $err:e ""
+  }
+};
 
+(* ── the payload codec ────────────────────────────────────────────────────────
+   One line per mapping, three hex fields separated by `|`:
 
-(* The accessors are core.storage.db's, not std.json's. db.many returns [$row] and
-   json.str cannot read a row handle, so ph and orig were both "": str.replace was
-   asked to replace the empty string with the empty string and the returned text still
-   held every placeholder. De-anonymisation was a silent no-op for the persistent map,
-   and every caller got the redacted text back believing it had been restored. *)
-f=restorerows(rows:@$row;text:str;requestid:str):str{
-  let result=mut.text;
-  let count=rows.len;
-  let i=mut.0;
+     v1
+     <entitytypehex>|<placeholderhex>|<originalhex>
+     ...
+     (newline padding to the next 256-byte boundary)
+
+   Every field is hex-encoded, which is what makes the framing unambiguous: hex is
+   [0-9a-f] only, so neither `|` nor a newline can occur inside a field however peculiar
+   a detected value is. A name containing a pipe, a newline or a NUL byte round-trips.
+   The cost is that the payload is twice the size of the text it holds, which for a
+   mapping list is nothing.
+
+   Padding is newlines, so it needs no length header and no trailing marker: a blank line
+   is not a record and the parser skips it. `str.split` on "\n" yields the empty strings
+   at the end, verified.
+
+   PARSE FAILURES ARE CODEC DEFECTS, NOT TAMPERING. This payload is only ever parsed
+   AFTER the GCM tag has verified, and a verified tag means the bytes are exactly the
+   bytes that were sealed. So a malformed line cannot have been produced by an attacker
+   without the key; it can only have been produced by a bug in this codec. decodepayload
+   therefore fails the whole mapping rather than skipping the bad line, so such a bug
+   surfaces as a refusal instead of as a silently shorter mapping. *)
+f=encodeentry(entry:$placeholderentry):str{
+  let typehex=hexof(entry.entitytype);
+  let phhex=hexof(entry.placeholder);
+  let valhex=hexof(entry.original);
+  <str.concat(typehex;str.concat("|";str.concat(phhex;str.concat("|";valhex))))
+};
+
+f=encodepayload(map:$placeholdermap):str{
+  let lines=mut.@();
+  lines=lines.push(payloadversion());
+  lp(let i=0;i<map.entries.len;i=i+1){
+    let entry:$placeholderentry=map.entries.get(i);
+    lines=lines.push(encodeentry(entry))
+  };
+  (* T-23: separator first. *)
+  <str.concat(str.join("\n";lines);"\n")
+};
+
+f=paddedpayload(payload:str):str{
+  let block=padblock();
+  let len=str.len(payload) as i64;
+  let whole=(len/block)*block;
+  let rem=len-whole;
+  if(rem==0){
+    <payload
+  }el{
+    <str.concat(payload;str.repeat("\n";(block-rem) as u64))
+  }
+};
+
+f=failedmap(why:str):$openedmap{
+  <$openedmap{openedentries:@();openedok:false;openedwhy:why}
+};
+
+f=decodepayload(payload:str):$openedmap{
+  let lines=str.split(payload;"\n");
+  if((lines.len as i64)==0){
+    <failedmap("the sealed payload was empty")
+  }el{};
+  if(str.eq(lines.get(0);payloadversion())){}el{
+    <failedmap("the sealed payload carries an unrecognised format version")
+  };
+  let out=mut.@();
+  let malformed=mut.0;
+  let i=mut.1;
   lp(let lv=0;true;lv=lv){
-    if(i>=count){
+    if(i>=(lines.len as i64)){
       br
     }el{
-      let row:$row=rows.get(i);
-      let ph=s.rowstr(row;"placeholder");
-      let orig=s.rowstr(row;"original");
-      result=str.replace(result;ph;orig);
-      i=i+1;
+      let line=lines.get(i);
+      if(str.len(line)==0){}el{
+        let parts=str.split(line;"|");
+        if((parts.len as i64)==3){
+          out=out.push($placeholderentry{
+            original:hextext(parts.get(2));
+            placeholder:hextext(parts.get(1));
+            entitytype:hextext(parts.get(0))
+          })
+        }el{
+          malformed=malformed+1
+        }
+      };
+      i=i+1
     }
   };
-  log.debug("restored text from placeholder map";"placeholder_store";requestid);
-  <result
+  if(malformed>0){
+    <failedmap("a record line in an authenticated payload did not parse, which is a codec defect rather than tampering")
+  }el{};
+  <$openedmap{openedentries:out;openedok:true;openedwhy:""}
 };
 
-f=restore(pmap:$persistentmap;text:str):str!$lokeerr{
-  <mt db.many("SELECT placeholder,original FROM placeholder_maps WHERE request_id=?";@(pmap.requestid)) {
-    $ok:rows $ok(restorerows(rows;text;pmap.requestid));
-    $err:e $err($storageerr(str.concat("failed to query placeholder_maps for request: ";pmap.requestid)))
-  }
+(* ── sealing and opening ──────────────────────────────────────────────────────
+   sealpayload is the only function in loke that encrypts a mapping, and it takes no
+   nonce: the nonce is generated here, once per call, so no call site can supply or reuse
+   one. *)
+f=nosealedpayload():$sealedpayload{
+  <$sealedpayload{sealednonce:"";sealedhex:"";sealedok:false}
 };
 
-
-f=restoretext(store:i64;requestid:str;text:str):str!$lokeerr{
-  let pmap=newmap(store;requestid);
-  <restore(pmap;text)
+f=sealpayload(secrethex:str;requestid:str;payload:str):$sealedpayload{
+  let key=derivemapkey(secrethex);
+  if((key.len as i64)!=32){
+    <nosealedpayload()
+  }el{};
+  let nonce=enc.aes256gcmnoncegen();
+  if((nonce.len as i64)!=12){
+    <nosealedpayload()
+  }el{};
+  let sealed=enc.aes256gcmencrypt(key;nonce;str.bytes(payload);str.bytes(aadfor(requestid)));
+  (* The tag is 16 bytes and the payload is never empty, so anything at or below 16 bytes
+     is the AEAD's own failure path returning an empty array, not a short message. *)
+  if((sealed.len as i64)<=16){
+    <nosealedpayload()
+  }el{};
+  <$sealedpayload{sealednonce:encd.hexencode(nonce);sealedhex:encd.hexencode(sealed);sealedok:true}
 };
 
-
-
-f=expireold(store:i64):i64!$lokeerr{
-  let expireok=mt db.exec(
-    store.conn;
-    "DELETE FROM placeholder_maps WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
-  ) {
-    $ok:v 1;
-    $err:e $err($storageerr("failed to expire old placeholder_maps entries"))
+f=openpayload(secrethex:str;requestid:str;noncehex:str;payloadhex:str):$openedmap{
+  let key=derivemapkey(secrethex);
+  if((key.len as i64)!=32){
+    <failedmap("no usable mapping key is available")
+  }el{};
+  let nonce=hexbytes(noncehex);
+  if((nonce.len as i64)!=12){
+    <failedmap("the stored nonce is not twelve bytes")
+  }el{};
+  let sealed=hexbytes(payloadhex);
+  if((sealed.len as i64)<=16){
+    <failedmap("the stored payload is too short to carry an authentication tag")
+  }el{};
+  let result=enc.aes256gcmdecrypt(key;nonce;sealed;str.bytes(aadfor(requestid)));
+  (* Two independent checks, deliberately. A wrong key, a tampered payload, a payload
+     moved to another request's row and a truncated column all land here. *)
+  if(str.len(result.err)==0){}el{
+    <failedmap("authentication failed: the payload was sealed under a different key, for a different request, or has been altered")
   };
-  log.info("expired old placeholder map entries";"placeholder_store";"maintenance");
-  <$ok(expireok)
+  if((result.ok.len as i64)==0){
+    <failedmap("decryption produced no plaintext")
+  }el{};
+  let payload=mt str.frombytes(result.ok) {
+    $ok:text text;
+    $err:e ""
+  };
+  if(str.len(payload)==0){
+    <failedmap("the decrypted payload could not be read")
+  }el{};
+  <decodepayload(payload)
 };
 
+(* ── persistence ──────────────────────────────────────────────────────────────
+   INSERT OR REPLACE, so re-storing a mapping for a request re-seals it under a NEW
+   nonce rather than leaving the old row alongside. That is the nonce-reuse case a
+   caller would otherwise have to remember. *)
+f=upsertsql():str{
+  <"INSERT OR REPLACE INTO placeholder_map_records (request_id,key_version,nonce_hex,payload_hex,created_at,expires_at) VALUES (?,?,?,?,datetime('now'),datetime('now','+1 day'))"
+};
 
-f=countforrequest(store:i64;requestid:str):u32!$lokeerr{
-  <mt db.one("SELECT COUNT(*) as cnt FROM placeholder_maps WHERE request_id=?";@(requestid)) {
-    $ok:row $ok(s.rowi64(row;"cnt") as u32);
-    $err:e $err($storageerr(str.concat("failed to count placeholder_maps for request: ";requestid)))
+(* Takes the secret as a parameter. X8.3: production resolves it from the keychain in
+   storemapping below, and tests pass one of their own, so no ambient state anywhere can
+   redirect which key seals a row. A secret that is not 64 characters is refused by
+   derivemapkey, so a trivial or empty one cannot be used by accident.
+
+   Returns a plain bool. T-18 would make the error arm of a `bool!$lokeerr` dead, and
+   "the mapping was not stored" reading as success is how a restore path ends up quietly
+   finding nothing. *)
+f=storemappingwithsecret(requestid:str;map:$placeholdermap;secrethex:str):bool{
+  if(str.len(requestid)==0){
+    log.warn("placeholder store: refusing to store a mapping with no request id";"placeholder_store";"system");
+    <false
+  }el{};
+  let sealed=sealpayload(secrethex;requestid;paddedpayload(encodepayload(map)));
+  if(sealed.sealedok){}el{
+    (* No row is written. A row whose payload could not be sealed would look like a
+       mapping that exists and restore to nothing, which is worse than no row: the
+       caller can see the false return, but a later reader cannot see the difference. *)
+    log.warn("placeholder store: could not seal the mapping, so nothing was persisted";"placeholder_store";requestid);
+    <false
+  };
+  let wrote=mt db.exec(upsertsql();@(requestid;str.fromint(keyversion());sealed.sealednonce;sealed.sealedhex)) {
+    $ok:v true;
+    $err:e false
+  };
+  if(wrote){
+    log.debug("placeholder store: sealed mapping persisted";"placeholder_store";requestid)
+  }el{
+    log.warn("placeholder store: failed to persist a sealed mapping";"placeholder_store";requestid)
+  };
+  <wrote
+};
+
+(* The production entry point. The key comes from the keychain, unconditionally, with no
+   branch on anything: core.storage.db.ensuredbkey returns "" when the keychain cannot
+   supply one, derivemapkey refuses "", sealpayload refuses a short key and this refuses
+   to write. A missing key fails the operation; it never falls back to plaintext. *)
+f=storemapping(requestid:str;map:$placeholdermap):bool{
+  <storemappingwithsecret(requestid;map;s.ensuredbkey())
+};
+
+f=readmappingwithsecret(requestid:str;secrethex:str):$openedmap{
+  (* db.one returns the error side when there is no row, which is the common case for a
+     request that had no entities — not a failure worth a warning. *)
+  <mt db.one("SELECT nonce_hex,payload_hex FROM placeholder_map_records WHERE request_id=?";@(requestid)) {
+    $ok:r openpayload(secrethex;requestid;s.rowstr(r;"nonce_hex");s.rowstr(r;"payload_hex"));
+    $err:e failedmap("no sealed mapping is stored for this request")
   }
+};
+
+f=readmapping(requestid:str):$openedmap{
+  <readmappingwithsecret(requestid;s.ensuredbkey())
+};
+
+(* Restoration, failing closed by returning the text UNCHANGED. See the header: a
+   placeholder left visible is an annoyance, a wrong name substituted confidently is a
+   disclosure, and there is no middle state in which a partially restored string is
+   returned.
+
+   The substitution itself delegates to core.privacy.placeholder.restore rather than
+   looping here. A second copy of that loop is precisely how PL1.1's collision stayed
+   invisible for as long as it did — two substitution paths, one of them wrong. *)
+f=restorewithsecret(requestid:str;text:str;secrethex:str):str{
+  let opened=readmappingwithsecret(requestid;secrethex);
+  if(opened.openedok){}el{
+    log.warn(str.concat("placeholder store: text left unrestored: ";opened.openedwhy);"placeholder_store";requestid);
+    <text
+  };
+  <ph.restore(text;$placeholdermap{entries:opened.openedentries})
+};
+
+f=restoretext(requestid:str;text:str):str{
+  <restorewithsecret(requestid;text;s.ensuredbkey())
+};
+
+(* ── deletion (X8.4) ──────────────────────────────────────────────────────────
+   Dropping the row is only half of it, and the half that is easy to believe. The proof
+   that the bytes are gone is a filesystem assertion, not an interface promise, and it
+   lives in tests/unit/privacy/test_mapping_deletion.tk: after deleting a subject's
+   mapping, no file under the data directory — the database, its rollback journal, any
+   WAL or -shm — contains the plaintext of the deleted value.
+
+   Two things make that assertion pass, and they are worth separating because only one of
+   them is about deletion:
+
+     1. The plaintext was never written. The payload is sealed before it reaches SQLite,
+        so the value is not in the file even BEFORE deletion, and not in a freed page, a
+        journal, a WAL frame, a temp file or a backup of any of them. This is the load
+        bearing half.
+     2. PRAGMA secure_delete, set on the connection by core.storage.db.openstore, zeroes
+        the freed pages so the CIPHERTEXT goes too. Measured to be honoured by this
+        toolchain rather than assumed — the measurement is recorded in that module,
+        because PRAGMA key is exactly why nothing here trusts a pragma it has not tested.
+
+   Deleting the keychain secret would also make every remaining row unreadable, and that
+   is a genuine third layer, but it is not deletion: it destroys access to the data rather
+   than the data. It is not claimed here as deletion.
+
+   std.db.exec cannot report zero rows affected — its wrapper returns 1 for any success
+   and 0 only for an error — so `true` here means the statement ran, not that a row
+   existed. Callers wanting the distinction check countforrequest first. *)
+f=deletemapping(requestid:str):bool{
+  let deleted=mt db.exec("DELETE FROM placeholder_map_records WHERE request_id=?";@(requestid)) {
+    $ok:v true;
+    $err:e false
+  };
+  if(deleted){
+    log.info("placeholder store: mapping deleted";"placeholder_store";requestid)
+  }el{
+    log.warn("placeholder store: failed to delete a mapping";"placeholder_store";requestid)
+  };
+  <deleted
+};
+
+f=purgeallmappings():bool{
+  let purged=mt db.exec("DELETE FROM placeholder_map_records";@()) {
+    $ok:v true;
+    $err:e false
+  };
+  if(purged){
+    log.info("placeholder store: every stored mapping was purged";"placeholder_store";"maintenance")
+  }el{
+    log.warn("placeholder store: failed to purge stored mappings";"placeholder_store";"maintenance")
+  };
+  <purged
+};
+
+(* The previous body was `db.exec(store.conn; sql)` with `store:i64` — a field access on
+   an integer AND the wrong arity for std.db, which takes (sql, params) and uses the
+   connection db.open established. It type-checked: the connection pointer was read as
+   the SQL string and the SQL string as the parameter array. It crashed the first time it
+   ran, and nothing ran it, because no caller in the repository called this module.
+
+   `expires_at < datetime('now')` is a string comparison and it is safe here, which is
+   NOT true of audit_log.created_at (GA5.11). Both sides of this one are produced by
+   SQLite's own datetime(), whose format is zero-padded `YYYY-MM-DD HH:MM:SS`, so
+   lexicographic order is chronological order. created_at there is epoch milliseconds
+   compared against ISO dates, where "1790..." sorts before "2026-...", which is why that
+   one needed a CAST. Nothing digests this column, so there is no hash to disturb. *)
+f=expireold():bool{
+  let expired=mt db.exec("DELETE FROM placeholder_map_records WHERE expires_at IS NOT NULL AND expires_at < datetime('now')";@()) {
+    $ok:v true;
+    $err:e false
+  };
+  if(expired){
+    log.info("placeholder store: expired mappings removed";"placeholder_store";"maintenance")
+  }el{
+    log.warn("placeholder store: failed to expire old mappings";"placeholder_store";"maintenance")
+  };
+  <expired
+};
+
+(* ── counts ───────────────────────────────────────────────────────────────────
+   Two counts, and the difference between them is the point of the schema.
+
+   countforrequest counts sealed RECORDS, so it is 0 or 1: it answers "is there a mapping
+   for this request" and nothing more. It previously declared `u32!$lokeerr`, whose error
+   arm T-18 makes dead — every caller would have read the first arm whatever happened —
+   and it counted per-entity rows, which is the census this design removes.
+
+   entrycountforrequest counts MAPPINGS, and needs the key. That asymmetry is deliberate:
+   how many entities a request mentioned is not readable from the database file. *)
+f=countforrequest(requestid:str):i64{
+  <s.countquery("SELECT request_id FROM placeholder_map_records WHERE request_id=?";@(requestid))
+};
+
+f=entrycountforrequestwithsecret(requestid:str;secrethex:str):i64{
+  let opened=readmappingwithsecret(requestid;secrethex);
+  if(opened.openedok){}el{
+    <0-1
+  };
+  <opened.openedentries.len as i64
+};
+
+f=entrycountforrequest(requestid:str):i64{
+  <entrycountforrequestwithsecret(requestid;s.ensuredbkey())
 };
