@@ -45,11 +45,29 @@ f=ishighersensitivity(levela:$sensitivitylevel;levelb:$sensitivitylevel):bool{
 
 
 
+(* Detection only. PL1.1: this layer no longer numbers its own entities.
+
+   It used to take the index from its own `str.arraylen(entities)+1`, while
+   presidio.topiientities took it from its own `entities.len+1` and the two NER layers
+   hardcoded `1` — and pipeline.run then concatenated all four lists, so `_1` could
+   arrive from more than one layer. Placeholders are assigned once, over the deduped
+   list, by placeholder.assignplaceholders.
+
+   The `phmap` that used to live here was dead: `let phmap=mut.ph.newmap()` was folded
+   through ph.addentry on every match and then not returned, because
+   $piidetectionresult has no map field. That was the ONLY addentry call site in the
+   repository, so the restore table was built nowhere. placeholder.mapfromentities is
+   the live path now.
+
+   .anonymised is still filled in, because a field named `anonymised` that silently
+   holds raw PII is the fail-open shape CLAUDE.md forbids and this function is called
+   standalone (privacy/test_harness.tk, tests/integration). It is assigned after the
+   scan from the same single generator, with an empty salt — a standalone caller has no
+   request id. pipeline.run ignores this field and re-anonymises from the deduped list,
+   so the unsalted numbering never reaches a provider. *)
 f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
-  let phmap=mut.ph.newmap();
   let entities=mut.@();
   let sensitivity=mut.$sensitivitylevel{$public:0};
-  let anonymised=mut.text;
   let patcount=str.arraylen(patterns);
   let pi=mut.0;
   lp(let lv=0;true;lv=lv){
@@ -65,22 +83,15 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
           br
         }el{
           let matchedvalue=str.arrayget(matches;mi);
-          
-          let entityindex=str.arraylen(entities)+1;
-          let placeholder=ph.makeplaceholder(pdef.name;entityindex);
-          (* The returned map is kept. Discarding it was how the placeholder table
-             stayed empty for every detection this loop made. *)
-          phmap=ph.addentry(phmap;matchedvalue;placeholder;pdef.name);
           let entity=$piientity{
             entitytype:pdef.name;
             value:matchedvalue;
             start:0;
             end:0;
             confidence:pdef.confidence;
-            placeholder:placeholder
+            placeholder:""
           };
           entities=str.arraypush(entities;entity);
-          anonymised=str.replace(anonymised;matchedvalue;placeholder);
           if(ishighersensitivity(pdef.sensitivity;sensitivity)){
             sensitivity=pdef.sensitivity
           }el{
@@ -92,10 +103,11 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
       pi=pi+1
     }
   };
+  let placed=ph.assignplaceholders(entities;"");
   <$piidetectionresult{
     original:text;
-    anonymised:anonymised;
-    entities:entities;
+    anonymised:ph.applytotext(text;placed);
+    entities:placed;
     sensitivity:sensitivity
   }
 };

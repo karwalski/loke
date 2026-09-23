@@ -6,6 +6,7 @@ m=core.privacy.placeholder;
 
 
 i=str:std.str;
+i=t:shared.types;
 
 t=$placeholderentry{
   original:str;
@@ -25,14 +26,102 @@ f=newmap():$placeholdermap{
 
 
 
-f=makeplaceholder(entitytype:str;index:u32):str{
+(* THE one placeholder format, and the only place a placeholder string is built.
+
+   PL1.1. Three uncoordinated generators used to exist — this one, ner.makenerplaceholder
+   and nerlocal.labeltoplaceholder — and the two NER ones hardcoded the index `1`. So
+   every NER-detected PERSON in a prompt became the identical `[PERSON_NER_1]`, dedup
+   never looked at placeholders, and restore's sequential str.replace let the FIRST map
+   entry consume every occurrence. Measured before the fix, on two people in one
+   sentence: "Alice Smith reviewed it and Bob Jones approved it." restored as "Alice
+   Smith reviewed it and Alice Smith approved it." Bob Jones was erased and his action
+   attributed to a different named individual, fluently and undetectably, by the
+   component whose job is protecting him.
+
+   The salt closes a second hole. Without it a user who types a literal `[PERSON_1]`
+   into their own prompt has that string forwarded verbatim, echoed back by the model,
+   and then replaced by restore with some OTHER person's real name. The salt is the
+   request id prefix, so a literal a user typed cannot collide with a placeholder this
+   run generated. It must be identical for every entity within one run or restore
+   cannot match — which is why it is derived once, in assignplaceholders, rather than
+   per call site.
+
+   An empty salt yields the historical `[EMAIL_1]` shape. That is what a standalone
+   single-layer detector with no request context gets; the pipeline always salts. *)
+f=makesaltedplaceholder(entitytype:str;salt:str;index:u32):str{
   let upper=str.toupper(entitytype);
-  let idxstr=str.fromu32(index);
-  let inner=str.concat(upper;"_");
-  let inner2=str.concat(inner;idxstr);
-  let withopen=str.concat("[";inner2);
-  let result=str.concat(withopen;"]");
-  <result
+  let body=mut.upper;
+  if(str.eq(salt;"")){}el{
+    body=str.concat(str.concat(upper;"_");salt)
+  };
+  let withindex=str.concat(str.concat(body;"_");str.fromu32(index));
+  <str.concat(str.concat("[";withindex);"]")
+};
+
+
+f=makeplaceholder(entitytype:str;index:u32):str{
+  <makesaltedplaceholder(entitytype;"";index)
+};
+
+
+(* A short prefix, not the whole request id: the placeholder has to stay readable to a
+   person reviewing an anonymised prompt, and four hex characters is already 65536 ways
+   for a literal the user typed to miss. str.substr rather than str.slice because a
+   request id shorter than the prefix must not trap — a caller with no request context
+   passes "" and gets the unsalted form. *)
+f=saltforrequest(requestid:str):str{
+  let len=str.len(requestid);
+  if(len<4){
+    <requestid
+  }el{
+    <str.substr(requestid;0;4)
+  }
+};
+
+
+(* PL1.1 — placeholder assignment for a whole entity list, in ONE place.
+
+   Detection layers no longer number their own entities. Each layer used to start its
+   own counter from its own `entities.len+1`, and pipeline.run then concatenated the
+   lists, so two layers could both hand out `_1`. Assigning here, over the list the
+   pipeline is actually going to use, makes the index unique by construction: a fourth
+   detection layer added later cannot reintroduce the collision, because whatever it
+   writes into .placeholder is overwritten.
+
+   The index is `1 + (number of EARLIER entities of the same type)`, which is O(n^2) over
+   a list realistically under 50. That is deliberate. It needs no map type, no mutable
+   accumulator crossing a module boundary and no result type, so toke's T-18 (a `mt` on
+   a user-declared error result always takes the first arm) and its value semantics for
+   struct parameters are both irrelevant to it.
+
+   Call this AFTER dedup. Numbering before dedup would leave gaps, and gaps are not
+   wrong so much as they are a signal that something was dropped between detection and
+   the prompt — which is exactly the sort of thing a reader of an anonymised prompt
+   should not have to guess about. *)
+f=assignplaceholders(entities:@$piientity;requestid:str):@$piientity{
+  let salt=saltforrequest(requestid);
+  let out=mut.@();
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    let seen=mut.0;
+    lp(let j=0;j<i;j=j+1){
+      let prior:$piientity=entities.get(j);
+      if(str.eq(prior.entitytype;e.entitytype)){
+        seen=seen+1
+      }el{}
+    };
+    (* A callee cannot mutate a caller's struct, so the entity is rebuilt rather than
+       having .placeholder written into it. *)
+    out=out.push($piientity{
+      entitytype:e.entitytype;
+      value:e.value;
+      start:e.start;
+      end:e.end;
+      confidence:e.confidence;
+      placeholder:makesaltedplaceholder(e.entitytype;salt;(seen+1) as u32)
+    })
+  };
+  <out
 };
 
 
@@ -58,6 +147,132 @@ f=addentry(map:$placeholdermap;original:str;placeholder:str;entitytype:str):$pla
 };
 
 
+(* The restore table, built from the entity list the pipeline actually anonymised with.
+
+   Until PL1.1 there was no path from a $pipelinerun back to a restore map at all: the
+   only addentry call site in the repository was a local in regex.rundetection that was
+   never returned, so it was dead code and restore was only ever called on maps that
+   tests had hand-built. $piientity already carries both halves of an entry, so this
+   needs no new field on $piidetectionresult and nothing has to be written to disk. *)
+f=mapfromentities(entities:@$piientity):$placeholdermap{
+  let map=mut.newmap();
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    map=addentry(map;e.value;e.placeholder;e.entitytype)
+  };
+  <map
+};
+
+
+(* True when (la, ia) precedes (lb, ib) in longest-value-first, then leftmost, order.
+
+   A total order over (value length, list index). It is total because the index makes
+   every pair distinct, and that is the property the selection in applytotext relies on
+   to choose each entity exactly once without a parallel "taken" array. *)
+f=beforeinorder(la:i64;ia:i64;lb:i64;ib:i64):bool{
+  if(la>lb){
+    <true
+  }el{
+    if(la<lb){
+      <false
+    }el{
+      <ia<ib
+    }
+  }
+};
+
+
+(* The index of the entity that comes next after (prevlen, previdx) in that order, or
+   -1 when none is left. *)
+f=nextinorder(entities:@$piientity;prevlen:i64;previdx:i64):i64{
+  let bestidx=mut.0-1;
+  let bestlen=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    let li=str.len(e.value) as i64;
+    if(beforeinorder(prevlen;previdx;li;i as i64)){
+      if(bestidx<0){
+        bestidx=i as i64;
+        bestlen=li
+      }el{
+        if(beforeinorder(li;i as i64;bestlen;bestidx)){
+          bestidx=i as i64;
+          bestlen=li
+        }el{}
+      }
+    }el{}
+  };
+  <bestidx
+};
+
+
+(* Length of the longest entity value. Used only to seed the selection with a key that
+   precedes every entity, so the seed needs no magic number and no separate flag. *)
+f=longestvaluelen(entities:@$piientity):i64{
+  let longest=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    let li=str.len(e.value) as i64;
+    if(li>longest){
+      longest=li
+    }el{}
+  };
+  <longest
+};
+
+
+(* The one substitution pass. pipeline.anonymisetext delegates here, and so does the
+   regex layer's own single-layer result — two copies of this loop with two different
+   sources of placeholder is how the collision stayed invisible.
+
+   SUBSTITUTION IS LONGEST-VALUE-FIRST, and that ordering is load-bearing.
+
+   Detection layers routinely emit both a full name and its parts — Presidio reports
+   PERSON "Bob Jones" while a NER layer reports PERSON "Bob" — and dedup keeps both when
+   the spans do not overlap or the longer one is the more confident. Substituting in list
+   order, shortest first, then leaves `[PERSON_2a4c_1] Jones` in the text that goes to the
+   provider: half the name replaced and the SURNAME FORWARDED IN THE CLEAR, with the
+   placeholder for "Bob Jones" never appearing in the prompt at all while still being
+   counted as a detected entity and written to the restore map. That is a leak of exactly
+   the kind this module exists to prevent, and it is silent — the anonymised text looks
+   anonymised, and a round trip of that same text is still byte-identical, because
+   restore is the exact inverse of the substitution that mangled it. So no round-trip
+   assertion can catch this; tests/unit/privacy/test_placeholder_collision.tk asserts the
+   leaked fragment and the missing placeholder directly.
+
+   Longest first cannot have the problem: once `Bob Jones` has become a placeholder, any
+   `Bob` still in the text is a genuinely separate mention and should be substituted.
+   Ties in length are broken by list position, which makes the order total — see
+   beforeinorder. *)
+f=applytotext(text:str;entities:@$piientity):str{
+  let result=mut.text;
+  let count=entities.len as i64;
+  (* A key that precedes every entity: longer than the longest value, so the first
+     selection is unconstrained whatever previdx is. *)
+  let prevlen=mut.longestvaluelen(entities)+1;
+  let previdx=mut.0;
+  lp(let k=0;k<count;k=k+1){
+    let pick=nextinorder(entities;prevlen;previdx);
+    if(pick<0){
+      br
+    }el{
+      let e:$piientity=entities.get(pick);
+      result=str.replace(result;e.value;e.placeholder);
+      prevlen=str.len(e.value) as i64;
+      previdx=pick
+    }
+  };
+  <result
+};
+
+
+(* Sequential replace is safe here and needs no length-descending sort: `[EMAIL_1]` is
+   not a prefix of `[EMAIL_10]` because the closing bracket intervenes. Uniqueness of
+   the placeholder, which assignplaceholders guarantees, is the whole requirement.
+
+   Note that the same is NOT true of the value side — see applytotext, which does have
+   to order. The asymmetry is the closing bracket: placeholders are self-delimiting and
+   real names are not. *)
 f=restore(text:str;map:$placeholdermap):str{
   let result=mut.text;
   let i=mut.0;

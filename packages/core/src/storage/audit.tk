@@ -85,7 +85,19 @@ f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
   <crypto.tohex(crypto.sha256(str.tobytes(fields)))
 };
 
-f=logevent(store:i64;event:$auditevent):i64!$lokeerr{
+(* The insert, returning a plain bool — and that is the whole point of splitting it out.
+
+   `db.exec` is a STDLIB result, so matching it does discriminate correctly. The problem
+   is what logevent then does with the answer: it re-wraps it in `$ok`/`$err` of
+   `$lokeerr`, a user-declared sum, and a caller matching THAT always takes the first arm
+   whatever happened (T-18). So the information `db.exec` gave us is thrown away one frame
+   up, and every caller reads a failed insert as a success.
+
+   For a tamper-evident audit trail that is the worst possible direction to be wrong in: a
+   request whose row was never written would be reported as recorded, and the hash chain
+   would then attest to a history with a hole in it. So the request path calls this and
+   gets a bool it cannot misread. *)
+f=insertevent(store:i64;event:$auditevent):bool{
   let id=str.randhex(16);
   let created=db.nowms(0);
 
@@ -113,8 +125,19 @@ f=logevent(store:i64;event:$auditevent):i64!$lokeerr{
     prevhashval;
     hash;
     str.fromi64(created))) {
-    $ok:v $ok(0);
-    $err:e $err($storageerr("failed to insert audit event"))
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* Kept for callers that already match its result, including the integration test. New
+   callers should use insertevent: this signature cannot tell them whether the write
+   happened, for the reason set out above. *)
+f=logevent(store:i64;event:$auditevent):i64!$lokeerr{
+  if(insertevent(store;event)){
+    <$ok(0)
+  }el{
+    <$err($storageerr("failed to insert audit event"))
   }
 };
 
