@@ -56,6 +56,8 @@ already had and discarded.
 | **T-23** | **Correctness, silent** | **Arguments of different declared types but the same ABI are accepted reversed** (`str.join`) | none — segfault |
 | **T-24** | **Correctness, silent** | **`@(array; element)` nests instead of appending** | none — intermittent segfault |
 | **T-25** | Blocks | `max_funcs` counts imported signatures; E9010 names neither the limit, the cause, nor that it is configurable | E9010, no line number |
+| **T-26** | **Blocks, and the fix advice creates a silent bug** | **No assignment to a struct field or array element, and E2002 recommends `==`, which compiles to a no-op** | E2002, with wrong advice |
+| **T-27** | **Silent code deletion** | **Comments nest, so `(*` inside a comment (e.g. `COUNT(*)`) swallows the rest of the file** | none at all |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
 right. **T-13 to T-24 were found later, getting loke's test suite to run against real
@@ -523,28 +525,32 @@ the table wins.
 ## What we would ask for, in order
 
 This list was written against T-1 to T-12 and is now reordered: five of those are fixed
-in 445f519, and the four found since are more damaging than anything that remains.
+in 445f519, and the fifteen found since include four that are more damaging than anything that remains.
 
-1. **T-18** — `mt` on an `X!$userErr` takes the first arm whatever the value is. Every
+1. **T-26** — change E2002's advice, and warn on a discarded comparison in statement
+   position. This is first because it is the only item on the list whose *diagnostic* has
+   created defects: 32 silent no-ops in this codebase are the compiler's own recommended
+   fix, applied faithfully. Both halves are small and neither needs new analysis.
+2. **T-18** — `mt` on an `X!$userErr` takes the first arm whatever the value is. Every
    error path in this codebase is dead code, 182 functions' worth, and we have had to
    write around it by returning sentinels instead of results. Nothing else on this list
    distorts a program's control flow.
-2. **T-20** — an `f64` returned across a module boundary is corrupted. **We have found the
+3. **T-20** — an `f64` returned across a module boundary is corrupted. **We have found the
    mechanism and it looks like a one-line fix**: `llvm.c:1641` registers a literal `"i64"`
    return for every imported function, discarding the correct `"double"` that line 1629
    just computed, while the definition side emits a real `double` — and the bitcast the
    comment at 1639 promises is performed by neither side. Either half fixes it. Until it
    lands, no figure this project computes across a module boundary can be published.
-3. **T-23 and T-24** — call sites not checked against a declared type where the ABI
+4. **T-23 and T-24** — call sites not checked against a declared type where the ABI
    representation coincides. 99 latent segfaults here, and T-24's crash is
    *intermittent*, so a green test run is not evidence.
-4. **T-2**, the label counter. 17 sites in one project, each needing IR archaeology.
-5. **T-7** — the remaining silent one from the original set. The diagnostic already
+5. **T-2**, the label counter. 17 sites in one project, each needing IR archaeology.
+6. **T-7** — the remaining silent one from the original set. The diagnostic already
    exists and simply is not reached.
-6. **T-12 and T-22** — generate the stdlib `.tki` files from the builtin table, or check
+7. **T-12 and T-22** — generate the stdlib `.tki` files from the builtin table, or check
    them against it in CI. Four disagreements found so far, each one a crash.
-7. **T-11** — make stub status visible at the call site.
-8. **A source location on codegen failures.** Even a "while compiling `f=x` at
+8. **T-11** — make stub status visible at the call site.
+9. **A source location on codegen failures.** Even a "while compiling `f=x` at
    `file.tk:120`" prefix on E9003 would change these from a day of bisection into a
    minute of reading. This remains the single highest-leverage item in the document:
    T-23 took a day to find and five minutes to fix.
@@ -903,6 +909,98 @@ function, bisected with `--max-funcs`, and the fix was one line of `tkc.toml`. T
 perfectly reasonable design — we are not asking for a bigger default. We are asking for the
 diagnostic to be the thing that tells us, because this is the same shape as the ask at the
 bottom of this document: **the compiler knew the answer and printed something else.**
+
+---
+
+## T-26 — there is no assignment to a struct field or array element, and the diagnostic for it recommends the bug
+
+**Severity: blocks, and its `fix` field actively creates a silent defect. This is the single
+most expensive item we have reported.**
+
+```toke
+t=$r{a:i64;b:i64};
+f=main():i64{
+  let x=mut.$r{a:1;b:2};
+  x.a=9;          (* E2002: "`=` is assignment; use `==` for equality" *)
+  <x.a
+};
+```
+
+There is no form of `x.a = v` in the language — not through a parameter, not on a local
+`mut` struct, not on an array element. That is a defensible design for a value-semantics
+language and we are not asking for it to change.
+
+**What we are asking for is the diagnostic.** `E2002` says *"`=` is assignment; use `==` for
+equality"*, and following that advice turns a parse error into a **discarded comparison
+that compiles clean and does nothing**. `x.a==9;` in statement position is legal, has no
+effect, and emits no warning.
+
+That is not hypothetical. It is the origin of the worst defect class in this codebase:
+
+- **13 accumulations that silently did nothing** (our story LS1.1a), each of them an
+  `x.field==value;` where an assignment was meant. Two examples that survived months of
+  review: a k-means centroid update, and a governance trace that recorded nothing while
+  reporting success.
+- **19 more sites found this week** in a tree being migrated, all the same shape. We only
+  did not convert them because we had already learned the lesson — a sweep that trusted
+  the compiler's advice would have converted 19 parse errors into 19 silent no-ops. Eleven
+  of them are functions whose entire body is field assignments, so they are no-ops today
+  and would have stayed no-ops, quietly, forever.
+
+Three asks, in order of value:
+
+1. **Change the advice.** When the left-hand side of `=` is a field access or an index, the
+   message should say that the language has no such assignment and name the alternative —
+   reconstruct the struct, or return the new value — rather than suggesting `==`.
+2. **Warn on a discarded comparison in statement position.** `x==y;` as a statement has no
+   effect and is a bug in every case we have seen. The linter has
+   `discarded-value-result` for calls; this is the same rule for operators. It would have
+   caught all 32 sites above with no new analysis.
+3. Consider allowing field assignment on a local `mut` struct, which is what people
+   reach for and is sound under value semantics.
+
+---
+
+## T-27 — comments nest, so `(*` inside a comment silently deletes the rest of the file
+
+**Severity: silent code deletion, no diagnostic of any kind.**
+
+```toke
+m=q;
+(* reads COUNT(*) from the table *)
+f=survived():i64{ <1 };
+```
+
+The `(*` inside `COUNT(*)` opens a **nested** comment. The single `*)` closes the inner one,
+the outer stays open, and `f=survived` is consumed as comment text. The compiler exits 0,
+emits IR, and the function is simply **not in it**. We verified it by checking the emitted
+`.ll` rather than the exit status, which is the only way to see it:
+
+| comment | function in the IR? |
+|---|---|
+| `(* plain *)` | yes |
+| `(* reads COUNT(*) from the table *)` | **no** |
+| `(* outer (* inner *)` | **no** |
+| `(* outer (* inner *) *)` | yes |
+
+Two things make this worse than an ordinary lexer quirk. First, there is no diagnostic —
+not a warning, not an unclosed-delimiter error at EOF — so the only symptom is a function
+that has vanished, which surfaces much later as an undefined symbol at link time, or not at
+all if nothing calls it. Second, `COUNT(*)` is not an exotic thing to write in a comment in
+a database-backed project; it is the single most common SQL fragment there is, and our house
+style asks for comments explaining what a query does.
+
+We scanned our tree and nothing is currently swallowed, so we were lucky rather than
+careful. One of our own workers hit it this week while writing a new comment.
+
+Either treatment would be fine, and we have no preference:
+
+- Do not nest — first `*)` closes, which is what OCaml-style syntax leads people to expect
+  least but is simplest; or
+- Keep nesting and **emit an error at EOF** when depth is greater than zero. `E2004
+  unclosed delimiter` already exists and would be exactly right here.
+
+The current combination — nesting plus silence — is the one that loses code.
 
 ---
 
