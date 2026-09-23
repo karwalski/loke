@@ -109,6 +109,18 @@ step_checks() {
     python3 ./scripts/check_claims.py --check || failed=1
   fi
 
+  # The register's own arithmetic. check_claims.py verifies that a verified claim carries an
+  # evidence pointer and that every figure traces to metrics-baseline.md; it does not add the
+  # verdicts up. On 2026-09-23 the hand-written Summary read verified 33 / total 95 while the
+  # rows said 34 / 97, and two of its five numbers had been wrong before that session's edits.
+  # In a document whose purpose is to stop the project overstating itself, the table a reader
+  # is most likely to quote was the one with nothing checking it. Same conclusion as RV1.7
+  # reached for the backlog: derive it.
+  if [[ -f ./scripts/gen_claims_summary.py ]]; then
+    echo "  the claims register's Summary is derived from its rows"
+    python3 ./scripts/gen_claims_summary.py --check || failed=1
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1
