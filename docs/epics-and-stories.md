@@ -1050,11 +1050,11 @@ hand-edit produced a set of numbers that disagreed with them.*
 | Epic T: Test Suite | 14 | 65 | 23 | — | 42 | — | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | TOOLCHAIN | 1 | 46 | 15 | 3 | — | — | — | 1 | — | 27 |
-| DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 30 | 10 | 4 | — | — | — | — | — | 16 |
+| DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 31 | 10 | 4 | — | — | — | — | — | 17 |
 | AUDIT-DRIVEN GAPS | 5 | 40 | 37 | — | 2 | — | — | — | — | 1 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 15 | 1 | — | — | — | — | — | 16 |
 | VERIFICATION PROGRAMME | 14 | 114 | 50 | 10 | — | 6 | 3 | — | — | 45 |
-| **Total** | **88** | **654** | **471** | **18** | **47** | **6** | **3** | **1** | — | **108** |
+| **Total** | **88** | **655** | **471** | **18** | **47** | **6** | **3** | **1** | — | **109** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1124,7 +1124,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | F10 | 1 | 46 | 15 | 3 | — | — | — | 1 | — | 27 |
 | MK19 | 1 | 10 | 6 | 2 | — | — | — | — | — | 2 |
 | MK20 | 1 | 5 | 4 | 1 | — | — | — | — | — | — |
-| MK21 | 1 | 15 | — | 1 | — | — | — | — | — | 14 |
+| MK21 | 1 | 16 | — | 1 | — | — | — | — | — | 15 |
 | GA1 | 1 | 12 | 10 | — | 1 | — | — | — | — | 1 |
 | GA2 | 1 | 5 | 4 | — | 1 | — | — | — | — | — |
 | GA3 | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1148,9 +1148,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 22 | 12 | 1 | — | — | — | — | — | 9 |
 | RV1 | 1 | 10 | 3 | — | — | — | — | — | — | 7 |
-| **Total** | **88** | **654** | **471** | **18** | **47** | **6** | **3** | **1** | — | **108** |
+| **Total** | **88** | **655** | **471** | **18** | **47** | **6** | **3** | **1** | — | **109** |
 
-Rows parsed: **654**, across **88** epics and **16** level-1 headings.
+Rows parsed: **655**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
@@ -1371,6 +1371,7 @@ never leaves, not even for categorisation.
 | MK21.10 | M |  | **The disclosure ledger for a whole session** — Depends on DA1. Show the user, for a complete session, exactly what left the device: the bytes, the field names, the category names, and the fact that zero transaction rows and zero merchant strings were included. This is the artefact that makes the claim checkable rather than merely stated, and it is the single most persuasive thing in the demo. |
 | MK21.11 | M |  | **Adversarial test: the no-custody invariant under real pressure** — Depends on AD1. Seed a statement with unique sentinel values in the account number, a merchant name, an amount and a balance. Run every path in the workspace — import, OCR, structuring, categorisation, budgeting, tax, refine, export, presentation — and assert each sentinel appears **zero times** in every captured outbound payload. Include the paths that leaked elsewhere: a refine round-trip, a saved template reload, and a session restored from history. This is the regression test for the architecture claim, and it belongs in CI. |
 | MK21.12 | S | **Partial** | **A synthetic statement fixture, so the demo needs nobody's real data** — Ship a realistic but wholly synthetic statement in each supported format: text PDF, scanned image, CSV in two institution shapes, and XLSX. Include deliberate difficulties — a misaligned scan, an ambiguous date format, a duplicated period boundary, a merchant string with processor noise — so the confidence and reconciliation work in MK21.5 has something to demonstrate against. Real statements stay with their owners.<br><br>**Status detail:** Partial — **CSV fixtures done** (`tests/fixtures/bank-statements/`): two institution shapes with genuinely different conventions, a ragged export, and a deliberately non-reconciling statement so MK21.5's check has something to catch. Ground truth included so an import is scored rather than eyeballed, and the generator verifies its own reconciliation. **PDF and scanned-image fixtures are blocked** on the extraction sidecar (MK21.4a) — there is no way to author a realistic scan without it, and a fake one would test nothing. |
+| MK21.13 | S |  | **moke stores a SQL time function as text in ten places** — found 2026-09-23 by `scripts/find_sql_literal_now.py`, which is gated on the built trees only because moke cannot be verified while 42 of its source files do not compile. The sites: `packages/moke/pages/api/agents.tk` lines 50, 78, 82, 83, 114, 118, 119; `packages/moke/src/governance.tk:157`; `packages/moke/src/mcp/broker_status.tk` lines 67 and 76 — all binding the literal `"now"` as a parameter. Same defect as GA5.1, which cost eleven sites across seven core modules by three separate mechanisms, and whose worst consequence was not a useless column but a query that always returned nothing: `governance/monitoring` filtered `created_at >= datetime('now','-N days')` against a column holding the literal `now()`. Fix with `datetime('now')` in the statement text, or bind `str.fromi64(t.nowi64())`. Add `packages/moke` to the sweep's gated roots when the tree compiles — until then adding it would fail the gate on a tree nothing can build. Belongs to Wave 4. |
 
 
 ---

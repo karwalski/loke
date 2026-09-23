@@ -121,6 +121,28 @@ step_checks() {
     python3 ./scripts/gen_claims_summary.py --check || failed=1
   fi
 
+  # GA5.1 — a SQL time function stored as TEXT. Eleven sites in seven modules, by three
+  # separate mechanisms: bound as a parameter (`@(..., "now()")`), quoted inside the statement
+  # (`VALUES (?,?,'now()')`), and assigned straight to a struct field. A bound parameter is a
+  # value and is never evaluated; a quoted string in SQL is a string.
+  #
+  # Gated on the built trees rather than all of packages/, because packages/moke carries ten
+  # more that cannot be verified while 42 of its files do not compile (MK21.13, Wave 4).
+  #
+  # Two of these did real damage rather than storing a useless column:
+  # governance/monitoring filtered `created_at >= datetime('now','-N days')` against a column
+  # of literal `now()`, so every trend window returned nothing for every model, always; and
+  # memory/storage stamped every drawer and closet identically, which is why memory decay had
+  # nothing to age.
+  if [[ -f ./scripts/find_sql_literal_now.py ]]; then
+    echo "  no SQL time function is stored as text"
+    python3 ./scripts/find_sql_literal_now.py --check \
+      packages/core packages/shared packages/browser >/dev/null \
+      || { python3 ./scripts/find_sql_literal_now.py \
+             packages/core packages/shared packages/browser >&2
+           failed=1; }
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1
