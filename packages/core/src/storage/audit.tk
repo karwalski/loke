@@ -28,6 +28,17 @@ t=$auditevent{
   correlationid:str
 };
 
+(* The result of a chain verification. See verifychain below for why this is a plain
+   struct and not a result: T-18 would make a $err arm dead, and a verifier whose failure
+   reads as "chain intact" is the worst available outcome for this function. *)
+t=$chainresult{
+  ok:bool;
+  rowschecked:i64;
+  firstbadid:str;
+  reason:str
+};
+
+
 (* Declared i64!$lokeerr, not void!$lokeerr, and returns $ok(0).
 
    toke lowers a `void!$err` success type to LLVM `void`, so any call site that binds
@@ -60,11 +71,47 @@ t=$auditevent{
    tamper-EVIDENT, and that needs the predecessor and the whole record in the digest.
    sha256 over prev_hash plus every field gives that: altering any field or removing any
    row breaks every hash after it. *)
-f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
-  (* The separator keeps two different field splits from hashing alike. A pipe is
-     enough here because no field is free text — the closest is the correlation id,
-     which is generated. *)
+(* The digest is over a joined field STRING, and both the writer and the verifier build that
+   string, so neither has to trust a reconstruction.
+
+   This split exists because of a real failure. The verifier first rebuilt an $auditevent
+   from the stored columns and re-ran eventdigest over it — and an intact chain did not
+   verify. `cost_usd` is written with str.fromfloat, and reading it back through any numeric
+   type loses precision below the type's resolution: a cost of 0.005 read as hundredths is
+   1, which formats back as 0.01, so the recomputed digest differed from the stored one on
+   every row. The chain was fine; the reconstruction was lossy.
+
+   Hashing the stored text directly removes the class of problem rather than widening the
+   numeric type: whatever str.fromfloat produced is exactly what the column holds, so the
+   verifier reads the same bytes that were hashed. A digest over a re-parsed value is a
+   digest over a guess about the parser. *)
+f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str):str{
+  (* The separator keeps two different field splits from hashing alike. A pipe is enough
+     here because no field is free text — the closest is the correlation id, which is
+     generated. *)
   let fields=str.join("|";@(
+    prevhash;
+    id;
+    eventtype;
+    usecase;
+    modelid;
+    provider;
+    sensitivity;
+    risktier;
+    tokensin;
+    tokensout;
+    costusd;
+    durationms;
+    correlationid;
+    created
+  ));
+  (* sha256 takes [byte], not str — str.tobytes first. Passing the string directly
+     type-checked and crashed at run time. *)
+  <crypto.tohex(crypto.sha256(str.tobytes(fields)))
+};
+
+f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
+  <digestfields(
     prevhash;
     id;
     event.eventtype;
@@ -78,25 +125,9 @@ f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
     str.fromfloat(event.costusd);
     str.fromint(event.durationms);
     event.correlationid;
-    str.fromi64(created)
-  ));
-  (* sha256 takes [byte], not str — str.tobytes first. Passing the string directly
-     type-checked and crashed at run time. *)
-  <crypto.tohex(crypto.sha256(str.tobytes(fields)))
+    str.fromi64(created))
 };
 
-(* The insert, returning a plain bool — and that is the whole point of splitting it out.
-
-   `db.exec` is a STDLIB result, so matching it does discriminate correctly. The problem
-   is what logevent then does with the answer: it re-wraps it in `$ok`/`$err` of
-   `$lokeerr`, a user-declared sum, and a caller matching THAT always takes the first arm
-   whatever happened (T-18). So the information `db.exec` gave us is thrown away one frame
-   up, and every caller reads a failed insert as a success.
-
-   For a tamper-evident audit trail that is the worst possible direction to be wrong in: a
-   request whose row was never written would be reported as recorded, and the hash chain
-   would then attest to a history with a hole in it. So the request path calls this and
-   gets a bool it cannot misread. *)
 f=insertevent(store:i64;event:$auditevent):bool{
   let id=str.randhex(16);
   let created=db.nowms(0);
@@ -141,6 +172,98 @@ f=logevent(store:i64;event:$auditevent):i64!$lokeerr{
   }
 };
 
+
+(* GA5.3 — chain verification, reading FORWARD in insertion order.
+
+   The digest was made real by GA5.2 (sha256 over the previous hash plus all fourteen
+   fields) and the trail was made non-empty by GA1.4. Neither of those is tamper-EVIDENCE
+   on its own: evidence means somebody can check, and until now nothing could. A hash chain
+   nobody verifies is a hash chain that might not chain.
+
+   Forward order matters. Each row's prev_hash must equal the previous row's hash, so the
+   check is sequential and the first divergence is the useful output — everything after it
+   is downstream of the same break. Reporting "the chain is broken" without saying where
+   would leave an operator no better off.
+
+   Three failures are distinguishable, and the difference is what an operator needs:
+
+     - a FIELD was altered   -> the recomputed digest differs from the stored hash
+     - the HASH was altered   -> the next row's prev_hash no longer matches
+     - a ROW was deleted      -> the same symptom as an altered hash, one row earlier
+
+   The last two present identically from inside the data, which is a real limit and is
+   stated rather than papered over: the chain proves rows have not been changed or removed
+   from the middle, and cannot distinguish a removal from a rewrite at the same point.
+
+   Returns a plain struct, never a result. T-18 makes the error arm of a user-declared sum
+   dead, so a verifier that returned $err would be read as "chain intact" by every caller —
+   which for this function is the single worst available failure. *)
+f=chainok(n:i64):$chainresult{
+  <$chainresult{ok:true;rowschecked:n;firstbadid:"";reason:""}
+};
+
+f=chainbad(n:i64;id:str;reason:str):$chainresult{
+  <$chainresult{ok:false;rowschecked:n;firstbadid:id;reason:reason}
+};
+
+f=digestfromrow(r:$row):str{
+  (* Every column read as TEXT, which is what was hashed. cost_usd in particular must NOT
+     go through rowf64hundredths here — see digestfields above. *)
+  <digestfields(
+    s.rowstr(r;"prev_hash");
+    s.rowstr(r;"id");
+    s.rowstr(r;"event_type");
+    s.rowstr(r;"use_case");
+    s.rowstr(r;"model_id");
+    s.rowstr(r;"provider");
+    s.rowstr(r;"sensitivity");
+    s.rowstr(r;"risk_tier");
+    s.rowstr(r;"tokens_in");
+    s.rowstr(r;"tokens_out");
+    s.rowstr(r;"cost_usd");
+    s.rowstr(r;"duration_ms");
+    s.rowstr(r;"correlation_id");
+    s.rowstr(r;"created_at"))
+};
+
+f=verifyrows(rows:@$row):$chainresult{
+  let expectedprev=mut."";
+  lp(let i=0;i<rows.len;i=i+1){
+    let r:$row=rows.get(i);
+    let id=s.rowstr(r;"id");
+    let storedhash=s.rowstr(r;"hash");
+    let storedprev=s.rowstr(r;"prev_hash");
+
+    if(str.eq(storedprev;expectedprev)){}el{
+      <chainbad(i;id;"prev_hash does not match the previous row's hash: a row was deleted, or a hash was rewritten, at or before this point")
+    };
+
+    let recomputed=digestfromrow(r);
+    if(str.eq(recomputed;storedhash)){}el{
+      <chainbad(i;id;"the stored hash does not match a digest recomputed from this row's own fields: a field was altered")
+    };
+
+    expectedprev=storedhash
+  };
+  <chainok(rows.len as i64)
+};
+
+(* The first row's prev_hash is "" — logevent writes the empty string when the table is
+   empty — so an empty trail verifies trivially and says so through rowschecked. *)
+f=verifychain(store:i64):$chainresult{
+  <mt db.many("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at FROM audit_log ORDER BY created_at ASC, rowid ASC";@()) {
+    $ok:rows verifyrows(rows);
+    $err:e chainbad(0;"";"the audit trail could not be read")
+  }
+};
+
+f=formatchainresult(r:$chainresult):str{
+  if(r.ok){
+    <str.concat("audit chain intact: ";str.concat(str.fromi64(r.rowschecked);" row(s) verified"))
+  }el{
+    <str.concat("AUDIT CHAIN BROKEN after ";str.concat(str.fromi64(r.rowschecked);str.concat(" row(s), at id ";str.concat(r.firstbadid;str.concat(": ";r.reason)))))
+  }
+};
 
 (* The rows are mapped in their own function, which is what establishes their type.
    Binding `let queryresult=mt db.many(...) { $ok:rows rows; $err:e $err(...) }` gave

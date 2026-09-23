@@ -98,18 +98,86 @@ f=seenvalue(kept:@$piientity;value:str):bool{
   <found
 };
 
-(* True when `candidate` overlaps an already-kept span that is at least as confident,
-   in which case the candidate adds nothing. *)
-f=overlapsbetter(kept:@$piientity;candidate:$piientity):bool{
-  let shadowed=mut.false;
-  lp(let i=0;i<kept.len;i=i+1){
-    let e:$piientity=kept.get(i);
-    if(candidate.start<e.end){
-      if(candidate.end>e.start){
-        if(e.confidence>=candidate.confidence){
-          shadowed=true
+(* PL1.9 -- shadowing is decided over the whole detection list, not over whichever prefix
+   of it happened to be kept already.
+
+   The old predicate was `overlapsbetter(kept;candidate)`: drop a CANDIDATE overlapping an
+   already-kept entity of at least equal confidence. It never revisited a kept entity when
+   a better overlapping one arrived later, so the same two detections produced two
+   different entity lists depending on which detection layer ran first:
+
+     Bob (0.78) then Bob Jones (0.92)  ->  both kept
+     Bob Jones (0.92) then Bob (0.78)  ->  only Bob Jones kept
+
+   Layer order is a configuration detail, not a property of the text. The shorter is a
+   strict shadow of the longer either way, and either way it inflated the reported entity
+   count and put an entry in the restoration map whose placeholder never reaches the
+   prompt.
+
+   WHY THE RELATION IS NARROWER THAN "OVERLAPS AND IS LESS CONFIDENT". Dropping an entity
+   means nothing will substitute its value, so it is only safe to drop one whose value is
+   a substring of a survivor that covers its span: ph.applytotext substitutes longest
+   value first, so replacing "Bob Jones" removes the "Bob" inside it. Merely overlapping
+   spans give no such guarantee -- dropping on overlap alone can leave the part of the
+   loser that the winner does not cover sitting in the prompt in the clear, which the old
+   predicate could do. So `shadow` shadows `target` when the shadow's span covers the
+   target's, the shadow's value strictly contains the target's, and the shadow is at least
+   as confident.
+
+   That relation is transitive (span nesting, substring and >= all are) and antisymmetric
+   (strict containment cannot hold in both directions), so the survivors are its maximal
+   elements, every dropped entity's value sits inside a survivor's, and no two entities
+   can shadow each other into both being dropped.
+
+   WHAT THIS GIVES UP, stated rather than hidden: when the shorter value also occurs
+   somewhere the longer does not -- "Bob Jones and Bob", with only the first Bob detected
+   -- keeping the shorter entity meant applytotext replaced the later bare "Bob" too.
+   Dropping it loses that. It was never a guarantee: the other arrival order already lost
+   it, and it depends on a layer having reported one occurrence of a value and the
+   substitution over-applying to all of them. Order independence means choosing one of
+   the two old behaviours, and inflating the count and the restore map is the worse one.
+
+   ENTITIES WITH NO SPANS ARE UNTOUCHED. regex.rundetection sets start:0;end:0 on every
+   entity it emits (story PL1.7), so for that layer every span is identical and empty and
+   there is nothing to reason about. Requiring end>start on BOTH sides means a spanless
+   entity neither shadows nor is shadowed -- the same outcome as before this change, since
+   the old test `candidate.start<e.end` was also false for an empty span. Order
+   independence for spanless entities is not achievable here and does not belong here: it
+   needs the real match offsets PL1.7 is about. Equal values are still collapsed by
+   seenvalue, span or no span. *)
+f=strictlyshadows(shadow:$piientity;target:$piientity):bool{
+  let spanned=mut.false;
+  if(shadow.end>shadow.start){
+    if(target.end>target.start){
+      spanned=true
+    }el{}
+  }el{};
+  let shadows=mut.false;
+  if(spanned){
+    if(shadow.start<=target.start){
+      if(shadow.end>=target.end){
+        if(shadow.confidence>=target.confidence){
+          if(str.contains(shadow.value;target.value)){
+            if(str.eq(shadow.value;target.value)){}el{
+              shadows=true
+            }
+          }el{}
         }el{}
       }el{}
+    }el{}
+  }el{};
+  <shadows
+};
+
+(* Scanned over the WHOLE input list, which is the part that makes the answer independent
+   of arrival order. Including the target itself is harmless: strictlyshadows requires the
+   two values to differ, so nothing shadows itself. *)
+f=shadowedbyany(entities:@$piientity;target:$piientity):bool{
+  let shadowed=mut.false;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(strictlyshadows(e;target)){
+      shadowed=true
     }el{}
   };
   <shadowed
@@ -120,7 +188,7 @@ f=dedupentities(entities:@$piientity):@$piientity{
   lp(let i=0;i<entities.len;i=i+1){
     let candidate:$piientity=entities.get(i);
     if(seenvalue(kept;candidate.value)){}el{
-      if(overlapsbetter(kept;candidate)){}el{
+      if(shadowedbyany(entities;candidate)){}el{
         kept=kept.push(candidate)
       }
     }

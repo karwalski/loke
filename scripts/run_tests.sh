@@ -102,7 +102,17 @@ PASS=0
 FAIL=0
 ERRORS=""
 
-for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not -path '*/test_harness*' | sort); do
+# AD1.8 — the exclusion is now the one product module, spelled out in full.
+#
+# packages/core/src/privacy/test_harness.tk is a library module whose name happens to
+# start with test_: it declares no main and must not be discovered as a test. The
+# exclusion used to be the glob '*/test_harness*', which also swallowed anything else
+# beginning with that prefix — including tests/unit/privacy/test_harness_runner.tk, the
+# driver that finally executes the harness. Naming the file rather than a prefix keeps
+# the product module out and lets the runner in. The pattern has no leading */ so it
+# still matches when run_tests.sh is pointed at a subdirectory and find prints a
+# relative path with no ./ prefix.
+for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not -path '*packages/core/src/privacy/test_harness.tk' | sort); do
   NAME=$(basename "$SRC" .tk)
   ORIGDIR=$(pwd)
 

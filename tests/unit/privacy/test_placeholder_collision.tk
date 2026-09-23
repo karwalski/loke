@@ -136,6 +136,45 @@ f=placeholderforvalue(entities:@$piientity;value:str):str{
   <found
 };
 
+(* True when the list holds an entity with this value. *)
+f=containsvalue(entities:@$piientity;value:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.value;value)){
+      found=true
+    }el{}
+  };
+  <found
+};
+
+(* True when two deduped lists describe the same set of values.
+
+   Compared as a set rather than index by index, because dedup preserves input order: a
+   pair that both survive is listed in opposite orders by the two arrival orders, and that
+   is not the defect PL1.9 is about. What must not depend on arrival order is WHICH
+   entities survive -- the reported count, and which placeholders end up in the restore
+   map. *)
+f=samevalueset(a:@$piientity;b:@$piientity):bool{
+  let same=mut.true;
+  if(a.len==b.len){}el{
+    same=false
+  };
+  lp(let i=0;i<a.len;i=i+1){
+    let e:$piientity=a.get(i);
+    if(containsvalue(b;e.value)){}el{
+      same=false
+    }
+  };
+  lp(let j=0;j<b.len;j=j+1){
+    let e:$piientity=b.get(j);
+    if(containsvalue(a;e.value)){}el{
+      same=false
+    }
+  };
+  <same
+};
+
 f=distinctcount(entities:@$piientity):i64{
   let n=mut.0;
   lp(let i=0;i<entities.len;i=i+1){
@@ -223,9 +262,8 @@ f=main():i64{
 
   (* 6. THE SUBSTRING HAZARD. One entity's value is a strict prefix of another's, which is
         routine rather than exotic: Presidio reports PERSON "Bob Jones" while a NER layer
-        reports PERSON "Bob", and dedup keeps both because the longer one is the more
-        confident of an overlapping pair. The shorter is listed FIRST here, which is the
-        order that breaks — layer output is concatenated in layer order, not by length.
+        reports PERSON "Bob". The shorter is listed FIRST here, which is the order that
+        used to break — layer output is concatenated in layer order, not by length.
 
         Substituting in list order gives "[PERSON_2a4c_1] Jones signed." — the surname
         forwarded to the provider in the clear, and the placeholder for "Bob Jones"
@@ -235,14 +273,23 @@ f=main():i64{
         even unordered, because "Bob Jones" is not in that text either. And the round trip
         is byte-identical even unordered, because restore is the exact inverse of the
         substitution that mangled it — so neither of those can detect this. The two that
-        can are the leaked fragment and the missing placeholder, asserted directly. *)
+        can are the leaked fragment and the missing placeholder, asserted directly.
+
+        CHANGED BY PL1.9. This assertion used to read "a name and its prefix both survive
+        dedup when the longer is the more confident", and expected two entities. It was
+        asserting the order-dependent half of a defect: the same two detections in the
+        other arrival order produced ONE entity, because overlapsbetter only compared a
+        candidate against what had already been kept. Dedup now drops a strictly shadowed
+        entity in either order, so "Bob" — whose span is inside "Bob Jones" and whose
+        value is a substring of it, at lower confidence — goes. The ordering hazard itself
+        is still exercised, at 6b and at 7, by pairs that legitimately both survive. *)
   let prefixtext="Bob Jones signed.";
   let prefixdetected=@(
     personat("Bob";0 as u32;3 as u32;0.78);
     personat("Bob Jones";0 as u32;9 as u32;0.92)
   );
   let prefixents=ph.assignplaceholders(pl.dedupentities(prefixdetected);fixedrequestid());
-  if(t.assert(str.arraylen(prefixents)==2;"a name and its prefix both survive dedup when the longer is the more confident")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.arraylen(prefixents)==1;"a strictly shadowed prefix is dropped, leaving only the longer value")){pass=pass+1}el{fail=fail+1};
   let prefixanon=pl.anonymisetext(prefixtext;prefixents);
 
   (* RED BEFORE THE ORDERING FIX. The surname, forwarded in the clear. *)
@@ -275,6 +322,90 @@ f=main():i64{
   if(t.assert(allplaceholderspresent(twoanon;twoents);"both entities' placeholders appear when one value is a prefix of the other")){pass=pass+1}el{fail=fail+1};
   let tworestored=ph.restore(twoanon;ph.mapfromentities(twoents));
   if(t.assert(str.eq(tworestored;twotext);"two mentions, one a prefix of the other, round-trip byte-for-byte")){pass=pass+1}el{fail=fail+1};
+
+  (* 6b. The same substring hazard with real spans, in the shape PL1.9 leaves standing. A
+         shadow has to be AT LEAST AS CONFIDENT as what it shadows, so when the shorter
+         value is the more confident detection — a NER layer certain about "Bob", Presidio
+         hedging on "Bob Jones" — neither shadows the other and both survive with
+         overlapping spans. The shorter is listed first, which is the order that strands
+         the surname if substitution follows list order rather than value length. *)
+  let cptext="Bob Jones signed.";
+  let cpdetected=@(
+    personat("Bob";0 as u32;3 as u32;0.95);
+    personat("Bob Jones";0 as u32;9 as u32;0.78)
+  );
+  let cpents=ph.assignplaceholders(pl.dedupentities(cpdetected);fixedrequestid());
+  if(t.assert(str.arraylen(cpents)==2;"a more confident prefix is not shadowed by a longer, less confident value")){pass=pass+1}el{fail=fail+1};
+  let cpanon=pl.anonymisetext(cptext;cpents);
+  if(t.assert(!str.contains(cpanon;"Jones");"the surname is not stranded when the shorter value is listed first")){pass=pass+1}el{fail=fail+1};
+  let cplonger=placeholderforvalue(cpents;"Bob Jones");
+  if(t.assert(str.contains(cpanon;cplonger);"the longer value's placeholder reaches the prompt whichever is the more confident")){pass=pass+1}el{fail=fail+1};
+  let cprestored=ph.restore(cpanon;ph.mapfromentities(cpents));
+  if(t.assert(str.eq(cprestored;cptext);"an overlapping pair the confidence rule keeps round-trips byte-for-byte")){pass=pass+1}el{fail=fail+1};
+
+  (* 7. PL1.9 — ORDER INDEPENDENCE. The same two detections handed to dedup in both
+        arrival orders.
+
+        Before PL1.9 this pair gave two entities one way round and one the other, because
+        overlapsbetter only compared a candidate against what had already been kept and
+        never reconsidered a kept entity when a better overlapping one arrived later.
+        Which detection layer runs first is a configuration detail, not a property of the
+        text, so an entity list that depends on it is a reported entity count and a
+        restoration map that depend on it too — and the extra entry's placeholder is
+        unreachable, because PL1.1's longest-value-first substitution has already consumed
+        the text it would have matched. *)
+  let shortfirst=@(
+    personat("Bob";0 as u32;3 as u32;0.78);
+    personat("Bob Jones";0 as u32;9 as u32;0.92)
+  );
+  let longfirst=@(
+    personat("Bob Jones";0 as u32;9 as u32;0.92);
+    personat("Bob";0 as u32;3 as u32;0.78)
+  );
+  let dshort=pl.dedupentities(shortfirst);
+  let dlong=pl.dedupentities(longfirst);
+  if(t.assert(str.arraylen(dshort)==str.arraylen(dlong);"dedup keeps the same number of entities in either arrival order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(samevalueset(dshort;dlong);"dedup keeps the same entities in either arrival order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.arraylen(dshort)==1;"the strictly shadowed prefix is dropped even when it arrives first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(containsvalue(dshort;"Bob Jones");"and the survivor is the longer, more confident value")){pass=pass+1}el{fail=fail+1};
+
+  (* Equal confidence, same nesting. A shadow needs to be at least as confident, not
+     strictly more, so the longer still wins — and the relation is antisymmetric, so the
+     pair cannot shadow each other into BOTH being dropped, which would delete a detected
+     person outright. *)
+  let eqshort=@(
+    personat("Bob";0 as u32;3 as u32;0.90);
+    personat("Bob Jones";0 as u32;9 as u32;0.90)
+  );
+  let eqlong=@(
+    personat("Bob Jones";0 as u32;9 as u32;0.90);
+    personat("Bob";0 as u32;3 as u32;0.90)
+  );
+  let deqshort=pl.dedupentities(eqshort);
+  let deqlong=pl.dedupentities(eqlong);
+  if(t.assert(samevalueset(deqshort;deqlong);"an equally confident overlapping pair dedups the same way in either order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.arraylen(deqshort)==1;"and exactly one of them survives, not none")){pass=pass+1}el{fail=fail+1};
+
+  (* The regex layer supplies no spans at all: rundetection sets start:0;end:0 on every
+     entity it emits (story PL1.7). Shadowing is decided on spans, so there is nothing
+     there to decide on, and a spanless entity must not be dropped on the strength of an
+     empty span — that would delete a detection the layer actually made. Both survive, in
+     either order, which is the same outcome as before PL1.9. The ordering hazard is
+     therefore still live for that layer, and still handled by the substitution order. *)
+  let spanlessshort=@(
+    person("Bob";0 as u32;0 as u32);
+    person("Bob Jones";0 as u32;0 as u32)
+  );
+  let spanlesslong=@(
+    person("Bob Jones";0 as u32;0 as u32);
+    person("Bob";0 as u32;0 as u32)
+  );
+  let dspanshort=pl.dedupentities(spanlessshort);
+  if(t.assert(str.arraylen(dspanshort)==2;"two spanless detections are both kept, because an empty span decides nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(samevalueset(dspanshort;pl.dedupentities(spanlesslong));"and a spanless pair dedups the same way in either order")){pass=pass+1}el{fail=fail+1};
+  let spanents=ph.assignplaceholders(dspanshort;fixedrequestid());
+  let spananon=pl.anonymisetext("Bob Jones signed.";spanents);
+  if(t.assert(!str.contains(spananon;"Jones");"a spanless prefix pair does not strand the surname either")){pass=pass+1}el{fail=fail+1};
 
   (* The ordering predicate itself, so a future change to it is diagnosed here rather
      than as a puzzling leak two assertions up. It must be a TOTAL order: longer first,

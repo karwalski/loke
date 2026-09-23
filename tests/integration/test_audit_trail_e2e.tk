@@ -8,6 +8,7 @@ i=file:std.file;
 i=std:std;
 i=audit:core.storage.audit;
 i=sdb:core.storage.db;
+i=db:std.db;
 
 (* Helper: open an in-memory store for testing *)
 (* str.concat, not interpolation. A string returned by std.homedir() is TRUNCATED when
@@ -199,6 +200,67 @@ f=testinserteventchainslinks():bool{
   <t.assert(n>1;"two chained inserts both land")
 };
 
+(* GA5.3 — the chain is only tamper-EVIDENT if something can detect the tamper.
+
+   The digest became real in GA5.2 and the trail became non-empty in GA1.4; neither is
+   evidence on its own. These four assertions are the acceptance criteria the story names:
+   an intact chain verifies, a mutated FIELD is caught, a mutated HASH is caught, and a
+   DELETED row is caught. Each tamper is applied with raw SQL, deliberately going around the
+   module under test — a test that can only tamper through the API it is testing proves
+   nothing about an attacker with database access, which is the threat here.
+
+   The last two present identically from inside the data, and the verifier says so rather
+   than claiming a distinction it cannot make. *)
+f=execsql(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=testchainintact():bool{
+  let store=openteststore();
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-v1"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-v2"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-v3"));
+  let r=audit.verifychain(store);
+  <t.assert(r.ok;"an untampered chain verifies")
+};
+
+f=testdetectsfieldmutation():bool{
+  let store=openteststore();
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-fm-1"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-fm-2"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-fm-3"));
+  (* Alter a field of a MIDDLE row without touching its hash — the shape of someone editing
+     the record of what was sent while leaving the digest alone. *)
+  execsql("UPDATE audit_log SET provider='tampered' WHERE correlation_id='corr-fm-2'");
+  let r=audit.verifychain(store);
+  <t.assert(!r.ok;"a mutated field is detected")
+};
+
+f=testdetectshashmutation():bool{
+  let store=openteststore();
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-hm-1"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-hm-2"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-hm-3"));
+  execsql("UPDATE audit_log SET hash='0000000000000000000000000000000000000000000000000000000000000000' WHERE correlation_id='corr-hm-2'");
+  let r=audit.verifychain(store);
+  <t.assert(!r.ok;"a mutated digest is detected")
+};
+
+f=testdetectsdeletedrow():bool{
+  let store=openteststore();
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-del-1"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-del-2"));
+  audit.insertevent(store;maketestevent("llm_request";"browser-chat";"corr-del-3"));
+  (* Removing a middle row breaks the linkage at the row AFTER it, which is why the verifier
+     reads forward and reports the first divergence rather than a count. *)
+  execsql("DELETE FROM audit_log WHERE correlation_id='corr-del-2'");
+  let r=audit.verifychain(store);
+  <t.assert(!r.ok;"a deleted row is detected")
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
@@ -214,6 +276,10 @@ f=main():i64{
   if(testinserteventreturnstrue()){pass=pass+1}el{fail=fail+1};
   if(testinserteventaddsexactlyone()){pass=pass+1}el{fail=fail+1};
   if(testinserteventchainslinks()){pass=pass+1}el{fail=fail+1};
+  if(testchainintact()){pass=pass+1}el{fail=fail+1};
+  if(testdetectsfieldmutation()){pass=pass+1}el{fail=fail+1};
+  if(testdetectshashmutation()){pass=pass+1}el{fail=fail+1};
+  if(testdetectsdeletedrow()){pass=pass+1}el{fail=fail+1};
 
   <fail
 };
