@@ -1,0 +1,230 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.router.strategy;
+
+i=reg:core.models.registry;
+i=str:std.str;
+i=log:shared.log;
+i=t:shared.types;
+
+(* X8.6 — the four named router strategies.
+
+   docs/claims.md D3 advertised "Strategies: cheapest-adequate, fastest, best-quality,
+   local-first" and a grep for all four names across packages/ and src/ returned zero
+   matches: there was one fixed selection path, not four strategies. This module is the
+   implementation, and strategyname below is the single place the four names are spelled,
+   so the claim and the code cannot drift apart again.
+
+   What each strategy ranks by, and where those numbers come from. Every candidate is a
+   core.models.registry $modelcapability, and the ranking reads qualityscore, speedtoks and
+   local off it plus a cost table held here. The registry's qualityscore and speedtoks are
+   hardcoded editorial estimates with no cited measurement — see the entries in
+   packages/core/src/models/registry.tk — so "fastest" and "best-quality" order models by
+   stated figures, not benchmarked ones. That is a limitation of the registry's data, not of
+   the ranking, and it is recorded here rather than implied away.
+
+   The cost table is the third copy of the same numbers in this repository
+   (core.router.router.costinfrommodel and core.router.selector.estimatecost are the other
+   two, and they do not agree: costinfrommodel returns 0.0 for an unknown model, which is
+   the sort-as-free trap this table avoids). That duplication is not accidental: an f64
+   RETURNED across a module boundary is
+   corrupted (T-20), so a shared costper1k(modelid):f64 accessor could not be called from
+   another module, and each module that needs the figures in f64 form has to hold them. *)
+t=$routingstrategy{
+  $cheapestadequate:i64;
+  $fastest:i64;
+  $bestquality:i64;
+  $localfirst:i64
+};
+
+(* Constructed, never bare: a bare sum variant in a value position compiles with no
+   diagnostic and crashes when matched (T-13). *)
+f=cheapestadequate():$routingstrategy{
+  <$routingstrategy{$cheapestadequate:0}
+};
+
+f=fastest():$routingstrategy{
+  <$routingstrategy{$fastest:0}
+};
+
+f=bestquality():$routingstrategy{
+  <$routingstrategy{$bestquality:0}
+};
+
+f=localfirst():$routingstrategy{
+  <$routingstrategy{$localfirst:0}
+};
+
+(* `==` on two sums compares the handle, not the variant, and a value returned from a
+   function does not compare equal to an identically constructed local (T-14). So every
+   comparison goes through this rank. *)
+f=strategyrank(s:$routingstrategy):i64{
+  <mt s {
+    $cheapestadequate:v 0;
+    $fastest:v 1;
+    $bestquality:v 2;
+    $localfirst:v 3
+  }
+};
+
+f=strategyeq(a:$routingstrategy;b:$routingstrategy):bool{
+  <strategyrank(a)==strategyrank(b)
+};
+
+(* The four names exactly as docs/claims.md D3 states them. A caller that prints a strategy
+   prints one of these; a caller that parses one accepts one of these. *)
+f=strategyname(s:$routingstrategy):str{
+  <mt s {
+    $cheapestadequate:v "cheapest-adequate";
+    $fastest:v "fastest";
+    $bestquality:v "best-quality";
+    $localfirst:v "local-first"
+  }
+};
+
+f=isstrategyname(s:str):bool{
+  if(str.eq(s;"cheapest-adequate")){<true}el{};
+  if(str.eq(s;"fastest")){<true}el{};
+  if(str.eq(s;"best-quality")){<true}el{};
+  if(str.eq(s;"local-first")){<true}el{};
+  <false
+};
+
+(* An unrecognised name yields best-quality, which is the ranking core.models.registry
+   .bestfortask already applied before this module existed — so a config with a typo in it
+   behaves as the router did before, rather than silently becoming cheapest. A caller that
+   wants to reject a typo tests isstrategyname first. *)
+f=strategyfromname(s:str):$routingstrategy{
+  if(str.eq(s;"cheapest-adequate")){<cheapestadequate()}el{};
+  if(str.eq(s;"fastest")){<fastest()}el{};
+  if(str.eq(s;"local-first")){<localfirst()}el{};
+  <bestquality()
+};
+
+(* Cost per 1k input tokens, in USD. A local model is free at the point of use, which is
+   read off the capability's own `local` flag rather than guessed from the model id.
+
+   Order matters: "gpt-4o-mini" contains "gpt-4o", so the more specific id is tested
+   first. The 0.001 tail is a deliberately non-zero unknown-cloud-model cost — a cloud
+   model whose price this table does not know must not sort as free, or cheapest-adequate
+   would prefer exactly the models it knows least about. *)
+f=costin1k(c:$modelcapability):f64{
+  if(c.local){ <0.0 }el{};
+  if(str.contains(c.modelid;"claude-3-5-sonnet")){<0.003}el{};
+  if(str.contains(c.modelid;"claude-3-5-haiku")){<0.001}el{};
+  if(str.contains(c.modelid;"gpt-4o-mini")){<0.00015}el{};
+  if(str.contains(c.modelid;"gpt-4o")){<0.005}el{};
+  <0.001
+};
+
+(* "Adequate" in cheapest-adequate. Below this quality score a cheaper model is not a
+   saving, it is a different answer, so cheapest-adequate will not descend past it.
+
+   This is a policy choice, not a measurement, and it is stated as one. 0.70 admits
+   qwen2.5:7b (0.72) and every cloud model, and excludes gemma3:4b (0.68). *)
+f=adequacyfloor():f64{
+  <0.70
+};
+
+f=localrank(c:$modelcapability):i64{
+  if(c.local){ <1 }el{ <0 }
+};
+
+f=bettercheapest(cand:$modelcapability;best:$modelcapability):bool{
+  let cc=costin1k(cand);
+  let cb=costin1k(best);
+  if(cc<cb){<true}el{};
+  if(cb<cc){<false}el{};
+  <cand.qualityscore>best.qualityscore
+};
+
+f=betterfastest(cand:$modelcapability;best:$modelcapability):bool{
+  if(cand.speedtoks>best.speedtoks){<true}el{};
+  if(best.speedtoks>cand.speedtoks){<false}el{};
+  <cand.qualityscore>best.qualityscore
+};
+
+f=betterquality(cand:$modelcapability;best:$modelcapability):bool{
+  <cand.qualityscore>best.qualityscore
+};
+
+f=betterlocalfirst(cand:$modelcapability;best:$modelcapability):bool{
+  let rc=localrank(cand);
+  let rb=localrank(best);
+  if(rc>rb){<true}el{};
+  if(rb>rc){<false}el{};
+  <cand.qualityscore>best.qualityscore
+};
+
+(* The match is the whole body of its own function rather than inline in the candidate
+   loop: toke miscompiles a three-or-more-arm `mt` written inline in a loop (T-2). *)
+f=better(strategy:$routingstrategy;cand:$modelcapability;best:$modelcapability):bool{
+  <mt strategy {
+    $cheapestadequate:v bettercheapest(cand;best);
+    $fastest:v betterfastest(cand;best);
+    $bestquality:v betterquality(cand;best);
+    $localfirst:v betterlocalfirst(cand;best)
+  }
+};
+
+(* Two filters every strategy applies, plus one that only cheapest-adequate applies.
+
+   reg.meetstier is the latency tier's speed floor. maxcostper1k is the caller's cost
+   ceiling, which $selectioncriteria has always carried and which
+   core.models.registry.bestfortask never read — so before this module the field was
+   accepted and silently ignored on every selection. The adequacy floor applies to
+   cheapest-adequate alone, because it is the only strategy whose objective would otherwise
+   reward picking the worst model available. *)
+f=eligible(c:$modelcapability;tier:$modeltier;strategy:$routingstrategy;maxcostper1k:f64):bool{
+  if(reg.meetstier(tier;c.speedtoks)){}el{ <false };
+  if(costin1k(c)>maxcostper1k){ <false }el{};
+  if(strategyrank(strategy)==0){
+    <!(c.qualityscore<adequacyfloor())
+  }el{};
+  <true
+};
+
+(* The plain form, for the same reason core.models.registry.bestfortask is plain: an empty
+   modelid means "no candidate met the constraints", tested with reg.iscapability. Nothing
+   here returns a result whose error side is a user sum, because a caller cannot
+   discriminate one (T-18) and reading a field off the mis-bound value segfaults.
+
+   An array of structs does cross a module boundary intact, f64 fields included — probed
+   this session against reg.findfortask with the registry's own qualityscore and speedtoks
+   values, which is why the candidate list can be walked here rather than inside the
+   registry. maxcostper1k is an f64 PARAMETER, which also crosses intact; only a bare f64
+   return is corrupted (T-20). *)
+f=bestbystrategy(
+  registry:i64;
+  task:$tasktype;
+  localonly:bool;
+  tier:$modeltier;
+  strategy:$routingstrategy;
+  maxcostper1k:f64
+):$modelcapability{
+  let cands=reg.findfortask(registry;task;localonly);
+  let bestidx=mut.0-1;
+  let haveone=mut.false;
+  lp(let i=0;i<cands.len;i=i+1){
+    let c:$modelcapability=cands.get(i);
+    if(eligible(c;tier;strategy;maxcostper1k)){
+      if(haveone){
+        let cur:$modelcapability=cands.get(bestidx);
+        if(better(strategy;c;cur)){bestidx=i}el{}
+      }el{
+        bestidx=i;
+        haveone=true
+      }
+    }el{}
+  };
+  if(haveone){
+    <cands.get(bestidx)
+  }el{
+    <reg.nocapability()
+  }
+};
+
+f=describe(strategy:$routingstrategy;c:$modelcapability):str{
+  <str.concat(str.concat("strategy ";strategyname(strategy));str.concat(" chose ";c.modelid))
+};

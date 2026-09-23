@@ -1,0 +1,114 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.optimiser.testoptimiseroutcomes;
+
+i=t:std.test;
+i=str:std.str;
+i=cache:core.optimiser.cache;
+i=budget:core.optimiser.budget;
+i=bt:core.optimiser.budgettypes;
+
+(* GA1.6 and GA1.5 — the two outcomes that could not be observed before.
+
+   GA1.6: cache.lookup returned $cacheresult{$none:i64;$some:i64} and constructed $some:0 on
+   every hit, so a hit returned the literal zero and the type had no room for a response. It
+   returns $cachehit now, which carries one. Nothing called lookup, so nothing had noticed.
+
+   GA1.5: budget.record's whole body was `manager.usage.get(i)==$budgetusage{...}`, a
+   COMPARISON whose bool was discarded (T-26). No usage row was ever updated, so the
+   counters stayed at zero however much was spent and a budget that never accumulates never
+   refuses. The accumulation assertions below are the ones that would have failed.
+
+   Neither function needs a network, a model or a store to be tested at this level: the
+   contract being asserted is that a hit is distinguishable from a miss and that a recorded
+   spend is visible to the caller. *)
+
+f=defaultmanager():$budgetmanager{
+  <budget.new(budget.defaultlimits())
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── GA1.6: $cachehit, its sentinel and its predicate ────────────────────────── *)
+  let miss:$cachehit=cache.nohit();
+  if(t.assert(!cache.ishit(miss);"nohit reads as NOT a hit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(miss.response)==0;"a miss carries no response to mistake for an answer")){pass=pass+1}el{fail=fail+1};
+
+  let hit:$cachehit=cache.hitfrom("the cached answer";0.97;12);
+  if(t.assert(cache.ishit(hit);"a hit reads as a hit")){pass=pass+1}el{fail=fail+1};
+  (* The whole point of the type change: the hit can actually hand over the response. *)
+  if(t.assert(str.eq(hit.response;"the cached answer");"and it CARRIES the response, which $cacheresult could not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hit.ageseconds==12;"the age survives")){pass=pass+1}el{fail=fail+1};
+  (* score is an f64 FIELD of a returned struct, which crosses a module boundary intact.
+     Only a bare f64 return is corrupted (T-20), so no scaling is needed and this pair of
+     bounds is what proves it. *)
+  if(t.assert(hit.score>0.96;"the f64 score field crosses the module boundary intact (lower bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hit.score<0.98;"the f64 score field crosses the module boundary intact (upper bound)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cache.ishit(hit)!=cache.ishit(miss);"a hit and a miss are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  (* An empty response is the sentinel, so it cannot be smuggled in as a hit. *)
+  let emptyhit:$cachehit=cache.hitfrom("";0.99;1);
+  if(t.assert(!cache.ishit(emptyhit);"an empty response is NOT a hit, whatever its score")){pass=pass+1}el{fail=fail+1};
+
+  (* formatstats had no `<` at all — the body was a bare expression, so toke evaluated the
+     concatenation and discarded it (the wider form of T-19). *)
+  let stats=cache.formatstats($cachestats{hits:5;misses:3;entries:10;evictions:2});
+  if(t.assert(str.contains(stats;"5 hits");"formatstats returns its string instead of discarding it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stats;"3 misses");"and the whole line is built")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GA1.5: budget.record accumulates, and a caller can see it ───────────────── *)
+  let fresh:$budgetmanager=defaultmanager();
+  if(t.assert(budget.rowtokens(fresh;0)==0;"a fresh manager has spent nothing")){pass=pass+1}el{fail=fail+1};
+
+  let once:$budgetmanager=budget.record(fresh;100 as u32;0.5);
+  if(t.assert(budget.rowtokens(once;0)==100;"RECORDING A SPEND IS VISIBLE TO THE CALLER — the assertion T-26 made impossible")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.rowtokens(fresh;0)==0;"and the manager passed in is unchanged, because toke structs are values")){pass=pass+1}el{fail=fail+1};
+
+  let twice:$budgetmanager=budget.record(once;150 as u32;0.25);
+  if(t.assert(budget.rowtokens(twice;0)==250;"spends ACCUMULATE across calls")){pass=pass+1}el{fail=fail+1};
+
+  (* Both rows are updated: defaultlimits has one row per period, daily and monthly, and both
+     count the same spend. *)
+  if(t.assert(budget.rowtokens(twice;1)==250;"every period row records the spend")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.rowtokens(twice;99)==0;"an out-of-range row answers 0 rather than reading off the end")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.rowtokens(twice;0-1)==0;"and so does a negative one")){pass=pass+1}el{fail=fail+1};
+
+  (* Cost crosses as MILLIONTHS of a dollar. shared.types.f64hundredths would be cents, and
+     a request costing a fraction of a cent would record as zero — the unit has to be finer
+     than the quantity being counted. *)
+  if(t.assert(budget.microusd(0.003)==3000;"0.003 USD is 3000 millionths")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.microusd(0.0)==0;"zero cost is zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.rowcostmicrousd(twice;0)==750000;"0.50 + 0.25 USD accumulates to 750000 millionths")){pass=pass+1}el{fail=fail+1};
+
+  (* withusage is what lets a budget survive the process that spent it. *)
+  let seeded:$budgetmanager=budget.withusage(defaultmanager();5000;2500000);
+  if(t.assert(budget.rowtokens(seeded;0)==5000;"persisted token counters are restored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.rowcostmicrousd(seeded;0)==2500000;"persisted cost counters are restored")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GA1.5: and the limit actually refuses ───────────────────────────────────── *)
+  let within:$budgetcheck=budget.check(defaultmanager();0 as u32;0.0);
+  if(t.assert(within.allowed;"an unspent budget allows the request")){pass=pass+1}el{fail=fail+1};
+
+  (* defaultlimits sets the daily token limit to 100000. *)
+  let overtokens:$budgetcheck=budget.check(budget.withusage(defaultmanager();150000;0);0 as u32;0.0);
+  if(t.assert(!overtokens.allowed;"a budget already past its daily token limit REFUSES")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(overtokens.reason;"token limit exceeded");"and says which limit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(overtokens.reason;"daily");"and which period")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(within.allowed!=overtokens.allowed;"allowed and refused are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  (* The daily cost limit is 5.0 USD; 6000000 millionths is 6.00. *)
+  let overcost:$budgetcheck=budget.check(budget.withusage(defaultmanager();0;6000000);0 as u32;0.0);
+  if(t.assert(!overcost.allowed;"a budget already past its daily cost limit REFUSES")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(overcost.reason;"cost limit exceeded");"and says so")){pass=pass+1}el{fail=fail+1};
+
+  (* resetperiod, which was fixed before record and is the reason the defect in record was
+     visible at all: the same code, already corrected one function away. *)
+  let reset:$budgetmanager=budget.resetperiod(twice;$budgetperiod{$daily:0});
+  if(t.assert(budget.rowtokens(reset;0)==0;"resetperiod clears the daily row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(budget.rowtokens(reset;1)==250;"and leaves the monthly row alone")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

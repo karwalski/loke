@@ -15,10 +15,16 @@ i=bt:core.optimiser.budgettypes;
 
 
 
+(* str.arraylen/str.arrayget replaced with .len/.push. str.arrayget erases the element type
+   of what it returns — the same reason PL1.1 took it out of
+   core.privacy.placeholder.buildplaceholdermap — and `lim` was bound and never used, which
+   is the only thing that kept it harmless here. .push is also the form the rest of this
+   module already uses (resetperiod), so the file no longer disagrees with itself about how
+   to build an array. *)
 f=new(limits:@$budgetlimit):$budgetmanager{
   let usage=mut.@();
-  lp(let i=0;i<str.arraylen(limits);i=i+1){ let lim=str.arrayget(limits;i);
-    usage=usage.append($budgetusage{
+  lp(let i=0;i<limits.len;i=i+1){
+    usage=usage.push($budgetusage{
       periodstart:"";
       tokensused:0;
       costusd:0.0;
@@ -172,30 +178,97 @@ f=check(manager:$budgetmanager;estimatedtokens:u32;estimatedcost:f64):$budgetche
 
 
 
-f=record(manager:$budgetmanager;tokens:u32;cost:f64):void{
-  let count=manager.usage.len;
-  let i=mut.0;
-  lp(let lv=0;true;lv=lv){
-    if(i >= count){
-      br
-    }el{
-      let usg=manager.usage.get(i);
-      manager.usage.get(i)==$budgetusage{
-        periodstart:usg.periodstart;
-        tokensused:((usg.tokensused as i64 + tokens as i64) as u32);
-        costusd:usg.costusd + cost;
-        requestcount:((usg.requestcount as i64 + 1) as i32)
-      };
-      i=i+1;
-    }
+(* GA1.5 — record did nothing at all, and said nothing about it.
+
+   The old body was
+
+     manager.usage.get(i)==$budgetusage{ ... };
+
+   which is a COMPARISON. It computed a bool and threw it away, so no usage row was ever
+   updated: every request recorded against the budget left the counters at zero, and a
+   budget that never accumulates never refuses. There is no assignment to a struct field or
+   an array element in toke, and E2002's advice to "use `==`" produces exactly this silent
+   no-op (T-26) — the identical defect was already found and fixed in resetperiod below, and
+   left in place here.
+
+   Nor could writing through .get(i) have worked. toke structs are values, so the manager has
+   to be RETURNED for a caller to see the change, which is why the signature is no longer
+   void. Nothing in the repository called record, so no compatibility shim is owed: the
+   signature change cannot break a caller that does not exist.
+
+   requestcount is cast to u32, not i32: $budgetusage declares it u32, and the old i32 cast
+   was a narrowing the type did not ask for. *)
+f=record(manager:$budgetmanager;tokens:u32;cost:f64):$budgetmanager{
+  let usage=mut.@();
+  lp(let i=0;i<manager.usage.len;i=i+1){
+    let usg:$budgetusage=manager.usage.get(i);
+    usage=usage.push($budgetusage{
+      periodstart:usg.periodstart;
+      tokensused:((usg.tokensused as i64 + tokens as i64) as u32);
+      costusd:usg.costusd + cost;
+      requestcount:((usg.requestcount as i64 + 1) as u32)
+    })
   };
-  <void
+  <$budgetmanager{limits:manager.limits;usage:usage}
+};
+
+(* Per-ROW accessors, deliberately not a total.
+
+   Summing across rows would be wrong: defaultlimits returns one row per PERIOD — daily and
+   monthly — and both rows count the same spend. A "total" over them double-counts, so a
+   caller that persisted it would inflate the recorded usage every time it round-tripped.
+   The caller names the row it means. *)
+f=rowtokens(manager:$budgetmanager;idx:i64):i64{
+  if(idx<0){ <0 }el{};
+  if(idx>=manager.usage.len){ <0 }el{};
+  let usg:$budgetusage=manager.usage.get(idx);
+  <usg.tokensused as i64
+};
+
+(* Cost in MILLIONTHS of a US dollar, as an exact integer, because an f64 RETURNED across a
+   module boundary is corrupted (T-20) and a caller in another module therefore cannot be
+   handed the f64 at all. Same reason shared.types.f64hundredths and
+   core.router.selector.estimatecosthundredths exist.
+
+   shared.types.f64hundredths is deliberately NOT used here. It multiplies by 100, which for
+   a USD amount is CENTS — and a single request to gpt-4o-mini costs a small fraction of one
+   cent, so rounding to cents would record every request as zero and the accumulated total
+   would never move. The unit has to be finer than the quantity being counted. *)
+f=microusd(cost:f64):i64{
+  if(cost<0.0){
+    <((cost * 1000000.0) - 0.5) as i64
+  }el{
+    <((cost * 1000000.0) + 0.5) as i64
+  }
+};
+
+f=rowcostmicrousd(manager:$budgetmanager;idx:i64):i64{
+  if(idx<0){ <0 }el{};
+  if(idx>=manager.usage.len){ <0 }el{};
+  let usg:$budgetusage=manager.usage.get(idx);
+  <microusd(usg.costusd)
+};
+
+(* Seeds every usage row from counters a caller persisted, so a budget survives the process
+   that spent it. A budget held only in memory in a request handler is reset by every
+   request, which is the same as no budget. *)
+f=withusage(manager:$budgetmanager;tokens:i64;costmicrousd:i64):$budgetmanager{
+  let usage=mut.@();
+  lp(let i=0;i<manager.usage.len;i=i+1){
+    usage=usage.push($budgetusage{
+      periodstart:"";
+      tokensused:tokens as u32;
+      costusd:(costmicrousd as f64)/1000000.0;
+      requestcount:0
+    })
+  };
+  <$budgetmanager{limits:manager.limits;usage:usage}
 };
 
 
 
 
-(* Four defects, and the function did nothing at all.
+(* resetperiod had the same four defects record had, and they were fixed here first.
 
    `manager.usage.get(i)==$budgetusage{...}` is a COMPARISON. It computed a bool and
    discarded it, so no usage row was ever reset. Writing through `.get(i)` could not

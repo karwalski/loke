@@ -30,6 +30,15 @@ t=$cachestats{
   evictions:i32
 };
 
+(* GA1.6 — $cacheresult is kept only for the two result-returning wrappers at the bottom of
+   this file, and no new code should use it.
+
+   It was lookup's return type, and it could not do the job: $some carried an i64 and
+   `lookup` constructed $some:0 on every hit, so a hit returned the literal zero. The type
+   had no room for a response, which means the semantic cache could report that it had one
+   and never hand it over — and nothing in the repository called lookup, so nothing noticed.
+   $cachehit was already declared above and used nowhere; it is what the return wanted to be
+   all along. *)
 t=$cacheresult{
   $none:i64;
   $some:i64
@@ -53,51 +62,165 @@ f=defaultconfig(datadir:str):$cacheconfig{
   }
 };
 
+(* vecstore.open returns VecStore!VecErr and vecstore.collection returns
+   VecCollection!VecErr. The previous bodies returned those RESULT wrappers as bare i64
+   handles, so what a caller held was a pointer to a result and not to a store, and
+   vs.collection was then handed that wrapper where a VecStore was expected. A std.* result
+   DOES discriminate, so it can simply be matched — and 0 is the "no store" sentinel, tested
+   with an `if`, the same convention as browser.pages.api.pipeline.openstore. *)
 f=open(cfg:$cacheconfig):i64{
-  <vs.open(cfg.datadir)
-};
-
-f=collection(store:i64):i64{
-  <vs.collection(store;"prompt_cache")
-};
-
-f=checkcacheentry(p:i64;col:i64;topid:str;cfg:$cacheconfig):$cacheresult{
-  let createdat=json.geti64(p;"created_at");
-  let now=time.nowunix();
-  if((now-createdat)>cfg.ttlseconds){
-    vs.delete(col;topid);
-    log.debug("cache: evicted expired entry";"cache";"");
-    <$cacheresult{$none:0}
-  }el{
-    <$cacheresult{$some:0}
+  <mt vs.open(cfg.datadir) {
+    $ok:s s;
+    $err:e 0
   }
 };
 
-f=cacheparsewarn():$cacheresult{
-  log.warn("cache: failed to parse payload";"cache";"");
-  <$cacheresult{$none:0}
+(* The parameter is `vstore`, not `store`. This module declares f=store, and a parameter of
+   the same name resolves to the FUNCTION: `if(store==0)` raised E4031 "expected 'func', got
+   'i64'" against a perfectly ordinary comparison. The old body never compared the parameter,
+   only forwarded it, so the collision was invisible until this guard was added. *)
+f=collection(vstore:i64):i64{
+  if(vstore==0){
+    <0
+  }el{};
+  <mt vs.collection(vstore;"prompt_cache") {
+    $ok:c c;
+    $err:e 0
+  }
 };
 
-f=lookup(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cacheresult{
+(* The sentinel and its predicate, the same shape as core.models.registry.nocapability /
+   iscapability and core.providers.types.nocompletion / iscompletion.
+
+   An EMPTY response means "no hit". A cached response cannot be the empty string: store
+   below writes whatever the provider returned, and a provider that returned nothing is not
+   something worth serving from a cache. So the sentinel cannot collide with real data.
+
+   This is a plain struct rather than a result because a result whose error side is a
+   user-declared sum cannot be discriminated by its caller — toke takes the FIRST arm
+   whatever the value is (T-18) — and reading a field off the mis-bound value segfaults. A
+   cache is exactly the wrong place for that: the failure mode is serving one user's cached
+   answer in place of another's, or serving garbage as an answer. *)
+f=nohit():$cachehit{
+  <$cachehit{
+    response:"";
+    score:0.0;
+    ageseconds:0
+  }
+};
+
+f=ishit(h:$cachehit):bool{
+  <str.len(h.response)>0
+};
+
+(* $cachehit.score is an f64 FIELD of a returned struct, which crosses a module boundary
+   intact. Only a bare f64 RETURN is corrupted (T-20), so the score needs no scaling and no
+   f64hundredths carrier. *)
+f=hitfrom(response:str;score:f64;age:i64):$cachehit{
+  if(str.len(response)==0){
+    <nohit()
+  }el{};
+  <$cachehit{
+    response:response;
+    score:score;
+    ageseconds:age as i32
+  }
+};
+
+(* The payload is read through the TYPED std.json accessors — json.dec, json.str, json.i64 —
+   not through json.decode/json.geti64. Two reasons. A std.json result DOES discriminate
+   correctly, unlike a result whose error side is a user sum, so these matches can be
+   trusted; and the untyped shims take and return bare i64 handles, so the previous body
+   matched `mt` on an i64 that json.decode had returned and read fields off it. *)
+f=checkcacheentry(payload:str;col:i64;topid:str;score:f64;cfg:$cacheconfig):$cachehit{
+  <mt json.dec(payload) {
+    $ok:obj entryfromobj(obj;col;topid;score;cfg);
+    $err:e cacheparsewarn()
+  }
+};
+
+f=entryfromobj(obj:$json;col:i64;topid:str;score:f64;cfg:$cacheconfig):$cachehit{
+  let createdat=mt json.i64(obj;"created_at") {
+    $ok:n n;
+    $err:e 0
+  };
+  if(createdat==0){
+    (* A payload with no readable created_at cannot be aged, so it cannot be trusted to be
+       within its TTL. Treated as a miss and removed, rather than served forever. *)
+    vs.delete(col;topid);
+    log.warn("cache: entry has no readable created_at, evicted";"cache";"");
+    <nohit()
+  }el{};
+  let now=time.nowunix();
+  let age=now-createdat;
+  if(age>(cfg.ttlseconds as i64)){
+    vs.delete(col;topid);
+    log.debug("cache: evicted expired entry";"cache";"");
+    <nohit()
+  }el{};
+  let response=mt json.str(obj;"response") {
+    $ok:r r;
+    $err:e ""
+  };
+  <hitfrom(response;score;age)
+};
+
+f=cacheparsewarn():$cachehit{
+  log.warn("cache: failed to parse payload";"cache";"");
+  <nohit()
+};
+
+(* std.models.infer.embed answers with @f32 and std.vecstore's upsert and search both take
+   @(f64). The previous body handed one straight to the other in both directions, which is a
+   type mismatch toke accepts without a diagnostic — 4-byte floats read as 8-byte ones, so
+   every stored vector and every query vector was a different vector from the one the
+   embedding model produced. Converting element by element is the only honest way across.
+
+   This is a real cost on the request path — one pass over the embedding — and it is the
+   price of the two libraries disagreeing about float width. The alternative is a cache whose
+   similarity scores mean nothing. *)
+f=tof64(v:@f32):@f64{
+  let out=mut.@();
+  lp(let i=0;i<v.len;i=i+1){
+    out=out.push(v.get(i) as f64)
+  };
+  <out
+};
+
+(* GA1.6 — lookup answers with a $cachehit, so a hit can actually carry the response.
+
+   Tested with ishit, not matched. Every miss path returns nohit(), and a miss is logged at
+   debug rather than warn: on a machine that has not pulled nomic-embed-text the absence of
+   an embedding model is the steady state, not an incident, and a warning on every request
+   is the definition of crying wolf. The behaviour is unchanged — no embedding means a
+   MISS, never a guess. *)
+f=lookup(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cachehit{
   let embedding=inf.embed(pool;embedmodel();prompt);
   if(embedding.len==0){
-    log.warn("cache: no embedding model loaded, treating as a miss";"cache";"");
-    <$cacheresult{$none:0}
+    log.debug("cache: no embedding model loaded, treating as a miss";"cache";"");
+    <nohit()
   }el{};
-  let results=vs.search(col;embedding;1;cfg.threshold);
+  let results=vs.search(col;tof64(embedding);1;cfg.threshold);
   if(results.len==0){
-    <$cacheresult{$none:0}
+    <nohit()
+  }el{};
+  let top=results.get(0);
+  if(top.score<cfg.threshold){
+    <nohit()
+  }el{};
+  <checkcacheentry(top.payload;col;top.id;top.score;cfg)
+};
+
+(* Kept so that any caller already matching lookup's old result keeps compiling. It cannot
+   tell that caller anything — $some:0 was always the payload and still is — and it discards
+   the response it now has in hand. Nothing in the repository calls it; new callers use
+   lookup and ishit. *)
+f=lookupresult(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cacheresult{
+  let hit=lookup(col;prompt;pool;cfg);
+  if(ishit(hit)){
+    <$cacheresult{$some:0}
   }el{
-    let top=results.get(0);
-    if(top.score<cfg.threshold){
-      <$cacheresult{$none:0}
-    }el{
-      let parsed=json.decode(top.payload);
-      <mt parsed {
-        $ok:p checkcacheentry(p;col;top.id;cfg);
-        $err:e cacheparsewarn()
-      }
-    }
+    <$cacheresult{$none:0}
   }
 };
 
@@ -116,7 +239,7 @@ f=store(col:i64;prompt:str;response:str;pool:$inferpool):bool{
       str.fromi64(now));
     "}");
   let id=str.randhex(16);
-  <vs.upsert(col;id;embedding;payload)
+  <vs.upsert(col;id;tof64(embedding);payload)
 };
 
 f=evictexpired(col:i64;ttlseconds:i32):i32{
@@ -124,8 +247,11 @@ f=evictexpired(col:i64;ttlseconds:i32):i32{
   <vs.deletebefore(col;now-(ttlseconds as i64))
 };
 
+(* The whole body was a bare expression with no `<`, so toke evaluated the concatenation
+   and discarded it, and formatstats returned garbage — the wider form of T-19 that
+   scripts/find_discarded_tail_expr.py exists to catch. *)
 f=formatstats(stats:$cachestats):str{
-  str.concat(
+  <str.concat(
     str.concat(
       str.concat(
         str.concat(

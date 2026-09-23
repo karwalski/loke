@@ -1,0 +1,210 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.router.testroutesafety;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=reg:core.models.registry;
+i=sel:core.router.selector;
+i=strat:core.router.strategy;
+i=rtr:core.router.router;
+
+(* GA1.7 / X8.6 — the route-level safety property, and the four named strategies.
+
+   tests/unit/router/test_selection_outcome.tk asserts that a RESTRICTED request with no
+   local model is REFUSED at the SELECTOR. This file asserts the property again at the
+   ROUTE, because the route is the value a provider call is actually made from:
+
+     a RESTRICTED request must not be routed to a cloud provider.
+
+   The assertion is deliberately paired with its own control. The same request at PUBLIC
+   sensitivity, same strategy, same registry, DOES route to a cloud provider — so the
+   RESTRICTED assertion is testing the sensitivity gate rather than passing because the
+   router can never reach a cloud provider at all. A safety test that would still pass with
+   the safety code deleted is worth nothing, and the PUBLIC case is what rules that out.
+
+   X8.6: docs/claims.md D3 advertised "cheapest-adequate, fastest, best-quality,
+   local-first" with zero matches for any of the four names anywhere in packages/ or src/.
+   The names are asserted here as strings, against strat.strategyname, so the claim has a
+   test and not just an implementation.
+
+   No network. Every text used here classifies through core.router.intent.classifyfast at a
+   confidence above its 0.80 short-circuit, so intent.classify never opens a socket, and
+   every other path exercised is pure. *)
+
+f=criteria(task:$tasktype;sens:$sensitivitylevel;preferlocal:bool;maxcost:f64):$selectioncriteria{
+  <$selectioncriteria{
+    task:task;
+    sensitivity:sens;
+    tolerance:$latencytolerance{$instant:0};
+    preferlocal:preferlocal;
+    maxcostper1k:maxcost;
+    requiretools:false
+  }
+};
+
+f=chosen(c:$selectioncriteria;r:$registry;s:$routingstrategy):str{
+  let picked:$selectionresult=sel.selectmodelwith(c;r;s);
+  <picked.modelid
+};
+
+(* The most dangerous router this repository can build, which is the right one to test the
+   safety property with: preferlocal FALSE, so nothing filters the candidates down to local
+   models, and best-quality, the strategy that ranks claude-3-5-sonnet (0.95) top. If the
+   RESTRICTED gate failed, this is the config that would send the data to Anthropic.
+
+   The ollama URL points at a closed port on purpose. Nothing here should reach it — every
+   text used classifies above intent.classifyfast's 0.80 short-circuit — so if a future edit
+   makes routing depend on a live Ollama, this test will show it rather than quietly
+   depending on the developer's machine. *)
+f=cloudfavouringrouter():$router{
+  <rtr.new(rtr.newconfigfull("http://127.0.0.1:59997";false;0.05;strat.bestquality()))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let r=reg.newregistry();
+
+  (* ── X8.6: the four names, spelled exactly as docs/claims.md D3 states them ──── *)
+  if(t.assert(str.eq(strat.strategyname(strat.cheapestadequate());"cheapest-adequate");"strategy 1 is named cheapest-adequate")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(strat.strategyname(strat.fastest());"fastest");"strategy 2 is named fastest")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(strat.strategyname(strat.bestquality());"best-quality");"strategy 3 is named best-quality")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(strat.strategyname(strat.localfirst());"local-first");"strategy 4 is named local-first")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(strat.isstrategyname("cheapest-adequate");"cheapest-adequate is a recognised name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strat.isstrategyname("local-first");"local-first is a recognised name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!strat.isstrategyname("cheapest");"a near-miss name is NOT recognised, so a typo can be caught")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!strat.isstrategyname("");"the empty string is not a strategy")){pass=pass+1}el{fail=fail+1};
+
+  (* Round trip through the name, which is what a config file or an API field carries. *)
+  if(t.assert(strat.strategyeq(strat.strategyfromname("fastest");strat.fastest());"fastest round-trips through its name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strat.strategyeq(strat.strategyfromname("cheapest-adequate");strat.cheapestadequate());"cheapest-adequate round-trips through its name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strat.strategyeq(strat.strategyfromname("local-first");strat.localfirst());"local-first round-trips through its name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strat.strategyeq(strat.strategyfromname("best-quality");strat.bestquality());"best-quality round-trips through its name")){pass=pass+1}el{fail=fail+1};
+  (* strategyeq goes through a rank, because `==` on two sums compares the handle and a
+     returned sum does not compare equal to an identically constructed local (T-14). *)
+  if(t.assert(!strat.strategyeq(strat.fastest();strat.bestquality());"two different strategies are NOT equal")){pass=pass+1}el{fail=fail+1};
+
+  (* ── X8.6: the four strategies select DIFFERENTLY, which is the claim ────────── *)
+  let chatany=criteria($tasktype{$chat:0};$sensitivitylevel{$public:0};false;0.05);
+  let byquality=chosen(chatany;r;strat.bestquality());
+  let byspeed=chosen(chatany;r;strat.fastest());
+  let bylocal=chosen(chatany;r;strat.localfirst());
+  let bycost=chosen(chatany;r;strat.cheapestadequate());
+
+  if(t.assert(str.eq(byquality;"claude-3-5-sonnet-20241022");"best-quality picks the highest qualityscore that meets the tier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(byspeed;"gpt-4o-mini");"fastest picks the highest speedtoks")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(bylocal;"qwen2.5:7b");"local-first picks a local model over a better cloud one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(bycost;"qwen2.5:7b");"cheapest-adequate picks a free local model that clears the quality floor")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(byquality;byspeed);"best-quality and fastest are DISTINGUISHABLE — the claim D3 made and the code did not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(byquality;bylocal);"best-quality and local-first are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  (* The NER case separates cheapest-adequate from local-first, which the chat case cannot:
+     gemma3:4b is local and free, so local-first takes it, but its qualityscore of 0.68 is
+     below the adequacy floor, so cheapest-adequate will not descend to it and pays for the
+     cheapest ADEQUATE model instead. That is the difference between "cheapest" and
+     "cheapest-adequate", and without it the strategy would be a race to the worst model. *)
+  let nerany=criteria($tasktype{$ner:0};$sensitivitylevel{$public:0};false;0.05);
+  let nercost=chosen(nerany;r;strat.cheapestadequate());
+  let nerlocal=chosen(nerany;r;strat.localfirst());
+  if(t.assert(str.eq(nerlocal;"gemma3:4b");"local-first takes the free local NER model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(nercost;"claude-3-5-sonnet-20241022");"cheapest-adequate refuses the below-floor free model and pays for an adequate one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(nercost;nerlocal);"cheapest-adequate and local-first are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  (* ── criteria.maxcostper1k was accepted and never read. It is read now. ───────── *)
+  let cheapceiling=criteria($tasktype{$chat:0};$sensitivitylevel{$public:0};false;0.002);
+  let underceiling=chosen(cheapceiling;r;strat.bestquality());
+  if(t.assert(str.eq(underceiling;"claude-3-5-haiku-20241022");"a 0.002 cost ceiling excludes sonnet at 0.003 and gpt-4o at 0.005")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(underceiling;byquality);"the ceiling changes the selection, so it is not being ignored")){pass=pass+1}el{fail=fail+1};
+
+  let zeroceiling=criteria($tasktype{$chat:0};$sensitivitylevel{$public:0};false;0.0);
+  let free=chosen(zeroceiling;r;strat.bestquality());
+  if(t.assert(str.eq(free;"qwen2.5:7b");"a zero cost ceiling leaves only the free local models")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE SAFETY PROPERTY, at the selector, under EVERY strategy ──────────────── *)
+  (* A strategy chooses BETWEEN permitted models. It must never widen what is permitted, so
+     the RESTRICTED refusal has to hold for all four — including the two that would
+     otherwise prefer a cloud model. *)
+  let restrictedreview=criteria($tasktype{$codereview:0};$sensitivitylevel{$restricted:0};false;0.05);
+  if(t.assert(!sel.isselected(sel.selectmodelwith(restrictedreview;r;strat.bestquality()));"RESTRICTED with no local model is refused under best-quality")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sel.isselected(sel.selectmodelwith(restrictedreview;r;strat.fastest()));"RESTRICTED with no local model is refused under fastest")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sel.isselected(sel.selectmodelwith(restrictedreview;r;strat.cheapestadequate()));"RESTRICTED with no local model is refused under cheapest-adequate")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sel.isselected(sel.selectmodelwith(restrictedreview;r;strat.localfirst()));"RESTRICTED with no local model is refused under local-first")){pass=pass+1}el{fail=fail+1};
+
+  let refusal=sel.selectmodelwith(restrictedreview;r;strat.bestquality());
+  if(t.assert(str.len(refusal.provider)==0;"the refusal names no provider, so nothing can be dispatched to it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(refusal.reason;"RESTRICTED");"the refusal says why")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(refusal.reason;"best-quality");"and which strategy was in force when it happened")){pass=pass+1}el{fail=fail+1};
+
+  (* The same RESTRICTED request with preferlocal already TRUE is refused identically. The
+     gate is the sensitivity, not the caller's preference. *)
+  let restrictedreviewlocal=criteria($tasktype{$codereview:0};$sensitivitylevel{$restricted:0};true;0.05);
+  if(t.assert(!sel.isselected(sel.selectmodelwith(restrictedreviewlocal;r;strat.bestquality()));"RESTRICTED is refused whether or not the caller asked for local")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The route-level guard itself ────────────────────────────────────────────── *)
+  (* Every cloud provider must be recognised as one. If a variant is ever added to
+     $provider and answered false here by accident, this is the assertion that catches it. *)
+  if(t.assert(rtr.iscloudprovider($provider{$anthropic:0});"anthropic is a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$openai:0});"openai is a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$google:0});"google is a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$mistral:0});"mistral is a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.iscloudprovider($provider{$openrouter:0});"openrouter is a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider($provider{$ollama:0});"ollama is NOT a cloud provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.iscloudprovider($provider{$local:0});"local is NOT a cloud provider")){pass=pass+1}el{fail=fail+1};
+
+  (* A refusal names no cloud provider either, so a caller that ignores isrouted and reads
+     the provider off a refusal still cannot reach a cloud endpoint with it. *)
+  let none=rtr.noroute("nothing available");
+  if(t.assert(!rtr.isrouted(none);"noroute is not routed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rtr.isclouddecision(none);"and a refusal does not name a cloud provider")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE SAFETY PROPERTY, at the route ───────────────────────────────────────── *)
+  let router=cloudfavouringrouter();
+
+  (* The CONTROL. Same router, same strategy, same text, PUBLIC — and it does go to the
+     cloud. Without this the RESTRICTED assertion below could pass on a router that can
+     never reach a cloud provider at all, which would make it worthless. *)
+  let publicroute=rtr.routerequest(
+    router;
+    "summarise this quarterly report";
+    $sensitivitylevel{$public:0};
+    0 as u32;
+    $latencytolerance{$instant:0};
+    "test-public"
+  );
+  if(t.assert(rtr.isrouted(publicroute);"a PUBLIC summarisation request is routed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.isclouddecision(publicroute);"CONTROL: at PUBLIC this router DOES choose a cloud provider")){pass=pass+1}el{fail=fail+1};
+
+  (* THE ASSERTION. Identical in every respect except the sensitivity. *)
+  let restrictedroute=rtr.routerequest(
+    router;
+    "summarise this quarterly report";
+    $sensitivitylevel{$restricted:0};
+    1 as u32;
+    $latencytolerance{$instant:0};
+    "test-restricted"
+  );
+  if(t.assert(!rtr.isclouddecision(restrictedroute);"A RESTRICTED REQUEST IS NOT ROUTED TO A CLOUD PROVIDER")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.isrouted(restrictedroute);"and it is still served, by a local model, rather than dropped")){pass=pass+1}el{fail=fail+1};
+  let rspec:$modelspec=restrictedroute.model;
+  if(t.assert(str.eq(rspec.id;"qwen2.5:7b");"the RESTRICTED request goes to the local model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rtr.isclouddecision(publicroute)!=rtr.isclouddecision(restrictedroute);"the sensitivity, and nothing else, is what changed the destination")){pass=pass+1}el{fail=fail+1};
+
+  (* And again through the content scorer rather than the pii argument: text carrying a
+     password is scored RESTRICTED by sens.scorefromcontent even when the caller passes
+     PUBLIC, so the gate must close on that too. *)
+  let contentroute=rtr.routerequest(
+    router;
+    "summarise this note, it contains a password";
+    $sensitivitylevel{$public:0};
+    0 as u32;
+    $latencytolerance{$instant:0};
+    "test-content"
+  );
+  if(t.assert(!rtr.isclouddecision(contentroute);"content scored RESTRICTED is not routed to a cloud provider either")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

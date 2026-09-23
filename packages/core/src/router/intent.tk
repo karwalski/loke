@@ -301,38 +301,93 @@ f=classifyfast(text:str):$intentresult{
 
 
 
+(* Four defects, stacked, and together they made an unreachable classifier look like a
+   confident one.
+
+   1. A stdlib result's `mt` arms bind BY POSITION, not by label. Measured directly this
+      session with no loke module involved:
+
+        f=okfirst(raw:str):i64{  <mt json.dec(raw) { $ok:o 1; $jsonerr:e 2 } };
+        f=errfirst(raw:str):i64{ <mt json.dec(raw) { $jsonerr:e 2; $ok:o 1 } };
+
+          okfirst(valid)  -> ok arm     okfirst(invalid)  -> err arm     correct
+          errfirst(valid) -> ERR arm    errfirst(invalid) -> OK arm      INVERTED
+
+      All three matches here were written error-arm-first, so the failure path ran the
+      success code and the success path threw the LLM answer away. $ok is written first
+      throughout now. This is the wider form of T-18: T-18 says the error arm of a
+      USER-declared result is dead; this says a STDLIB result discriminates only when $ok
+      comes first.
+
+   2. `$ok:raw raw` bound the whole $httpresp and the next line called json.dec on it. The
+      body is str.frombytes(r.body), which is how browser.pages.api.pipeline reads one.
+
+   3. The request body was built with `json.enc($jsonobj{...})`. $jsonobj is declared in no
+      module in this repository, and json.enc takes a str. Measured: that expression returns
+      a string containing neither the model id, nor "messages", nor the user's text — so the
+      request sent to Ollama named no model and carried no prompt. It is str.concat now.
+      core.providers.anthropic and core.providers.openai still build their bodies this way
+      and are reported, not fixed here: they are not this module.
+
+   4. The combined symptom, measured before this change: classify("review this code please";
+      <closed port>) returned method:"llm" with task chat at confidence 0.72 — a fabricated
+      classification, labelled as having come from a model, more confident than the keyword
+      result it had actually fallen back from. A code-generation prompt routed as chat picks a
+      different model.
+
+   Every failure path now returns `fast` unchanged, so the method stays "keyword" and the
+   confidence stays the keyword confidence. The provenance label is the only witness a caller
+   has for whether a model was consulted, and it now tells the truth. *)
+f=classifybody(text:str):str{
+  let sys="Classify the intent as one of: chat, code_generation, code_review, summarisation, classification, ner, embedding, data_analysis. Reply with just the category name.";
+  let head=str.concat("{\"model\":\"qwen2.5:7b\",\"stream\":false,\"messages\":[{\"role\":\"system\",\"content\":";json.enc(sys));
+  <str.concat(
+    str.concat(head;"},{\"role\":\"user\",\"content\":");
+    str.concat(json.enc(text);"}]}")
+  )
+};
+
+f=classifyfromcontent(content:str;fast:$intentresult):$intentresult{
+  if(str.len(content)==0){
+    <fast
+  }el{};
+  (* The confidence is the LLM path's own 0.72, which is deliberately BELOW every keyword
+     confidence that short-circuits above it: a model consulted because the keywords were
+     unsure should not claim more certainty than they did. *)
+  <$intentresult{task:taskfromstr(content);confidence:0.72;method:"llm"}
+};
+
+f=classifyfrommessage(msgobj:$json;fast:$intentresult):$intentresult{
+  <classifyfromcontent(json.str(msgobj;"content");fast)
+};
+
+f=classifyfromobj(obj:$json;fast:$intentresult):$intentresult{
+  <mt json.dec(json.str(obj;"message")) {
+    $ok:msgobj classifyfrommessage(msgobj;fast);
+    $jsonerr:e fast
+  }
+};
+
+f=classifyfromjson(raw:str;fast:$intentresult):$intentresult{
+  <mt json.dec(raw) {
+    $ok:obj classifyfromobj(obj;fast);
+    $jsonerr:e fast
+  }
+};
+
+f=classifyfromresp(r:$httpresp;fast:$intentresult):$intentresult{
+  <classifyfromjson(str.frombytes(r.body);fast)
+};
+
 f=classify(text:str;ollamaurl:str):$intentresult{
   let fast=classifyfast(text);
   if(fast.confidence > 0.80){
     <fast
-  }el{
-    let hc=http.client(ollamaurl);
-    let body=json.enc($jsonobj{
-      model:"qwen2.5:7b";
-      stream:false;
-      messages:@(
-        $jsonobj{role:"system";content:"Classify the intent as one of: chat, code_generation, code_review, summarisation, classification, ner, embedding, data_analysis. Reply with just the category name."};
-        $jsonobj{role:"user";content:text}
-      )
-    });
-    let resp=http.postheaders(hc;"/api/chat";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-    let raw=mt resp {
-      $httperr:e fast;
-      $ok:raw raw
-    };
-    let parsed=json.dec(raw);
-    let obj=mt parsed {
-      $jsonerr:e fast;
-      $ok:obj obj
-    };
-    let msgraw=json.str(obj;"message");
-    let msgparsed=json.dec(msgraw);
-    let msgobj=mt msgparsed {
-      $jsonerr:e fast;
-      $ok:msgobj msgobj
-    };
-    let content=json.str(msgobj;"content");
-    let task=taskfromstr(content);
-    <$intentresult{task:task;confidence:0.72;method:"llm"}
+  }el{};
+  let hc=http.client(ollamaurl);
+  let resp=http.postheaders(hc;"/api/chat";str.tobytes(classifybody(text));"{\"content-type\":\"application/json\"}");
+  <mt resp {
+    $ok:r classifyfromresp(r;fast);
+    $httperr:e fast
   }
 };

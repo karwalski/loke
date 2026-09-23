@@ -8,6 +8,7 @@ m=core.router.router;
 i=intent:core.router.intent;
 i=sens:core.router.sensitivity;
 i=sel:core.router.selector;
+i=strat:core.router.strategy;
 i=reg:core.models.registry;
 i=log:shared.log;
 i=str:std.str;
@@ -17,7 +18,8 @@ t=$routerconfig{
   ollamaurl:str;
   preferlocal:bool;
   maxcostper1k:f64;
-  defaulttolerance:$latencytolerance
+  defaulttolerance:$latencytolerance;
+  strategy:$routingstrategy
 };
 
 t=$router{
@@ -27,12 +29,38 @@ t=$router{
 
 
 
+(* X8.6 — the default strategy is local-first, which is what README.md and
+   packages/cli/src/commands.tk already say loke is.
+
+   It is also the choice that changes nothing measurable: newconfig sets preferlocal:true,
+   so the candidate pool is already local-only, and local-first and best-quality rank an
+   all-local pool identically — both fall through to highest qualityscore. Verified against
+   the routing this session already observed, routerequest -> qwen2.5:7b.
+
+   newconfigwith is for a caller that wants one of the other three. *)
 f=newconfig(ollamaurl:str):$routerconfig{
+  <newconfigwith(ollamaurl;strat.localfirst())
+};
+
+f=newconfigwith(ollamaurl:str;strategy:$routingstrategy):$routerconfig{
+  <newconfigfull(ollamaurl;true;0.05;strategy)
+};
+
+(* preferlocal and maxcostper1k were reachable only through the two defaults above, so a
+   caller that wanted cloud-eligible routing, or a tighter cost ceiling, had to construct
+   $routerconfig by hand. Both are f64/bool PARAMETERS, which cross a module boundary
+   intact — only a bare f64 return is corrupted (T-20).
+
+   preferlocal:false does NOT make a RESTRICTED request cloud-eligible. The sensitivity gate
+   in core.router.selector.selectmodelwith forces local-only regardless, and routerequest
+   re-checks the resulting decision. preferlocal is a preference; RESTRICTED is a rule. *)
+f=newconfigfull(ollamaurl:str;preferlocal:bool;maxcostper1k:f64;strategy:$routingstrategy):$routerconfig{
   <$routerconfig{
     ollamaurl:ollamaurl;
-    preferlocal:true;
-    maxcostper1k:0.05;
-    defaulttolerance:$instant(0)
+    preferlocal:preferlocal;
+    maxcostper1k:maxcostper1k;
+    defaulttolerance:$instant(0);
+    strategy:strategy
   }
 };
 
@@ -238,6 +266,36 @@ f=isrouted(d:$routingdecision):bool{
   <str.len(spec.id)>0
 };
 
+(* GA1.7 — the route-level half of the safety property.
+
+   core.router.selector refuses a RESTRICTED request that no local model can serve, and
+   tests/unit/router/test_selection_outcome.tk asserts that refusal at the selector. This is
+   the same property asserted again at the layer that matters, because this is the value a
+   provider call is actually made from: whatever a strategy, a config, a cloud-fallback path
+   or a future edit to the selector does, a decision naming a cloud provider for RESTRICTED
+   data does not leave this function.
+
+   It is deliberately a second, independent check rather than trust in the first one. The
+   privacy invariant in CLAUDE.md is a contributor invariant enforced by review; this is the
+   one place in the routing path where it can be enforced by the machine, and the cost of
+   enforcing it twice is one comparison. *)
+f=iscloudprovider(p:$provider):bool{
+  <mt p {
+    $anthropic:v true;
+    $openai:v true;
+    $google:v true;
+    $mistral:v true;
+    $openrouter:v true;
+    $ollama:v false;
+    $local:v false
+  }
+};
+
+f=isclouddecision(d:$routingdecision):bool{
+  let spec:$modelspec=d.model;
+  <iscloudprovider(spec.provider)
+};
+
 f=routerequest(
   rtr:$router;
   text:str;
@@ -275,7 +333,7 @@ f=routerequest(
   };
 
   
-  let selected=sel.selectmodel(criteria;rtr.registry);
+  let selected=sel.selectmodelwith(criteria;rtr.registry;cfg.strategy);
   if(sel.isselected(selected)){}el{
     log.warn(str.concat("route: no model selected — ";selected.reason);"router";cid);
     <noroute(selected.reason)
@@ -290,6 +348,17 @@ f=routerequest(
     estimatedcost:result.estimatedcost;
     estimatedlatencyms:latency
   };
+
+  (* The route-level safety check. senseq, not ==, because finalsensitivity came out of
+     sens.combine and a returned sum does not compare equal to a locally constructed one
+     (T-14). *)
+  if(t.senseq(finalsensitivity;t.restricted())){
+    if(isclouddecision(decision)){
+      log.error(str.concat("route: REFUSED — RESTRICTED request selected cloud provider ";result.provider);"router";cid);
+      <noroute(str.concat("router: RESTRICTED data must not be routed to a cloud provider (selection named ";str.concat(result.provider;")")))
+    }el{}
+  }el{};
+
   let routemsg=str.concat(str.concat(str.concat("route: selected ";result.modelid);" via ");result.provider);
   log.info(routemsg;"router";cid);
   <decision

@@ -15,6 +15,13 @@ i=ks:core.governance.killswitch;
 i=policy:core.governance.policy;
 i=audit:core.storage.audit;
 i=dbmod:core.storage.db;
+i=settings:core.storage.settings;
+i=rtr:core.router.router;
+i=cache:core.optimiser.cache;
+i=budget:core.optimiser.budget;
+i=bt:core.optimiser.budgettypes;
+i=inf:core.models.infer;
+i=pt:core.providers.types;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -55,8 +62,17 @@ f=refused(reason:str):i64{
 };
 
 f=anthropickey():str{
-  let settings=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
-  <json.str(json.dec(settings);"anthropic_api_key")
+  let raw=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
+  <json.str(json.dec(raw);"anthropic_api_key")
+};
+
+f=openaikey():str{
+  let raw=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
+  <json.str(json.dec(raw);"openai_api_key")
+};
+
+f=lokehome():str{
+  <str.concat(std.homedir();"/.loke")
 };
 
 f=privacyfields(run:$pipelinerun):str{
@@ -162,14 +178,226 @@ f=recordevent(store:i64;run:$pipelinerun;provider:str;modelid:str;tokensin:i64;t
   }
 };
 
+
+(* GA1.2 — restoration. The user sees their own words back, not [PERSON_a3f1_1].
+
+   The map is derived from the deduped entity list the pipeline already carries, via
+   ph.mapfromentities. That is deliberate: the parallel $placeholdermap the layers used to
+   build was the thing regex.rundetection threw away, and PL1.1 removed it rather than
+   plumbing it through. One list, one map, derived where it is needed. *)
+f=restoretext(run:$pipelinerun;text:str):str{
+  let res:$piidetectionresult=run.result;
+  <ph.restore(text;ph.mapfromentities(res.entities))
+};
+
+
+(* A failed provider call is audited too. An audit trail that records only successes
+   describes a system that never has an outage, which is worse than no trail. *)
+f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
+  let elapsed=str.nowunix()-startms;
+  recordevent(store;run;provider;modelid;0;0;elapsed;decision);
+  <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
+};
+
+
+(* GA1.6 — the semantic cache, and it is consulted FIRST.
+
+   A hit must short-circuit before any work is spent encoding, routing or dispatching,
+   which is why this sits above the router rather than beside it.
+
+   Everything the cache sees is ANONYMISED. The key is the pipeline's anonymised text and
+   the stored value is the provider's anonymised response — never the original and never
+   the restored text — so the cache file cannot become a store of the PII the pipeline just
+   removed.
+
+   And it is only consulted for requests that carry NO entities at all. That is a
+   deliberate, conservative rule, not an oversight. A cached response contains the
+   placeholders of the request that produced it; serving it to a DIFFERENT request and
+   restoring it with that request's placeholder map is a cross-request substitution, and the
+   two failure modes are showing one user another user's value or showing a raw placeholder
+   as an answer. Two anonymised prompts can sit above the 0.92 similarity threshold while
+   referring to entirely different people — that is what anonymisation does to a prompt. So
+   a request with entities is never served from cache and never stored in it. *)
+f=cachecfg():$cacheconfig{
+  <cache.defaultconfig(str.concat(lokehome();"/cache"))
+};
+
+(* nomic-embed-text must be present on disk as a GGUF before inf.load is worth calling.
+   inf.load logs a warning when in-process inference is unavailable, and a machine that has
+   not pulled the embedding model is in a steady state, not an incident — a warning on every
+   request is the definition of crying wolf. With no model the pool is empty, inf.embed
+   returns an empty vector, and cache.lookup treats that as a MISS rather than a guess. *)
+f=embedpool():$inferpool{
+  let pool=inf.newpool(lokehome());
+  if(file.exists(inf.modelpath(pool;cache.embedmodel()))){
+    <inf.load(pool;cache.embedmodel())
+  }el{
+    <pool
+  }
+};
+
+f=cacheeligible(run:$pipelinerun):bool{
+  <run.totalentities==0 as u32
+};
+
+f=cachelookup(run:$pipelinerun;prompt:str):$cachehit{
+  if(cacheeligible(run)){}el{
+    <cache.nohit()
+  };
+  let cfg=cachecfg();
+  let vstore=cache.open(cfg);
+  if(vstore==0){
+    <cache.nohit()
+  }el{};
+  let col=cache.collection(vstore);
+  if(col==0){
+    <cache.nohit()
+  }el{};
+  <cache.lookup(col;prompt;embedpool();cfg)
+};
+
+f=cachestore(run:$pipelinerun;prompt:str;response:str):bool{
+  if(cacheeligible(run)){}el{
+    <false
+  };
+  if(str.len(response)==0){
+    <false
+  }el{};
+  let cfg=cachecfg();
+  let vstore=cache.open(cfg);
+  if(vstore==0){
+    <false
+  }el{};
+  let col=cache.collection(vstore);
+  if(col==0){
+    <false
+  }el{};
+  <cache.store(col;prompt;response;embedpool())
+};
+
+(* GA1.5 — the token and cost budget, which had zero importers before this.
+
+   What it checks, precisely, so that nobody reads more into it than is there: the
+   ACCUMULATED spend recorded against today, against core.optimiser.budget.defaultlimits.
+   The estimate for the request about to be made is ZERO, because this repository has no
+   tokeniser — nothing can count the tokens of a prompt before a provider does — and
+   inventing an estimate would make the numbers in the audit trail fiction. So a request is
+   refused when the budget is ALREADY spent, and the spend is recorded from the token counts
+   the provider itself returned. That is a real limit with real numbers; it is not a
+   pre-flight estimate and is not described as one.
+
+   The counters are persisted in the settings store, keyed by the day number, because a
+   manager built fresh in a request handler and thrown away at the end of it is not a budget
+   — every request would start from zero. A day change resets them. *)
+f=daynumber():i64{
+  <str.nowunix()/86400
+};
+
+f=budgetmanager(store:i64):$budgetmanager{
+  let base=budget.new(budget.defaultlimits());
+  if(store==0){
+    <base
+  }el{};
+  (* getintor, not getint: getint returns i64!$lokeerr and toke takes the FIRST arm of a
+     match on a result whose error side is a user sum whatever the value is (T-18). getintor
+     answers with the default and cannot mislead. *)
+  if(settings.getintor(store;"budget.day";0)==daynumber()){}el{
+    <base
+  };
+  <budget.withusage(
+    base;
+    settings.getintor(store;"budget.tokens";0);
+    settings.getintor(store;"budget.microusd";0)
+  )
+};
+
+(* setint returns i64!$lokeerr, so its own report of success cannot be read (T-18). The write
+   is verified by READING IT BACK, which is the only honest confirmation available here: a
+   budget that silently fails to persist is a limit that does not exist, and the caller is
+   told so rather than assuming. *)
+f=persistbudget(store:i64;tokens:i64;costmicrousd:i64):bool{
+  if(store==0){
+    <false
+  }el{};
+  settings.setint(store;"budget.day";daynumber();"budget");
+  settings.setint(store;"budget.tokens";tokens;"budget");
+  settings.setint(store;"budget.microusd";costmicrousd;"budget");
+  <settings.getintor(store;"budget.tokens";0-1)==tokens
+};
+
+(* GA1.7 — the provider is chosen by core.router.router, not by the length of an API key.
+
+   What this replaced: `if(str.len(anthropickey())>20)` sent the request to Anthropic when a
+   key happened to be configured and to a hardcoded qwen2.5:3b otherwise. Sensitivity played
+   no part in it, so a RESTRICTED request on a machine with an Anthropic key set went to
+   Anthropic. Both model ids were hardcoded and neither matched anything in
+   core.models.registry.
+
+   It waited for LS1.1j because selector.select and router.route return results whose error
+   side is a user-declared sum, and toke takes the FIRST arm of such a match whatever the
+   value is (T-18) — so a failed selection read as a success would have named a garbage
+   provider. Worse than misleading, in fact: routerequest's predecessor segfaulted on every
+   call. routerequest and isrouted are the plain forms.
+
+   WHY THIS DOES NOT CALL core.providers.dispatcher, which is the obvious thing to do and
+   which the trydispatch* family was converted for. Measured this session, with probes:
+
+     json.enc(@$chatmessage)      ->  "[4350999488]"    a POINTER, not the messages
+     json.enc($jsonobj{model:"qwen2.5:7b"; ... })  ->  a string containing neither
+                                   "qwen2.5:7b" nor "messages" nor the user's content
+
+   $jsonobj is declared in no module in this repository, and json.enc takes a str. So the
+   request bodies in core.providers.anthropic.completeplain and openai.completeplain carry
+   no model and no messages, and anthropic additionally passes its headers as an
+   @$httpheader where http.postheaders wants a JSON string — so the API key never reaches the
+   request either. Those three defects are reported, not fixed here: they are in
+   packages/core/src/providers, they are not this story, and routing a working endpoint
+   through them would replace a request that works with one that cannot.
+
+   So the ROUTING is what changed, which is the whole of GA1.7, and the request bodies stay
+   the hand-built ones that are known to work — now with the model id and the destination
+   coming from the routing decision rather than from a hardcoded literal. *)
+f=routerfor():$router{
+  <rtr.new(rtr.newconfig("http://127.0.0.1:11434"))
+};
+
+(* The $completionrequest this endpoint WOULD hand to core.providers.dispatcher, and the one
+   place the anonymised text is put into a provider request shape. It is not called yet, and
+   the comment above says why: the provider modules' own request bodies carry neither the
+   model nor the messages, measured, so routing through them would replace a request that
+   works with one that cannot. When those three defects are fixed this is the shape that
+   replaces toanthropic and toollama, and tests/integration/test_pipeline_api.tk already
+   asserts the property that matters about it — that the ORIGINAL text is not reachable
+   through it, only the anonymised text. *)
+f=completionfor(modelid:str;anonymised:str;sysprompt:str):$completionrequest{
+  <$completionrequest{
+    modelid:modelid;
+    messages:@(pt.usermsg(anonymised));
+    systemprompt:sysprompt;
+    maxtokens:4096 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=providerlabel(p:$provider):str{
+  <mt p {
+    $anthropic:v "anthropic";
+    $openai:v "openai";
+    $google:v "google";
+    $mistral:v "mistral";
+    $openrouter:v "openrouter";
+    $ollama:v "ollama";
+    $local:v "local"
+  }
+};
+
 (* Anthropic returns {"content":[{"type":"text","text":...}],"usage":{...}}.
 
-   json.arr is the TYPED accessor and returns a stdlib result, which does discriminate
-   correctly — unlike a result whose error side is a user-declared sum (T-18). Extracting
-   the text rather than handing back the raw body is what makes restoration safe: the
-   original values are restored into PLAIN TEXT and the result is escaped afterwards, so a
-   name containing a quote cannot malform the response. Restoring over the raw JSON body
-   would have had exactly that hazard. *)
+   json.arr is the TYPED accessor and returns a stdlib result, which discriminates correctly
+   — provided $ok is written FIRST. A stdlib result's match arms bind BY POSITION, not by
+   label: measured this session, `mt json.dec(x) { $jsonerr:e 2; $ok:o 1 }` returns the OK
+   arm for invalid JSON and the ERR arm for valid. Every match below puts $ok first. *)
 f=anthropictext(raw:str):str{
   let obj=json.dec(raw);
   <mt json.arr(obj;"content") {
@@ -198,80 +426,187 @@ f=usagetokens(raw:str;field:str):i64{
   }
 };
 
-(* GA1.2 — restoration. The user sees their own words back, not [PERSON_a3f1_1].
-
-   The map is derived from the deduped entity list the pipeline already carries, via
-   ph.mapfromentities. That is deliberate: the parallel $placeholdermap the layers used to
-   build was the thing regex.rundetection threw away, and PL1.1 removed it rather than
-   plumbing it through. One list, one map, derived where it is needed. *)
-f=restoretext(run:$pipelinerun;text:str):str{
-  let res:$piidetectionresult=run.result;
-  <ph.restore(text;ph.mapfromentities(res.entities))
+(* The cost of THIS request, from the cost table core.router.router attached to the decision.
+   costper1kinput and costper1koutput are f64 FIELDS of a returned $modelspec, which cross a
+   module boundary intact — only a bare f64 return is corrupted (T-20) — so these are the
+   router's own figures rather than a second copy of them. A local model's fields are 0.0, so
+   a local request costs nothing, which is the point of routing to one. *)
+f=requestcost(spec:$modelspec;tokensin:i64;tokensout:i64):f64{
+  <(((tokensin as f64)/1000.0)*spec.costper1kinput)+(((tokensout as f64)/1000.0)*spec.costper1koutput)
 };
 
-f=anthropicreply(store:i64;run:$pipelinerun;r:$httpresp;piifields:str;startms:i64;decision:$policydecision):i64{
-  let raw=str.frombytes(r.body);
-  let restored=restoretext(run;anthropictext(raw));
-  let tin=usagetokens(raw;"input_tokens");
-  let tout=usagetokens(raw;"output_tokens");
+f=refusedroute(reason:str;piifields:str):i64{
+  log.warn(str.concat("pipeline: no model could be routed to — ";reason);"api.pipeline";"");
+  <http.res(503;"{\"ok\":false,\"error\":\(json.enc(reason)),\"routed\":false\(piifields)}")
+};
+
+f=refusedbudget(reason:str;piifields:str):i64{
+  log.warn(str.concat("pipeline: refused, budget exhausted — ";reason);"api.pipeline";"");
+  <http.res(429;"{\"ok\":false,\"error\":\(json.enc(reason)),\"budget_exceeded\":true\(piifields)}")
+};
+
+f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
+  log.info("pipeline: served from the semantic cache";"api.pipeline";run.requestid);
+  let restored=restoretext(run;hit.response);
+  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"cached\":true,\"cache_age_seconds\":\(hit.ageseconds),\"audited\":false\(piifields)}")
+};
+
+(* One place for everything that happens AFTER a provider has answered: the cache is written
+   with the anonymised response, the budget is accumulated and persisted, the audit row is
+   inserted, and only then is the text restored for the user. *)
+f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision):i64{
+  let spec:$modelspec=route.model;
+  let provstr=providerlabel(spec.provider);
   let elapsed=str.nowunix()-startms;
-  let logged=recordevent(store;run;"anthropic";"claude-sonnet-4-20250514";tin;tout;elapsed;decision);
+  let res:$piidetectionresult=run.result;
+
+  (* Stored BEFORE restoration, so the cache holds only anonymised text. *)
+  cachestore(run;res.anonymised;anonresponse);
+
+  let bm:$budgetmanager=budgetmanager(store);
+  let spent:$budgetmanager=budget.record(bm;(tin+tout) as u32;requestcost(spec;tin;tout));
+  let persisted=persistbudget(store;budget.rowtokens(spent;0);budget.rowcostmicrousd(spent;0));
+  if(persisted){}el{
+    log.warn("budget counters were not persisted, so the limit is not accumulating";"api.pipeline";run.requestid)
+  };
+
+  let logged=recordevent(store;run;provstr;spec.id;tin;tout;elapsed;decision);
   if(logged){}el{
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
   };
-  (* anthropic_raw stays for compatibility and carries the ANONYMISED body, which is what
-     the provider actually returned. `response` is the restored text. Keeping them distinct
-     matters: one is what left the machine, the other is what the user should read. *)
-  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"anthropic_raw\":\(json.enc(raw)),\"model\":\"claude-sonnet-4-20250514\",\"provider\":\"anthropic\",\"audited\":\(logged)\(piifields)}")
+
+  let restored=restoretext(run;anonresponse);
+  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"model\":\(json.enc(spec.id)),\"provider\":\(json.enc(provstr)),\"routing_reason\":\(json.enc(route.reason)),\"tokens_in\":\(tin),\"tokens_out\":\(tout),\"cached\":false,\"audited\":\(logged)\(piifields)}")
 };
 
-f=toanthropic(store:i64;run:$pipelinerun;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision):i64{
-  let abody="{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
+f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;r:$httpresp;piifields:str;startms:i64;decision:$policydecision):i64{
+  let raw=str.frombytes(r.body);
+  let anonresponse=anthropictext(raw);
+  <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision)
+};
+
+f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  let spec:$modelspec=route.model;
+  let abody="{\"model\":\(json.enc(spec.id)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
   let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
   <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
-    $ok:r anthropicreply(store;run;r;piifields;startms;decision);
-    $err:e providerfailed(store;run;"anthropic";"claude-sonnet-4-20250514";startms;decision)
+    $ok:r anthropicreply(store;run;route;r;piifields;startms;decision);
+    $err:e providerfailed(store;run;"anthropic";spec.id;startms;decision)
   }
 };
 
-(* A failed provider call is audited too. An audit trail that records only successes
-   describes a system that never has an outage, which is worse than no trail. *)
-f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
-  let elapsed=str.nowunix()-startms;
-  recordevent(store;run;provider;modelid;0;0;elapsed;decision);
-  <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
+(* http.posturl answers with a bare str and no result, so a dead Ollama returns "" — and the
+   old body took that "" straight through json.str and answered 200 with an empty response,
+   which reads to the user as the model having nothing to say. An empty body is now a 502,
+   and it is audited like any other provider failure. *)
+f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  let spec:$modelspec=route.model;
+  let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
+  let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
+  if(str.len(raw)==0){
+    log.warn("pipeline: ollama returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
+    <providerfailed(store;run;"ollama";spec.id;startms;decision)
+  }el{};
+  let anonresponse=json.str(json.dec(raw);"response");
+  if(str.len(anonresponse)==0){
+    log.warn("pipeline: ollama response carried no text";"api.pipeline";run.requestid);
+    <providerfailed(store;run;"ollama";spec.id;startms;decision)
+  }el{};
+  (* Ollama's /api/generate reports prompt_eval_count and eval_count, not the OpenAI names. *)
+  <completed(store;run;route;anonresponse;usagetokens(raw;"prompt_eval_count");usagetokens(raw;"eval_count");piifields;startms;decision)
 };
 
-f=toollama(store:i64;run:$pipelinerun;anonymised:str;piifields:str;startms:i64;decision:$policydecision):i64{
-  let payload="{\"model\":\"qwen2.5:3b\",\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
-  let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
-  let response=json.str(json.dec(raw);"response");
-  let restored=restoretext(run;response);
-  let elapsed=str.nowunix()-startms;
-  let logged=recordevent(store;run;"ollama";"qwen2.5:3b";0;0;elapsed;decision);
-  if(logged){}el{
-    log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
+(* A cloud provider the router can name but this endpoint has no client for. It refuses
+   rather than substituting some other provider: a second routing decision taken here, out of
+   the router's sight, is exactly what GA1.7 removed. *)
+f=unsupportedprovider(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
+  let spec:$modelspec=route.model;
+  recordevent(store;run;providerlabel(spec.provider);spec.id;0;0;str.nowunix()-startms;decision);
+  <refusedroute(str.concat(str.concat("this endpoint has no client for provider ";providerlabel(spec.provider));str.concat(" (model ";str.concat(spec.id;")")));piifields)
+};
+
+f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
+  let spec:$modelspec=route.model;
+  recordevent(store;run;"anthropic";spec.id;0;0;str.nowunix()-startms;decision);
+  <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
+};
+
+f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  let key=anthropickey();
+  if(str.len(key)>20){}el{
+    <needsanthropickey(store;run;route;piifields;startms;decision)
   };
-  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"model\":\"qwen2.5:3b\",\"provider\":\"ollama\",\"audited\":\(logged)\(piifields)}")
+  <toanthropic(store;run;route;anonymised;sysprompt;key;piifields;startms;decision)
+};
+
+(* All seven $provider variants are named. A match on a plain user sum DOES discriminate
+   across a module boundary — it is only a result whose error side is a user sum that does
+   not (T-18) — and listing every variant is what lets the refusal say WHICH provider was
+   unsupported. *)
+f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  let res:$piidetectionresult=run.result;
+  let spec:$modelspec=route.model;
+  let prov:$provider=spec.provider;
+  <mt prov {
+    $anthropic:v toanthropicchecked(store;run;route;res.anonymised;sysprompt;piifields;startms;decision);
+    $openai:v unsupportedprovider(store;run;route;piifields;startms;decision);
+    $google:v unsupportedprovider(store;run;route;piifields;startms;decision);
+    $mistral:v unsupportedprovider(store;run;route;piifields;startms;decision);
+    $openrouter:v unsupportedprovider(store;run;route;piifields;startms;decision);
+    $ollama:v toollama(store;run;route;res.anonymised;piifields;startms;decision);
+    $local:v toollama(store;run;route;res.anonymised;piifields;startms;decision)
+  }
 };
 
 (* Forwards the pipeline's anonymised text, never the original.
 
-   The provider is still chosen by key length rather than by core.router.selector.select —
-   that is GA1.7, and it is deliberately still open: select returns a $selectionresult!
-   $lokeerr, and under T-18 a failed selection would read as a success and pick a garbage
-   provider. For sensitivity-scored routing that means potentially sending restricted data
-   to a cloud endpoint, introduced by the story meant to prevent it. It waits for the
-   sentinel refactor (LS1.1j). *)
+   The order is the story: cache, then budget, then route, then dispatch. A hit spends
+   nothing; an exhausted budget refuses before a provider is paid; and the route is what
+   decides where the text is allowed to go. *)
 f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision):i64{
   let res:$piidetectionresult=run.result;
   let piifields=privacyfields(run);
-  let key=anthropickey();
-  if(str.len(key)>20){
-    <toanthropic(store;run;res.anonymised;sysprompt;key;piifields;startms;decision)
-  }el{
-    <toollama(store;run;res.anonymised;piifields;startms;decision)
-  }
+
+  let hit:$cachehit=cachelookup(run;res.anonymised);
+  if(cache.ishit(hit)){
+    <cachedreply(run;hit;piifields)
+  }el{};
+
+  (* Declared types on every intermediate whose fields are read. Without them toke raises
+     E4034 "field 'reason' is declared at different offsets by more than one struct" — the
+     name is ambiguous across $budgetcheck, $selectionresult and $routingdecision, and the
+     diagnostic lands on the READ rather than on the binding. *)
+  let bcheck:$budgetcheck=budget.check(budgetmanager(store);0 as u32;0.0);
+  if(bcheck.allowed){}el{
+    recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+    <refusedbudget(bcheck.reason;piifields)
+  };
+
+  let route:$routingdecision=rtr.routerequest(
+    routerfor();
+    res.anonymised;
+    res.sensitivity;
+    run.totalentities;
+    $latencytolerance{$instant:0};
+    run.requestid
+  );
+  if(rtr.isrouted(route)){}el{
+    recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+    <refusedroute(route.reason;piifields)
+  };
+
+  (* The route-level safety property, asserted here as well as inside routerequest.
+     core.router.router already refuses to return a cloud decision for RESTRICTED data; this
+     is the same check at the last point before a provider is called, because this is the
+     line that would leak. Two comparisons are the right price for it. *)
+  if(t.senseq(res.sensitivity;t.restricted())){
+    if(rtr.isclouddecision(route)){
+      recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+      <refusedroute("RESTRICTED data must not be sent to a cloud provider";piifields)
+    }el{}
+  }el{};
+
+  <dispatch(store;run;route;sysprompt;piifields;startms;decision)
 };
 
 (* If the store cannot be opened the switch cannot be read, and an unreadable kill switch

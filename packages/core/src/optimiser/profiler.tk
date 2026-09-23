@@ -37,11 +37,20 @@ t=$datasetprofile{
   sensitivityhint:str
 };
 
+(* str.arrayget erases the element type of what it returns, and str.arraylen is its partner.
+   Both are replaced throughout this module with the typed .len / .get(i) accessors — the
+   same change PL1.1 made to core.privacy.placeholder.buildplaceholdermap and this session
+   made to core.optimiser.budget.new.
+
+   This is a hazard removal, not a bug fix, and it is worth saying so rather than claiming a
+   result it did not produce: converting these eleven call sites changed no assertion in
+   tests/unit/optimiser/test_profiler.tk. findmin and findmax were broken by something else
+   entirely, and strlt below is what fixes them. *)
 f=ispiiname(colname:str):bool{
   let lower=str.tolower(colname);
   let markers=@("email";"phone";"name";"address";"ssn";"dob";"birth";"credit";"account";"password";"key";"token");
   let found=mut.false;
-  lp(let i=0;i<str.arraylen(markers);i=i+1){ let m=str.arrayget(markers;i);
+  lp(let i=0;i<markers.len;i=i+1){ let m=markers.get(i);
     if(found){}el{
       if(str.contains(lower;m)){
         found=true
@@ -164,7 +173,7 @@ f=tryintorfloat(row:i64;colname:str;vals:@str):@str{
 
 f=extractcolvalues(rows:@i64;colname:str):@str{
   let vals=mut.@();
-  lp(let i=0;i<str.arraylen(rows);i=i+1){ let row=str.arrayget(rows;i);
+  lp(let i=0;i<rows.len;i=i+1){ let row=rows.get(i);
     let sval=json.trystrkey(row;colname);
     vals=mt sval {
       $ok:s vals.push(s);
@@ -176,7 +185,7 @@ f=extractcolvalues(rows:@i64;colname:str):@str{
 
 f=countnulls(rows:@i64;colname:str):u32{
   let count=mut.0;
-  lp(let i=0;i<str.arraylen(rows);i=i+1){ let row=str.arrayget(rows;i);
+  lp(let i=0;i<rows.len;i=i+1){ let row=rows.get(i);
     let isnull=json.isnullkey(row;colname);
     if(isnull){
       count=count+1
@@ -192,9 +201,9 @@ f=countnulls(rows:@i64;colname:str):u32{
 
 f=countunique(vals:@str):u32{
   let seen=mut.@();
-  lp(let i=0;i<str.arraylen(vals);i=i+1){ let v=str.arrayget(vals;i);
+  lp(let i=0;i<vals.len;i=i+1){ let v=vals.get(i);
     let already=mut.false;
-    lp(let j=0;j<str.arraylen(seen);j=j+1){ let s=str.arrayget(seen;j);
+    lp(let j=0;j<seen.len;j=j+1){ let s=seen.get(j);
       if(already){}el{
         if(str.eq(s;v)){
           already=true
@@ -208,15 +217,66 @@ f=countunique(vals:@str):u32{
   <seen.len
 };
 
+(* std.str.compare is NOT a three-way comparison. Measured directly this session:
+
+     str.compare("apple";"banana")  ->  1
+     str.compare("banana";"apple")  ->  1
+     str.compare("apple";"apple")   ->  0
+
+   It reports EQUAL or DIFFERENT and never returns a negative, so `cmp<0` can never be true.
+   findmin therefore never moved off element zero — findmin(["banana","apple","cherry"])
+   answered "banana" — and findmax only appeared to work: with `cmp>0` true for every
+   difference it takes the LAST value that differs from the running one, which coincides with
+   the maximum when the input happens to be ascending and not otherwise.
+   findmax(["cherry","apple","banana"]) answered "banana".
+
+   That matters beyond these two functions: minval and maxval go into a $colprofile, which is
+   what totoonschema describes to a model. A wrong range in a schema profile is a wrong
+   statement about the caller's data.
+
+   strlt is a real lexicographic less-than, byte by byte. str.charat answers a byte value as
+   an i64, which is why T-28 says to compare it against 48..57 rather than hand it to
+   str.isdigit; comparing two of them to each other is the same arithmetic. The loop cannot
+   return early — `decided` latches instead — because a bare return inside `lp` is not a shape
+   this module uses. *)
+f=strlt(a:str;b:str):bool{
+  let la=str.len(a);
+  let lb=str.len(b);
+  let n=mut.la;
+  if(lb<n){n=lb}el{};
+  let decided=mut.false;
+  let result=mut.false;
+  lp(let i=0;i<n;i=i+1){
+    if(decided){}el{
+      let ca=str.charat(a;i);
+      let cb=str.charat(b;i);
+      if(ca<cb){
+        decided=true;
+        result=true
+      }el{
+        if(cb<ca){
+          decided=true;
+          result=false
+        }el{}
+      }
+    }
+  };
+  if(decided){
+    <result
+  }el{
+    (* Every shared byte is equal, so the shorter string sorts first. *)
+    <la<lb
+  }
+};
+
 f=findmin(vals:@str):str{
   let m=mut."";
   if(vals.len==0 as u64){
     <""
   }el{
     m=vals.get(0);
-    lp(let i=0;i<str.arraylen(vals);i=i+1){ let v=str.arrayget(vals;i);
-      let cmp=str.compare(v;m);
-      if(cmp<0){
+    lp(let i=0;i<vals.len;i=i+1){ let v=vals.get(i);
+      if(strlt(v;m)){
         m=v
       }el{}
     };
@@ -230,9 +290,8 @@ f=findmax(vals:@str):str{
     <""
   }el{
     m=vals.get(0);
-    lp(let i=0;i<str.arraylen(vals);i=i+1){ let v=str.arrayget(vals;i);
-      let cmp=str.compare(v;m);
-      if(cmp>0){
+    lp(let i=0;i<vals.len;i=i+1){ let v=vals.get(i);
+      if(strlt(m;v)){
         m=v
       }el{}
     };
@@ -287,11 +346,11 @@ f=profilerowarr(rowarr:@i64;name:str):$datasetprofile!$lokeerr{
     let colnames=json.keys(rowarr.get(0));
     let colcount=colnames.len;
     let columns=mut.@();
-    lp(let ci=0;ci<str.arraylen(colnames);ci=ci+1){ let colname=str.arrayget(colnames;ci);
+    lp(let ci=0;ci<colnames.len;ci=ci+1){ let colname=colnames.get(ci);
       columns=columns.append(profilecol(rowarr;colname;rowcount))
     };
     let haspii=mut.false;
-    lp(let ci=0;ci<str.arraylen(columns);ci=ci+1){ let cp=str.arrayget(columns;ci);
+    lp(let ci=0;ci<columns.len;ci=ci+1){ let cp=columns.get(ci);
       if(cp.ispiicandidate){
         haspii=true
       }el{}
@@ -385,7 +444,7 @@ f=totoonschema(profile:$datasetprofile):str{
     )
   );
   let collines=mut.@();
-  lp(let i=0;i<str.arraylen(profile.columns);i=i+1){ let cp=str.arrayget(profile.columns;i);
+  lp(let i=0;i<profile.columns.len;i=i+1){ let cp=profile.columns.get(i);
     let types=coltypetostr(cp.coltype);
     let samplepart=mut."";
     if(cp.samplevals.len==0){}el{
