@@ -1513,9 +1513,19 @@ The simple shape — `let a=mut.@(); a=a.push(1.5);` alone in a function — tak
 non-in-place path, which is selected when the same variable is also assigned from a function
 call elsewhere in the function.
 
-**There is no workaround that keeps an f64 vector.** Returning it fails, putting it in a struct
-field fails, and routing every assignment through a helper only moves the error into the helper
-(measured). The options are to carry a fixed-point `@i64` — hundredths or basis points, which is
+**There is no workaround that keeps an f64 vector.** Four were measured and all four fail:
+returning it; putting it in a struct field; routing every assignment through a helper (the error
+moves *into* the helper, which also returns `@f64`); and wrapping the column in a one-row
+`@(@f64)` matrix so only the correct container type is declared — that last one fails because the
+inner accumulator is still an `@f64` local, which is the actual problem.
+
+**What does work is changing the element type.** `moke/src/profiler.tk` and `moke/src/hooks.tk`
+both assembled the moment their accumulators became `@i64` of scaled micro-units, with
+`shared.types.i64min`/`i64max`/`i64mean` replacing `math.min`/`max`/`mean`. That is a real fix
+rather than a workaround — integer summation is also more accurate for a mean than accumulating
+over f64 — but it is only cheap when the consumers are simple statistics. `moke/src/compute.tk`
+is blocked on it because it uses `math.percentile` and `math.linreg`, which have no integer
+equivalent and would have to be reimplemented. The options are to carry a fixed-point `@i64` — hundredths or basis points, which is
 what we already do for T-20 — or to use `@(@f64)` and index into a single row. Both change the
 type of every producer and consumer, which for a k-means implementation means rewriting the
 arithmetic.
