@@ -528,7 +528,8 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | X4.3 | S | **Done** | Watch mode for development (server restart + client reload on file change, fast feedback loop) `[R16.1]` |
 | X4.4 | M | **Done** | Scaffold generator CLI (`loke generate migration`, `loke generate route`, `loke generate adapter`, `loke generate locale` — reduces manual boilerplate creation) `[R16.3]` |
 | X4.5 | M | **Done** | Debug mode (request/response inspection, database query logging, pipeline stage tracing, route matching details — never enabled in production, activated via config flag) `[R16.5]` |
-| X4.6 | S |  | **A sweep commit must be provably mechanical** — `scripts/verify_held_changes.py` already checks that held toke changes are an equality-only substitution, it existed when `09b0a67` landed, and it correctly flags a line-count change as *"not a substitution"*. But it guards the **working tree**, so once a change is committed it has nothing to compare against — and nothing checks that a commit *described* as a mechanical sweep actually was one. That gap cost 161 lines of working request-path wiring (GA1.10). Add a pre-push check: for a commit touching more than N files whose message names a mechanical migration, any file with a net line delta beyond a small threshold must be listed explicitly in the message. The signal is cheap and specific — in `09b0a67` exactly one file of 24 shrank by more than 30 lines |
+| X4.6 | S | **Done** | **A sweep commit must be provably mechanical** — `scripts/verify_held_changes.py` already checks that held toke changes are an equality-only substitution, it existed when `09b0a67` landed, and it correctly flags a line-count change as *"not a substitution"*. But it guards the **working tree**, so once a change is committed it has nothing to compare against — and nothing checks that a commit *described* as a mechanical sweep actually was one. That gap cost 161 lines of working request-path wiring (GA1.10). Add a pre-push check: for a commit touching more than N files whose message names a mechanical migration, any file with a net line delta beyond a small threshold must be listed explicitly in the message. The signal is cheap and specific — in `09b0a67` exactly one file of 24 shrank by more than 30 lines *Done 2026-09-23. `scripts/check_sweep_commit.py` runs over COMMITS rather than the working tree, which is the gap: `verify_held_changes.py` had already named the exact file and written "it must never be committed from the working tree", and its own docstring says it reports rather than enforces — so once the change was committed there was nothing left to compare against. The rule is not "do not delete" but "say what you deleted": any file losing more than 30 lines net must have its name appear in the commit message, and four PROTECTED files (the request route, the privacy pipeline, the placeholder map, the audit trail) must be named on any net loss of 5. **Proven both ways:** `--range 09b0a67~1..09b0a67 --all-history` reproduces the original failure, and today's 14 commits pass. Also delivered: `githooks/pre-push` plus `scripts/install-hooks.sh` using `core.hooksPath` so the hook is a version-controlled, reviewable artefact — and the gate now asserts `core.hooksPath` is actually set, because X4.2 was marked Done claiming a pre-push hook while `.git/hooks` held only `.sample` files and nothing in the tree could have revealed it. pre-PUSH not pre-COMMIT, deliberately: a 10-second pre-commit hook gets `--no-verify`d within a day, and a hook people bypass is worse than none because it creates the impression of a control.* |
+| X4.7 | S | | **Audit the nine unexplained deletions that predate the X4.6 cutover** — `check_sweep_commit.py` applies from `531708a` forward, because commits before it cannot be amended without rewriting history that may already have been fetched. Nine deletions sit before that line and are grandfathered **explicitly rather than silently**: `d14e0bd` (4 test files, −98/−67/−60/−36), `4894533` (`privacy/pipeline.tk` −43), `4d6e0ec` (`governance/report.tk` −60, `models/queue.tk` −42, `privacy/pipeline.tk` −10, `privacy/test_harness.tk` −37). All look like legitimate work whose messages simply did not enumerate files — but `09b0a67` looked like that too, and it had removed response restoration, policy evaluation and audit logging. Two of these touch files already known to be defective: `governance/report.tk` has a function with no return statement at all (fixed 2026-09-23) and `privacy/test_harness.tk` had three latent defects. Read each diff and record, per deletion, whether anything working was lost. If something was, recover it as GA1.10 did |
 
 ## Epic X4a: Module-Aware API Handler Compilation
 
@@ -1043,7 +1044,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 12 | 11 | — | — | — | — | — | — | 1 |
-| CROSS-CUTTING | 9 | 77 | 76 | — | — | — | — | — | — | 1 |
+| CROSS-CUTTING | 9 | 78 | 77 | — | — | — | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 65 | — | — | — | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
@@ -1052,7 +1053,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 38 | 34 | — | 4 | — | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 15 | 1 | — | — | — | — | — | 16 |
 | VERIFICATION PROGRAMME | 14 | 104 | 40 | 8 | — | 6 | 6 | — | — | 44 |
-| **Total** | **88** | **639** | **499** | **16** | **7** | **6** | **6** | **1** | — | **104** |
+| **Total** | **88** | **640** | **500** | **16** | **7** | **6** | **6** | **1** | — | **104** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1090,7 +1091,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | X1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X2 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | X3 | 1 | 6 | 6 | — | — | — | — | — | — | — |
-| X4 | 1 | 6 | 5 | — | — | — | — | — | — | 1 |
+| X4 | 1 | 7 | 6 | — | — | — | — | — | — | 1 |
 | X4a | 1 | 21 | 21 | — | — | — | — | — | — | — |
 | X4b | 1 | 18 | 18 | — | — | — | — | — | — | — |
 | X4c | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1146,9 +1147,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 17 | 8 | 1 | — | — | — | — | — | 8 |
 | RV1 | 1 | 10 | 2 | — | — | — | — | — | — | 8 |
-| **Total** | **88** | **639** | **499** | **16** | **7** | **6** | **6** | **1** | — | **104** |
+| **Total** | **88** | **640** | **500** | **16** | **7** | **6** | **6** | **1** | — | **104** |
 
-Rows parsed: **639**, across **88** epics and **16** level-1 headings.
+Rows parsed: **640**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 

@@ -114,6 +114,30 @@ step_checks() {
     python3 ./scripts/check_backlog.py --check || failed=1
   fi
 
+  # The hook must be INSTALLED, not merely present in the tree. X4.2 was marked Done
+  # claiming a pre-push hook was in place while .git/hooks held only .sample files, and
+  # nothing could have revealed that from the repository. So the gate asserts the
+  # configuration, not the file.
+  echo "  git hooks are installed"
+  if [[ "$(git config --get core.hooksPath 2>/dev/null || true)" != "githooks" ]]; then
+    echo "    core.hooksPath is not set to githooks — run scripts/install-hooks.sh" >&2
+    echo "    A hook that is not installed is documentation. X4.2 shipped as exactly that." >&2
+    failed=1
+  fi
+
+  # Unexplained deletions in the commits not yet pushed. 09b0a67 cut a 240-line request
+  # handler to 79 inside a mechanical sweep, removing response restoration, policy
+  # evaluation and audit logging, and never mentioned the file — three stories were
+  # recorded as "never implemented" for a day as a result.
+  if [[ -f ./scripts/check_sweep_commit.py ]]; then
+    echo "  every large deletion is named in its commit message"
+    if _sweep_base=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null); then
+      python3 ./scripts/check_sweep_commit.py --range "$_sweep_base..HEAD" || failed=1
+    else
+      echo "    no upstream branch; nothing to compare against."
+    fi
+  fi
+
   if [[ -f tests/fixtures/pii-corpus/generate.py ]]; then
     echo "  PII corpus spans verify"
     python3 tests/fixtures/pii-corpus/generate.py --verify >/dev/null \

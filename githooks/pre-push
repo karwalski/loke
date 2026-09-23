@@ -1,0 +1,43 @@
+#!/bin/sh
+# pre-push — the checks that are fast enough to run before every push.
+#
+# pre-PUSH and not pre-COMMIT, deliberately. The gate's `checks` step runs 20-odd
+# checks and takes ten seconds or so; a pre-commit hook that slow gets --no-verify'd
+# within a day, and a hook people routinely bypass is worse than no hook because it
+# creates the impression of a control. Pushing is rarer and the wait is acceptable.
+#
+# Build and test stay in CI. This hook is the cheap half: shape, schema, claims, the
+# codegen hazard sweeps, and the unexplained-deletion check.
+#
+# Install with: scripts/install-hooks.sh   (sets core.hooksPath, so this file is
+# version-controlled rather than living un-tracked in .git/hooks)
+
+set -eu
+
+REPO=$(git rev-parse --show-toplevel)
+cd "$REPO"
+
+echo "pre-push: static checks"
+./scripts/quality-gate.sh --step checks
+
+# Every commit being pushed, not just the tip. `git rev-parse @{u}` fails on a branch
+# with no upstream, in which case there is nothing to compare against and the whole
+# branch is new — check it against the default branch instead.
+if UPSTREAM=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null); then
+  RANGE="$UPSTREAM..HEAD"
+else
+  BASE=$(git rev-parse --verify --quiet origin/main || git rev-parse --verify --quiet main || true)
+  if [ -z "$BASE" ]; then
+    echo "pre-push: no upstream and no main to compare against; skipping the deletion check." >&2
+    RANGE=""
+  else
+    RANGE="$BASE..HEAD"
+  fi
+fi
+
+if [ -n "$RANGE" ]; then
+  echo "pre-push: unexplained deletions in $RANGE"
+  python3 scripts/check_sweep_commit.py --range "$RANGE"
+fi
+
+echo "pre-push: ok"
