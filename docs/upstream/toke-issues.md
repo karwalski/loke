@@ -1454,6 +1454,82 @@ trip.** `arr.len()` is **not** a defect: `arr.len()` and `arr.len` emit the iden
 `getelementptr i64, i64* %p, i32 -1`, and the compiler labels it `; .len()`. Only
 `str.len(<array>)` is wrong.
 
+## T-37 — a declared `@f64` gets the SCALAR f64 conversion applied to its array handle
+
+**Severity: availability, and it emits IR that cannot be assembled.** Nine `packages/moke`
+modules fail `clang -c -x ir`; five of them fail for this.
+
+Wherever a value's declared type is `@f64`, toke converts it as though it were `f64`. Minimal
+reproduction, three functions of identical shape:
+
+```toke
+m=g;
+f=retf64arr(a:@f64;v:f64):@f64{ <a.push(v) };   (* BROKEN *)
+f=retstrarr(a:@str;v:str):@str{ <a.push(v) };   (* fine   *)
+f=reti64arr(a:@i64;v:i64):@i64{ <a.push(v) };   (* fine   *)
+```
+
+The `@f64` one emits:
+
+```llvm
+%t4 = call i64 @tk_array_append_w(i64 %t1, i64 %t3)
+%t5 = fptosi double %t4 to i64        ; <- the ARRAY HANDLE, converted as a double
+ret i64 %t5
+```
+
+→ `error: '%t4' defined with type 'i64' but expected 'double'`.
+
+`@str` and `@i64` emit `ptrtoint` and are correct. It is specific to `@f64`.
+
+**It is not only the return position.** A struct FIELD declared `@f64` does the same:
+
+```toke
+t=$f64vec{ v:@f64 };
+f=wrapped(a:$f64vec;x:f64):$f64vec{ <$f64vec{ v:a.v.push(x) } };
+```
+
+→ `%t10 = bitcast double %t9 to i64` where `%t9` is the array handle. So wrapping the array in a
+struct is **not** a workaround.
+
+`@(@f64)` — an array of f64 arrays — IS correct, which is the shape that makes the bug look
+intermittent: in `moke/src/ml/engine.tk` the k-means matrix (`@(@f64)`) is fine while every
+single-vector helper (`zerovector`, `centroidfor`, `extractnumericcol`, all `:@f64`) is not.
+
+**Where it bites, and how it presents.** Two adjacent pushes in one function lowered
+differently — `moke/src/compute.tk`, accumulating a timeseries:
+
+```llvm
+%t1197 = call i64 @tk_array_append_w(i64 %t1195, i64 %t1196)   ; a str element
+%t1198 = inttoptr i64 %t1197 to i8*                            ; conversion present
+store i8* %t1198, i8** %datekeys
+
+%t1202 = bitcast double %t1201 to i64                          ; an f64 element
+%t1203 = call i64 @tk_array_append_w(i64 %t1200, i64 %t1202)
+store i8* %t1203, i8** %datesums                               ; inttoptr MISSING
+```
+
+The simple shape — `let a=mut.@(); a=a.push(1.5);` alone in a function — takes
+`tk_array_append_inplace_w` and is correct, so a small probe does not reproduce it. It needs the
+non-in-place path, which is selected when the same variable is also assigned from a function
+call elsewhere in the function.
+
+**There is no workaround that keeps an f64 vector.** Returning it fails, putting it in a struct
+field fails, and routing every assignment through a helper only moves the error into the helper
+(measured). The options are to carry a fixed-point `@i64` — hundredths or basis points, which is
+what we already do for T-20 — or to use `@(@f64)` and index into a single row. Both change the
+type of every producer and consumer, which for a k-means implementation means rewriting the
+arithmetic.
+
+**A discriminator, in case it narrows the search.** `core.optimiser.cache.tof64` is declared
+`(v:@f32):@f64` and assembles cleanly in all three of our trees. Its accumulator is only ever
+written as `out=out.push(...)` — a self-update — so it takes `tk_array_append_inplace_w`, where
+the conversion is emitted correctly. The defect appears when the same variable is ALSO assigned
+from a function call somewhere in the function, which selects the non-in-place path. So the two
+paths disagree, and only one of them is wrong.
+
+**Ask.** Use the array conversion for any `@T`, including `@f64`. The element type should not
+select the conversion for the container.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke
