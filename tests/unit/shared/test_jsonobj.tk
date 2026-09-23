@@ -1,0 +1,89 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.shared.jsonobj;
+
+i=t:std.test;
+i=json:std.json;
+i=str:std.str;
+i=jx:shared.jsonobj;
+
+(* T-32 — std.json cannot read a nested value, and every route to one fails differently:
+   json.str on an object returns $jsonerr, a dotted path returns $jsonerr, json.getval
+   followed by json.i64 SEGFAULTS, and str.matchbracket returns $bracketerr. shared.jsonobj
+   works around it by brace-matching the object's text out of `o.raw` and re-wrapping it.
+
+   These assertions are against the real module, on the exact response shapes
+   core.providers.anthropic and core.providers.openai receive. The brace-matching cases are
+   the ones worth having: a `}` inside a string value is what makes a naive `indexof("}")`
+   wrong, and it is data a provider really sends — any assistant message about code will
+   contain one. *)
+
+f=decode(body:str):$json{
+  <mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e $json{raw:"{}"}
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── The Anthropic shape ─────────────────────────────────────────────────────
+     The defect this module exists for: both counts read as 0 for every hosted request, and
+     0 tokens means 0 cost, written into an append-only hash-chained trail. *)
+  let ant=decode("{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":150,\"output_tokens\":42},\"stop_reason\":\"end_turn\"}");
+  if(t.assert(jx.nestedi64(ant;"usage";"input_tokens";0)==150;"input_tokens is read out of the nested usage object")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jx.nestedi64(ant;"usage";"output_tokens";0)==42;"and output_tokens, which is the SECOND field — so the object is matched, not just found")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The OpenAI shape, which nests one level deeper in the same document ─────*)
+  let oai=decode("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"}}],\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":5,\"total_tokens\":16}}");
+  if(t.assert(jx.nestedi64(oai;"usage";"prompt_tokens";0)==11;"prompt_tokens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jx.nestedi64(oai;"usage";"completion_tokens";0)==5;"completion_tokens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jx.nestedi64(oai;"usage";"total_tokens";0)==16;"and a third field, past two others")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A `}` inside a string value must not end the object ─────────────────────
+     This is why objend tracks string state instead of searching for the next brace. An
+     assistant reply that mentions code contains braces; so does any JSON-in-a-string. *)
+  let brace=decode("{\"usage\":{\"note\":\"a } brace\",\"input_tokens\":7},\"model\":\"x\"}");
+  if(t.assert(jx.nestedi64(brace;"usage";"input_tokens";0)==7;"a closing brace inside a string value does not terminate the object early")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An ESCAPED quote inside a string value ──────────────────────────────────
+     Without backslash tracking, the escaped quote closes the string, the `}` that follows
+     is then read as structure, and the object ends in the wrong place. *)
+  let esc=decode("{\"usage\":{\"note\":\"say \\\"hi\\\" }\",\"input_tokens\":9}}");
+  if(t.assert(jx.nestedi64(esc;"usage";"input_tokens";0)==9;"an escaped quote does not close the string")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An object nested one level deeper than the key asked for ────────────────*)
+  let deep=decode("{\"usage\":{\"detail\":{\"cache\":3},\"input_tokens\":11}}");
+  if(t.assert(jx.nestedi64(deep;"usage";"input_tokens";0)==11;"an inner object is skipped over, not mistaken for the end")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Absent, and the fallback ────────────────────────────────────────────────
+     A response with no usage block must give the caller its fallback, not a wrong number.
+     Both providers pass 0, which is the honest answer for "the provider did not say". *)
+  let nousage=decode("{\"model\":\"claude-sonnet-4-20250514\",\"content\":[]}");
+  if(t.assert(jx.nestedi64(nousage;"usage";"input_tokens";0)==0;"an absent usage block yields the fallback")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jx.nestedi64(nousage;"usage";"input_tokens";0-1)==0-1;"and the fallback is the caller's, not a hardcoded zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!jx.hasnested(nousage;"usage");"hasnested tells absent from present, for a caller that needs to")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jx.hasnested(ant;"usage");"and says present when it is")){pass=pass+1}el{fail=fail+1};
+
+  (* A present key whose value is genuinely zero must NOT look absent. This is the
+     distinction the fallback alone cannot make, and it is why hasnested exists. *)
+  let zero=decode("{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}");
+  if(t.assert(jx.nestedi64(zero;"usage";"input_tokens";0-1)==0;"a real zero reads as zero, not as the fallback")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jx.hasnested(zero;"usage");"and the block is reported present")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A nested STRING field, the other accessor ───────────────────────────────*)
+  if(t.asserteq(jx.nestedstr(oai;"usage";"nosuchfield";"none");"none";"nestedstr falls back on a missing field")){pass=pass+1}el{fail=fail+1};
+  let msg=decode("{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad model\"}}");
+  if(t.asserteq(jx.nestedstr(msg;"error";"message";"");"bad model";"and reads a nested string when there is one — the provider error path")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Malformed: an unterminated object ───────────────────────────────────────
+     Truncated bodies happen on a dropped connection. The scanner must not run off the end
+     or return a partial object that parses as something. *)
+  let trunc=$json{raw:"{\"usage\":{\"input_tokens\":5"};
+  if(t.assert(jx.nestedi64(trunc;"usage";"input_tokens";0-1)==0-1;"an unterminated object yields the fallback, not a partial read")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

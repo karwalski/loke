@@ -1212,6 +1212,108 @@ gate, failing any `mt` over a result whose `$ok` arm is not written first, and
 `scripts/fix_err_arm_first.py` to reorder them. It is a lint rule standing in for a type
 rule, and it cannot see a match built by a macro or spread across a helper.
 
+## T-32 — `std.json` cannot read a nested value
+
+**Severity: capability gap, and every workaround for it fails differently.**
+
+`std.json`'s typed API is eight functions — `enc`, `dec`, `str`, `u64`, `i64`, `f64`, `bool`,
+`arr` — and every accessor among them takes a `Json` plus a **flat** key. There is no
+`json.obj(Json, str) -> Json!JsonErr`, so a value one level down is unreachable. Measured at
+`0b0bc4e` against `{"model":"abc","usage":{"input_tokens":150}}`:
+
+```toke
+json.str(o;"usage")                    (* -> $jsonerr: usage is an object, not a str *)
+json.i64(o;"usage.input_tokens")       (* -> $jsonerr: dotted paths are not supported *)
+json.getval(o;"usage")  then json.i64  (* -> SIGSEGV *)
+str.matchbracket(rest)                 (* -> $bracketerr *)
+```
+
+The third one is the one to look at. `json.getval` is one of roughly fifty names in
+`std.json`'s interface declared `(i64, i64) -> i64` — `getobj`, `getstr`, `getint`, `has`,
+`keys`, `entries`, `values`, `tryint`, and so on. They operate on a different representation,
+reached through `json.parse`, which is **T-17**: a name that links to an unrelated runtime
+symbol. Handing one of them the typed `Json` compiles and links, because a one-field struct
+and a handle share an ABI (**T-23**), and then dereferences whatever the struct's first word
+happens to be. So the API surface a user reads offers about sixty functions of which eight
+are usable, and picking a wrong one is a segfault rather than a diagnostic.
+
+**What it cost us.** Both hosted providers. `core.providers.anthropic` and
+`core.providers.openai` read token usage as `json.str(obj;"usage")` followed by `json.dec` on
+the result — so the decode always errored and both counts fell to their `0` default. Every
+audit row for a hosted request carried `tokens_in = 0`, `tokens_out = 0` and `cost_usd = 0`,
+and `audit_log` is append-only and hash-chained over exactly those columns, so the zeros are
+permanent once written and the chain attests to them. OpenAI additionally returned **empty
+content for every completion**, because `choices[0].message.content` is one level deeper than
+Anthropic's `content[0].text` and `message` is an object.
+
+**Our workaround**, in `packages/shared/src/jsonobj.tk`, rests on two things that do work:
+`Json` is declared `{ raw:str }` and `o.raw` holds the whole document; and `$json{raw:"…"}`
+can be constructed in user code and read correctly by the typed accessors. So we find
+`"key":` in the raw text, brace-match the object that follows — tracking string state and
+backslash escapes, because `{"note":"a } brace"}` is real data — and re-wrap the substring.
+`json.arr` is typed and genuinely works, so array elements come back as real `Json` values and
+that part needs no trick.
+
+It is a text scan standing in for an object model. It cannot handle duplicate keys at
+different depths, and it is O(n) per lookup over the whole document.
+
+**Ask.** `json.obj(Json, str) -> Json!JsonErr`. One function closes this. Failing that,
+support a dotted path in the existing accessors. And separately: either fix or remove the
+fifty untyped `(i64, i64) -> i64` names, because at present the interface advertises them
+alongside the eight that work.
+
+---
+
+## T-33 — every numeric and boolean `std.json` accessor reports an error for a falsy value
+
+**Severity: correctness, silent, and it makes "zero" and "absent" the same answer.**
+
+Measured at `0b0bc4e`, each accessor against a document where the field is present:
+
+| expression | result |
+|---|---|
+| `json.i64(o;"n")` where `n` is `0` | **`$jsonerr`** |
+| `json.u64(o;"n")` where `n` is `0` | **`$jsonerr`** |
+| `json.f64(o;"f")` where `f` is `0.0` | **`$jsonerr`** |
+| `json.bool(o;"b")` where `b` is `false` | **`$jsonerr`** |
+| `json.str(o;"s")` where `s` is `""` | `$ok ""` |
+| `json.i64(o;"n")` where `n` is `5` | `$ok 5` |
+| `json.f64(o;"f")` where `f` is `1.5` | `$ok 1.5` |
+| `json.bool(o;"b")` where `b` is `true` | `$ok true` |
+
+`json.str` is the only survivor, and it survives because an empty string is still a non-null
+pointer. So a JSON `0` cannot be distinguished from a missing key, a `false` cannot be
+distinguished from a missing key, and every `$err`/`$jsonerr` arm in a program is doing double
+duty as "the value was falsy".
+
+**This is almost certainly the same defect as T-31, seen from the other side.** The
+measurements are consistent with `X!E` being a **single machine word carrying the value, with
+zero standing for the error and no tag at all**. That one sentence predicts everything we have
+filed separately:
+
+- a falsy payload reads as an error — this issue;
+- `ok` selects arm 0 and `err` selects arm 1 **by position**, because the only test available
+  is "is the word zero" — **T-31**;
+- a result whose error side is a user-declared sum always takes arm 0, because the success
+  payload is a non-null pointer and so is the error payload — **T-18**;
+- `json.dec` on malformed input correctly takes the error arm, because it returns NULL;
+- bare `json.str(o;"model")` used directly as a `str`, with no match at all, *works* — which
+  should be impossible if a result had a tag, and which a great deal of code in the wild is
+  presumably relying on without knowing it.
+
+We have not read the compiler, so that mechanism is inference from eleven measurements rather
+than a claim about the implementation. But if it is right, T-18, T-31 and T-33 are one fix,
+and it is the most valuable fix available in the language.
+
+**Our workaround** is to ask the document text whether the field is present and falsy:
+`shared.jsonobj.fieldiszero` locates `"field":` and checks whether the value's first character
+is `0` — exact rather than heuristic, because JSON forbids leading zeros in numbers, so a value
+beginning with `0` can only be `0`, `0.0` or the like. A field that is present, not falsy, and
+still errored is treated as a genuine type mismatch and gets the caller's fallback.
+
+That works for numbers. There is no equivalent trick for `false`, which is why nothing in this
+codebase now reads a boolean out of JSON.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

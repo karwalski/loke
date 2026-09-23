@@ -7,6 +7,7 @@ m=core.providers.anthropic;
 
 i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
@@ -31,31 +32,80 @@ f=new(apikey:str):$anthropicclient{
 
 
 
+(* ── Cost, in integer NANODOLLARS ────────────────────────────────────────────────
+   1 nanodollar = 1e-9 USD. Rates are exact integers at this scale — $3/Mtok is 3000
+   nanodollars per token — so the arithmetic below involves no floating point at all.
+
+   This exists because `calccost` returns a BARE f64, and a bare f64 return is corrupted
+   across a module boundary (T-20): measured, `calccost("claude-sonnet-4-20250514";150;42)`
+   returned **0** to a caller in another module, and the Haiku case returned
+   **4.94066e-324** — a denormal, which is the low word of the real value read as a double.
+   Parameters and struct fields cross intact; only returns are lost.
+
+   The consequence was not confined to a test. `browser/pages/api/pipeline.tk:142` passes
+   **0.0** as the estimated cost into `policy.classifyrisk` with a comment saying the real
+   figure "cannot be trusted until LS1.1h converts it" — so every governance decision in
+   browser mode was taken as though the request were free, and every audit row recorded a
+   zero cost. `calccostnano` is the conversion that note is waiting for.
+
+   `calccost` is kept for the `$completionresponse.costusd` field, which is filled in THIS
+   module, where the return is intact. Anything crossing a boundary must use the nano form.
+   Rates as of 2026-09; if they change, docs/metrics-baseline.md is the only place that
+   publishes derived figures. *)
+
+f=nanoin(modelid:str):i64{
+  if(str.contains(modelid;"claude-3-5-haiku")){
+    <800
+  }el{
+    <3000
+  }
+};
+
+f=nanoout(modelid:str):i64{
+  if(str.contains(modelid;"claude-3-5-haiku")){
+    <4000
+  }el{
+    <15000
+  }
+};
+
+f=calccostnano(modelid:str;inputtokens:u32;outputtokens:u32):i64{
+  <((inputtokens as i64)*nanoin(modelid))+((outputtokens as i64)*nanoout(modelid))
+};
+
+(* Same-module callers only — the return is a bare f64 (T-20). Use calccostnano across a
+   boundary. The division is the only floating-point step, and it happens after the exact
+   integer total, so the f64 carries no accumulated error of its own. *)
 f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
-  let costin=mut.0.000003;
-  if(str.contains(modelid;"claude-3-5-haiku")){costin=0.0000008}el{};
-  let costout=mut.0.000015;
-  if(str.contains(modelid;"claude-3-5-haiku")){costout=0.000004}el{};
-  <((inputtokens as f64)*costin)+((outputtokens as f64)*costout)
+  <(calccostnano(modelid;inputtokens;outputtokens) as f64)/1000000000.0
 };
 
 
 
 
 
-f=buildresponse(obj:i64):$completionresponse{
-  let contentarr=json.getarr(obj;"content");
-  let text=json.str(contentarr.get(0);"text");
-  let usage=json.str(obj;"usage");
-  let usageobj=json.dec(usage);
-  let inputtokens=mt usageobj {
-    $ok:u json.i64(u;"input_tokens");
-    $jsonerr:e 0
-  };
-  let outputtokens=mt usageobj {
-    $ok:u json.i64(u;"output_tokens");
-    $jsonerr:e 0
-  };
+
+(* `obj:$json`, not `obj:i64`. Every caller binds it from `json.dec`, so it always WAS a
+   $json; the i64 declaration worked only because a one-field struct and a handle share an
+   ABI (T-23). Declaring it honestly is what makes the typed accessors below safe to use.
+
+   json.getarr — one of std.json's fifty untyped (i64,i64)->i64 helpers — is replaced by
+   jx.elemstr over the TYPED json.arr. getarr happened to work for content[0].text because
+   the field is a string; it is the same family as json.parse (T-17) and reaches a different
+   representation, which is how the OpenAI side segfaulted. *)
+f=buildresponse(obj:$json):$completionresponse{
+  let text=jx.elemstr(obj;"content";0;"text";"");
+  (* jx.nestedi64, because std.json cannot read a nested value at all (T-32).
+     This used to be `json.str(obj;"usage")` then `json.dec` on the result. json.str is typed
+     `str!JsonErr` and refuses an object, so the decode always errored and both counts fell to
+     their 0 default. Measured: every hosted completion reported inputtokens 0, outputtokens 0
+     and therefore costusd 0.0 — and those three columns go into audit_log, which is
+     append-only and hash-chained over them, so the zeros are permanent once written and the
+     chain attests to them.
+     json.getval + json.i64 is NOT the fix: it segfaults. See shared/jsonobj.tkc.md for the
+     four routes that were measured and how this one works. *)
+  let inputtokens=jx.nestedi64(obj;"usage";"input_tokens";0) as u32;
+  let outputtokens=jx.nestedi64(obj;"usage";"output_tokens";0) as u32;
   let modelout=json.str(obj;"model");
   let cost=calccost(modelout;inputtokens;outputtokens);
   let resp=$completionresponse{
@@ -87,12 +137,10 @@ f=parseplain(raw:str):$completionresponse{
 
 f=completeplain(client:$anthropicclient;req:$completionrequest):$completionresponse{
   let hc=http.client("https://api.anthropic.com");
-  let body=json.enc($jsonobj{
-    model:req.modelid;
-    maxtokens:req.maxtokens;
-    system:req.systemprompt;
-    messages:req.messages
-  });
+  (* pt.anthropicbody, not json.enc($jsonobj{...}) — see the note above pt.messagesjson.
+     $jsonobj is declared in no module, so the old expression sent a body naming no model and
+     carrying no prompt. *)
+  let body=pt.anthropicbody(req);
   let headers=@(
     $httpheader{key:"x-api-key";value:client.config.apikey};
     $httpheader{key:"anthropic-version";value:"2023-06-01"};

@@ -7,6 +7,7 @@ m=core.providers.openai;
 
 i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
@@ -31,13 +32,54 @@ f=new(apikey:str):$openaiclient{
 
 
 
-f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
-  let costin=mut.0.0000025;
-  if(str.contains(modelid;"gpt-4o-mini")){costin=0.00000015}el{};
-  let costout=mut.0.00001;
-  if(str.contains(modelid;"gpt-4o-mini")){costout=0.0000006}el{};
-  <((inputtokens as f64)*costin)+((outputtokens as f64)*costout)
+(* ── Cost, in integer NANODOLLARS ────────────────────────────────────────────────
+   1 nanodollar = 1e-9 USD. Rates are exact integers at this scale — $3/Mtok is 3000
+   nanodollars per token — so the arithmetic below involves no floating point at all.
+
+   This exists because `calccost` returns a BARE f64, and a bare f64 return is corrupted
+   across a module boundary (T-20): measured, `calccost("claude-sonnet-4-20250514";150;42)`
+   returned **0** to a caller in another module, and the Haiku case returned
+   **4.94066e-324** — a denormal, which is the low word of the real value read as a double.
+   Parameters and struct fields cross intact; only returns are lost.
+
+   The consequence was not confined to a test. `browser/pages/api/pipeline.tk:142` passes
+   **0.0** as the estimated cost into `policy.classifyrisk` with a comment saying the real
+   figure "cannot be trusted until LS1.1h converts it" — so every governance decision in
+   browser mode was taken as though the request were free, and every audit row recorded a
+   zero cost. `calccostnano` is the conversion that note is waiting for.
+
+   `calccost` is kept for the `$completionresponse.costusd` field, which is filled in THIS
+   module, where the return is intact. Anything crossing a boundary must use the nano form.
+   Rates as of 2026-09; if they change, docs/metrics-baseline.md is the only place that
+   publishes derived figures. *)
+
+f=nanoin(modelid:str):i64{
+  if(str.contains(modelid;"gpt-4o-mini")){
+    <150
+  }el{
+    <2500
+  }
 };
+
+f=nanoout(modelid:str):i64{
+  if(str.contains(modelid;"gpt-4o-mini")){
+    <600
+  }el{
+    <10000
+  }
+};
+
+f=calccostnano(modelid:str;inputtokens:u32;outputtokens:u32):i64{
+  <((inputtokens as i64)*nanoin(modelid))+((outputtokens as i64)*nanoout(modelid))
+};
+
+(* Same-module callers only — the return is a bare f64 (T-20). Use calccostnano across a
+   boundary. The division is the only floating-point step, and it happens after the exact
+   integer total, so the f64 carries no accumulated error of its own. *)
+f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
+  <(calccostnano(modelid;inputtokens;outputtokens) as f64)/1000000000.0
+};
+
 
 
 
@@ -63,11 +105,8 @@ f=completeplain(client:$openaiclient;req:$completionrequest):$completionresponse
     };
     messages=withsys
   };
-  let body=json.enc($jsonobj{
-    model:req.modelid;
-    messages:messages;
-    maxtokens:req.maxtokens
-  });
+  (* pt.openaibody, not json.enc($jsonobj{...}) — see the note above pt.messagesjson. *)
+  let body=pt.openaibody(req.modelid;messages;req.maxtokens);
   let authvalue=str.concat("Bearer ";client.config.apikey);
   let headers=@(
     $httpheader{key:"Authorization";value:authvalue};
@@ -108,24 +147,29 @@ f=openaiparseraw(raw:str):$completionresponse!$lokeerr{
   }
 };
 
-f=openaibuildobj(obj:i64):$completionresponse{
-  let choices=json.getarr(obj;"choices");
-  let message=json.str(choices.get(0);"message");
-  let msgobj=json.dec(message);
-  let text=mt msgobj {
-    $ok:m json.str(m;"content");
-    $jsonerr:e ""
-  };
-  let usage=json.str(obj;"usage");
-  let usageobj=json.dec(usage);
-  let inputtokens=mt usageobj {
-    $ok:u json.i64(u;"prompt_tokens");
-    $jsonerr:e 0
-  };
-  let outputtokens=mt usageobj {
-    $ok:u json.i64(u;"completion_tokens");
-    $jsonerr:e 0
-  };
+(* `obj:$json` — see the note on anthropic.buildresponse.
+
+   choices[0].message.content is TWO levels deep, which is one more than Anthropic's
+   content[0].text, and that is the whole reason every OpenAI completion returned empty
+   text. The old code read `message` with json.str — typed `str!JsonErr`, which refuses an
+   object — so the decode that followed always errored and `text` fell to "". Measured: a
+   well-formed gpt-4o response yielded content "".
+
+   jx.elem descends the array with the typed json.arr; jx.nestedstr then brace-matches the
+   `message` object out of that element. *)
+f=openaibuildobj(obj:$json):$completionresponse{
+  let text=jx.nestedstr(jx.elem(obj;"choices";0);"message";"content";"");
+  (* jx.nestedi64, because std.json cannot read a nested value at all (T-32).
+     This used to be `json.str(obj;"usage")` then `json.dec` on the result. json.str is typed
+     `str!JsonErr` and refuses an object, so the decode always errored and both counts fell to
+     their 0 default. Measured: every hosted completion reported inputtokens 0, outputtokens 0
+     and therefore costusd 0.0 — and those three columns go into audit_log, which is
+     append-only and hash-chained over them, so the zeros are permanent once written and the
+     chain attests to them.
+     json.getval + json.i64 is NOT the fix: it segfaults. See shared/jsonobj.tkc.md for the
+     four routes that were measured and how this one works. *)
+  let inputtokens=jx.nestedi64(obj;"usage";"prompt_tokens";0) as u32;
+  let outputtokens=jx.nestedi64(obj;"usage";"completion_tokens";0) as u32;
   let modelout=json.str(obj;"model");
   let cost=calccost(modelout;inputtokens;outputtokens);
   let resp=$completionresponse{

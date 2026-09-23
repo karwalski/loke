@@ -123,25 +123,37 @@ f=main():i64{
   if(t.assert(!pt.iscompletion(bad);"an unparseable body yields the sentinel, not an empty success")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(pt.completionerror(bad);"failed to parse");"and says why")){pass=pass+1}el{fail=fail+1};
 
-  (* ── FINDING 2: the cost arithmetic ─────────────────────────────────────────
-     Sonnet input is $3/Mtok and output $15/Mtok, so 150 in and 42 out is
-     150*0.000003 + 42*0.000015 = 0.00108. Asserted by value, bounded, so a corrupted
-     return cannot satisfy it by accident. *)
-  let sonnetcost=ant.calccost("claude-sonnet-4-20250514";150 as u32;42 as u32);
-  if(t.assert(sonnetcost>0.00107;"150 input and 42 output tokens on Sonnet costs $0.00108 — see FINDING 2, the bare f64 return is corrupted")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(sonnetcost<0.00109;"bounded from above too")){pass=pass+1}el{fail=fail+1};
+  (* ── The cost arithmetic, in exact integer nanodollars ─────────────────────
+     FINDING 2 was that `calccost` returns a bare f64, and T-20 corrupts a bare f64 return
+     across a module boundary: measured, the Sonnet case came back as 0 and the Haiku case
+     as 4.94066e-324 — the smallest denormal, bit pattern 1, i.e. the low word of the real
+     double read on its own.
 
-  (* Haiku is cheaper than Sonnet, and that ordering is what the router's cost tier rests
-     on. A thousand tokens each way: Haiku 0.0048, Sonnet 0.018. *)
-  let haikucost=ant.calccost("claude-3-5-haiku-20241022";1000 as u32;1000 as u32);
-  let sonnetbulk=ant.calccost("claude-sonnet-4-20250514";1000 as u32;1000 as u32);
-  if(t.assert(haikucost<sonnetbulk;"Haiku costs less than Sonnet for identical token counts")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(haikucost>0.0047;"and Haiku's own figure is $0.0048")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(haikucost<0.0049;"bounded from above")){pass=pass+1}el{fail=fail+1};
+     `calccostnano` is the conversion T-20's remedy calls for: rates are exact integers at
+     1e-9 USD ($3/Mtok is 3000 nanodollars per token), so the arithmetic never touches
+     floating point and an i64 crosses the boundary intact. Equalities, not bounds — a
+     denormal satisfies any window whose lower bound is zero, which is how the old form
+     could have passed while wrong. *)
+  let sonnetnano=ant.calccostnano("claude-sonnet-4-20250514";150 as u32;42 as u32);
+  if(t.assert(sonnetnano==1080000;"150 in and 42 out on Sonnet is exactly 1080000 nanodollars ($0.00108)")){pass=pass+1}el{fail=fail+1};
 
-  (* Zero tokens cost nothing. This is the one calccost case that is indistinguishable from
-     the corruption, which is why it is asserted last rather than used as evidence. *)
-  if(t.assert(ant.calccost("claude-sonnet-4-20250514";0 as u32;0 as u32)==0.0;"zero tokens cost nothing")){pass=pass+1}el{fail=fail+1};
+  let haikunano=ant.calccostnano("claude-3-5-haiku-20241022";1000 as u32;1000 as u32);
+  let sonnetbulk=ant.calccostnano("claude-sonnet-4-20250514";1000 as u32;1000 as u32);
+  if(t.assert(haikunano==4800000;"1000 each way on Haiku is exactly 4800000 ($0.0048)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sonnetbulk==18000000;"and on Sonnet 18000000 ($0.018)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haikunano<sonnetbulk;"Haiku costs less than Sonnet for identical token counts — the ordering the router's cost tier rests on")){pass=pass+1}el{fail=fail+1};
+
+  (* Output is dearer than input. A single blended rate would satisfy the totals above and
+     still price every mixed request wrongly. *)
+  if(t.assert(ant.calccostnano("claude-sonnet-4-20250514";1000 as u32;0 as u32)<ant.calccostnano("claude-sonnet-4-20250514";0 as u32;1000 as u32);"output tokens cost more than input tokens")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(ant.calccostnano("claude-sonnet-4-20250514";0 as u32;0 as u32)==0;"zero tokens cost nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* The audit row's figure comes from the SAME arithmetic, so the two cannot drift: the
+     response's costusd field is calccost, which is calccostnano divided by 1e9 inside the
+     provider module, where an f64 return is intact. *)
+  let r2:$completionresponse=ant.parseplain(samplebody());
+  if(t.assert(r2.inputtokens as i64==150;"the parsed response carries the same token count the cost is computed from")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

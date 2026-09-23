@@ -9,6 +9,7 @@ i=t:shared.types;
    Measured this session — see the LS1.1j report. iscompletion below was written against
    t.strlen first and reported every real response as a failure. *)
 i=str:std.str;
+i=json:std.json;
 
 
 
@@ -105,4 +106,70 @@ f=assistantmsg(content:str):$chatmessage{
 
 f=systemmsg(content:str):$chatmessage{
   <$chatmessage{role:"system";content:content}
+};
+
+
+(* ── Request bodies, built with str.concat ─────────────────────────────────────────────
+   Both providers used to build their request body as
+
+     json.enc($jsonobj{ model:req.modelid; maxtokens:req.maxtokens; messages:messages })
+
+   and `$jsonobj` is declared in NO module in this repository. json.enc takes a str, so that
+   expression compiles, links, and returns a string containing neither the model id, nor
+   "messages", nor the user's text. Measured on the identical expression in core.router.intent.
+   Every hosted completion this project has ever sent named no model and carried no prompt, on
+   the live path (dispatcher:57-66 -> pipeline.dispatch). It is the reason nothing downstream
+   of a cloud request has ever been observed working.
+
+   Two further defects were hidden behind it and are fixed here because they would have
+   surfaced the moment the body became real: the wire field is `max_tokens` on both APIs, not
+   `maxtokens`, and Anthropic takes `system` as a TOP-LEVEL string, not as a message with
+   role "system".
+
+   json.enc is still used, for the one thing it is right for: escaping a str into a JSON
+   string literal. A prompt containing a quote or a newline would otherwise produce a body the
+   provider rejects — and a prompt is exactly the field most likely to contain both. *)
+
+f=messagesjson(messages:@$chatmessage):str{
+  let out=mut."[";
+  lp(let mj=0;mj<messages.len;mj=mj+1){
+    let m=messages.get(mj);
+    let sep=mut."";
+    if(mj>0){sep=","}el{};
+    out=str.concat(out;
+      str.concat(sep;
+        str.concat(
+          str.concat("{\"role\":";json.enc(m.role));
+          str.concat(",\"content\":";str.concat(json.enc(m.content);"}")))))
+  };
+  <str.concat(out;"]")
+};
+
+(* Omitted entirely when empty rather than sent as "": Anthropic rejects an empty `system`. *)
+f=systemfield(sysprompt:str):str{
+  if(str.len(sysprompt)==0){
+    <""
+  }el{
+    <str.concat(",\"system\":";json.enc(sysprompt))
+  }
+};
+
+f=anthropicbody(req:$completionrequest):str{
+  <str.concat(
+    str.concat(
+      str.concat("{\"model\":";json.enc(req.modelid));
+      str.concat(",\"max_tokens\":";str.fromint(req.maxtokens as i64)));
+    str.concat(
+      systemfield(req.systemprompt);
+      str.concat(",\"messages\":";str.concat(messagesjson(req.messages);"}"))))
+};
+
+(* OpenAI has no top-level system field: the system prompt is prepended as a message by the
+   caller, which is what openai.completeplain already did. *)
+f=openaibody(modelid:str;messages:@$chatmessage;maxtokens:u32):str{
+  <str.concat(
+    str.concat(
+      str.concat("{\"model\":";json.enc(modelid));
+      str.concat(",\"max_tokens\":";str.fromint(maxtokens as i64)));
+    str.concat(",\"messages\":";str.concat(messagesjson(messages);"}")))
 };

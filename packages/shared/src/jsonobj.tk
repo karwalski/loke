@@ -1,0 +1,162 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=shared.jsonobj;
+
+i=json:std.json;
+i=str:std.str;
+
+f=sliceor(s:str;from:i64;to:i64):str{
+  <mt str.slice(s;from as u64;to as u64) {
+    $ok:v v;
+    $sliceerr:e ""
+  }
+};
+
+f=objend(s:str;n:i64):i64{
+  let depth=mut.0;
+  let instr=mut.false;
+  let esc=mut.false;
+  let end=mut.0-1;
+  lp(let k=0;k<n;k=k+1){
+    if(end<0){
+      let c=str.charat(s;k);
+      if(esc){
+        esc=false
+      }el{
+        if(instr){
+          if(c==92){ esc=true }el{
+            if(c==34){ instr=false }el{}
+          }
+        }el{
+          if(c==34){ instr=true }el{
+            if(c==123){ depth=depth+1 }el{
+              if(c==125){
+                depth=depth-1;
+                if(depth==0){ end=k+1 }el{}
+              }el{}
+            }
+          }
+        }
+      }
+    }el{}
+  };
+  <end
+};
+
+f=emptyobj():$json{
+  <$json{raw:"{}"}
+};
+
+f=nested(o:$json;key:str):$json{
+  let needle=str.concat(str.concat("\"";key);"\":");
+  let at=str.indexof(o.raw;needle);
+  if(at<0){ <emptyobj() }el{};
+  let from=at+(str.len(needle) as i64);
+  let rest=sliceor(o.raw;from;str.len(o.raw) as i64);
+  let e=objend(rest;str.len(rest) as i64);
+  if(e<0){ <emptyobj() }el{};
+  <$json{raw:sliceor(rest;0;e)}
+};
+
+(* ── A JSON zero is not a missing field, and std.json cannot tell them apart ───────
+   Measured at 0b0bc4e: every NUMERIC and BOOLEAN accessor in std.json reports `$jsonerr`
+   for a falsy value.
+
+     json.i64  on 0      -> $jsonerr        json.i64  on 5    -> $ok 5
+     json.u64  on 0      -> $jsonerr        json.f64  on 1.5  -> $ok 1.5
+     json.f64  on 0.0    -> $jsonerr        json.bool on true -> $ok true
+     json.bool on false  -> $jsonerr        json.str  on ""   -> $ok ""
+
+   Only `json.str` survives, and it survives because an empty string is still a non-null
+   pointer. Filed as T-33. Together with T-31 it points at one representation: `X!E` looks to
+   be a single machine word carrying the value, with zero standing for the error — which is
+   why arms bind by position, why a user-declared error side always takes arm 0, and why a
+   legitimate zero reads as a failure.
+
+   Left alone, that makes `nestedi64` report the caller's fallback for a real zero. For the
+   providers it happens not to matter — a zero token count and a fallback of 0 agree — but
+   "the provider said zero" and "the provider did not say" are different facts, and an audit
+   reader that cannot distinguish them cannot tell a free request from an unrecorded one.
+
+   So the error arm asks the text. `fieldiszero` is exact rather than heuristic: JSON forbids
+   leading zeros in numbers, so a value whose first character is `0` is `0`, `0.0` or similar
+   — it cannot be `07` or `0x10`. A field that is present but not falsy and still errored is
+   a genuine type mismatch, and that gets the fallback. *)
+
+f=fieldtail(n:$json;field:str):str{
+  let needle=str.concat(str.concat("\"";field);"\":");
+  let at=str.indexof(n.raw;needle);
+  if(at<0){ <"" }el{};
+  let from=at+(str.len(needle) as i64);
+  <sliceor(n.raw;from;str.len(n.raw) as i64)
+};
+
+f=fieldiszero(n:$json;field:str):bool{
+  let rest=fieldtail(n;field);
+  if(str.len(rest)==0){ <false }el{};
+  let c=str.charat(rest;0);
+  if(c==48){ <true }el{};
+  (* "-0" and "-0.0" are legal JSON and mean zero. *)
+  if(c==45){
+    if((str.len(rest) as i64)<2){ <false }el{};
+    <str.charat(rest;1)==48
+  }el{};
+  <false
+};
+
+f=nestedi64(o:$json;key:str;field:str;fallback:i64):i64{
+  <mt json.i64(nested(o;key);field) {
+    $ok:v v;
+    $jsonerr:e zeroorfallback(nested(o;key);field;fallback)
+  }
+};
+
+f=zeroorfallback(n:$json;field:str;fallback:i64):i64{
+  if(fieldiszero(n;field)){
+    <0
+  }el{
+    <fallback
+  }
+};
+
+f=nestedstr(o:$json;key:str;field:str;fallback:str):str{
+  <mt json.str(nested(o;key);field) {
+    $ok:v v;
+    $jsonerr:e fallback
+  }
+};
+
+f=hasnested(o:$json;key:str):bool{
+  <str.len(nested(o;key).raw)>2
+};
+
+(* ── Array elements ───────────────────────────────────────────────────────────────
+   `json.arr` IS typed — `(Json, str) -> [Json]!JsonErr` — and it works: an element comes
+   back as a real `$json` whose `.raw` holds that element's text, so `nested` and the typed
+   accessors both apply to it. This is the one part of std.json's object model that is
+   reachable, and it is why `elem` exists rather than another text scan.
+
+   Bounds are checked here rather than trusted. `a.get(0)` on an empty array is a read past
+   the end, and an empty `choices` array is what a provider returns when it refuses a
+   request — a refusal is exactly the case a caller is least likely to have tested. *)
+
+f=elemat(a:@$json;idx:i64):$json{
+  if(idx<0){ <emptyobj() }el{};
+  if(idx>=(a.len as i64)){ <emptyobj() }el{};
+  <a.get(idx)
+};
+
+f=elem(o:$json;key:str;idx:i64):$json{
+  <mt json.arr(o;key) {
+    $ok:a elemat(a;idx);
+    $jsonerr:e emptyobj()
+  }
+};
+
+f=elemstr(o:$json;key:str;idx:i64;field:str;fallback:str):str{
+  <mt json.str(elem(o;key;idx);field) {
+    $ok:v v;
+    $jsonerr:e fallback
+  }
+};
