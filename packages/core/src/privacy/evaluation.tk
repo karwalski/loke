@@ -22,6 +22,54 @@ t=$comparisonmatrix{
   totaltexts:i64
 };
 
+(* Basis points, because a threshold has to survive the journey to its caller.
+
+   The three f64 functions below are correct and are called only from inside this module.
+   The moment a TEST imports one, the value crosses a module boundary — and a bare f64
+   RETURN is corrupted there (T-20: the caller declares the return i64 while the definition
+   says double, so it reads the wrong register). Measured: `f64abs(-50.0)` arrives as the bit
+   pattern 1. An f64 PARAMETER and an f64 struct FIELD both cross intact; only a bare return
+   does not.
+
+   So a recall floor expressed as 0.90 could not be asserted from a test at all. Expressed as
+   9000 basis points it can, exactly, and the integer is also the honest unit: a recall floor
+   is a policy threshold, and 93.2% has three digits of meaning, not seventeen.
+
+   Rounds rather than truncating — `9999.6` basis points is 100%, not 99.99%. *)
+f=ratiobp(num:i64;den:i64):i64{
+  if(den==0){
+    <0
+  }el{
+    <((num * 10000) + (den / 2)) / den
+  }
+};
+
+f=precisionbp(tp:i64;fp:i64):i64{
+  <ratiobp(tp;tp+fp)
+};
+
+f=recallbp(tp:i64;fn2:i64):i64{
+  <ratiobp(tp;tp+fn2)
+};
+
+f=f1bp(pbp:i64;rbp:i64):i64{
+  if(pbp+rbp==0){
+    <0
+  }el{
+    <(2 * pbp * rbp) / (pbp + rbp)
+  }
+};
+
+f=bplabel(bp:i64):str{
+  (* 9550 -> "95.50%". Integer arithmetic throughout, so the rendering cannot drift from
+     the value the assertion used. *)
+  let whole=bp / 100;
+  let frac=bp - (whole * 100);
+  let fracstr=mut.str.fromi64(frac);
+  if(frac<10){fracstr=str.concat("0";fracstr)}el{};
+  <str.concat(str.fromi64(whole);str.concat(".";str.concat(fracstr;"%")))
+};
+
 f=computeprecision(tp:i64;fp:i64):f64{
   if(tp+fp==0){<0.0}el{};
   <(tp as f64)/((tp+fp) as f64)
@@ -55,4 +103,39 @@ f=evaluatelayer(layerid:str;detected:i64;labelled:i64;matched:i64):$evaluationre
 
 f=formatresult(r:$evaluationresult):str{
   <str.concat(r.layerid;str.concat(": P=";str.concat(str.fromfloat(r.precision);str.concat(" R=";str.concat(str.fromfloat(r.recall);str.concat(" F1=";str.fromfloat(r.f1)))))))
+};
+
+(* $comparisonmatrix was declared when this module was written and never constructed, which
+   is most of why AD1.2 could not be measured: there was no shape to put a per-layer result
+   into. These three give it one. *)
+f=newmatrix(totallabelled:i64;totaltexts:i64):$comparisonmatrix{
+  <$comparisonmatrix{layers:@($evaluationresult);totallabelled:totallabelled;totaltexts:totaltexts}
+};
+
+f=addlayer(m:$comparisonmatrix;r:$evaluationresult):$comparisonmatrix{
+  (* Returns the new matrix. A callee cannot mutate its caller's struct, and `.push` returns
+     the new array rather than appending in place — the defect class that made thirteen
+     accumulations in this repository silently do nothing (LS1.1a). *)
+  <$comparisonmatrix{layers:m.layers.push(r);totallabelled:m.totallabelled;totaltexts:m.totaltexts}
+};
+
+f=evaluatelayerbp(layerid:str;detected:i64;labelled:i64;matched:i64):$evaluationresult{
+  (* The same arithmetic as evaluatelayer, with the ratios computed in basis points and then
+     divided locally into the f64 fields. The f64 fields are kept because $evaluationresult
+     crosses as a struct, where they survive; what must not cross is a bare f64 return. *)
+  let tp=matched;
+  let fp=mut.detected-matched;
+  let fn2=mut.labelled-matched;
+  if(fp<0){fp=0}el{};
+  if(fn2<0){fn2=0}el{};
+  let pbp=precisionbp(tp;fp);
+  let rbp=recallbp(tp;fn2);
+  let fbp=f1bp(pbp;rbp);
+  <$evaluationresult{
+    layerid:layerid;detections:detected;
+    truepositives:tp;falsepositives:fp;falsenegatives:fn2;
+    precision:(pbp as f64)/10000.0;
+    recall:(rbp as f64)/10000.0;
+    f1:(fbp as f64)/10000.0
+  }
 };

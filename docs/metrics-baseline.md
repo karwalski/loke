@@ -61,6 +61,58 @@ python3 tests/fixtures/pii-corpus/generate.py
 python3 tests/fixtures/pii-corpus/score_patterns.py
 ```
 
+### PII detection, regex layer, measured by loke's OWN compiled detector — 2026-09-23
+
+**The first detection figure this project has taken from the code it ships.** Every earlier
+figure, including the block below, came from `score_patterns.py` reading the pattern strings
+and evaluating them with **Python's `re`**. This one calls `core.privacy.regex.detect`.
+
+| Metric | Value | N |
+|---|---|---|
+| Recall, regex-addressable types, overlap rule | **95.45%** | 88 entities in 74 texts |
+| Recall, exact span | 59.09% | 88 entities |
+| Detections made | 94 | |
+
+**Arm:** `regex-layer-toke-compiled`.
+**Workload:** `tests/fixtures/pii-corpus`, seed 20260919, spans verified by construction.
+**Assertion:** `tests/integration/test_detection_recall.tk`, with a **floor of 90.00%** held
+in integer basis points. The floor is a policy, not a measurement — it is set below what the
+detector achieves so that it fails when a change makes detection worse. Lowering it to make a
+build pass is the thing that file exists to prevent.
+
+**The headline is the cross-validation.** Overlap recall is **95.45%** here and **0.9545**
+from the Python scorer on the same corpus — identical. The two engines agree, which is the
+first evidence that the Python-based figures in the block below were not misleading about
+recall, and it is worth more than the number itself: that instrument has carried a mandatory
+"Python's engine is not toke's, and both limits push in unknown directions" caveat since
+2026-09-19, and one of those directions is now known to be zero.
+
+**Exact-span recall diverges, and the cause is loke's spans rather than its detection** —
+59.09% against Python's 71.69%. toke's regex engine exposes **no match offset at all**, so
+PL1.7 recovers each span with `str.indexof` on the matched value; where a value occurs twice
+the span points at the first occurrence. That approximation is documented in `regex.tk` and is
+exactly why the exact-span figure is **reported and not floored**: flooring a number whose
+instrument has a stated approximation would assert more than is known.
+
+**What this still is not.** The regex layer only. NER and Presidio need network sidecars that
+are not running, so `PERSON` and the rest are outside the addressable set — the same reason
+the block below publishes two recall figures. `core.privacy.evaluation` now constructs the
+`$comparisonmatrix` that was declared when it was written and never built, so the other two
+layers join this table when they can run without a sidecar.
+
+Three things had to land first, and none alone was enough: **AD1.8** ran the privacy harness
+for the first time in the project's history, which is how anyone discovered the detector was
+reporting every Australian mobile as a Tax File Number; **PL1.7** gave entities real spans, so
+the overlap rule became expressible; and **AD1.2** needed a threshold that survives reaching
+its caller, since a bare `f64` return is corrupted across a module boundary (T-20) and a floor
+of 0.90 could not otherwise have been asserted from a test at all.
+
+Reproduce:
+
+```sh
+./scripts/run_tests.sh tests/integration/test_detection_recall.tk
+```
+
 ### PII detection, regex layer with the PL1.10 filters — 2026-09-23
 
 **The figures above describe a detector that no longer ships.** PL1.7 and PL1.10 added two

@@ -1,0 +1,236 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testdetectionrecall;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=json:std.json;
+i=rx:core.privacy.regex;
+i=ev:core.privacy.evaluation;
+i=sh:shared.types;
+i=io:std.io;
+
+(* AD1.2 — detection recall, measured by loke's OWN compiled detector for the first time.
+
+   Everything this project has published about detection accuracy came from
+   `tests/fixtures/pii-corpus/score_patterns.py`, which reads the ten pattern strings out of
+   `patterns.tk` and evaluates them with **Python's `re`**. That was honest and it was
+   labelled `regex-layer-python-re`, but it is not loke: Python's engine is not toke's, and
+   since PL1.10 the shipped detector also applies two post-match filters that the Python
+   scorer had to REIMPLEMENT to stay accurate. This file removes that gap for the regex
+   layer — it calls `rx.detect` and scores what comes back.
+
+   Three things made it possible, all landed today, and none of them alone was enough:
+
+     AD1.8   ran the privacy harness for the first time, which is how anyone noticed the
+             detector was reporting every Australian mobile as a Tax File Number.
+     PL1.7   gave every entity a real span. Before that `start` and `end` were 0 on every
+             detection, so overlap scoring — the rule the corpus is built around — was not
+             expressible at all.
+     AD1.2   (here) needed a threshold that survives reaching its caller, which is
+             `ev.recallbp`: a bare f64 return is corrupted across a module boundary (T-20),
+             so a floor of 0.90 could not have been asserted from a test.
+
+   Scoring rule, and it matters that it is stated: a detection counts as a true positive if
+   it OVERLAPS a labelled span of the same type, which is the rule
+   `docs/metrics-baseline.md` already publishes against. Exact-span matching is stricter and
+   arguably more correct; this file asserts the overlap rule and reports both, so the two are
+   never confused.
+
+   THE FLOOR IS A POLICY, NOT A MEASUREMENT. It is set below what the detector achieves
+   today, on purpose: its job is to fail when a change makes detection worse, not to record
+   the current number. The current number belongs in docs/metrics-baseline.md, where it can
+   carry its caveats. Raising the floor is a deliberate act; lowering it to make a build pass
+   is the thing this file exists to prevent. *)
+
+t=$tally{
+  labelled:i64;
+  matched:i64;
+  matchedexact:i64;
+  detections:i64;
+  texts:i64
+};
+
+f=corpuspath():str{
+  <"tests/fixtures/pii-corpus/corpus.jsonl"
+};
+
+(* The corpus labels types in upper case (AU_TFN); the detector emits lower case (au_tfn).
+   Compared case-insensitively rather than by a mapping table, so a new pattern needs no edit
+   here — and a mismatch shows up as a missed detection rather than as silence. *)
+f=typematches(labelled:str;detected:str):bool{
+  <str.eq(sh.strlower(labelled);sh.strlower(detected))
+};
+
+f=overlaps(astart:i64;aend:i64;bstart:i64;bend:i64):bool{
+  <astart<bend && bstart<aend
+};
+
+(* Does any detection of the same type overlap this labelled span? *)
+f=labelledismatched(dets:@$piientity;ltype:str;lstart:i64;lend:i64):bool{
+  let found=mut.false;
+  lp(let i=0;i<dets.len;i=i+1){
+    let d:$piientity=dets.get(i);
+    if(typematches(ltype;d.entitytype)){
+      if(overlaps(lstart;lend;d.start as i64;d.end as i64)){
+        found=true
+      }el{}
+    }el{}
+  };
+  <found
+};
+
+f=labelledismatchedexact(dets:@$piientity;ltype:str;lstart:i64;lend:i64):bool{
+  let found=mut.false;
+  lp(let i=0;i<dets.len;i=i+1){
+    let d:$piientity=dets.get(i);
+    if(typematches(ltype;d.entitytype)){
+      if((d.start as i64)==lstart){
+        if((d.end as i64)==lend){found=true}el{}
+      }el{}
+    }el{}
+  };
+  <found
+};
+
+(* Only the types the regex layer has a pattern for. Scoring it against PERSON — which needs
+   a network sidecar that is not running — would understate the layer; omitting the others
+   entirely would overstate loke. docs/metrics-baseline.md publishes both figures for exactly
+   that reason, and this is the addressable one. *)
+f=isregexaddressable(ltype:str):bool{
+  let lower=sh.strlower(ltype);
+  <str.eq(lower;"email") || str.eq(lower;"phone_au") || str.eq(lower;"phone_us")
+   || str.eq(lower;"credit_card") || str.eq(lower;"ip_v4") || str.eq(lower;"au_tfn")
+   || str.eq(lower;"au_abn") || str.eq(lower;"ssn_us") || str.eq(lower;"url")
+   || str.eq(lower;"api_key")
+};
+
+f=emptytally():$tally{
+  <$tally{labelled:0;matched:0;matchedexact:0;detections:0;texts:0}
+};
+
+(* The per-entity loop lives in its own function because a match arm is an EXPRESSION —
+   `lp` inside one is rejected. That is why this is not written inline. *)
+f=tallyentities(ents:@$json;dets:@$piientity;acc:$tally):$tally{
+  let labelled=mut.acc.labelled;
+  let matched=mut.acc.matched;
+  let matchedexact=mut.acc.matchedexact;
+  lp(let i=0;i<ents.len;i=i+1){
+    let e=ents.get(i);
+    let etype=mt json.str(e;"type") { $ok:s s; $err:x "" };
+    let estart=mt json.i64(e;"start") { $ok:n n; $err:x 0-1 };
+    let eend=mt json.i64(e;"end") { $ok:n n; $err:x 0-1 };
+    if(isregexaddressable(etype)){
+      if(estart<0){}el{
+        labelled=labelled+1;
+        if(labelledismatched(dets;etype;estart;eend)){matched=matched+1}el{};
+        if(labelledismatchedexact(dets;etype;estart;eend)){matchedexact=matchedexact+1}el{}
+      }
+    }el{}
+  };
+  <$tally{
+    labelled:labelled;
+    matched:matched;
+    matchedexact:matchedexact;
+    detections:acc.detections;
+    texts:acc.texts
+  }
+};
+
+f=scoreone(acc:$tally;line:str):$tally{
+  let obj=json.dec(line);
+  let text=mt json.str(obj;"text") { $ok:s s; $err:e "" };
+  if(str.len(text)==0){
+    <acc
+  }el{
+    let res:$piidetectionresult=rx.detect(text);
+    let dets=res.entities;
+    let counted=mt json.arr(obj;"entities") {
+      $ok:ents tallyentities(ents;dets;acc);
+      $err:e acc
+    };
+    <$tally{
+      labelled:counted.labelled;
+      matched:counted.matched;
+      matchedexact:counted.matchedexact;
+      detections:acc.detections+(dets.len as i64);
+      texts:acc.texts+1
+    }
+  }
+};
+
+f=scorecorpus():$tally{
+  let raw=mt file.read(corpuspath()) { $ok:s s; $err:e "" };
+  if(str.len(raw)==0){
+    <emptytally()
+  }el{
+    let lines=str.split(raw;"
+");
+    let acc=mut.emptytally();
+    lp(let i=0;i<lines.len;i=i+1){
+      let line=lines.get(i);
+      if(str.len(line)>2){
+        acc=scoreone(acc;line)
+      }el{}
+    };
+    <acc
+  }
+};
+
+(* ── The floor ───────────────────────────────────────────────────────────────
+   9000 basis points = 90.00% recall on regex-addressable types, overlap rule.
+
+   Set below the measured value deliberately, and set in BASIS POINTS so the threshold
+   survives crossing a module boundary. If this fails, a change has made detection worse and
+   the right response is to find out why — not to lower the number. *)
+f=recallfloorbp():i64{
+  <9000
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let tally=scorecorpus();
+
+  if(t.assert(tally.texts>0;"the corpus was read (a missing corpus must fail, not score 0/0)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tally.labelled>0;"the corpus carries labelled regex-addressable entities")){pass=pass+1}el{fail=fail+1};
+
+  let fn2=tally.labelled-tally.matched;
+  let rbp=ev.recallbp(tally.matched;fn2);
+  let rbpexact=ev.recallbp(tally.matchedexact;tally.labelled-tally.matchedexact);
+
+  (* Printed unconditionally, pass or fail, and with io.println rather than an assert:
+     std.test.assert is silent on success, so a measurement reported through it is a
+     measurement nobody sees. A threshold assertion that hides its own number tells you only
+     which side of the line you are on. *)
+  io.println(str.concat("  AD1.2 recall (overlap)    = ";str.concat(ev.bplabel(rbp);
+    str.concat("  over ";str.concat(str.fromi64(tally.labelled);
+    str.concat(" labelled entities in ";str.concat(str.fromi64(tally.texts);" texts")))))));
+  io.println(str.concat("  AD1.2 recall (exact span) = ";ev.bplabel(rbpexact)));
+  io.println(str.concat("  AD1.2 detections made     = ";str.fromi64(tally.detections)));
+  io.println(str.concat("  AD1.2 floor               = ";ev.bplabel(recallfloorbp())));
+
+  if(t.assert(rbp>=recallfloorbp();
+    str.concat("recall on regex-addressable types is at or above the floor of ";
+      str.concat(ev.bplabel(recallfloorbp());str.concat(" — measured ";ev.bplabel(rbp)))))){pass=pass+1}el{fail=fail+1};
+
+  (* The exact-span figure is reported but NOT floored. It is a stricter rule and PL1.7's
+     spans are derived from str.indexof on the matched value, so a value occurring twice
+     points at the first occurrence — a known and documented approximation. Flooring a figure
+     whose instrument has a stated approximation would be asserting more than is known. *)
+  if(t.assert(rbpexact<=rbp;"exact-span recall cannot exceed overlap recall — a sanity check on the scorer itself")){pass=pass+1}el{fail=fail+1};
+
+  (* $comparisonmatrix was declared when evaluation.tk was written and never constructed.
+     Constructing it here is what makes a per-layer comparison possible at all; the NER and
+     Presidio layers join it when they can run without a network sidecar. *)
+  let m=ev.newmatrix(tally.labelled;tally.texts);
+  let layer=ev.evaluatelayerbp("regex";tally.detections;tally.labelled;tally.matched);
+  let m2=ev.addlayer(m;layer);
+  if(t.assert(m2.layers.len==1;"the comparison matrix holds the regex layer's result")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m2.totallabelled==tally.labelled;"the matrix carries the labelled total it was built with")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
