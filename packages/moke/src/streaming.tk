@@ -4,6 +4,28 @@
 m=moke.streaming;
 i=str:std.str;
 i=consolelog:moke.consolelog;
+i=time:std.time;
+i=jx:shared.jsonobj;
+
+(* ── Four faults, only some of which the compiler could see ────────────────────────
+   `str.unixnow` exists in neither the std.str interface nor the runtime (E4027). The clock
+   used beside these events is `time.nowms`, which is what moke.consolelog stamps its entries
+   with, so the two timelines line up.
+
+   The append was `s.events.pushcopy(evt)`, and there is no `pushcopy` method. An unknown method
+   call is not type-checked at all (T-7), and measured in the emitted IR it lowers to a call to a
+   BARE GLOBAL named after the method with the RECEIVER DROPPED -- `declare i64 @pushcopy(i64)`.
+   So neither `addtoken` nor `setstage` had an append behind it and the module could not link.
+   `s.events.push(evt)` is the append, and its result is used: a bare `arr.push(x)` lowers to
+   `tk_array_append_w`, which allocates a fresh array and leaves the original alone.
+
+   `consolelog.log` does not exist either; the function is `append`. That one did raise E4027,
+   which is the only reason the event-list bug above was ever going to be found.
+
+   And the JSON builders concatenated with `+`, which is arithmetic, not string concatenation.
+   Interpolation replaces it, and `shared.jsonobj.escape` replaces `str.jsonescape`, which exists
+   in neither the std.str interface nor the runtime -- so every event's data went onto the SSE
+   wire and into the session JSON unescaped. *)
 
 t=$streamstate{
   $idle:i64;
@@ -57,7 +79,7 @@ f=addtoken(s:$streamsession;token:str):$streamsession{
   let evt=$streamevent{
     eventtype:"token";
     data:token;
-    timestamp:str.unixnow()
+    timestamp:time.nowms()
   };
   <$streamsession{
     state:2;
@@ -65,7 +87,7 @@ f=addtoken(s:$streamsession;token:str):$streamsession{
     modelid:s.modelid;
     tokensreceived:s.tokensreceived + 1;
     activestage:"llm_call";
-    events:s.events.pushcopy(evt);
+    events:s.events.push(evt);
     sessionlog:s.sessionlog
   };
 };
@@ -74,7 +96,7 @@ f=setstage(s:$streamsession;stage:str):$streamsession{
   let evt=$streamevent{
     eventtype:"stage";
     data:stage;
-    timestamp:str.unixnow()
+    timestamp:time.nowms()
   };
   <$streamsession{
     state:s.state;
@@ -82,8 +104,8 @@ f=setstage(s:$streamsession;stage:str):$streamsession{
     modelid:s.modelid;
     tokensreceived:s.tokensreceived;
     activestage:stage;
-    events:s.events.pushcopy(evt);
-    sessionlog:consolelog.log(s.sessionlog;stage;"ok";"Stage active";0)
+    events:s.events.push(evt);
+    sessionlog:consolelog.append(s.sessionlog;stage;"ok";"Stage active";0 as i32)
   };
 };
 
@@ -96,19 +118,13 @@ f=statelabel(state:i64):str{
 };
 
 f=eventtojson(e:$streamevent):str{
-  let j=mut."{";
-  j=str.concat(j;"\"event_type\":\"" + str.jsonescape(e.eventtype) + "\"");
-  j=str.concat(j;",\"data\":\"" + str.jsonescape(e.data) + "\"");
-  j=str.concat(j;",\"timestamp\":" + str.fromint64(e.timestamp));
-  j=str.concat(j;"}");
-  <j
+  <"{\"event_type\":\"\(jx.escape(e.eventtype))\",\"data\":\"\(jx.escape(e.data))\",\"timestamp\":\(str.fromint(e.timestamp))}"
 };
 
+(* An SSE frame is `event:`, `data:`, then a BLANK line; the event type is a field name, not
+   payload, so it is not escaped, while the data is. *)
 f=tosse(e:$streamevent):str{
-  <"event: " + e.eventtype + "
-data: " + str.jsonescape(e.data) + "
-
-"
+  <"event: \(e.eventtype)\ndata: \(jx.escape(e.data))\n\n"
 };
 
 f=sessiontojson(s:$streamsession):str{
@@ -118,14 +134,5 @@ f=sessiontojson(s:$streamsession):str{
     eventparts=eventparts.push(eventtojson(e))
   };
   let eventsjson=str.join(",";eventparts);
-  let j="{";
-  j=str.concat(j;"\"state\":\"" + statelabel(s.state) + "\"");
-  j=str.concat(j;",\"request_id\":\"" + str.jsonescape(s.requestid) + "\"");
-  j=str.concat(j;",\"model_id\":\"" + str.jsonescape(s.modelid) + "\"");
-  j=str.concat(j;",\"tokens_received\":" + str.fromint(s.tokensreceived));
-  j=str.concat(j;",\"active_stage\":\"" + str.jsonescape(s.activestage) + "\"");
-  j=str.concat(j;",\"events\":[" + eventsjson + "]");
-  j=str.concat(j;",\"console_log\":" + consolelog.tojson(s.sessionlog));
-  j=str.concat(j;"}");
-  <j
+  <"{\"state\":\"\(statelabel(s.state))\",\"request_id\":\"\(jx.escape(s.requestid))\",\"model_id\":\"\(jx.escape(s.modelid))\",\"tokens_received\":\(str.fromint(s.tokensreceived as i64)),\"active_stage\":\"\(jx.escape(s.activestage))\",\"events\":[\(eventsjson)],\"console_log\":\(consolelog.tojson(s.sessionlog))}"
 };

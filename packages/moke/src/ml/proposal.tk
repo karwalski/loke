@@ -4,6 +4,9 @@
 m=moke.ml.proposal;
 i=str:std.str;
 i=http:std.http;
+i=json:std.json;
+i=reach:shared.reachability;
+i=jx:shared.jsonobj;
 
 
 
@@ -24,166 +27,193 @@ t=$proposalresult{
 
 
 
-f=heuristicproposals(numcols:@str;catcols:@str):@$mlsuggestion{
-  let suggestions=@();
-  let nnum=numcols.len();
-  let ncat=catcols.len();
+(* --- The JSON reader here was five functions that do not exist ---------------------
+   `str.jsonencode`, `str.jsonarray`, `str.ok`, `str.jsonparsearray`, `str.jsonstring` and
+   `str.jsonparsestringarray` are in neither the std.str interface nor the runtime. The encoder
+   meant strings went out unquoted and unescaped; the five readers meant `parsellmsuggestions`
+   could never return anything, so `fromschema` always fell through to the heuristics and the
+   "llm" source was unreachable. std.json plus `shared.jsonobj` is the reader this tree uses,
+   and a raw array handle from `json.getarr` is walked with `str.arraylen`/`str.arrayget`, as
+   `core.privacy.ner.buildentities` does -- `.len`/`.get` are for typed arrays.
 
-  
+   `http.post("/api/moke/pipeline"; "application/json"; body)` had three arguments where the
+   client takes two, and `/api/moke/pipeline` is not a route anything serves: moke's own server
+   listens on 11432 and exposes `/api/pipeline`, and what that route does is forward to the loke
+   pipeline on 11430. This posts to that pipeline directly, the same endpoint and pattern
+   `moke.dashboardflow` uses.
+
+   And every loop in the file was an `if(i < n){ ...; i=i+1 }el{}`, which runs once: the k-means
+   column list held one column, the parsed-suggestion list one suggestion, and `formatsuggestions`
+   printed one. Each `.push` result was also discarded (T-24), so in practice they held none. *)
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
+
+f=heuristicproposals(numcols:@str;catcols:@str):@$mlsuggestion{
+  let suggestions=mut.@();
+  let nnum=numcols.len;
+  let ncat=catcols.len;
+
   if(nnum > 2){
-    let kmcols=@();
     let take=mut.3;
     if(take > nnum){ take=nnum };
-    let ki=mut.0;
-    if(ki < take){ kmcols.push(numcols.get(ki)); ki=ki + 1 }el{};
-    suggestions.push($mlsuggestion{
+    let kmcols=mut.@();
+    lp(let ki=0;ki<take;ki=ki+1){
+      kmcols=kmcols.push(numcols.get(ki))
+    };
+    suggestions=suggestions.push($mlsuggestion{
       kind:"kmeans";
       title:"K-Means Clustering";
       description:"Group rows into natural clusters based on numeric patterns. Useful for segmenting customers, products, or events.";
       columns:kmcols;
       params:"{\"k\":4,\"max_iter\":100}";
-      rationale:str.concat("Dataset has ";str.concat(str.fromint(nnum);" numeric columns — clustering will reveal natural groupings."))
-    });
+      rationale:"Dataset has \(str.fromint(nnum)) numeric columns — clustering will reveal natural groupings."
+    })
   };
 
-  
   if(nnum > 1){
-    let azcols=@();
-    azcols.push(numcols.get(0));
-    suggestions.push($mlsuggestion{
+    suggestions=suggestions.push($mlsuggestion{
       kind:"zscore";
       title:"Z-Score Anomaly Detection";
       description:"Flag rows where a numeric value lies more than N standard deviations from the column mean.";
-      columns:azcols;
+      columns:@(numcols.get(0));
       params:"{\"threshold\":3.0}";
-      rationale:str.concat("Outliers in ";str.concat(numcols.get(0);" may indicate data quality issues or exceptional events."))
-    });
+      rationale:"Outliers in \(numcols.get(0)) may indicate data quality issues or exceptional events."
+    })
   };
 
-  
   if(nnum > 2){
-    suggestions.push($mlsuggestion{
+    suggestions=suggestions.push($mlsuggestion{
       kind:"correlation";
       title:"Pearson Correlation Matrix";
       description:"Compute pairwise linear correlation between all numeric columns to surface relationships.";
       columns:numcols;
       params:"{}";
       rationale:"Correlation will reveal which numeric features move together and guide further modelling."
-    });
+    })
   };
 
-  
   if(nnum > 1 && ncat > 1){
-    let gbcols=@();
-    gbcols.push(catcols.get(0));
-    gbcols.push(numcols.get(0));
-    suggestions.push($mlsuggestion{
+    suggestions=suggestions.push($mlsuggestion{
       kind:"groupby";
       title:"Group-By Analysis";
-      description:str.concat("Compute mean and variance of ";str.concat(numcols.get(0);str.concat(" within each category of ";str.concat(catcols.get(0);"."))));
-      columns:gbcols;
+      description:"Compute mean and variance of \(numcols.get(0)) within each category of \(catcols.get(0)).";
+      columns:@(catcols.get(0);numcols.get(0));
       params:"{\"agg\":\"mean\"}";
-      rationale:str.concat("Segment ";str.concat(numcols.get(0);str.concat(" by ";str.concat(catcols.get(0);" to compare performance across categories."))))
-    });
+      rationale:"Segment \(numcols.get(0)) by \(catcols.get(0)) to compare performance across categories."
+    })
   };
 
   <suggestions
 };
 
-
-
 f=buildprompt(schematoon:str;numcols:@str;catcols:@str):str{
-  let prompt=mut."You are a data analyst. Given the dataset schema below, suggest 2-4 ML analyses.
-
-";
-  prompt=str.concat(prompt;str.concat("SCHEMA PROFILE (no raw data):
-";str.concat(schematoon;"
-
-")));
-  prompt=str.concat(prompt;str.concat("Numeric columns: ";str.concat(str.join(", ";numcols);"
-")));
-  prompt=str.concat(prompt;str.concat("Categorical columns: ";str.concat(str.join(", ";catcols);"
-
-")));
-  prompt=str.concat(prompt;"Respond as a JSON array of objects, each with keys: kind, title, description, columns (array), params (JSON string), rationale.
-");
-  prompt=str.concat(prompt;"Kinds available: kmeans, zscore, iqr, correlation, groupby.
-");
-  prompt=str.concat(prompt;"Be concise and practical. Do not include any raw data or PII in your response.");
-  <prompt
+  <"You are a data analyst. Given the dataset schema below, suggest 2-4 ML analyses.\n\nSCHEMA PROFILE (no raw data):\n\(schematoon)\n\nNumeric columns: \(str.join(", ";numcols))\nCategorical columns: \(str.join(", ";catcols))\n\nRespond as a JSON array of objects, each with keys: kind, title, description, columns (array), params (JSON string), rationale.\nKinds available: kmeans, zscore, iqr, correlation, groupby.\nBe concise and practical. Do not include any raw data or PII in your response."
 };
 
-f=parsellmsuggestions(body:str):@$mlsuggestion{
-  
-  
-  let suggestions=@();
-  let arr=str.jsonarray(body; "response");
-  if(!str.ok(arr)){ <suggestions };
-  let i=mut.0;
-  let items=str.jsonparsearray(arr);
-  if(i < items.len()){
-    let item=items.get(i);
-    let kind=str.jsonstring(item; "kind");
-    let title=str.jsonstring(item; "title");
-    let desc=str.jsonstring(item; "description");
-    let rationale=str.jsonstring(item; "rationale");
-    let params=str.jsonstring(item; "params");
-    let colsraw=str.jsonarray(item; "columns");
-    let cols=str.jsonparsestringarray(colsraw);
+(* $ok first: `mt` binds a result's arms by POSITION, not by label, and writing the error arm
+   first inverts the match (T-31). *)
+f=itemstr(item:i64;key:str):str{
+  <mt json.str(item;key) {
+    $ok:v v;
+    $jsonerr:e ""
+  }
+};
+
+f=itemcols(item:i64):@str{
+  let out=mut.@();
+  let raw=json.getarr(item;"columns");
+  lp(let i=0;i<str.arraylen(raw);i=i+1){
+    out=out.push(itemstr(str.arrayget(raw;i);""))
+  };
+  <out
+};
+
+f=suggestionsfromarray(arr:i64):@$mlsuggestion{
+  let out=mut.@();
+  let items=json.getarr(arr;"");
+  lp(let i=0;i<str.arraylen(items);i=i+1){
+    let item=str.arrayget(items;i);
+    let kind=itemstr(item;"kind");
+    let title=itemstr(item;"title");
     if(str.len(kind) > 0 && str.len(title) > 0){
-      suggestions.push($mlsuggestion{
+      out=out.push($mlsuggestion{
         kind:kind;
         title:title;
-        description:desc;
-        columns:cols;
-        params:params;
-        rationale:rationale
-      });
-    };
-    i=i + 1;
-  }el{};
-  <suggestions
+        description:itemstr(item;"description");
+        columns:itemcols(item);
+        params:itemstr(item;"params");
+        rationale:itemstr(item;"rationale")
+      })
+    }
+  };
+  <out
+};
+
+(* The model is asked for a bare JSON array. `response` is read first because that is the field
+   the loke pipeline wraps a completion in; a reply that is already the array is parsed directly. *)
+f=parsellmsuggestions(body:str):@$mlsuggestion{
+  let inner=mt json.dec(body) {
+    $ok:o itemstr(o;"response");
+    $jsonerr:e ""
+  };
+  let payload=mut.body;
+  if(str.len(inner)>0){ payload=inner };
+  <mt json.dec(payload) {
+    $ok:arr suggestionsfromarray(arr);
+    $jsonerr:e @()
+  }
+};
+
+f=pipelinebaseurl():str{
+  <"http://127.0.0.1:11430"
+};
+
+(* `http.postheaders` against a dead port reports $ok carrying nothing (T-15), so the port is
+   checked first rather than treating an empty body as a model that had nothing to say. *)
+f=askpipeline(prompt:str):str{
+  if(reach.localserviceup(pipelinebaseurl())){}el{
+    <""
+  };
+  let body="{\"text\":\(jsonencode(prompt)),\"system_prompt\":\"\",\"tolerance\":\"patient\",\"mode\":\"chat\"}";
+  let hc=http.client(pipelinebaseurl());
+  <mt http.postheaders(hc;"/api/pipeline";str.tobytes(body);"{\"content-type\":\"application/json\"}") {
+    $ok:raw raw;
+    $httperr:e ""
+  }
 };
 
 f=fromschema(schematoon:str;numcols:@str;catcols:@str):$proposalresult{
-  let prompt=buildprompt(schematoon; numcols; catcols);
-  let body=str.concat("{\"text\":";str.concat(str.jsonencode(prompt);",\"system_prompt\":\"\",\"tolerance\":\"patient\",\"mode\":\"chat\"}"));
-  let res=http.post("/api/moke/pipeline"; "application/json"; body);
-  if(http.ok(res)){
-    let suggestions=parsellmsuggestions(http.body(res));
-    if(suggestions.len() > 0){
+  let reply=askpipeline(buildprompt(schematoon;numcols;catcols));
+  if(str.len(reply)>0){
+    let suggestions=parsellmsuggestions(reply);
+    if(suggestions.len > 0){
       <$proposalresult{
         suggestions:suggestions;
         source:"llm"
       }
-    };
+    }
   };
-  
   <$proposalresult{
-    suggestions:heuristicproposals(numcols; catcols);
+    suggestions:heuristicproposals(numcols;catcols);
     source:"heuristic"
   }
 };
 
-
-
 f=formatsuggestions(result:$proposalresult):str{
-  let lines=@();
-  lines.push(str.concat("Analysis proposals (source: ";str.concat(result.source;")")));
-  lines.push("---");
-  let i=mut.0;
-  if(i < result.suggestions.len()){
-    let s=result.suggestions.get(i);
-    lines.push(str.concat(str.fromint(i + 1);str.concat(". [";str.concat(str.upper(s.kind);str.concat("] ";s.title)))));
-    lines.push(str.concat("   ";s.description));
-    lines.push(str.concat("   Columns: ";str.join(", ";s.columns)));
-    lines.push(str.concat("   Why: ";s.rationale));
+  let lines=mut.@();
+  lines=lines.push("Analysis proposals (source: \(result.source))");
+  lines=lines.push("---");
+  lp(let i=0;i<result.suggestions.len;i=i+1){
+    let s:$mlsuggestion=result.suggestions.get(i);
+    lines=lines.push("\(str.fromint(i+1)). [\(str.upper(s.kind))] \(s.title)");
+    lines=lines.push("   \(s.description)");
+    lines=lines.push("   Columns: \(str.join(", ";s.columns))");
+    lines=lines.push("   Why: \(s.rationale)");
     if(str.len(s.params) > 2){
-      lines.push(str.concat("   Params: ";s.params));
+      lines=lines.push("   Params: \(s.params)")
     };
-    lines.push("");
-    i=i + 1;
-  }el{};
-  <str.join("
-";lines)
+    lines=lines.push("")
+  };
+  <str.join("\n";lines)
 };

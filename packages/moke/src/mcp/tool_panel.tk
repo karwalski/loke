@@ -5,6 +5,7 @@ m=moke.mcp.toolpanel;
 i=str:std.str;
 i=tools:mcptoke.tools;
 i=proto:core.mcp.protocol;
+i=jx:shared.jsonobj;
 
 
 t=$tooldisplay{
@@ -32,30 +33,54 @@ t=$toolpanelstate{
 };
 
 
+(* --- Three faults, one of them a loop that was written as an `if` -----------------
+   `str.jsonencode` exists in neither the std.str interface nor the runtime, so every string this
+   module put on the wire went out unquoted and unescaped: the JSON was malformed for any value
+   containing a quote, a backslash or a newline, and structurally malformed for all of them
+   because the quotes themselves were missing. `shared.jsonobj.escape` is the escaper -- std.json
+   is not usable for this (T-32).
+
+   `panelstatetojson` and the trim in `addinvocation` used `if(i < arr.len()){ ...; i=i+1 }el{}`
+   where a `lp` was meant. Each therefore handled exactly ONE element: the panel JSON listed one
+   tool and one invocation however many there were, and the 100-entry trim reduced the history to
+   a single entry rather than to its last hundred. Neither raised a diagnostic: a discarded
+   `.push` result is legal (T-24), and the `.len()` spelling was not itself a fault -- measured in
+   the emitted IR it produces the identical `getelementptr i64, i64* %p, i32 -1` as `.len`.
+
+   `addinvocation(state:i64;...)` read `.invocations`, `.tools` and `.totalinvocations` off an
+   integer; it takes a `$toolpanelstate`. *)
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
+
+f=categoryfor(name:str):str{
+  if(str.eq(name;"anonymise")){ <"privacy" };
+  if(str.eq(name;"analyse")){ <"privacy" };
+  if(str.eq(name;"profile")){ <"analysis" };
+  <"transform"
+};
+
+f=iconfor(name:str):str{
+  if(str.eq(name;"compress")){ <"minimize" };
+  if(str.eq(name;"decompress")){ <"maximize" };
+  if(str.eq(name;"profile")){ <"bar-chart" };
+  if(str.eq(name;"analyse")){ <"shield" };
+  if(str.eq(name;"anonymise")){ <"eye-off" };
+  <"wrench"
+};
+
 f=gettooldisplays():@$tooldisplay{
   let mcptools=tools.alltools();
-  let displays=@();
-  let ti=mut.0;
-  lp(let lv=0;ti < mcptools.len();lv=lv){
+  let displays=mut.@();
+  lp(let ti=0;ti<mcptools.len;ti=ti+1){
     let t=mcptools.get(ti);
-    let category="transform";
-    if(str.eq(t.name;"anonymise")){ category="privacy" };
-    if(str.eq(t.name;"analyse")){ category="privacy" };
-    if(str.eq(t.name;"profile")){ category="analysis" };
-    let icon="wrench";
-    if(str.eq(t.name;"compress")){ icon="minimize" };
-    if(str.eq(t.name;"decompress")){ icon="maximize" };
-    if(str.eq(t.name;"profile")){ icon="bar-chart" };
-    if(str.eq(t.name;"analyse")){ icon="shield" };
-    if(str.eq(t.name;"anonymise")){ icon="eye-off" };
-    displays.push($tooldisplay{
+    displays=displays.push($tooldisplay{
       name:t.name;
       description:t.description;
       inputschema:t.inputschema;
-      category:category;
-      icon:icon
-    });
-    ti=ti + 1
+      category:categoryfor(t.name);
+      icon:iconfor(t.name)
+    })
   };
   <displays
 };
@@ -94,16 +119,14 @@ f=newpanelstate():$toolpanelstate{
   };
 };
 
-f=addinvocation(state:i64;inv:$toolinvocation):$toolpanelstate{
-  let invocations=mut.state.invocations;
-  invocations.push(inv);
-  if(invocations.len() > 100){
-    let trimmed=@();
-    let ti=invocations.len() - 100;
-    if(ti < invocations.len()){
-      trimmed.push(invocations.get(ti));
-      ti=ti + 1
-    }el{};
+(* Keeps the most recent 100 invocations. *)
+f=addinvocation(state:$toolpanelstate;inv:$toolinvocation):$toolpanelstate{
+  let invocations=mut.state.invocations.push(inv);
+  if(invocations.len > 100){
+    let trimmed=mut.@();
+    lp(let ti=invocations.len-100;ti<invocations.len;ti=ti+1){
+      trimmed=trimmed.push(invocations.get(ti))
+    };
     invocations=trimmed
   };
   <$toolpanelstate{
@@ -116,15 +139,15 @@ f=addinvocation(state:i64;inv:$toolinvocation):$toolpanelstate{
 
 f=tooldisplaytojson(t:$tooldisplay):str{
   <str.concat("{\"name\":";
-    str.concat(str.jsonencode(t.name);
+    str.concat(jsonencode(t.name);
     str.concat(",\"description\":";
-    str.concat(str.jsonencode(t.description);
+    str.concat(jsonencode(t.description);
     str.concat(",\"input_schema\":";
     str.concat(t.inputschema;
     str.concat(",\"category\":";
-    str.concat(str.jsonencode(t.category);
+    str.concat(jsonencode(t.category);
     str.concat(",\"icon\":";
-    str.concat(str.jsonencode(t.icon);
+    str.concat(jsonencode(t.icon);
     "}"))))))))))
 };
 
@@ -132,40 +155,36 @@ f=invocationtojson(inv:$toolinvocation):str{
   let successstr=mut."false";
   if(inv.success){ successstr="true" }el{};
   <str.concat("{\"tool_name\":";
-    str.concat(str.jsonencode(inv.toolname);
+    str.concat(jsonencode(inv.toolname);
     str.concat(",\"args_json\":";
-    str.concat(str.jsonencode(inv.argsjson);
+    str.concat(jsonencode(inv.argsjson);
     str.concat(",\"timestamp\":";
-    str.concat(str.jsonencode(inv.timestamp);
+    str.concat(jsonencode(inv.timestamp);
     str.concat(",\"duration_ms\":";
-    str.concat(str.fromi32(inv.durationms);
+    str.concat(str.fromint(inv.durationms as i64);
     str.concat(",\"success\":";
     str.concat(successstr;
     str.concat(",\"result_json\":";
-    str.concat(str.jsonencode(inv.resultjson);
+    str.concat(jsonencode(inv.resultjson);
     str.concat(",\"error\":";
-    str.concat(str.jsonencode(inv.error);
+    str.concat(jsonencode(inv.error);
     "}"))))))))))))))
 };
 
 f=panelstatetojson(state:$toolpanelstate):str{
-  let toolparts=@();
-  let ti=0;
-  if(ti < state.tools.len()){
-    toolparts.push(tooldisplaytojson(state.tools.get(ti)));
-    ti=ti + 1
-  }el{};
-  let invparts=@();
-  let ii=mut.0;
-  if(ii < state.invocations.len()){
-    invparts.push(invocationtojson(state.invocations.get(ii)));
-    ii=ii + 1
-  }el{};
+  let toolparts=mut.@();
+  lp(let ti=0;ti<state.tools.len;ti=ti+1){
+    toolparts=toolparts.push(tooldisplaytojson(state.tools.get(ti)))
+  };
+  let invparts=mut.@();
+  lp(let ii=0;ii<state.invocations.len;ii=ii+1){
+    invparts=invparts.push(invocationtojson(state.invocations.get(ii)))
+  };
   <str.concat("{\"tools\":[";
     str.concat(str.join(",";toolparts);
     str.concat("],\"invocations\":[";
     str.concat(str.join(",";invparts);
     str.concat("],\"total_invocations\":";
-    str.concat(str.fromi32(state.totalinvocations);
+    str.concat(str.fromint(state.totalinvocations as i64);
     "}"))))))
 };

@@ -5,187 +5,296 @@ m=page.moke.api.ml;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=fmt:std.fmt;
+i=jx:shared.jsonobj;
 i=engine:moke.ml.engine;
 i=proposal:moke.ml.proposal;
 
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser
+   tree uses throughout; it links and runs. Filed as T-34. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* ── Reading JSON out of the request ──────────────────────────────────────────────
+   Four of the readers this file used do not exist anywhere: json.getstrarray,
+   json.parse2dstrarray, json.getobj and json.encodestrarray are in no std.json interface and in
+   no runtime (E4027 on each). A fifth, json.getstr, is worse than absent: it is one of roughly
+   fifty names std.json declares `(i64, i64) -> i64`, which read a different representation
+   reached through json.parse, and because a handle and a one-field struct share an ABI, handing
+   one raw request text compiles, links, and then dereferences the string's first word as a
+   pointer. Measured at the pinned toolchain: a program calling json.getstr on a str exits 139,
+   SIGSEGV. Every POST here would have killed the moke server on its first field read (T-32).
+
+   What does work is the eight typed accessors plus shared.jsonobj. json.arr returns real Json
+   elements and each element's `.raw` holds that element's exact JSON text — measured against
+   {"headers":["a","b c","q\"z"]}, three elements with the escapes intact, and a nested
+   ["1","2"] for an array of arrays. json.arr needs a KEY, so a bare array value is read by
+   wrapping it in a one-field object first; that is wrapvalue, and it is how the 2-D case
+   recurses. jx.nested is the nested-object reader std.json has no equivalent for.
+
+   Every arm list below writes $ok FIRST, because mt binds a result's arms by POSITION and not by
+   label (T-31): err-first inverts the match and hands the error payload to the success path. *)
+f=rawof(o:$json):str{ <o.raw };
+
+(* The JSON string escapes, undone. Four sequential str.replace calls with the backslash pair last
+   is the obvious shape and it is WRONG. Consider a value whose real content is the three
+   characters backslash, n, b: JSON writes that as an escaped backslash followed by a plain n and
+   b, so the text contains two backslashes then "nb". A replace looking for backslash-then-n
+   matches the SECOND backslash and turns it into a real newline, and the value silently changes
+   under you. Doing the backslash pair first has the mirror problem.
+
+   Splitting the text on the escaped-backslash pair removes it as a delimiter, so no segment can
+   contain a backslash that was half of one, and inside a segment every backslash is the start of a
+   genuine escape. Rejoining with a single backslash puts the literal ones back. Measured against
+   six cases this session, including that one and a genuine newline escape. *)
+f=unescapeseg(s:str):str{
+  let a=str.replace(s;"\\n";"
+");
+  let b=str.replace(a;"\\t";"	");
+  let c=str.replace(b;"\\r";"
+");
+  <str.replace(c;"\\\"";"\"")
+};
+
+f=unquote(raw:str):str{
+  let t=str.trim(raw);
+  if(str.len(t) < 2){ <"" }el{};
+  let inner=str.trimsuffix(str.trimprefix(t;"\"");"\"");
+  let segs=str.split(inner;"\\\\");
+  let out=mut.@();
+  lp(let i=0;i<segs.len();i=i+1){
+    out=out.push(unescapeseg(segs.get(i)))
+  };
+  <str.join("\\";out)
+};
+
+f=wrapvalue(raw:str):$json{
+  <mt json.dec(str.concat("{\"v\":";str.concat(raw;"}"))) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  }
+};
+
+f=strarrayat(o:$json;key:str):@str{
+  let arr=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<arr.len();i=i+1){
+    out=out.push(unquote(rawof(arr.get(i))))
+  };
+  <out
+};
+
+f=rows2d(raw:str):@(@str){
+  let outer=mt json.arr(wrapvalue(raw);"v") {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<outer.len();i=i+1){
+    out=out.push(strarrayat(wrapvalue(rawof(outer.get(i)));"v"))
+  };
+  <out
+};
+
+f=strat(o:$json;key:str;fallback:str):str{
+  <mt json.str(o;key) {
+    $ok:v v;
+    $jsonerr:e fallback
+  }
+};
+
+(* str.isnumeric and str.isfloat are in neither the interface nor the runtime, and str.parsei32
+   is one of the untyped `(i64) -> i64` names. The test and the conversion are the same operation:
+   str.toint is declared str -> i64!ParseErr and str.tofloat str -> f64!ParseErr, and both
+   discriminate — measured, str.toint("notanumber") takes the error arm. So the guard is the
+   match, and the fallback lives in the error arm rather than in a separate literal. *)
+f=intor(s:str;fallback:i32):i32{
+  <mt str.toint(s) {
+    $ok:v v as i32;
+    $err:e fallback
+  }
+};
+
+f=floator(s:str;fallback:f64):f64{
+  <mt str.tofloat(s) {
+    $ok:v v;
+    $err:e fallback
+  }
+};
+
+f=strarrayjson(items:@str):str{
+  let parts=mut.@();
+  lp(let i=0;i<items.len();i=i+1){
+    parts=parts.push(json.enc(items.get(i)))
+  };
+  <str.concat("[";str.concat(str.join(",";parts);"]"))
+};
+
+f=kmeansbody(result:$kmeansresult):str{
+  (* fmt.arr for the cluster assignments, which are @i64: json.encodei32array, which this file
+     called, does not exist. fmt.f64 for the inertia rather than str.fromf32 — fromf32 is an alias
+     for tk_str_fromfloat_w and reads its argument as f64 BITS, so it is right here only by
+     accident and wrong the moment someone passes it a genuine f32. *)
+  <str.concat("{\"ok\":true,\"kind\":\"kmeans\",\"k\":";
+    str.concat(str.fromint(result.k as i64);
+    str.concat(",\"iterations\":";
+    str.concat(str.fromint(result.iterations as i64);
+    str.concat(",\"inertia\":";
+    str.concat(fmt.f64(result.inertia;4);
+    str.concat(",\"assignments\":[";
+    str.concat(fmt.arr(result.assignments;",");
+    "]}"))))))))
+};
+
+f=anomalybody(kind:str;result:$anomalyresult):str{
+  <str.concat("{\"ok\":true,\"kind\":";
+    str.concat(json.enc(kind);
+    str.concat(",\"column\":";
+    str.concat(json.enc(result.column);
+    str.concat(",\"method\":";
+    str.concat(json.enc(result.method);
+    str.concat(",\"threshold\":";
+    str.concat(fmt.f64(result.threshold;4);
+    str.concat(",\"anomaly_count\":";
+    str.concat(str.fromint(result.anomalies.len() as i64);
+    "}"))))))))))
+};
+
+f=correlationbody(results:@$correlationresult):str{
+  (* mut. on the accumulator and `parts=parts.push(...)`: push RETURNS a new array and does not
+     mutate in place, and an unused method result draws no diagnostic (T-7, T-24). The old code
+     declared this as a plain `let` — E4070 on the rebind — and discarded the push, so the pairs
+     list would have been empty even once it compiled. *)
+  let parts=mut.@();
+  lp(let i=0;i<results.len();i=i+1){
+    let r=results.get(i);
+    let p=str.concat("{\"col_a\":";
+      str.concat(json.enc(r.cola);
+      str.concat(",\"col_b\":";
+      str.concat(json.enc(r.colb);
+      str.concat(",\"pearson_r\":";
+      str.concat(fmt.f64(r.pearsonr;4);
+      str.concat(",\"strength\":";
+      str.concat(json.enc(r.strength);
+      "}"))))))));
+    parts=parts.push(p)
+  };
+  <str.concat("{\"ok\":true,\"kind\":\"correlation\",\"pairs\":[";
+    str.concat(str.join(",";parts);
+    "]}"))
+};
+
 f=postrun(req:i64):i64{
-  let body=req.body;
-
-  let kind=mt json.getstr(body;"kind") {
-    ok:v v;
-    err:e ""
-  };
-  let optsraw=mt json.getobj(body;"opts") {
-    ok:v v;
-    err:e "{}"
-  };
-  let datasetname=mt json.getstr(body;"dataset_name") {
-    ok:v v;
-    err:e ""
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
 
+  let kind=strat(obj;"kind";"");
   if(str.eq(kind;"")){
-    <http.res.err(400;"missing required field: kind")
+    <errjson(400;"missing required field: kind")
   };
 
-  let headers=mt json.getstrarray(body;"headers") {
-    ok:v v;
-    err:e @()
-  };
-  let rowsjson=mt json.getstr(body;"rows_json") {
-    ok:v v;
-    err:e "[]"
-  };
-  let rows=mt json.parse2dstrarray(rowsjson) {
-    ok:v v;
-    err:e @()
-  };
-
-  let respbody="";
+  (* jx.nested, because std.json cannot read a nested value at all (T-32) and json.getobj — which
+     this file used — exists in neither the interface nor the runtime. *)
+  let opts=jx.nested(obj;"opts");
+  let headers=strarrayat(obj;"headers");
+  let rows=rows2d(strat(obj;"rows_json";"[]"));
 
   if(str.eq(kind;"kmeans")){
-    let kstr=mt json.getstr(optsraw;"k") { ok:v v; err:e "4" };
-    let maxiterstr=mt json.getstr(optsraw;"max_iter") { ok:v v; err:e "100" };
-    let k=4;
-    let maxiter=100;
-    if(str.isnumeric(kstr)){ k=str.parsei32(kstr) };
-    if(str.isnumeric(maxiterstr)){ maxiter=str.parsei32(maxiterstr) };
-    let colnames=mt json.getstrarray(optsraw;"columns") {
-      ok:v v;
-      err:e @()
+    let kopts=$kmeansopts{
+      k:intor(strat(opts;"k";"4");4 as i32);
+      maxiter:intor(strat(opts;"max_iter";"100");100 as i32);
+      columns:strarrayat(opts;"columns")
     };
-    let opts=$kmeansopts{
-      k:k;
-      maxiter:maxiter;
-      columns:colnames
-    };
-    let result=engine.kmeans(headers;rows;opts);
-    respbody=str.concat("{";
-      str.concat("\"ok\":true,\"kind\":\"kmeans\",";
-      str.concat("\"k\":";
-      str.concat(str.fromi32(result.k);
-      str.concat(",\"iterations\":";
-      str.concat(str.fromi32(result.iterations);
-      str.concat(",\"inertia\":";
-      str.concat(str.fromf32(result.inertia);
-      str.concat(",\"assignments\":";
-      str.concat(json.encodei32array(result.assignments);
-      "}"))))))))))
-  };
+    <http.res(200;kmeansbody(engine.kmeans(headers;rows;kopts)))
+  }el{};
 
   if(str.eq(kind;"zscore")){
-    let column=mt json.getstr(optsraw;"column") { ok:v v; err:e "" };
-    let threshstr=mt json.getstr(optsraw;"threshold") { ok:v v; err:e "3.0" };
-    let threshold=3.0;
-    if(str.isfloat(threshstr)){ threshold=str.tofloat(threshstr) };
-    let opts=$anomalyopts{
-      column:column;
-      threshold:threshold;
+    let zopts=$anomalyopts{
+      column:strat(opts;"column";"");
+      threshold:floator(strat(opts;"threshold";"3.0");3.0);
       method:"zscore"
     };
-    let result=engine.zscoreanomalies(headers;rows;opts);
-    respbody=str.concat("{";
-      str.concat("\"ok\":true,\"kind\":\"zscore\",";
-      str.concat("\"column\":";
-      str.concat(str.jsonencode(result.column);
-      str.concat(",\"method\":\"zscore\",\"threshold\":";
-      str.concat(str.fromf32(result.threshold);
-      str.concat(",\"anomaly_count\":";
-      str.concat(str.fromi32(result.anomalies.len());
-      "}"))))))))
-  };
+    <http.res(200;anomalybody("zscore";engine.zscoreanomalies(headers;rows;zopts)))
+  }el{};
 
   if(str.eq(kind;"iqr")){
-    let column=mt json.getstr(optsraw;"column") { ok:v v; err:e "" };
-    let threshstr=mt json.getstr(optsraw;"threshold") { ok:v v; err:e "1.5" };
-    let threshold=1.5;
-    if(str.isfloat(threshstr)){ threshold=str.tofloat(threshstr) };
-    let opts=$anomalyopts{
-      column:column;
-      threshold:threshold;
+    let iopts=$anomalyopts{
+      column:strat(opts;"column";"");
+      threshold:floator(strat(opts;"threshold";"1.5");1.5);
       method:"iqr"
     };
-    let result=engine.iqranomalies(headers;rows;opts);
-    respbody=str.concat("{";
-      str.concat("\"ok\":true,\"kind\":\"iqr\",";
-      str.concat("\"column\":";
-      str.concat(str.jsonencode(result.column);
-      str.concat(",\"method\":\"iqr\",\"threshold\":";
-      str.concat(str.fromf32(result.threshold);
-      str.concat(",\"anomaly_count\":";
-      str.concat(str.fromi32(result.anomalies.len());
-      "}"))))))))
-  };
+    <http.res(200;anomalybody("iqr";engine.iqranomalies(headers;rows;iopts)))
+  }el{};
 
   if(str.eq(kind;"correlation")){
-    let results=engine.correlationmatrix(headers;rows);
-    let pairsparts=@();
-    let ri=0;
-    lp(let lv=0;ri < results.len();lv=lv){
-      let r=results.get(ri);
-      let p=mut.str.concat("{\"col_a\":";str.jsonencode(r.cola));
-      p=str.concat(p;str.concat(",\"col_b\":";str.jsonencode(r.colb)));
-      p=str.concat(p;str.concat(",\"pearson_r\":";str.fromf32(r.pearsonr)));
-      p=str.concat(p;str.concat(",\"strength\":";str.jsonencode(r.strength)));
-      let part=str.concat(p;"}");
-      pairsparts=pairsparts.push(part);
-      ri=ri + 1
-    };
-    respbody=str.concat("{\"ok\":true,\"kind\":\"correlation\",\"pairs\":[";
-      str.concat(str.join(",";pairsparts);
-      "]}"))
-  };
+    <http.res(200;correlationbody(engine.correlationmatrix(headers;rows)))
+  }el{};
 
-  if(str.len(respbody) == 0){
-    <http.res.err(400;str.concat("unknown kind: ";kind))
-  };
-
-  <http.res.json(200;respbody)
+  (* Returning from each branch rather than accumulating into a `respbody` and testing it for
+     emptiness at the end. The old shape declared `let respbody=""` and rebound it in four `if`
+     bodies — E4070 four times — and then treated an empty accumulator as "unknown kind", which
+     conflates a kind nobody implements with a kind that legitimately produced no output. *)
+  <errjson(400;str.concat("unknown kind: ";kind))
 };
 
 f=postpropose(req:i64):i64{
-  let body=req.body;
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
 
-  let schematoon=mt json.getstr(body;"schema_toon") {
-    ok:v v;
-    err:e ""
-  };
-  let numcols=mt json.getstrarray(body;"num_cols") {
-    ok:v v;
-    err:e @()
-  };
-  let catcols=mt json.getstrarray(body;"cat_cols") {
-    ok:v v;
-    err:e @()
-  };
+  let schematoon=strat(obj;"schema_toon";"");
+  let numcols=strarrayat(obj;"num_cols");
+  let catcols=strarrayat(obj;"cat_cols");
 
   if(str.eq(schematoon;"") && numcols.len() == 0 && catcols.len() == 0){
-    <http.res.err(400;"at least one of schema_toon, num_cols, or cat_cols is required")
+    <errjson(400;"at least one of schema_toon, num_cols, or cat_cols is required")
   };
 
   let result=proposal.fromschema(schematoon;numcols;catcols);
 
-  let suggestionparts=@();
-  let si=0;
-  lp(let lv=0;si < result.suggestions.len();lv=lv){
+  let parts=mut.@();
+  lp(let si=0;si<result.suggestions.len();si=si+1){
     let s=result.suggestions.get(si);
-    let coljson=json.encodestrarray(s.columns);
-    let p=mut.str.concat("{\"kind\":";str.jsonencode(s.kind));
-    p=str.concat(p;str.concat(",\"title\":";str.jsonencode(s.title)));
-    p=str.concat(p;str.concat(",\"description\":";str.jsonencode(s.description)));
-    p=str.concat(p;str.concat(",\"columns\":";coljson));
-    p=str.concat(p;str.concat(",\"params\":";str.jsonencode(s.params)));
-    p=str.concat(p;str.concat(",\"rationale\":";str.jsonencode(s.rationale)));
-    let part=str.concat(p;"}");
-    suggestionparts=suggestionparts.push(part);
-    si=si + 1
+    let p=str.concat("{\"kind\":";
+      str.concat(json.enc(s.kind);
+      str.concat(",\"title\":";
+      str.concat(json.enc(s.title);
+      str.concat(",\"description\":";
+      str.concat(json.enc(s.description);
+      str.concat(",\"columns\":";
+      str.concat(strarrayjson(s.columns);
+      str.concat(",\"params\":";
+      str.concat(json.enc(s.params);
+      str.concat(",\"rationale\":";
+      str.concat(json.enc(s.rationale);
+      "}"))))))))))));
+    parts=parts.push(p)
   };
 
-  let respbody=str.concat("{\"ok\":true,\"source\":";
-    str.concat(str.jsonencode(result.source);
+  <http.res(200;str.concat("{\"ok\":true,\"source\":";
+    str.concat(json.enc(result.source);
     str.concat(",\"suggestions\":[";
-    str.concat(str.join(",";suggestionparts);
-    "]}"))));
-
-  <http.res.json(200;respbody)
+    str.concat(str.join(",";parts);
+    "]}")))))
 };

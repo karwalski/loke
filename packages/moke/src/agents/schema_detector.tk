@@ -3,8 +3,35 @@
 
 m=moke.agents.schemadetector;
 i=str:std.str;
+i=jx:shared.jsonobj;
 i=hooks:moke.hooks;
 
+(* ── The comparison ran once, and the JSON was unbalanced ──────────────────────────
+   The eight reported diagnostics were all one thing: the `difftojson` accumulation nested
+   `str.concat` twenty deep and closed with twenty-one parentheses, which took the parser out at
+   line 175 and made every following declaration unreachable. Behind that:
+
+   1. **All seven loops were `if(i < n){ ...; i=i+1 }el{}`.** Each ran ONCE. `compareschemas`
+      therefore compared the FIRST old column against the FIRST new column and stopped: a
+      dropped column was reported only if it was column 0, a type change only if both sides had
+      it first, and the added/removed/changed tallies counted at most one. A schema-change
+      detector that looks at one column is not a detector, and nothing in the compiler objects —
+      an `if` where a `lp` was meant type-checks and runs.
+   2. **`changes.push(...)` discarded the array `.push` returns** (T-24), so even that one
+      finding never reached the list.
+   3. **`oldschema:i64` and `newschema:i64`** while the body read `.columns`, `.rowcount` and
+      `.colcount` off them. Member access on an integer is not checked, so it walked a raw word
+      as a struct. Both are `$schemaprofile`, the type `moke.hooks.extractschema` returns.
+   4. **`str.jsonencode` and `str.fromi32` are not real.** `jsonencode` here wraps
+      `shared.jsonobj.escape` in the quotes the old call was expected to add and never did —
+      every string went onto the wire unquoted. `str.fromi32` is a
+      `gen:"abi"` alias; `str.fromint` is the declared one.
+   5. **`str.concat(marker;" ";...)`** passed three arguments to a two-argument function.
+   6. **`.len()` at seven sites** reads as `.len` now -- consistency only, not a fault: measured
+      in the emitted IR both spellings produce the identical
+      `getelementptr i64, i64* %p, i32 -1`.
+
+   `rowdelta` was computed and never used, so it is gone. *)
 
 t=$columnchange{
   column:str;
@@ -26,99 +53,101 @@ t=$schemadiff{
   summary:str
 };
 
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
 
-f=compareschemas(datasetid:str;oldschema:i64;newschema:i64;timestamp:str):$schemadiff{
-  let changes=@();
-  let hasbreaking=mut.false;
+f=findcol(cols:@$colprofile;name:str):i64{
+  lp(let i=0;i<cols.len;i=i+1){
+    let c:$colprofile=cols.get(i);
+    if(str.eq(c.name;name)){
+      <i
+    }
+  };
+  <(0-1)
+};
 
-  let oldcols=oldschema.columns;
-  let newcols=newschema.columns;
+f=countoftype(changes:@$columnchange;changetype:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<changes.len;i=i+1){
+    let c:$columnchange=changes.get(i);
+    if(str.eq(c.changetype;changetype)){ n=n+1 }
+  };
+  <n
+};
 
-  let oi=mut.0;
-  if(oi < oldcols.len()){
-    let oldcol=oldcols.get(oi);
-    let found=false;
-    let ni=mut.0;
-    if(ni < newcols.len()){
-      if(str.eq(newcols.get(ni).name;oldcol.name)){ found=true };
-      ni=ni + 1
-    }el{};
-    if(!found){
-      changes.push($columnchange{
+(* A column present before and absent after is BREAKING: anything downstream that selects it
+   fails. A new column is informational, and a changed type is a warning rather than breaking
+   because a widening change (int to float, say) usually still reads. *)
+f=removedchanges(oldcols:@$colprofile;newcols:@$colprofile):@$columnchange{
+  let out=mut.@();
+  lp(let oi=0;oi<oldcols.len;oi=oi+1){
+    let oldcol:$colprofile=oldcols.get(oi);
+    if(findcol(newcols;oldcol.name)<0){
+      out=out.push($columnchange{
         column:oldcol.name;
         changetype:"removed";
         oldvalue:oldcol.coltype;
         newvalue:"";
         severity:"breaking"
-      });
-      hasbreaking=true
-    };
-    oi=oi + 1
-  }el{};
+      })
+    }
+  };
+  <out
+};
 
-  let ni=0;
-  if(ni < newcols.len()){
-    let newcol=newcols.get(ni);
-    let found=false;
-    let oi2=mut.0;
-    if(oi2 < oldcols.len()){
-      if(str.eq(oldcols.get(oi2).name;newcol.name)){ found=true };
-      oi2=oi2 + 1
-    }el{};
-    if(!found){
-      changes.push($columnchange{
+f=addedchanges(oldcols:@$colprofile;newcols:@$colprofile):@$columnchange{
+  let out=mut.@();
+  lp(let ni=0;ni<newcols.len;ni=ni+1){
+    let newcol:$colprofile=newcols.get(ni);
+    if(findcol(oldcols;newcol.name)<0){
+      out=out.push($columnchange{
         column:newcol.name;
         changetype:"added";
         oldvalue:"";
         newvalue:newcol.coltype;
         severity:"info"
       })
-    };
-    ni=ni + 1
-  }el{};
+    }
+  };
+  <out
+};
 
-  let ci=mut.0;
-  if(ci < oldcols.len()){
-    let oldcol=oldcols.get(ci);
-    let mi=mut.0;
-    if(mi < newcols.len()){
-      let newcol=newcols.get(mi);
-      if(str.eq(oldcol.name;newcol.name)){
-        if(str.eq(oldcol.coltype;newcol.coltype)==false){
-          changes.push($columnchange{
-            column:oldcol.name;
-            changetype:"type_changed";
-            oldvalue:oldcol.coltype;
-            newvalue:newcol.coltype;
-            severity:"warning"
-          })
-        };
-      };
-      mi=mi + 1
-    }el{};
-    ci=ci + 1
-  }el{};
+f=typechanges(oldcols:@$colprofile;newcols:@$colprofile):@$columnchange{
+  let out=mut.@();
+  lp(let oi=0;oi<oldcols.len;oi=oi+1){
+    let oldcol:$colprofile=oldcols.get(oi);
+    let at=findcol(newcols;oldcol.name);
+    if(at>=0){
+      let newcol:$colprofile=newcols.get(at);
+      if(str.eq(oldcol.coltype;newcol.coltype)){}el{
+        out=out.push($columnchange{
+          column:oldcol.name;
+          changetype:"type_changed";
+          oldvalue:oldcol.coltype;
+          newvalue:newcol.coltype;
+          severity:"warning"
+        })
+      }
+    }
+  };
+  <out
+};
 
-  let added=0;
-  let removed=0;
-  let typechanged=0;
-  let si=mut.0;
-  if(si < changes.len()){
-    let c=changes.get(si);
-    if(str.eq(c.changetype;"added")){ added=added + 1 };
-    if(str.eq(c.changetype;"removed")){ removed=removed + 1 };
-    if(str.eq(c.changetype;"type_changed")){ typechanged=typechanged + 1 };
-    si=si + 1
-  }el{};
+f=concatchanges(a:@$columnchange;b:@$columnchange):@$columnchange{
+  let out=mut.a;
+  lp(let i=0;i<b.len;i=i+1){
+    out=out.push(b.get(i))
+  };
+  <out
+};
 
-  let summarytext=mut.str.concat(str.fromi32(changes.len());" changes: ");
-  summarytext=str.concat(summarytext;str.concat(str.fromi32(added);" added, "));
-  summarytext=str.concat(summarytext;str.concat(str.fromi32(removed);" removed, "));
-  summarytext=str.concat(summarytext;str.concat(str.fromi32(typechanged);" type changed"));
-  let rowdelta=newschema.rowcount - oldschema.rowcount;
-  summarytext=str.concat(summarytext;str.concat(". Rows: ";str.concat(
-    str.fromi32(oldschema.rowcount);str.concat(" -> ";str.fromi32(newschema.rowcount)))));
-
+f=compareschemas(datasetid:str;oldschema:$schemaprofile;newschema:$schemaprofile;timestamp:str):$schemadiff{
+  let removed=removedchanges(oldschema.columns;newschema.columns);
+  let added=addedchanges(oldschema.columns;newschema.columns);
+  let retyped=typechanges(oldschema.columns;newschema.columns);
+  let changes=concatchanges(concatchanges(removed;added);retyped);
+  let summary="\(str.fromint(changes.len)) changes: \(str.fromint(added.len)) added, \(str.fromint(removed.len)) removed, \(str.fromint(retyped.len)) type changed. Rows: \(str.fromint(oldschema.rowcount as i64)) -> \(str.fromint(newschema.rowcount as i64))";
   <$schemadiff{
     datasetid:datasetid;
     timestamp:timestamp;
@@ -127,77 +156,41 @@ f=compareschemas(datasetid:str;oldschema:i64;newschema:i64;timestamp:str):$schem
     oldcolcount:oldschema.colcount;
     newcolcount:newschema.colcount;
     changes:changes;
-    hasbreakingchanges:hasbreaking;
-    summary:summarytext
-  };
+    hasbreakingchanges:countoftype(changes;"removed")>0;
+    summary:summary
+  }
 };
 
+f=changetojson(c:$columnchange):str{
+  <"{\"column\":\(jsonencode(c.column)),\"change_type\":\(jsonencode(c.changetype)),\"old_value\":\(jsonencode(c.oldvalue)),\"new_value\":\(jsonencode(c.newvalue)),\"severity\":\(jsonencode(c.severity))}"
+};
 
 f=difftojson(diff:$schemadiff):str{
-  let changeparts=@();
-  let ci=0;
-  if(ci < diff.changes.len()){
-    let c=diff.changes.get(ci);
-    let part=str.concat("{\"column\":";
-      str.concat(str.jsonencode(c.column);
-      str.concat(",\"change_type\":";
-      str.concat(str.jsonencode(c.changetype);
-      str.concat(",\"old_value\":";
-      str.concat(str.jsonencode(c.oldvalue);
-      str.concat(",\"new_value\":";
-      str.concat(str.jsonencode(c.newvalue);
-      str.concat(",\"severity\":";
-      str.concat(str.jsonencode(c.severity);
-      "}"))))))))));
-    changeparts.push(part);
-    ci=ci + 1
-  }el{};
-  let breakingstr="false";
-  if(diff.hasbreakingchanges){ breakingstr="true" };
-  <str.concat("{\"dataset_id\":";
-    str.concat(str.jsonencode(diff.datasetid);
-    str.concat(",\"timestamp\":";
-    str.concat(str.jsonencode(diff.timestamp);
-    str.concat(",\"old_row_count\":";
-    str.concat(str.fromi32(diff.oldrowcount);
-    str.concat(",\"new_row_count\":";
-    str.concat(str.fromi32(diff.newrowcount);
-    str.concat(",\"old_col_count\":";
-    str.concat(str.fromi32(diff.oldcolcount);
-    str.concat(",\"new_col_count\":";
-    str.concat(str.fromi32(diff.newcolcount);
-    str.concat(",\"has_breaking_changes\":";
-    str.concat(breakingstr;
-    str.concat(",\"summary\":";
-    str.concat(str.jsonencode(diff.summary);
-    str.concat(",\"changes\":[";
-    str.concat(str.join(",";changeparts);
-    "]}")))))))))))))))))))
+  let changeparts=mut.@();
+  lp(let ci=0;ci<diff.changes.len;ci=ci+1){
+    changeparts=changeparts.push(changetojson(diff.changes.get(ci)))
+  };
+  (* `flag`, not `breakingstr`: an identifier beginning with the keyword `br` raises W2020. *)
+  let flag=mut."false";
+  if(diff.hasbreakingchanges){ flag="true" };
+  <"{\"dataset_id\":\(jsonencode(diff.datasetid)),\"timestamp\":\(jsonencode(diff.timestamp)),\"old_row_count\":\(str.fromint(diff.oldrowcount as i64)),\"new_row_count\":\(str.fromint(diff.newrowcount as i64)),\"old_col_count\":\(str.fromint(diff.oldcolcount as i64)),\"new_col_count\":\(str.fromint(diff.newcolcount as i64)),\"has_breaking_changes\":\(flag),\"summary\":\(jsonencode(diff.summary)),\"changes\":[\(str.join(",";changeparts))]}"
 };
 
+f=changemarker(changetype:str):str{
+  if(str.eq(changetype;"removed")){ <"[-]" };
+  if(str.eq(changetype;"type_changed")){ <"[~]" };
+  <"[+]"
+};
 
 f=difftodiary(diff:$schemadiff):str{
-  let header=str.concat("Schema Change Detected -- ";diff.datasetid);
-  let body=mut.str.concat("
-";diff.summary);
+  let body=mut."Schema Change Detected -- \(diff.datasetid)\n\(diff.summary)";
   if(diff.hasbreakingchanges){
-    body=str.concat(body;"
-*** BREAKING CHANGES DETECTED ***")
+    body=str.concat(body;"\n*** BREAKING CHANGES DETECTED ***")
   };
-  body=str.concat(body;"
-
-Details:
-");
-  let ci=0;
-  if(ci < diff.changes.len()){
-    let c=diff.changes.get(ci);
-    let marker="[+]";
-    if(str.eq(c.changetype;"removed")){ marker="[-]" };
-    if(str.eq(c.changetype;"type_changed")){ marker="[~]" };
-    body=str.concat(body;str.concat(marker;" ";str.concat(c.column;
-      str.concat(": ";str.concat(c.oldvalue;str.concat(" -> ";str.concat(c.newvalue;"
-")))))));
-    ci=ci + 1
-  }el{};
-  <str.concat(header;body)
+  body=str.concat(body;"\n\nDetails:\n");
+  lp(let ci=0;ci<diff.changes.len;ci=ci+1){
+    let c:$columnchange=diff.changes.get(ci);
+    body=str.concat(body;"\(changemarker(c.changetype)) \(c.column): \(c.oldvalue) -> \(c.newvalue)\n")
+  };
+  <body
 };

@@ -5,52 +5,105 @@ m=page.moke.api.feedback;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
-i=std:std;
+i=time:std.time;
+i=jx:shared.jsonobj;
 
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+(* errjson, because http.res.err does not exist. See the note on http.res above: the
+   three-segment name binds to libc's err(3) and terminates the process with the status code
+   as its exit status. This builds the same {"ok":false,"error":...} envelope the success
+   paths in this file use, with json.enc supplying the quotes and the escaping. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* json.dec once, then the TYPED json.str accessor, because json.getstr — which every field
+   below used to go through — is one of roughly fifty names std.json declares as
+   `(i64, i64) -> i64`. They operate on a different representation, reached through
+   json.parse, and a one-field struct shares an ABI with a handle, so handing one of them a
+   `str` compiles, links, and then dereferences the first word of the string as a pointer.
+   Measured this session at the pinned toolchain: a program calling
+   `json.getstr("{\"rating\":\"thumbs_up\"}";"rating")` exits 139 — SIGSEGV. Every POST to
+   this endpoint would have killed the moke server on its first field read. See T-32.
+
+   json.str is one of the eight typed accessors that do work, and it needs a decoded Json
+   rather than raw text, hence the single json.dec above it. A body that is not JSON at all
+   yields the empty object, so every field falls to its default and the rating check below
+   answers 400 — the same answer a caller gets for a body with no rating in it. *)
 f=post(req:i64):i64{
-  let body=req.body;
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
 
-  let rating=mt json.getstr(body;"rating") {
+  let rating=mt json.str(obj;"rating") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e ""
   };
-  let featurearea=mt json.getstr(body;"feature_area") {
+  let featurearea=mt json.str(obj;"feature_area") {
     $ok:v v;
-    $err:e "chat_response"
+    $jsonerr:e "chat_response"
   };
-  let requestid=mt json.getstr(body;"request_id") {
+  let requestid=mt json.str(obj;"request_id") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e ""
   };
-  let modelid=mt json.getstr(body;"model_id") {
+  let modelid=mt json.str(obj;"model_id") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e ""
   };
-  let dataset=mt json.getstr(body;"dataset") {
+  let dataset=mt json.str(obj;"dataset") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e ""
   };
-  let comment=mt json.getstr(body;"comment") {
+  let comment=mt json.str(obj;"comment") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e ""
   };
 
   if(str.eq(rating;"")){
-    <http.res.err(400;"missing required field: rating")
+    <errjson(400;"missing required field: rating")
   };
 
   if(!str.eq(rating;"thumbs_up") && !str.eq(rating;"thumbs_down")){
-    <http.res.err(400;"rating must be thumbs_up or thumbs_down")
+    <errjson(400;"rating must be thumbs_up or thumbs_down")
   };
 
-  let id=str.concat("fb_";str.fromi64(std.nowms()));
+  (* time.nowms, not std.nowms. There is no `std` module interface and no `tk_std_nowms_w`
+     symbol in the runtime: measured this session, a program calling std.nowms() type-checks and
+     then fails to LINK with "Undefined symbols: _tk_std_nowms_w". The whole moke tree would have
+     failed at the link step on this one call. std.time.nowms() is the real one and returns epoch
+     milliseconds; it takes no argument despite what time.tki declares (T-12 class).
+     str.fromint rather than str.fromi64 for the same reason in reverse: fromi64 links, but it is
+     declared `(i64) -> i64` in str.tki and only passes for a str by ABI punning, while
+     str.fromint is declared `(i64) -> str` and is the accessor that is actually typed. *)
+  let id=str.concat("fb_";str.fromint(time.nowms()));
 
   let resp=mut."{";
   resp=str.concat(resp;"\"ok\":true");
-  resp=str.concat(resp;str.concat(",\"id\":";str.jsonencode(id)));
-  resp=str.concat(resp;str.concat(",\"rating\":";str.jsonencode(rating)));
-  resp=str.concat(resp;str.concat(",\"request_id\":";str.jsonencode(requestid)));
+  (* json.enc, not str.jsonencode: std.str declares no jsonencode, in the interface or in the
+     runtime, so the three calls that used to be here did not compile. json.enc is the typed
+     encoder and, like jx.escape, it returns the value WITH its surrounding quotes — which is
+     why there are none in the literals it is concatenated to. *)
+  resp=str.concat(resp;str.concat(",\"id\":";json.enc(id)));
+  resp=str.concat(resp;str.concat(",\"rating\":";json.enc(rating)));
+  resp=str.concat(resp;str.concat(",\"request_id\":";json.enc(requestid)));
   resp=str.concat(resp;"}");
 
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };

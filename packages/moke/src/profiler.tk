@@ -3,6 +3,32 @@
 
 m=moke.profiler;
 i=str:std.str;
+i=math:std.math;
+i=fmt:std.fmt;
+
+(* --- Six methods that do not exist, and a mis-named count ------------------------
+   `str.isfloat` and `str.matchesdate` are neither in the std.str interface nor in the runtime,
+   which is what the diagnostics said. Behind them sat five method calls that do not exist:
+   `nonnull.distinct()`, `distinct.take(3)`, `nums.min()`, `nums.max()` and `nums.sum()`. An
+   unknown method call is not type-checked (T-7); measured in the emitted IR it lowers to a call
+   to a BARE GLOBAL named after the method, with the receiver dropped -- `declare i64 @distinct()`,
+   `declare i64 @take(i64)`. So these are not silent no-ops, they are undefined symbols at link
+   time, and the only way one runs is if libc happens to export that name. Five of this file's
+   functions depended on them, which is to say the distinct set, the sample values and all three
+   numeric statistics had no implementation at all.
+
+   The `.len()` spellings were NOT a fault: `arr.len()` and `arr.len` emit the identical
+   `getelementptr i64, i64* %p, i32 -1`. They read as property here for consistency.
+
+   `str.fromfloat` takes one argument, not a precision; `fmt.f64(v;dp)` is the formatter.
+
+   And `infertype` set `uniquecount` to `nonnull.len` -- the count of non-null VALUES, not of
+   distinct ones -- then classified anything under 20 as categorical. Any column in a dataset of
+   fewer than twenty rows came back categorical whatever it held. It counts distinct values now.
+
+   `nullpct` was `str.tofloat(str.fromint(nullpct))`: an integer formatted to a string, parsed
+   back, and the RESULT of that parse assigned to an f32 field without being matched. It is one
+   division. *)
 
 t=$colstats{
   name:str;
@@ -33,162 +59,244 @@ f=ispiiname(col:str):bool{
     "postcode";"ssn";"tfn";"abn";"medicare";"card";"passport";"licence";"license";
     "gender";"sex";"age";"salary";"income";"account";"bsb";"iban";"ip";"device"
   );
-  let found=mut.false;
   lp(let ii=0;ii<hits.len;ii=ii+1){
-    let h=hits.get(ii);
-    if(str.contains(lc;h)){ found=true }
+    if(str.contains(lc;hits.get(ii))){
+      <true
+    }
   };
-  <found
+  <false
+};
+
+f=containsval(arr:@str;v:str):bool{
+  lp(let ii=0;ii<arr.len;ii=ii+1){
+    if(str.eq(arr.get(ii);v)){
+      <true
+    }
+  };
+  <false
+};
+
+f=distinctvals(values:@str):@str{
+  let out=mut.@();
+  lp(let ii=0;ii<values.len;ii=ii+1){
+    let v=values.get(ii);
+    if(containsval(out;v)){}el{
+      out=out.push(v)
+    }
+  };
+  <out
+};
+
+f=takefirst(values:@str;n:i64):@str{
+  let out=mut.@();
+  lp(let ii=0;ii<values.len && ii<n;ii=ii+1){
+    out=out.push(values.get(ii))
+  };
+  <out
+};
+
+(* `str.tofloat` is a result, so "does this parse" and "what is the value" are the same call.
+   $ok is written first because `mt` binds a result's arms by position (T-31). *)
+f=isnumericstr(v:str):bool{
+  let t=str.trim(v);
+  if(str.len(t)==0){
+    <false
+  };
+  <mt str.tofloat(t) {
+    $ok:n true;
+    $parseerr:e false
+  }
+};
+
+f=tonum(v:str):f64{
+  <mt str.tofloat(str.trim(v)) {
+    $ok:n n;
+    $parseerr:e 0.0
+  }
+};
+
+(* `str.matchesdate` does not exist and there is no date matcher in std.str. This is the same
+   loose shape test moke.hooks uses: two separators of the same kind and a length a date could
+   plausibly have. It is deliberately not a parser -- the demo datasets carry several formats and
+   a wrong "datetime" label is cheaper here than a missed one. *)
+f=looksdatelike(v:str):bool{
+  let t=str.trim(v);
+  if(str.len(t)<8){
+    <false
+  };
+  if(str.len(t)>32){
+    <false
+  };
+  if(str.split(t;"-").len==3){ <true };
+  if(str.split(t;"/").len==3){ <true };
+  <false
+};
+
+f=isboolstr(v:str):bool{
+  let lv=str.lower(str.trim(v));
+  if(lv == "true"){ <true };
+  if(lv == "false"){ <true };
+  if(lv == "yes"){ <true };
+  if(lv == "no"){ <true };
+  if(lv == "1"){ <true };
+  if(lv == "0"){ <true };
+  <false
 };
 
 f=infertype(values:@str):str{
   let nonnull=mut.@();
   lp(let ii=0;ii<values.len;ii=ii+1){
     let v=values.get(ii);
-    if(str.len(v) > 0){ nonnull=nonnull.push(v) };
+    if(str.len(str.trim(v))>0){ nonnull=nonnull.push(v) }
   };
-  if(str.len(nonnull) == 0){ <"categorical" };
-  let allnumeric=mut.true;
-  let allbool=mut.true;
-  let alldate=mut.true;
+  if(nonnull.len==0){ <"categorical" };
+  let numericcount=mut.0;
+  let boolcount=mut.0;
+  let datecount=mut.0;
+  let lensum=mut.0;
   lp(let ii=0;ii<nonnull.len;ii=ii+1){
     let v=nonnull.get(ii);
-    if(!str.isfloat(v)){ allnumeric=false };
-    let lv=str.lower(v);
-    if(!(lv == "true") && !(lv == "false") && !(lv == "yes") && !(lv == "no") && !(lv == "1") && !(lv == "0")){
-      allbool=false
-    };
-    if(!str.matchesdate(v)){
-      alldate=false
-    };
+    if(isnumericstr(v)){ numericcount=numericcount+1 };
+    if(isboolstr(v)){ boolcount=boolcount+1 };
+    if(looksdatelike(v)){ datecount=datecount+1 };
+    lensum=lensum+(str.len(v) as i64)
   };
-  if(allnumeric){ <"numeric" };
-  if(alldate){ <"datetime" };
-  if(allbool){ <"boolean" };
-  let uniquecount=nonnull.len;
-  if(uniquecount < 20){ <"categorical" };
-  let avglensum=mut.0;
-  lp(let ii=0;ii<nonnull.len;ii=ii+1){
-    let v=nonnull.get(ii);
-    avglensum=avglensum + str.len(v)
-  };
-  let avglen=avglensum / nonnull.len();
-  if(avglen > 40){ <"text" };
+  let n=nonnull.len;
+  if(numericcount==n){ <"numeric" };
+  if(datecount==n){ <"datetime" };
+  if(boolcount==n){ <"boolean" };
+  if(distinctvals(nonnull).len<20){ <"categorical" };
+  if(lensum/n>40){ <"text" };
   <"categorical"
 };
 
+(* min, max and mean of the parsable values, as strings. They leave this function as strings, so
+   no bare float crosses a module boundary (T-20). *)
 f=numericstats(values:@str):@str{
   let nums=mut.@();
   lp(let ii=0;ii<values.len;ii=ii+1){
     let v=values.get(ii);
-    if(str.isfloat(v)){ nums=nums.push(str.tofloat(v)) }
+    if(isnumericstr(v)){ nums=nums.push(tonum(v)) }
   };
-  if(nums.len() == 0){ <@("";""; "") };
-  let mn=nums.min();
-  let mx=nums.max();
-  let mean=nums.sum() / nums.len();
-  <@(str.fromfloat(mn;4);str.fromfloat(mx;4);str.fromfloat(mean;4))
+  if(nums.len==0){
+    <@("";"";"")
+  };
+  <@(fmt.f64(math.min(nums);4);fmt.f64(math.max(nums);4);fmt.f64(math.mean(nums);4))
+};
+
+(* A short row yields a blank cell rather than an out-of-range read; ragged CSV is the norm in
+   the datasets this profiler is pointed at. *)
+f=columnof(rows:@(@str);ci:i64):@str{
+  let out=mut.@();
+  lp(let ri=0;ri<rows.len;ri=ri+1){
+    let r=rows.get(ri);
+    if(ci<r.len){
+      out=out.push(r.get(ci))
+    }el{
+      out=out.push("")
+    }
+  };
+  <out
+};
+
+f=cardinalityof(uniquecount:i64):str{
+  if(uniquecount==1){ <"constant" };
+  if(uniquecount<10){ <"low" };
+  if(uniquecount<100){ <"medium" };
+  <"high"
+};
+
+f=colstatsfor(col:str;colvals:@str):$colstats{
+  let nonnull=mut.@();
+  let nullcount=mut.0;
+  lp(let ni=0;ni<colvals.len;ni=ni+1){
+    let v=colvals.get(ni);
+    if(str.len(str.trim(v))==0){
+      nullcount=nullcount+1
+    }el{
+      nonnull=nonnull.push(v)
+    }
+  };
+  let nullpct=mut.0.0;
+  if(colvals.len>0){
+    nullpct=(nullcount as f64)*100.0/(colvals.len as f64)
+  };
+  let distinct=distinctvals(nonnull);
+  let itype=infertype(nonnull);
+  let minstr=mut."";
+  let maxstr=mut."";
+  let meanstr=mut."";
+  if(itype == "numeric"){
+    let ns=numericstats(nonnull);
+    minstr=ns.get(0);
+    maxstr=ns.get(1);
+    meanstr=ns.get(2)
+  };
+  <$colstats{
+    name:col;
+    inferredtype:itype;
+    nullpct:nullpct as f32;
+    uniquecount:distinct.len as i32;
+    cardinality:cardinalityof(distinct.len);
+    sample:takefirst(distinct;3);
+    minstr:minstr;
+    maxstr:maxstr;
+    meanstr:meanstr;
+    ispiicandidate:ispiiname(col)
+  }
 };
 
 f=profile(headers:@str;rows:@(@str);name:str):$profileresult{
-  let rowcount=rows.len();
-  let colcount=headers.len();
   let stats=mut.@();
   let piicount=mut.0;
   lp(let ci=0;ci<headers.len;ci=ci+1){
-    let col=headers.get(ci);
-    let colvals=mut.@();
-    lp(let ri=0;ri<rows.len;ri=ri+1){
-      let r=rows.get(ri);
-      colvals=colvals.push(r.get(ci))
-    };
-    let nullcount=mut.0;
-    lp(let ni=0;ni<colvals.len;ni=ni+1){
-      let v=colvals.get(ni);
-      if(str.len(str.trim(v)) == 0){ nullcount=nullcount+1 }
-    };
-    let nullpct=mut.0;
-    if(rowcount > 0){ nullpct=(nullcount * 100 / rowcount) }el{};
-    let nonnull=mut.@();
-    lp(let ni=0;ni<colvals.len;ni=ni+1){
-      let v=colvals.get(ni);
-      if(str.len(str.trim(v)) > 0){ nonnull=nonnull.push(v) }
-    };
-    let distinct=nonnull.distinct();
-    let uniquecount=distinct.len();
-    let cardinality=mut."high";
-    if(uniquecount == 1){ cardinality="constant"
-    }el{ if(uniquecount < 10){ cardinality="low"
-    }el{ if(uniquecount < 100){ cardinality="medium"
-    }el{} }};
-    let sample=distinct.take(3);
-    let itype=infertype(nonnull);
-    let minstr=mut."";
-    let maxstr=mut."";
-    let meanstr=mut."";
-    if(itype == "numeric"){
-      let ns=numericstats(nonnull);
-      minstr=ns.get(0);
-      maxstr=ns.get(1);
-      meanstr=ns.get(2)
-    };
-    let ispii=ispiiname(col);
-    if(ispii){ piicount=piicount + 1 };
-    stats=stats.push($colstats{
-      name:col;
-      inferredtype:itype;
-      nullpct:str.tofloat(str.fromint(nullpct));
-      uniquecount:uniquecount;
-      cardinality:cardinality;
-      sample:sample;
-      minstr:minstr;
-      maxstr:maxstr;
-      meanstr:meanstr;
-      ispiicandidate:ispii
-    })
+    let cs=colstatsfor(headers.get(ci);columnof(rows;ci));
+    if(cs.ispiicandidate){ piicount=piicount+1 };
+    stats=stats.push(cs)
   };
-  let sensitivity=mut."PUBLIC";
   let haspii=mut.false;
-  lp(let ii=0;ii<stats.len;ii=ii+1){
-    let s=stats.get(ii);
-    if(s.ispiicandidate){ haspii=true }
-  };
   let hasid=mut.false;
   lp(let ii=0;ii<stats.len;ii=ii+1){
-    let s=stats.get(ii);
-    if(str.contains(str.lower(s.name);"id") || str.contains(str.lower(s.name);"key")){ hasid=true }
+    let s:$colstats=stats.get(ii);
+    if(s.ispiicandidate){ haspii=true };
+    let lname=str.lower(s.name);
+    if(str.contains(lname;"id") || str.contains(lname;"key")){ hasid=true }
   };
-  if(haspii){ sensitivity="CONFIDENTIAL" }el{ if(hasid){ sensitivity="INTERNAL" } };
+  let sensitivity=mut."PUBLIC";
+  if(haspii){
+    sensitivity="CONFIDENTIAL"
+  }el{
+    if(hasid){ sensitivity="INTERNAL" }
+  };
   <$profileresult{
     datasetname:name;
-    rowcount:rowcount;
-    colcount:colcount;
+    rowcount:rows.len as i32;
+    colcount:headers.len as i32;
     stats:stats;
-    piicolcount:piicount;
+    piicolcount:piicount as i32;
     suggestedsensitivity:sensitivity
   }
 };
 
 f=formatprofile(result:$profileresult):str{
   let lines=mut.@();
-  lines=lines.push(str.concat("Dataset: ";result.datasetname));
-  lines=lines.push(str.concat("Rows: ";str.concat(str.fromint(result.rowcount);str.concat("  Columns: ";str.fromint(result.colcount)))));
-  lines=lines.push(str.concat("Suggested sensitivity: ";result.suggestedsensitivity));
-  lines=lines.push(str.concat("PII candidate columns: ";str.fromint(result.piicolcount)));
-  lines.push("---");
+  lines=lines.push("Dataset: \(result.datasetname)");
+  lines=lines.push("Rows: \(str.fromint(result.rowcount as i64))  Columns: \(str.fromint(result.colcount as i64))");
+  lines=lines.push("Suggested sensitivity: \(result.suggestedsensitivity)");
+  lines=lines.push("PII candidate columns: \(str.fromint(result.piicolcount as i64))");
+  lines=lines.push("---");
   lp(let ii=0;ii<result.stats.len;ii=ii+1){
-    let s=result.stats.get(ii);
+    let s:$colstats=result.stats.get(ii);
     let piiflag=mut."";
-    if(s.ispiicandidate){ piiflag=" [PII]" }el{};
-    lines.push(s.name + " (" + s.inferredtype + ")" + piiflag);
-    lines.push("  nulls=" + str.fromfloat(s.nullpct;1) + "%  unique=" + str.fromint(s.uniquecount) + "  cardinality=" + s.cardinality);
-    if(str.len(s.sample) > 0){
-      lines.push("  sample=[" + str.join(", ";s.sample) + "]")
+    if(s.ispiicandidate){ piiflag=" [PII]" };
+    lines=lines.push("\(s.name) (\(s.inferredtype))\(piiflag)");
+    lines=lines.push("  nulls=\(fmt.f64(s.nullpct as f64;1))%  unique=\(str.fromint(s.uniquecount as i64))  cardinality=\(s.cardinality)");
+    if(s.sample.len>0){
+      lines=lines.push("  sample=[\(str.join(", ";s.sample))]")
     };
-    if(str.len(s.minstr) > 0){
-      lines.push("  min=" + s.minstr + "  max=" + s.maxstr + "  mean=" + s.meanstr)
+    if(str.len(s.minstr)>0){
+      lines=lines.push("  min=\(s.minstr)  max=\(s.maxstr)  mean=\(s.meanstr)")
     }
   };
-  <str.join("
-";lines)
+  <str.join("\n";lines)
 };

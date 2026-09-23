@@ -3,6 +3,8 @@
 
 m=moke.mcp.brokerstatus;
 i=str:std.str;
+i=time:std.time;
+i=jx:shared.jsonobj;
 
 
 t=$serverstatus{
@@ -26,6 +28,38 @@ t=$brokerpanelstate{
 };
 
 
+(* --- Seven diagnostics, and three silent faults behind them -----------------------
+   `str.jsonencode` exists in neither the std.str interface nor the runtime, so every string this
+   module put on the wire went out unquoted and unescaped: the JSON was malformed for any value
+   containing a quote, a backslash or a newline, and structurally malformed for all of them
+   because the quotes themselves were missing. `shared.jsonobj.escape` is the escaper -- std.json
+   is not usable for this (T-32). What the compiler could not see:
+
+   1. **`panelstatetojson` looped with `if(si < state.servers.len()){ ...; si=si+1 }el{}`**,
+      which runs ONCE, so the broker panel listed one server however many were registered. An
+      `if` where a `lp` was meant type-checks and runs.
+   2. **`servers.push(server)` discarded the array `.push` returns** (T-24) and `servers` was not
+      `mut.`, so `addserver` incremented `servercount` and `totaltools` while adding no server.
+      The panel therefore reported a server count that its own server list contradicted.
+   3. **`addserver(state:i64;...)`** read `.servers`, `.healthycount`, `.servercount`,
+      `.totaltools`, `.requestsserved`, `.initialized` and `.lastupdated` off an integer. Member
+      access on an integer is not checked, so it walked a raw word as a struct. It takes a
+      `$brokerpanelstate`.
+
+   The `.len()` spellings read as `.len` now for consistency; that one was not a fault, since
+   both emit the identical `getelementptr i64, i64* %p, i32 -1`. `str.fromi32` and `str.fromi64`
+   are `gen:"abi"` aliases for the i64 formatter; `str.fromint` is the declared spelling. *)
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
+
+(* The demo fixtures stamped `lastcheck` with the literal string "now", which reads as a real
+   time in the panel and is never one. `scripts/find_sql_literal_now.py` flags the shape because
+   it is the same mistake that stored the text `now()` in the database (GA5.1). *)
+f=nowiso():str{
+  <time.format(time.now();"%Y-%m-%dT%H:%M:%SZ")
+};
+
 f=newpanelstate():$brokerpanelstate{
   <$brokerpanelstate{
     initialized:false;
@@ -38,20 +72,18 @@ f=newpanelstate():$brokerpanelstate{
   };
 };
 
-f=addserver(state:i64;server:$serverstatus):$brokerpanelstate{
-  let servers=state.servers;
-  servers.push(server);
+f=addserver(state:$brokerpanelstate;server:$serverstatus):$brokerpanelstate{
   let healthy=mut.state.healthycount;
   if(server.healthy){ healthy=healthy + 1 };
   <$brokerpanelstate{
     initialized:state.initialized;
     servercount:state.servercount + 1;
     healthycount:healthy;
-    totaltools:state.totaltools + server.tools.len();
+    totaltools:(state.totaltools as i64 + server.tools.len) as i32;
     requestsserved:state.requestsserved;
-    servers:servers;
+    servers:state.servers.push(server);
     lastupdated:state.lastupdated
-  };
+  }
 };
 
 
@@ -64,7 +96,7 @@ f=demoservers():@$serverstatus{
       healthy:true;
       tools:@("anonymise";"compress";"decompress";"profile";"analyse");
       permissions:@("read";"execute");
-      lastcheck:"now"
+      lastcheck:nowiso()
     };
     $serverstatus{
       name:"loke-memory";
@@ -73,7 +105,7 @@ f=demoservers():@$serverstatus{
       healthy:true;
       tools:@("memory.search";"memory.store";"memory.context";"memory.status";"memory.facts";"memory.diary_write");
       permissions:@("read";"write";"execute");
-      lastcheck:"now"
+      lastcheck:nowiso()
     };
   )
 };
@@ -87,58 +119,26 @@ f=permissionbadgeclass(permission:str):str{
 };
 
 
+f=jsonstrarray(values:@str):str{
+  let parts=mut.@();
+  lp(let ii=0;ii<values.len;ii=ii+1){
+    parts=parts.push(jsonencode(values.get(ii)))
+  };
+  <"[\(str.join(",";parts))]"
+};
+
 f=serverstatustojson(s:$serverstatus):str{
-  let healthystr=mut."false"; if(s.healthy){ healthystr="true" }el{};
-  let toolparts=mut.@();
-  lp(let ii=0;ii<s.tools.len;ii=ii+1){
-    let t=s.tools.get(ii);
-    toolparts=toolparts.push(str.jsonencode(t))
-  };
-  let toolsjson=str.concat("[";str.concat(str.join(",";toolparts);"]"));
-  let permparts=mut.@();
-  lp(let jj=0;jj<s.permissions.len;jj=jj+1){
-    let p=s.permissions.get(jj);
-    permparts=permparts.push(str.jsonencode(p))
-  };
-  let permsjson=str.concat("[";str.concat(str.join(",";permparts);"]"));
-  <str.concat("{\"name\":";
-    str.concat(str.jsonencode(s.name);
-    str.concat(",\"transport\":";
-    str.concat(str.jsonencode(s.transport);
-    str.concat(",\"url\":";
-    str.concat(str.jsonencode(s.url);
-    str.concat(",\"healthy\":";
-    str.concat(healthystr;
-    str.concat(",\"tools\":";
-    str.concat(toolsjson;
-    str.concat(",\"permissions\":";
-    str.concat(permsjson;
-    str.concat(",\"last_check\":";
-    str.concat(str.jsonencode(s.lastcheck);
-    "}"))))))))))))))
+  let healthy=mut."false";
+  if(s.healthy){ healthy="true" };
+  <"{\"name\":\(jsonencode(s.name)),\"transport\":\(jsonencode(s.transport)),\"url\":\(jsonencode(s.url)),\"healthy\":\(healthy),\"tools\":\(jsonstrarray(s.tools)),\"permissions\":\(jsonstrarray(s.permissions)),\"last_check\":\(jsonencode(s.lastcheck))}"
 };
 
 f=panelstatetojson(state:$brokerpanelstate):str{
-  let serverparts=@();
-  let si=mut.0;
-  if(si < state.servers.len()){
-    serverparts.push(serverstatustojson(state.servers.get(si)));
-    si=si + 1
-  }el{};
-  let initstr=mut."false"; if(state.initialized){ initstr="true" }el{};
-  <str.concat("{\"initialized\":";
-    str.concat(initstr;
-    str.concat(",\"server_count\":";
-    str.concat(str.fromi32(state.servercount);
-    str.concat(",\"healthy_count\":";
-    str.concat(str.fromi32(state.healthycount);
-    str.concat(",\"total_tools\":";
-    str.concat(str.fromi32(state.totaltools);
-    str.concat(",\"requests_served\":";
-    str.concat(str.fromi64(state.requestsserved);
-    str.concat(",\"last_updated\":";
-    str.concat(str.jsonencode(state.lastupdated);
-    str.concat(",\"servers\":[";
-    str.concat(str.join(",";serverparts);
-    "]}"))))))))))))))
+  let serverparts=mut.@();
+  lp(let si=0;si<state.servers.len;si=si+1){
+    serverparts=serverparts.push(serverstatustojson(state.servers.get(si)))
+  };
+  let initialised=mut."false";
+  if(state.initialized){ initialised="true" };
+  <"{\"initialized\":\(initialised),\"server_count\":\(str.fromint(state.servercount as i64)),\"healthy_count\":\(str.fromint(state.healthycount as i64)),\"total_tools\":\(str.fromint(state.totaltools as i64)),\"requests_served\":\(str.fromint(state.requestsserved)),\"last_updated\":\(jsonencode(state.lastupdated)),\"servers\":[\(str.join(",";serverparts))]}"
 };

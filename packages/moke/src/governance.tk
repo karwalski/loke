@@ -4,7 +4,11 @@
 m=moke.governance;
 
 i=str:std.str;
-i=t:shared.types;
+(* shared.types is no longer imported: `$lokeerr`/`$configerr` were its only use here
+   and `findpreset` no longer returns a result. An unused import still costs a slot in the
+   signature table that `max_funcs` bounds (T-25). *)
+i=time:std.time;
+i=jx:shared.jsonobj;
 
 t=$regulatorypreset{
   id:str;
@@ -87,13 +91,45 @@ f=getpresets():@$regulatorypreset{
   )
 };
 
-f=findpreset(id:str):$regulatorypreset!$lokeerr{
+(* --- Why this returns a sentinel and not a result --------------------------------
+   It used to be `$regulatorypreset!$lokeerr`. For a result whose error side is a USER-declared
+   sum the discriminant is never read: `mt` always takes arm 0 (T-18). So `$err($configerr(...))`
+   was indistinguishable from a found preset at every call site -- a caller asking for a
+   regulation that does not exist would have been handed the first arm's binding and gone on to
+   enforce it. An unknown preset id is now an inert preset: no blocked entity types, no
+   cross-border permission, and an empty id that `haspreset` reports as absent. Fail-closed, and
+   discriminable. *)
+(* `generatedat` was the literal string "now", so every compliance report this module produced
+   was stamped with the word rather than a time — and `scripts/find_sql_literal_now.py` flags it,
+   because that is exactly the mistake that put the text `now()` in the database (GA5.1). *)
+f=nowiso():str{
+  <time.format(time.now();"%Y-%m-%dT%H:%M:%SZ")
+};
+
+f=nopreset():$regulatorypreset{
+  <$regulatorypreset{
+    id:"";
+    name:"";
+    description:"";
+    classificationdefault:"restricted";
+    blockedentitytypes:@();
+    crossborderallowed:false;
+    anonymisationstrength:"full";
+    customrules:@()
+  }
+};
+
+f=findpreset(id:str):$regulatorypreset{
   let presets=getpresets();
   lp(let ii=0;ii<presets.len;ii=ii+1){
-    let p=presets.get(ii);
+    let p:$regulatorypreset=presets.get(ii);
     if(p.id == id){ <p }
   };
-  <$err($configerr(str.concat("preset not found: ";id)))
+  <nopreset()
+};
+
+f=haspreset(id:str):bool{
+  <str.len(findpreset(id).id)>0
 };
 
 f=classifyrisk(sensitivity:str;entitycount:i32;crossborder:bool;hasblockedentities:bool):$riskassessment{
@@ -102,37 +138,37 @@ f=classifyrisk(sensitivity:str;entitycount:i32;crossborder:bool;hasblockedentiti
 
   if(sensitivity == "RESTRICTED"){
     score=score+40;
-    reasons=reasons.pushcopy("RESTRICTED classification")
+    reasons=reasons.push("RESTRICTED classification")
   }el{ if(sensitivity == "CONFIDENTIAL"){
     score=score+25;
-    reasons=reasons.pushcopy("CONFIDENTIAL classification")
+    reasons=reasons.push("CONFIDENTIAL classification")
   }el{ if(sensitivity == "INTERNAL"){
     score=score+10;
-    reasons=reasons.pushcopy("INTERNAL classification")
+    reasons=reasons.push("INTERNAL classification")
   }}};
   if(entitycount > 10){
     score=score+30;
-    reasons=reasons.pushcopy("High PII entity count (" + str.fromint(entitycount) + ")")
+    reasons=reasons.push("High PII entity count (\(str.fromint(entitycount as i64)))")
   }el{ if(entitycount > 3){
     score=score+15;
-    reasons=reasons.pushcopy("Moderate PII entity count (" + str.fromint(entitycount) + ")")
+    reasons=reasons.push("Moderate PII entity count (\(str.fromint(entitycount as i64)))")
   }el{ if(entitycount > 0){
     score=score+5;
-    reasons=reasons.pushcopy("Low PII entity count (" + str.fromint(entitycount) + ")")
+    reasons=reasons.push("Low PII entity count (\(str.fromint(entitycount as i64)))")
   }}};
   if(crossborder){
     score=score+15;
-    reasons=reasons.pushcopy("Cross-border data transfer")
+    reasons=reasons.push("Cross-border data transfer")
   };
   if(hasblockedentities){
     score=score+20;
-    reasons=reasons.pushcopy("Contains blocked entity types")
+    reasons=reasons.push("Contains blocked entity types")
   };
   let tier=mut."Low";
   if(score > 50){ tier="High"
   }el{ if(score > 25){ tier="Medium"
   }el{} };
-  <$riskassessment{tier:tier;score:score;reasons:reasons}
+  <$riskassessment{tier:tier;score:score as i32;reasons:reasons}
 };
 
 f=generatereport(presetname:str;events:@$complianceevent):$compliancereport{
@@ -149,42 +185,44 @@ f=generatereport(presetname:str;events:@$complianceevent):$compliancereport{
       }
     }
   };
-  let total=events.len();
+  (* `events.len()` read as property. Measured in the emitted IR, `arr.len()` and `arr.len` are
+     the identical `getelementptr i64, i64* %p, i32 -1` -- the method spelling was not a defect,
+     only an inconsistency. *)
+  let total=events.len;
   let privacypct=mut.100;
-  if(total > 0){ privacypct=((total - violations) * 100) / total }el{};
+  if(total > 0){ privacypct=((total - violations) * 100) / total };
 
   <$compliancereport{
-    generatedat:"now";
+    generatedat:nowiso();
     presetname:presetname;
-    totalrequests:total;
-    violations:violations;
-    privacypct:privacypct;
-    riskbreakdownlow:low;
-    riskbreakdownmedium:medium;
-    riskbreakdownhigh:high;
+    totalrequests:total as i32;
+    violations:violations as i32;
+    privacypct:privacypct as i32;
+    riskbreakdownlow:low as i32;
+    riskbreakdownmedium:medium as i32;
+    riskbreakdownhigh:high as i32;
     events:events
   }
 };
 
+(* RFC 4180: a quoted CSV field escapes a double quote by doubling it. `detail` was interpolated
+   into a quoted field raw, so one quote in an event detail ended the field early and shifted
+   every remaining column of that row -- which in a compliance export is a silently wrong
+   record, not a formatting nuisance. *)
+f=csvquote(v:str):str{
+  <"\"\(str.replace(v;"\"";"\"\""))\""
+};
+
 f=reporttocsv(report:$compliancereport):str{
-  let out=mut."timestamp,event_type,detail,severity,risk_tier
-";
+  let out=mut."timestamp,event_type,detail,severity,risk_tier\n";
   lp(let ii=0;ii<report.events.len;ii=ii+1){
-    let e=report.events.get(ii);
-    out=out + e.timestamp + "," + e.eventtype + ",\"" + e.detail + "\"," + e.severity + "," + e.risktier + "
-"
+    let e:$complianceevent=report.events.get(ii);
+    out=str.concat(out;"\(e.timestamp),\(e.eventtype),\(csvquote(e.detail)),\(e.severity),\(e.risktier)\n")
   };
   <out
 };
 
+(* The preset name and the generated-at stamp went into the JSON unescaped. *)
 f=reporttojson(report:$compliancereport):str{
-  let out="{\"generated_at\":\"" + report.generatedat + "\",";
-  out=out + "\"preset\":\"" + report.presetname + "\",";
-  out=out + "\"total_requests\":" + str.fromint(report.totalrequests) + ",";
-  out=out + "\"violations\":" + str.fromint(report.violations) + ",";
-  out=out + "\"privacy_pct\":" + str.fromint(report.privacypct) + ",";
-  out=out + "\"risk_breakdown\":{\"low\":" + str.fromint(report.riskbreakdownlow);
-  out=out + ",\"medium\":" + str.fromint(report.riskbreakdownmedium);
-  out=out + ",\"high\":" + str.fromint(report.riskbreakdownhigh) + "}}";
-  <out
+  <"{\"generated_at\":\"\(jx.escape(report.generatedat))\",\"preset\":\"\(jx.escape(report.presetname))\",\"total_requests\":\(str.fromint(report.totalrequests as i64)),\"violations\":\(str.fromint(report.violations as i64)),\"privacy_pct\":\(str.fromint(report.privacypct as i64)),\"risk_breakdown\":{\"low\":\(str.fromint(report.riskbreakdownlow as i64)),\"medium\":\(str.fromint(report.riskbreakdownmedium as i64)),\"high\":\(str.fromint(report.riskbreakdownhigh as i64))}}"
 };

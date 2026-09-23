@@ -3,9 +3,36 @@
 
 m=moke.agents.qualityscanner;
 i=str:std.str;
+i=math:std.math;
+i=fmt:std.fmt;
 i=engine:moke.ml.engine;
-i=registry:moke.data.registry;
+i=jx:shared.jsonobj;
 
+(* ── Every accumulating loop here was an `if`, and the report added one finding ─────
+   The only reported diagnostic was E2030 for `moke.data.registry`, and that import was never
+   used — nothing in this file referenced `registry.` — so it is gone; an unused import still
+   costs a slot in the signature table that `max_funcs` bounds (T-25). Everything else was
+   silent:
+
+   1. **`addfindings`, `reporttojson` and `reporttodiary` each looped with
+      `if(fi < findings.len()){ ...; fi=fi+1 }el{}`**, which runs ONCE. So a scan that found
+      forty outlier columns recorded one finding, serialised one, and wrote one to the diary —
+      while `totalfindings` was incremented by the real count, so the report claimed forty
+      findings and carried one. An `if` where a `lp` was meant type-checks and runs.
+   2. **`findings.push(...)` and `findingparts.push(...)` discarded the array `.push` returns**
+      (T-24), so in practice neither list held anything at all.
+   3. **`.len()` at eight sites** reads as `.len` now. That one was not a fault: measured in the
+      emitted IR, `arr.len()` and `arr.len` produce the identical
+      `getelementptr i64, i64* %p, i32 -1`.
+   4. **`str.isfloat`, `str.fromi32` and `str.fromf32`.** The first exists in neither the
+      interface nor the runtime. The other two are `gen:"abi"` aliases: `str.fromi32` forwards to
+      the i64 formatter, and `str.fromf32` forwards to the f64 one — so it read an f32 argument
+      as f64 bits and printed a meaningless number in every "z-score > N" and "r=" message.
+   5. **`str.concat(marker;" ";...)` and `str.concat(c.cola;" / ";c.colb)`** passed three
+      arguments to a two-argument function.
+
+   The numbers are f64 now, following `moke.ml.engine`: the real stdlib has no f32 parse,
+   format or sqrt, and `$anomaly.score` and `$correlationresult.pearsonr` are f64 there. *)
 
 t=$scanfinding{
   datasetid:str;
@@ -14,7 +41,7 @@ t=$scanfinding{
   severity:str;
   detail:str;
   anomalycount:i32;
-  score:f32
+  score:f64
 };
 
 t=$scanreport{
@@ -31,12 +58,15 @@ t=$scanreport{
 };
 
 t=$scannerconfig{
-  zscorethreshold:f32;
+  zscorethreshold:f64;
   iqrenabled:bool;
-  correlationthreshold:f32;
+  correlationthreshold:f64;
   maxdatasets:i32
 };
 
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
 
 f=defaultconfig():$scannerconfig{
   <$scannerconfig{
@@ -44,121 +74,133 @@ f=defaultconfig():$scannerconfig{
     iqrenabled:true;
     correlationthreshold:0.9;
     maxdatasets:50
-  };
+  }
 };
 
-
-f=classifyseverity(anomalycount:i32;score:f32):str{
+f=classifyseverity(anomalycount:i64;score:f64):str{
   if(anomalycount > 10){ <"critical" };
   if(anomalycount > 3){ <"warning" };
-  let absscore=score;
-  if(absscore < 0.0){ absscore=absscore * -1.0 };
+  let absscore=math.abs(score);
   if(absscore > 5.0){ <"critical" };
   if(absscore > 3.0){ <"warning" };
   <"info"
 };
 
-
-f=scandataset(datasetid:str;headers:@str;rows:@(@str);config:$scannerconfig):@$scanfinding{
-  let findings=@();
-
-  let hi=mut.0;
-  lp(let lv=0;hi < headers.len();lv=lv){
-    let colname=headers.get(hi);
-    let numericcount=mut.0;
-    let samplelimit=mut.20;
-    if(samplelimit > rows.len()){ samplelimit=rows.len() }el{};
-    let si=mut.0;
-    lp(let lv2=0;si < samplelimit;lv2=lv2){
-      let val=str.trim(rows.get(si).get(hi));
-      if(str.isfloat(val)){ numericcount=numericcount + 1 }el{};
-      si=si + 1
-    };
-    if(numericcount > samplelimit / 2){
-      let opts=$anomalyopts{
-        column:colname;
-        threshold:config.zscorethreshold;
-        method:"zscore"
-      };
-      let result=engine.zscoreanomalies(headers;rows;opts);
-      let count=result.anomalies.len();
-      if(count > 0){
-        let maxscore=mut.0.0;
-        let ai=mut.0;
-        lp(let lv3=0;ai < count;lv3=lv3){
-          let a=result.anomalies.get(ai);
-          let abss=mut.a.score;
-          if(abss < 0.0){ abss=abss * -1.0 }el{};
-          if(abss > maxscore){ maxscore=abss }el{};
-          ai=ai + 1
-        };
-        findings.push($scanfinding{
-          datasetid:datasetid;
-          column:colname;
-          kind:"zscore";
-          severity:classifyseverity(count;maxscore);
-          detail:str.concat(str.fromi32(count);" outliers detected (z-score > ";
-            str.concat(str.fromf32(config.zscorethreshold);")"));
-          anomalycount:count;
-          score:maxscore
-        })
-      }el{};
-
-      if(config.iqrenabled){
-        let iqropts=$anomalyopts{
-          column:colname;
-          threshold:1.5;
-          method:"iqr"
-        };
-        let iqrresult=engine.iqranomalies(headers;rows;iqropts);
-        let iqrcount=iqrresult.anomalies.len();
-        if(iqrcount > 0){
-          let iqrmax=mut.0.0;
-          let bi=mut.0;
-          lp(let lv4=0;bi < iqrcount;lv4=lv4){
-            let b=iqrresult.anomalies.get(bi);
-            if(b.score > iqrmax){ iqrmax=b.score }el{};
-            bi=bi + 1
-          };
-          findings.push($scanfinding{
-            datasetid:datasetid;
-            column:colname;
-            kind:"iqr";
-            severity:classifyseverity(iqrcount;iqrmax);
-            detail:str.concat(str.fromi32(iqrcount);" outliers detected (IQR method)");
-            anomalycount:iqrcount;
-            score:iqrmax
-          })
-        }el{}
-      }el{}
-    }el{};
-    hi=hi + 1
+f=maxabsscore(anomalies:@$anomaly):f64{
+  let out=mut.0.0;
+  lp(let ai=0;ai<anomalies.len;ai=ai+1){
+    let a:$anomaly=anomalies.get(ai);
+    let s=math.abs(a.score);
+    if(s>out){ out=s }
   };
+  <out
+};
 
+(* A column is worth running outlier detection over when more than half its first 20 cells parse
+   as numbers. `moke.ml.engine.isnumericcol` uses the same shape over 50 cells with an 80 per
+   cent bar; this one is looser on purpose, because a column that is mostly numeric with a few
+   junk cells is exactly where a data-quality scan should look. *)
+f=worthscanning(rows:@(@str);colidx:i64):bool{
+  let samplelimit=mut.20;
+  if(samplelimit>rows.len){ samplelimit=rows.len };
+  if(samplelimit==0){ <false };
+  let numericcount=mut.0;
+  lp(let si=0;si<samplelimit;si=si+1){
+    let row=rows.get(si);
+    if(colidx<row.len){
+      if(engine.isnumericcell(row.get(colidx))){ numericcount=numericcount+1 }
+    }
+  };
+  <numericcount>samplelimit/2
+};
+
+f=zscorefinding(datasetid:str;colname:str;headers:@str;rows:@(@str);config:$scannerconfig):@$scanfinding{
+  let out=mut.@();
+  let result=engine.zscoreanomalies(headers;rows;$anomalyopts{
+    column:colname;
+    threshold:config.zscorethreshold;
+    method:"zscore"
+  });
+  let count=result.anomalies.len;
+  if(count>0){
+    let maxscore=maxabsscore(result.anomalies);
+    out=out.push($scanfinding{
+      datasetid:datasetid;
+      column:colname;
+      kind:"zscore";
+      severity:classifyseverity(count;maxscore);
+      detail:"\(str.fromint(count)) outliers detected (z-score > \(fmt.f64(config.zscorethreshold;2)))";
+      anomalycount:count as i32;
+      score:maxscore
+    })
+  };
+  <out
+};
+
+f=iqrfinding(datasetid:str;colname:str;headers:@str;rows:@(@str)):@$scanfinding{
+  let out=mut.@();
+  let result=engine.iqranomalies(headers;rows;$anomalyopts{
+    column:colname;
+    threshold:1.5;
+    method:"iqr"
+  });
+  let count=result.anomalies.len;
+  if(count>0){
+    let maxscore=maxabsscore(result.anomalies);
+    out=out.push($scanfinding{
+      datasetid:datasetid;
+      column:colname;
+      kind:"iqr";
+      severity:classifyseverity(count;maxscore);
+      detail:"\(str.fromint(count)) outliers detected (IQR method)";
+      anomalycount:count as i32;
+      score:maxscore
+    })
+  };
+  <out
+};
+
+f=concatfindings(a:@$scanfinding;b:@$scanfinding):@$scanfinding{
+  let out=mut.a;
+  lp(let i=0;i<b.len;i=i+1){
+    out=out.push(b.get(i))
+  };
+  <out
+};
+
+f=correlationfindings(datasetid:str;headers:@str;rows:@(@str);config:$scannerconfig):@$scanfinding{
+  let out=mut.@();
   let corrs=engine.correlationmatrix(headers;rows);
-  let ci=mut.0;
-  lp(let lv5=0;ci < corrs.len();lv5=lv5){
-    let c=corrs.get(ci);
-    let absr=mut.c.pearsonr;
-    if(absr < 0.0){ absr=absr * -1.0 }el{};
-    if(absr > config.correlationthreshold){
-      findings.push($scanfinding{
+  lp(let ci=0;ci<corrs.len;ci=ci+1){
+    let c:$correlationresult=corrs.get(ci);
+    if(math.abs(c.pearsonr)>config.correlationthreshold){
+      out=out.push($scanfinding{
         datasetid:datasetid;
-        column:str.concat(c.cola;" / ";c.colb);
+        column:"\(c.cola) / \(c.colb)";
         kind:"correlation";
         severity:"info";
-        detail:str.concat("Strong correlation (r=";str.concat(str.fromf32(c.pearsonr);
-          str.concat(") between ";str.concat(c.cola;str.concat(" and ";c.colb)))));
+        detail:"Strong correlation (r=\(fmt.f64(c.pearsonr;4))) between \(c.cola) and \(c.colb)";
         anomalycount:1;
         score:c.pearsonr
       })
-    }el{};
-    ci=ci + 1
+    }
   };
-
-  <findings
+  <out
 };
 
+f=scandataset(datasetid:str;headers:@str;rows:@(@str);config:$scannerconfig):@$scanfinding{
+  let findings=mut.@();
+  lp(let hi=0;hi<headers.len;hi=hi+1){
+    if(worthscanning(rows;hi)){
+      let colname=headers.get(hi);
+      findings=concatfindings(findings;zscorefinding(datasetid;colname;headers;rows;config));
+      if(config.iqrenabled){
+        findings=concatfindings(findings;iqrfinding(datasetid;colname;headers;rows))
+      }
+    }
+  };
+  <concatfindings(findings;correlationfindings(datasetid;headers;rows;config))
+};
 
 f=newreport(scanid:str;timestamp:str):$scanreport{
   <$scanreport{
@@ -172,107 +214,56 @@ f=newreport(scanid:str;timestamp:str):$scanreport{
     findings:@();
     durationms:0;
     status:"complete"
+  }
+};
+
+f=countseverity(findings:@$scanfinding;severity:str):i64{
+  let n=mut.0;
+  lp(let fi=0;fi<findings.len;fi=fi+1){
+    let f:$scanfinding=findings.get(fi);
+    if(str.eq(f.severity;severity)){ n=n+1 }
   };
+  <n
 };
 
 f=addfindings(report:$scanreport;findings:@$scanfinding):$scanreport{
-  let newfindings=report.findings;
-  let fi=mut.0;
-  let critical=report.criticalcount;
-  let warning=report.warningcount;
-  let info=report.infocount;
-  if(fi < findings.len()){
-    let f=findings.get(fi);
-    newfindings.push(f);
-    if(str.eq(f.severity;"critical")){ critical=critical + 1 };
-    if(str.eq(f.severity;"warning")){ warning=warning + 1 };
-    if(str.eq(f.severity;"info")){ info=info + 1 };
-    fi=fi + 1
-  }el{};
   <$scanreport{
     scanid:report.scanid;
     timestamp:report.timestamp;
     datasetsscanned:report.datasetsscanned + 1;
-    totalfindings:report.totalfindings + findings.len();
-    criticalcount:critical;
-    warningcount:warning;
-    infocount:info;
-    findings:newfindings;
+    totalfindings:(report.totalfindings as i64 + findings.len) as i32;
+    criticalcount:(report.criticalcount as i64 + countseverity(findings;"critical")) as i32;
+    warningcount:(report.warningcount as i64 + countseverity(findings;"warning")) as i32;
+    infocount:(report.infocount as i64 + countseverity(findings;"info")) as i32;
+    findings:concatfindings(report.findings;findings);
     durationms:report.durationms;
     status:report.status
-  };
+  }
 };
 
+f=findingtojson(f:$scanfinding):str{
+  <"{\"dataset_id\":\(jsonencode(f.datasetid)),\"column\":\(jsonencode(f.column)),\"kind\":\(jsonencode(f.kind)),\"severity\":\(jsonencode(f.severity)),\"detail\":\(jsonencode(f.detail)),\"anomaly_count\":\(str.fromint(f.anomalycount as i64)),\"score\":\(fmt.f64(f.score;4))}"
+};
 
 f=reporttojson(report:$scanreport):str{
-  let findingparts=@();
-  let fi=0;
-  if(fi < report.findings.len()){
-    let f=report.findings.get(fi);
-    let part=str.concat("{\"dataset_id\":";
-      str.concat(str.jsonencode(f.datasetid);
-      str.concat(",\"column\":";
-      str.concat(str.jsonencode(f.column);
-      str.concat(",\"kind\":";
-      str.concat(str.jsonencode(f.kind);
-      str.concat(",\"severity\":";
-      str.concat(str.jsonencode(f.severity);
-      str.concat(",\"detail\":";
-      str.concat(str.jsonencode(f.detail);
-      str.concat(",\"anomaly_count\":";
-      str.concat(str.fromi32(f.anomalycount);
-      str.concat(",\"score\":";
-      str.concat(str.fromf32(f.score);
-      "}"))))))))))))));
-    findingparts.push(part);
-    fi=fi + 1
-  }el{};
-  <str.concat("{\"scan_id\":";
-    str.concat(str.jsonencode(report.scanid);
-    str.concat(",\"timestamp\":";
-    str.concat(str.jsonencode(report.timestamp);
-    str.concat(",\"datasets_scanned\":";
-    str.concat(str.fromi32(report.datasetsscanned);
-    str.concat(",\"total_findings\":";
-    str.concat(str.fromi32(report.totalfindings);
-    str.concat(",\"critical_count\":";
-    str.concat(str.fromi32(report.criticalcount);
-    str.concat(",\"warning_count\":";
-    str.concat(str.fromi32(report.warningcount);
-    str.concat(",\"info_count\":";
-    str.concat(str.fromi32(report.infocount);
-    str.concat(",\"duration_ms\":";
-    str.concat(str.fromi32(report.durationms);
-    str.concat(",\"status\":";
-    str.concat(str.jsonencode(report.status);
-    str.concat(",\"findings\":[";
-    str.concat(str.join(",";findingparts);
-    "]}"))))))))))))))))))))
+  let findingparts=mut.@();
+  lp(let fi=0;fi<report.findings.len;fi=fi+1){
+    findingparts=findingparts.push(findingtojson(report.findings.get(fi)))
+  };
+  <"{\"scan_id\":\(jsonencode(report.scanid)),\"timestamp\":\(jsonencode(report.timestamp)),\"datasets_scanned\":\(str.fromint(report.datasetsscanned as i64)),\"total_findings\":\(str.fromint(report.totalfindings as i64)),\"critical_count\":\(str.fromint(report.criticalcount as i64)),\"warning_count\":\(str.fromint(report.warningcount as i64)),\"info_count\":\(str.fromint(report.infocount as i64)),\"duration_ms\":\(str.fromint(report.durationms as i64)),\"status\":\(jsonencode(report.status)),\"findings\":[\(str.join(",";findingparts))]}"
 };
 
+f=severitymarker(severity:str):str{
+  if(str.eq(severity;"warning")){ <"[WARN]" };
+  if(str.eq(severity;"critical")){ <"[CRIT]" };
+  <"[INFO]"
+};
 
 f=reporttodiary(report:$scanreport):str{
-  let header=str.concat("Data Quality Scan -- ";report.timestamp);
-  let summary=str.concat("
-Datasets scanned: ";str.concat(str.fromi32(report.datasetsscanned);
-    str.concat(" | Findings: ";str.concat(str.fromi32(report.totalfindings);
-    str.concat(" (";str.concat(str.fromi32(report.criticalcount);
-    str.concat(" critical, ";str.concat(str.fromi32(report.warningcount);
-    str.concat(" warning, ";str.concat(str.fromi32(report.infocount);" info)"))))))))));
-  let body=mut."
-
-Findings:
-";
-  let fi=0;
-  if(fi < report.findings.len()){
-    let f=report.findings.get(fi);
-    let marker="[INFO]";
-    if(str.eq(f.severity;"warning")){ marker="[WARN]" };
-    if(str.eq(f.severity;"critical")){ marker="[CRIT]" };
-    body=str.concat(body;str.concat(marker;" ";str.concat(f.datasetid;
-      str.concat("/";str.concat(f.column;str.concat(": ";str.concat(f.detail;"
-")))))));
-    fi=fi + 1
-  }el{};
-  <str.concat(header;str.concat(summary;body))
+  let out=mut."Data Quality Scan -- \(report.timestamp)\nDatasets scanned: \(str.fromint(report.datasetsscanned as i64)) | Findings: \(str.fromint(report.totalfindings as i64)) (\(str.fromint(report.criticalcount as i64)) critical, \(str.fromint(report.warningcount as i64)) warning, \(str.fromint(report.infocount as i64)) info)\n\nFindings:\n";
+  lp(let fi=0;fi<report.findings.len;fi=fi+1){
+    let f:$scanfinding=report.findings.get(fi);
+    out=str.concat(out;"\(severitymarker(f.severity)) \(f.datasetid)/\(f.column): \(f.detail)\n")
+  };
+  <out
 };

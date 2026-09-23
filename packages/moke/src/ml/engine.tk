@@ -3,9 +3,46 @@
 
 m=moke.ml.engine;
 i=str:std.str;
+i=math:std.math;
 
+(* ── Almost every loop in this file was written as an `if` ─────────────────────────
+   Sixty-four diagnostics, and they were not the interesting part. Measured against toke's
+   stdlib at the pinned commit:
 
+   1. **Twenty-one loops were `if(i < n){ ...; i=i+1 }el{}`.** Each ran its body ONCE. So
+      `pearson` summed one pair of deviations, `euclideandist` squared one dimension,
+      `colindex` compared one header, `kmeans` initialised one centroid, assigned one point,
+      and ran one iteration, `zscoreanomalies` and `iqranomalies` each tested one row, and
+      `correlationmatrix` produced at most one pair. Every result this module returned was
+      computed from the first element of its input. Nothing in the compiler objects to an `if`
+      where a `lp` was meant, which is why this survived: it type-checks, it runs, and it
+      returns a plausible number.
+   2. **The k-means centroid update was `sum.get(di) == sum.get(di) + points...`** — the exact
+      shape T-26 cites. There is no assignment to an array element; E2002 advises `==`, which
+      compiles to a discarded comparison that does nothing. The centroids were never updated,
+      so `kmeans` returned its initial centroids with a converged-looking result. The same
+      mistake appears again at `assignments.get(ui) == newassign.get(ui)`, which is why
+      convergence detection could never see a change either. Centroids are rebuilt now.
+   3. **`out.push(...)` discarded the array `.push` returns** at fifteen sites (T-24), so the
+      feature matrix, the centroid list, the assignment vector, the anomaly list and the
+      correlation list were all permanently empty. Combined with (1) this module could not
+      return anything but zeros.
+   4. **`str.sqrt`, `str.isfloat`, `vals.clone()` and `sorted.sortf32asc()` do not exist.** The
+      first two raised E4027. The last two are method calls, and an unknown method call is not
+      type-checked at all (T-7): measured in the emitted IR it lowers to a call to a BARE GLOBAL
+      named after the method with the receiver dropped — `declare i64 @clone()` — so the IQR path
+      had no sort behind it and the module could not link. `math.percentile` replaces the sort
+      outright, and the clone with it.
+   5. **`colindex` returns -1 when a column is missing, and `kmeans` tested `if(ci > 0)`** —
+      so column 0 of every dataset was treated as missing and silently contributed 0.0 to every
+      feature vector.
 
+   Arithmetic and the exported fields are f64, not the f32 they were. There is no f32 anywhere
+   in the real stdlib: `str.tofloat` returns f64, `math.*` is f64, and the `str.sqrt` this file
+   wanted does not exist at all — `math.sqrt` is f64. The f32 was costing a cast at every
+   boundary and buying nothing. Struct FIELDS cross a module boundary intact whatever the width
+   (T-20 is about bare returns), and no function here returns a bare float to another module
+   except the statistics helpers, which are same-module callers only. *)
 
 t=$kmeansopts{
   k:i32;
@@ -15,23 +52,23 @@ t=$kmeansopts{
 
 t=$kmeansresult{
   k:i32;
-  assignments:@i32;
-  centroids:@(@(f32));
-  inertia:f32;
+  assignments:@i64;
+  centroids:@(@f64);
+  inertia:f64;
   iterations:i32
 };
 
 t=$anomalyopts{
   column:str;
-  threshold:f32;
-  method:str  
+  threshold:f64;
+  method:str
 };
 
 t=$anomaly{
   rowindex:i32;
   column:str;
-  value:f32;
-  score:f32;
+  value:f64;
+  score:f64;
   kind:str
 };
 
@@ -39,14 +76,14 @@ t=$anomalyresult{
   column:str;
   method:str;
   anomalies:@$anomaly;
-  threshold:f32
+  threshold:f64
 };
 
 t=$correlationresult{
   cola:str;
   colb:str;
-  pearsonr:f32;
-  strength:str  
+  pearsonr:f64;
+  strength:str
 };
 
 t=$mlresult{
@@ -56,367 +93,356 @@ t=$mlresult{
   correlations:@$correlationresult
 };
 
+(* Same-module callers only: a bare f64 return is corrupted across a module boundary (T-20).
+   Everything this module exports carries its numbers in struct fields, which cross intact. *)
+f=meanof(vals:@f64):f64{
+  if(vals.len==0){ <0.0 };
+  <math.mean(vals)
+};
 
+f=stddevof(vals:@f64):f64{
+  if(vals.len<2){ <0.0 };
+  <math.sqrt(math.variance(vals))
+};
 
-f=meanf32(vals:@f32):f32{
-  let n=vals.len();
-  if(n == 0){ <0.0 };
-  let total=0.0;
-  lp(let ii=0;ii<vals.len;ii=ii+1){
-    let v=vals.get(ii);
-    total=total + v
+(* Pearson r, not r squared: `math.linreg` reports r squared and so loses the sign, and the
+   direction of a correlation is the half a reader takes first. *)
+f=pearson(xs:@f64;ys:@f64):f64{
+  let n=xs.len;
+  if(n<2 || ys.len<n){ <0.0 };
+  let mx=math.mean(xs);
+  let my=math.mean(ys);
+  let cov=mut.0.0;
+  let sx=mut.0.0;
+  let sy=mut.0.0;
+  lp(let idx=0;idx<n;idx=idx+1){
+    let dx=xs.get(idx)-mx;
+    let dy=ys.get(idx)-my;
+    cov=cov+dx*dy;
+    sx=sx+dx*dx;
+    sy=sy+dy*dy
   };
-  <total / str.tofloat(str.fromint(n))
+  let denom=math.sqrt(sx)*math.sqrt(sy);
+  if(denom==0.0){ <0.0 };
+  <cov/denom
 };
 
-f=stddevf32(vals:@f32):f32{
-  let n=vals.len();
-  if(n < 2){ <0.0 };
-  let m=meanf32(vals);
-  let sumsq=0.0;
-  lp(let ii=0;ii<vals.len;ii=ii+1){
-    let v=vals.get(ii);
-    let diff=v - m;
-    sumsq=sumsq + diff * diff
+f=colindex(headers:@str;name:str):i64{
+  lp(let idx=0;idx<headers.len;idx=idx+1){
+    if(str.eq(headers.get(idx);name)){
+      <idx
+    }
   };
-  <str.sqrt(sumsq / str.tofloat(str.fromint(n)))
+  <(0-1)
 };
 
-f=pearson(xs:@f32;ys:@f32):f32{
-  let n=xs.len();
-  if(n < 2){ <0.0 };
-  let mx=meanf32(xs);
-  let my=meanf32(ys);
-  let cov=0.0;
-  let sx=0.0;
-  let sy=0.0;
-  let idx=0;
-  if(idx < n){
-    let dx=xs.get(idx) - mx;
-    let dy=ys.get(idx) - my;
-    cov=cov + dx * dy;
-    sx=sx + dx * dx;
-    sy=sy + dy * dy;
-    idx=idx + 1
-  }el{};
-  let denom=str.sqrt(sx) * str.sqrt(sy);
-  if(denom == 0.0){ <0.0 };
-  <cov / denom
+(* `str.tofloat` is a result, so "is this a number" and "what is it" are one call. $ok first:
+   `mt` binds a result's arms by position, and the error arm first inverts the match (T-31). *)
+f=parsecell(v:str):f64{
+  <mt str.tofloat(str.trim(v)) {
+    $ok:n n;
+    $parseerr:e 0.0
+  }
 };
 
-f=colindex(headers:@str;name:str):i32{
-  let idx=0;
-  let found=-1;
-  if(idx < headers.len()){
-    if(str.eq(headers.get(idx); name)){ found=idx };
-    idx=idx + 1
-  }el{};
-  <found
+f=isnumericcell(v:str):bool{
+  let t=str.trim(v);
+  if(str.len(t)==0){
+    <false
+  };
+  <mt str.tofloat(t) {
+    $ok:n true;
+    $parseerr:e false
+  }
 };
 
-f=extractnumericcol(headers:@str;rows:@(@(str));colname:str):@f32{
-  let ci=colindex(headers; colname);
-  let out=@();
-  if(ci < 0){ <out };
+f=cellat(row:@str;ci:i64):str{
+  if(ci<0 || ci>=row.len){
+    <""
+  };
+  <row.get(ci)
+};
+
+f=extractnumericcol(headers:@str;rows:@(@str);colname:str):@f64{
+  let out=mut.@();
+  let ci=colindex(headers;colname);
+  if(ci<0){ <out };
   lp(let ii=0;ii<rows.len;ii=ii+1){
-    let r=rows.get(ii);
-    let v=str.trim(r.get(ci));
-    if(str.isfloat(v)){ out.push(str.tofloat(v)) }el{ out.push(0.0) }
+    out=out.push(parsecell(cellat(rows.get(ii);ci)))
   };
   <out
 };
 
-f=euclideandist(a:@f32;b:@f32):f32{
-  let d=0.0;
-  let i=0;
-  if(i < a.len()){
-    let diff=a.get(i) - b.get(i);
-    d=d + diff * diff;
-    i=i + 1;
-  }el{};
-  <str.sqrt(d)
+f=euclideandist(a:@f64;b:@f64):f64{
+  let d=mut.0.0;
+  lp(let i=0;i<a.len && i<b.len;i=i+1){
+    let diff=a.get(i)-b.get(i);
+    d=d+diff*diff
+  };
+  <math.sqrt(d)
 };
 
-f=nearestcentroid(point:@f32;centroids:@(@(f32))):i32{
-  let bestidx=0;
-  let bestdist=euclideandist(point; centroids.get(0));
-  let i=1;
-  if(i < centroids.len()){
-    let d=euclideandist(point; centroids.get(i));
-    if(d < bestdist){
+f=nearestcentroid(point:@f64;centroids:@(@f64)):i64{
+  if(centroids.len==0){ <0 };
+  let bestidx=mut.0;
+  let bestdist=mut.euclideandist(point;centroids.get(0));
+  lp(let i=1;i<centroids.len;i=i+1){
+    let d=euclideandist(point;centroids.get(i));
+    if(d<bestdist){
       bestdist=d;
-      bestidx=i;
-    };
-    i=i + 1;
-  }el{};
+      bestidx=i
+    }
+  };
   <bestidx
 };
 
-f=recomputecentroids(points:@(@(f32));assignments:@i32;k:i32;dims:i32):@(@(f32)){
-  let newcents=@();
-  let ci=0;
-  if(ci < k){
-    let sum=@();
-    let di=0;
-    if(di < dims){ sum.push(0.0); di=di + 1 }el{};
-    let count=0;
-    let pi=0;
-    if(pi < assignments.len()){
-      if(assignments.get(pi) == ci){
-        let di2=0;
-        if(di2 < dims){
-          sum.get(di2)==sum.get(di2) + points.get(pi).get(di2);
-          di2=di2 + 1
-        }el{};
-        count=count + 1;
-      };
-      pi=pi + 1
-    }el{};
-    if(count > 0){
-      let di3=0;
-      if(di3 < dims){
-        sum.get(di3)==sum.get(di3) / str.tofloat(str.fromint(count));
-        di3=di3 + 1
-      }el{}
+f=zerovector(dims:i64):@f64{
+  let out=mut.@();
+  lp(let di=0;di<dims;di=di+1){
+    out=out.push(0.0)
+  };
+  <out
+};
+
+(* An EMPTY cluster keeps its previous centroid rather than collapsing to the origin. The old
+   code produced a zero vector for it, which drags the next assignment pass toward zero and can
+   swallow a real cluster. *)
+f=centroidfor(points:@(@f64);assignments:@i64;cluster:i64;dims:i64;previous:@f64):@f64{
+  let count=mut.0;
+  lp(let pi=0;pi<points.len && pi<assignments.len;pi=pi+1){
+    if(assignments.get(pi)==cluster){ count=count+1 }
+  };
+  if(count==0){ <previous };
+  let sums=mut.@();
+  lp(let di=0;di<dims;di=di+1){
+    let total=mut.0.0;
+    (* `qi`, not a second `pi`: a repeated `let` of the same name in one function emits invalid
+       IR (T-6), and `scripts/find_shadowed_lets.py` gates it. *)
+    lp(let qi=0;qi<points.len && qi<assignments.len;qi=qi+1){
+      if(assignments.get(qi)==cluster){
+        let p=points.get(qi);
+        if(di<p.len){ total=total+p.get(di) }
+      }
     };
-    newcents.push(sum);
-    ci=ci + 1
-  }el{};
+    sums=sums.push(total/(count as f64))
+  };
+  <sums
+};
+
+f=recomputecentroids(points:@(@f64);assignments:@i64;centroids:@(@f64);dims:i64):@(@f64){
+  let newcents=mut.@();
+  lp(let ci=0;ci<centroids.len;ci=ci+1){
+    newcents=newcents.push(centroidfor(points;assignments;ci;dims;centroids.get(ci)))
+  };
   <newcents
 };
 
-
-
-f=kmeans(headers:@str;rows:@(@(str));opts:$kmeansopts):$kmeansresult{
-  let k=opts.k;
-  let maxiter=opts.maxiter;
-  let colnames=opts.columns;
-  let nrows=rows.len();
-  let dims=colnames.len();
-
-  
-  let matrix=@();
+f=featurematrix(headers:@str;rows:@(@str);colnames:@str):@(@f64){
+  let indices=mut.@();
+  lp(let jj=0;jj<colnames.len;jj=jj+1){
+    indices=indices.push(colindex(headers;colnames.get(jj)))
+  };
+  let matrix=mut.@();
   lp(let ii=0;ii<rows.len;ii=ii+1){
     let r=rows.get(ii);
-    let point=@();
-    lp(let jj=0;jj<colnames.len;jj=jj+1){
-      let cn=colnames.get(jj);
-      let ci=colindex(headers; cn);
-      if(ci > 0){
-        let v=str.trim(r.get(ci));
-        if(str.isfloat(v)){ point.push(str.tofloat(v)) }el{ point.push(0.0) }
-      }el{ point.push(0.0) }
+    let point=mut.@();
+    lp(let kk=0;kk<indices.len;kk=kk+1){
+      point=point.push(parsecell(cellat(r;indices.get(kk))))
     };
-    matrix.push(point)
+    matrix=matrix.push(point)
   };
+  <matrix
+};
 
-  
-  let centroids=@();
-  let initi=0;
-  let initlim=k;
-  if(initlim > nrows){ initlim=nrows };
-  if(initi < initlim){
-    centroids.push(matrix.get(initi));
-    initi=initi + 1
-  }el{};
-  
-  if(centroids.len() < k){
-    let pad=@();
-    let di=0;
-    if(di < dims){ pad.push(0.0); di=di + 1 }el{};
-    centroids.push(pad);
-  }el{};
+(* Centroids are seeded from the first k rows. That is deterministic and reproducible, which is
+   what a demo wants, and it is NOT k-means++ — a dataset ordered by the clustering variable will
+   seed badly. Said here so nobody reads the output as a tuned clustering. *)
+f=seedcentroids(matrix:@(@f64);k:i64;dims:i64):@(@f64){
+  let centroids=mut.@();
+  lp(let i=0;i<k && i<matrix.len;i=i+1){
+    centroids=centroids.push(matrix.get(i))
+  };
+  lp(let pad=centroids.len;pad<k;pad=pad+1){
+    centroids=centroids.push(zerovector(dims))
+  };
+  <centroids
+};
 
-  let assignments=@();
-  let ri=0;
-  if(ri < nrows){ assignments.push(0); ri=ri + 1 }el{};
+f=assignall(matrix:@(@f64);centroids:@(@f64)):@i64{
+  let out=mut.@();
+  lp(let pi=0;pi<matrix.len;pi=pi+1){
+    out=out.push(nearestcentroid(matrix.get(pi);centroids))
+  };
+  <out
+};
 
-  let iter=0;
-  let converged=false;
-  if(iter < maxiter && !converged){
-    let newassign=@();
-    let pi=0;
-    if(pi < nrows){
-      newassign.push(nearestcentroid(matrix.get(pi); centroids));
-      pi=pi + 1
-    }el{};
+f=sameassignment(a:@i64;b:@i64):bool{
+  if(a.len != b.len){ <false };
+  lp(let i=0;i<a.len;i=i+1){
+    if(a.get(i) != b.get(i)){
+      <false
+    }
+  };
+  <true
+};
 
-    
-    let changed=false;
-    let ci2=0;
-    if(ci2 < nrows){
-      if(newassign.get(ci2) != assignments.get(ci2)){ changed=true };
-      ci2=ci2 + 1
-    }el{};
+f=inertiaof(matrix:@(@f64);assignments:@i64;centroids:@(@f64)):f64{
+  let total=mut.0.0;
+  lp(let ii=0;ii<matrix.len && ii<assignments.len;ii=ii+1){
+    let c=assignments.get(ii);
+    if(c>=0 && c<centroids.len){
+      let d=euclideandist(matrix.get(ii);centroids.get(c));
+      total=total+d*d
+    }
+  };
+  <total
+};
 
-    
-    let ui=0;
-    if(ui < nrows){ assignments.get(ui)==newassign.get(ui); ui=ui + 1 }el{};
-
-    if(!changed){ converged=true };
-
-    centroids=recomputecentroids(matrix; assignments; k; dims);
-    iter=iter + 1
-  }el{};
-
-  
-  let inertia=0.0;
-  let ii=0;
-  if(ii < nrows){
-    let d=euclideandist(matrix.get(ii); centroids.get(assignments.get(ii)));
-    inertia=inertia + d * d;
-    ii=ii + 1
-  }el{};
-
+f=kmeans(headers:@str;rows:@(@str);opts:$kmeansopts):$kmeansresult{
+  let k=mut.(opts.k as i64);
+  if(k<1){ k=1 };
+  let dims=opts.columns.len;
+  let matrix=featurematrix(headers;rows;opts.columns);
+  let centroids=mut.seedcentroids(matrix;k;dims);
+  (* The local is `labels`, not `assignments`: an identifier beginning with the keyword `as`
+     raises W2020 on every assignment to it. The exported field keeps its name. *)
+  let labels=mut.assignall(matrix;centroids);
+  let iterations=mut.0;
+  let converged=mut.false;
+  lp(let it=0;it<(opts.maxiter as i64) && !converged;it=it+1){
+    centroids=recomputecentroids(matrix;labels;centroids;dims);
+    let newassign=assignall(matrix;centroids);
+    if(sameassignment(newassign;labels)){ converged=true };
+    labels=newassign;
+    iterations=iterations+1
+  };
   <$kmeansresult{
-    k:k;
-    assignments:assignments;
+    k:k as i32;
+    assignments:labels;
     centroids:centroids;
-    inertia:inertia;
-    iterations:iter
+    inertia:inertiaof(matrix;labels;centroids);
+    iterations:iterations as i32
   }
 };
 
-
-
-f=zscoreanomalies(headers:@str;rows:@(@(str));opts:$anomalyopts):$anomalyresult{
-  let colname=opts.column;
-  let threshold=opts.threshold;
-  let vals=extractnumericcol(headers; rows; colname);
-  let m=meanf32(vals);
-  let sd=stddevf32(vals);
-  let anomalies=@();
-  let ri=0;
-  if(ri < vals.len()){
-    let z=0.0;
-    if(sd > 0.0){ z=(vals.get(ri) - m) / sd };
-    let az=z;
-    if(az < 0.0){ az=az * -1.0 };
-    if(az > threshold){
-      anomalies.push($anomaly{
-        rowindex:ri;
-        column:colname;
+f=zscoreanomalies(headers:@str;rows:@(@str);opts:$anomalyopts):$anomalyresult{
+  let vals=extractnumericcol(headers;rows;opts.column);
+  let m=meanof(vals);
+  let sd=stddevof(vals);
+  let anomalies=mut.@();
+  lp(let ri=0;ri<vals.len;ri=ri+1){
+    let z=mut.0.0;
+    if(sd>0.0){ z=(vals.get(ri)-m)/sd };
+    if(math.abs(z)>opts.threshold){
+      anomalies=anomalies.push($anomaly{
+        rowindex:ri as i32;
+        column:opts.column;
         value:vals.get(ri);
         score:z;
         kind:"zscore"
-      });
-    };
-    ri=ri + 1
-  }el{};
+      })
+    }
+  };
   <$anomalyresult{
-    column:colname;
+    column:opts.column;
     method:"zscore";
     anomalies:anomalies;
-    threshold:threshold
+    threshold:opts.threshold
   }
 };
 
-
-
-f=iqranomalies(headers:@str;rows:@(@(str));opts:$anomalyopts):$anomalyresult{
-  let colname=opts.column;
-  let threshold=opts.threshold;
-  let vals=extractnumericcol(headers; rows; colname);
-  let n=vals.len();
-
-  
-  let sorted=vals.clone();
-  sorted.sortf32asc();
-
-  
-  let q1idx=(n * 25) / 100;
-  let q3idx=(n * 75) / 100;
-  if(q1idx > n){ q1idx=0 };
-  if(q3idx > n){ q3idx=n - 1 };
-  let q1=sorted.get(q1idx);
-  let q3=sorted.get(q3idx);
-  let iqr=q3 - q1;
-  let lower=q1 - 1.5 * iqr;
-  let upper=q3 + 1.5 * iqr;
-
-  let anomalies=@();
-  let ri=0;
-  if(ri < n){
+(* The quartiles come from `math.percentile`. The old code took `sorted=vals.clone()` and
+   `sorted.sortf32asc()` — neither method exists, neither was type-checked, and each lowered to an
+   undefined bare global with the receiver dropped (T-7) — then indexed
+   `(n*25)/100` into the UNSORTED values, with a clamp of `if(q1idx > n)` that was one past the
+   end. So the bounds were two arbitrary elements of the column. *)
+f=iqranomalies(headers:@str;rows:@(@str);opts:$anomalyopts):$anomalyresult{
+  let vals=extractnumericcol(headers;rows;opts.column);
+  let anomalies=mut.@();
+  if(vals.len<4){
+    <$anomalyresult{
+      column:opts.column;
+      method:"iqr";
+      anomalies:anomalies;
+      threshold:1.5
+    }
+  };
+  let q1=math.percentile(vals;25.0);
+  let q3=math.percentile(vals;75.0);
+  let iqr=q3-q1;
+  let lower=q1-1.5*iqr;
+  let upper=q3+1.5*iqr;
+  lp(let ri=0;ri<vals.len;ri=ri+1){
     let v=vals.get(ri);
-    if(v < lower || v > upper){
-      
-      let score=0.0;
-      if(v < lower && iqr > 0.0){ score=(lower - v) / iqr };
-      if(v > upper && iqr > 0.0){ score=(v - upper) / iqr };
-      anomalies.push($anomaly{
-        rowindex:ri;
-        column:colname;
+    if(v<lower || v>upper){
+      let score=mut.0.0;
+      if(iqr>0.0){
+        if(v<lower){ score=(lower-v)/iqr };
+        if(v>upper){ score=(v-upper)/iqr }
+      };
+      anomalies=anomalies.push($anomaly{
+        rowindex:ri as i32;
+        column:opts.column;
         value:v;
         score:score;
         kind:"iqr"
-      });
-    };
-    ri=ri + 1
-  }el{};
+      })
+    }
+  };
   <$anomalyresult{
-    column:colname;
+    column:opts.column;
     method:"iqr";
     anomalies:anomalies;
     threshold:1.5
   }
 };
 
-
-
-f=pearsonstrength(r:f32):str{
-  let ar=r;
-  if(ar < 0.0){ ar=ar * -1.0 };
-  if(ar > 0.7){ <"strong" };
-  if(ar > 0.4){ <"moderate" };
-  if(ar > 0.2){ <"weak" };
+f=pearsonstrength(r:f64):str{
+  let ar=math.abs(r);
+  if(ar>0.7){ <"strong" };
+  if(ar>0.4){ <"moderate" };
+  if(ar>0.2){ <"weak" };
   <"negligible"
 };
 
-f=isnumericcol(headers:@str;rows:@(@(str));col:str):bool{
-  let ci=colindex(headers; col);
-  if(ci < 0){ <false };
-  let numericcount=0;
-  let total=0;
-  let limit=50;
-  if(limit > rows.len()){ limit=rows.len() };
-  let ri=0;
-  if(ri < limit){
-    let v=str.trim(rows.get(ri).get(ci));
-    if(str.len(v) > 0){
-      if(str.isfloat(v)){ numericcount=numericcount + 1 };
-      total=total + 1;
-    };
-    ri=ri + 1
-  }el{};
-  if(total == 0){ <false };
-  <(numericcount * 100 / total) > 80
+(* A column counts as numeric when more than 80 per cent of its first 50 non-blank cells parse.
+   Blank cells are not counted either way, which is deliberate: a sparse numeric column should
+   not be disqualified by its gaps. *)
+f=isnumericcol(headers:@str;rows:@(@str);col:str):bool{
+  let ci=colindex(headers;col);
+  if(ci<0){ <false };
+  let numericcount=mut.0;
+  let total=mut.0;
+  lp(let ri=0;ri<rows.len && ri<50;ri=ri+1){
+    let v=str.trim(cellat(rows.get(ri);ci));
+    if(str.len(v)>0){
+      if(isnumericcell(v)){ numericcount=numericcount+1 };
+      total=total+1
+    }
+  };
+  if(total==0){ <false };
+  <(numericcount*100/total)>80
 };
 
-f=correlationmatrix(headers:@str;rows:@(@(str))):@$correlationresult{
-  
-  let numcols=@();
+f=correlationmatrix(headers:@str;rows:@(@str)):@$correlationresult{
+  let numcols=mut.@();
   lp(let ii=0;ii<headers.len;ii=ii+1){
     let h=headers.get(ii);
-    if(isnumericcol(headers; rows; h)){ numcols.push(h) }
+    if(isnumericcol(headers;rows;h)){ numcols=numcols.push(h) }
   };
-
-  let results=@();
-  let ai=0;
-  if(ai < numcols.len()){
-    let bi=ai + 1;
-    if(bi < numcols.len()){
-      let xs=extractnumericcol(headers; rows; numcols.get(ai));
-      let ys=extractnumericcol(headers; rows; numcols.get(bi));
-      let r=pearson(xs; ys);
-      results.push($correlationresult{
+  let results=mut.@();
+  lp(let ai=0;ai<numcols.len;ai=ai+1){
+    lp(let bi=ai+1;bi<numcols.len;bi=bi+1){
+      let xs=extractnumericcol(headers;rows;numcols.get(ai));
+      let ys=extractnumericcol(headers;rows;numcols.get(bi));
+      let r=pearson(xs;ys);
+      results=results.push($correlationresult{
         cola:numcols.get(ai);
         colb:numcols.get(bi);
         pearsonr:r;
         strength:pearsonstrength(r)
-      });
-      bi=bi + 1
-    }el{};
-    ai=ai + 1
-  }el{};
+      })
+    }
+  };
   <results
 };

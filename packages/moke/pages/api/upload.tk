@@ -6,31 +6,81 @@ i=http:std.http;
 i=json:std.json;
 i=str:std.str;
 i=upload:moke.upload;
+i=compute:moke.compute;
+
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+
+(* json.enc, not str.jsonencode: std.str declares no jsonencode in either the interface or the
+   runtime, so all five calls this file made were E4027. json.enc returns the value WITH its
+   surrounding quotes, which is why the literals around it stop at the colon. *)
+f=strarrayjson(items:@str):str{
+  let parts=mut.@();
+  lp(let i=0;i<items.len();i=i+1){
+    parts=parts.push(json.enc(items.get(i)))
+  };
+  <str.concat("[";str.concat(str.join(",";parts);"]"))
+};
+
+(* $parseresult.dataset is declared i64, so `result.dataset.headers` read a field off a value with
+   no established type — E4034 at codegen, a stage --check never reaches, and for `headers` in
+   particular the message is that more than one struct in scope declares it at a different offset.
+   A typed parameter establishes it; $dataset is moke.compute's, which is why that import is here
+   and was not before. *)
+f=datasetheaders(ds:$dataset):@str{ <ds.headers };
+
+(* The filename out of a multipart content-disposition header. Split out because str.slice is
+   declared `str!SliceErr` and both slices in the old code bound it straight to a str; a match is
+   needed, and $ok has to be written FIRST, since mt binds a result's arms by POSITION and not by
+   label (T-31) — err-first would have handed the error payload to the success path for every
+   header that did carry a filename.
+
+   http.reqheader, not http.header: http.header is declared to take the `req` STRUCT and to return
+   str!httprouteerr, while the handler is given a raw i64 pointer. http.reqheader is declared
+   (i64, str) -> str for exactly that, and the same applies to http.reqparam against
+   http.queryparam below. *)
+f=filenamefromheader(req:i64;fallback:str):str{
+  let contentdisp=http.reqheader(req;"content-disposition");
+  if(str.len(contentdisp) == 0){ <fallback }el{};
+  let fnidx=str.indexof(contentdisp;"filename=\"");
+  if(fnidx < 0){ <fallback }el{};
+  let start=fnidx + 10;
+  let rest=mt str.slice(contentdisp;start as u64;str.len(contentdisp)) {
+    $ok:v v;
+    $sliceerr:e ""
+  };
+  let endidx=str.indexof(rest;"\"");
+  if(endidx <= 0){ <fallback }el{};
+  <mt str.slice(rest;0;endidx as u64) {
+    $ok:v v;
+    $sliceerr:e fallback
+  }
+};
 
 f=post(req:i64):i64{
-  let contentdisp=http.header(req;"content-disposition");
-  let filename="uploaded_dataset";
+  (* mut., because the query parameter below may replace it. *)
+  let filename=mut.filenamefromheader(req;"uploaded_dataset");
+  let qname=http.reqparam(req;"name");
+  if(str.len(qname) > 0){ filename=qname }el{};
 
-  if(str.len(contentdisp) > 0){
-    let fnidx=str.indexof(contentdisp;"filename=\"");
-    if(fnidx > 0){
-      let start=fnidx + 10;
-      let rest=str.slice(contentdisp;start;str.len(contentdisp));
-      let endidx=str.indexof(rest;"\"");
-      if(endidx > 0){
-        filename=str.slice(rest;0;endidx)
-      }
-    }
-  };
-
-  let qname=http.queryparam(req;"name");
-  if(str.len(qname) > 0){ filename=qname };
-
-  let rawtext=req.body;
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let rawtext=http.reqbody(req);
 
   if(str.len(str.trim(rawtext)) == 0){
     let errbody="{\"ok\":false,\"error\":\"empty body\",\"col_count\":0,\"row_count\":0,\"headers\":[],\"preview_rows\":[]}";
-    <http.res.json(400;errbody)
+    <http.res(400;errbody)
   };
 
   let opts=upload.defaultopts();
@@ -38,50 +88,55 @@ f=post(req:i64):i64{
 
   if(result.ok == false){
     let errbody=str.concat("{\"ok\":false,\"error\":";
-      str.concat(str.jsonencode(result.error);
+      str.concat(json.enc(result.error);
       ",\"col_count\":0,\"row_count\":0,\"headers\":[],\"preview_rows\":[]}"));
-    <http.res.json(422;errbody)
+    <http.res(422;errbody)
   };
 
-  let previewparts=@();
-  let pi=0;
+  (* Every accumulator in this function used to be a plain `let` holding @() with a bare
+     `parts.push(x)` beside it. push RETURNS a new array and does not mutate in place, and an
+     unused method result draws no diagnostic (T-7, T-24) — so preview_rows and headers came back
+     as `[]` for every successful upload, however many rows the CSV had. The loop counters had the
+     same problem in the other direction: `pi=pi+1` on an immutable binding is E4070, which is why
+     the file did not compile at all. *)
+  let previewparts=mut.@();
+  let pi=mut.0;
   lp(let lv=0;pi < result.previewrows.len();lv=lv){
     let row=result.previewrows.get(pi);
-    let cellparts=@();
-    let ci=0;
+    let cellparts=mut.@();
+    let ci=mut.0;
     lp(let lv2=0;ci < row.len();lv2=lv2){
-      cellparts.push(str.jsonencode(row.get(ci)));
+      cellparts=cellparts.push(json.enc(row.get(ci)));
       ci=ci + 1
     };
-    previewparts.push(str.concat("[";str.concat(str.join(",";cellparts);"]")));
+    previewparts=previewparts.push(str.concat("[";str.concat(str.join(",";cellparts);"]")));
     pi=pi + 1
   };
   let previewjson=str.concat("[";str.concat(str.join(",";previewparts);"]"));
 
-  let headerparts=@();
-  let hi=0;
-  lp(let lv3=0;hi < result.dataset.headers.len();lv3=lv3){
-    headerparts.push(str.jsonencode(result.dataset.headers.get(hi)));
-    hi=hi + 1
-  };
-  let headersjson=str.concat("[";str.concat(str.join(",";headerparts);"]"));
+  (* `as $dataset` because $parseresult declares the field as a bare i64 and the checker will not
+     pass an established i64 to a struct parameter without the cast (E4031, whose own fix line asks
+     for it). The two share an ABI, so the cast is a re-label and not a conversion. *)
+  let headersjson=strarrayjson(datasetheaders(result.dataset as $dataset));
 
   let displayname=upload.guessname(filename);
 
+  (* str.fromint, not str.fromi32: fromi32 is one of std.str's untyped `(i64) -> i64` names and
+     fromint is the one declared (i64) -> str. The counts are i32 fields, so they are cast. *)
   let respbody=str.concat("{\"ok\":true,";
     str.concat("\"filename\":";
-    str.concat(str.jsonencode(filename);
+    str.concat(json.enc(filename);
     str.concat(",\"display_name\":";
-    str.concat(str.jsonencode(displayname);
+    str.concat(json.enc(displayname);
     str.concat(",\"col_count\":";
-    str.concat(str.fromi32(result.colcount);
+    str.concat(str.fromint(result.colcount as i64);
     str.concat(",\"row_count\":";
-    str.concat(str.fromi32(result.rowcount);
+    str.concat(str.fromint(result.rowcount as i64);
     str.concat(",\"headers\":";
     str.concat(headersjson;
     str.concat(",\"preview_rows\":";
     str.concat(previewjson;
     ",\"error\":\"\"}")))))))))))));
 
-  <http.res.json(200;respbody)
+  <http.res(200;respbody)
 };

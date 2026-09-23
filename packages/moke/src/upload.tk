@@ -5,7 +5,39 @@ m=moke.upload;
 i=str:std.str;
 i=compute:moke.compute;
 
+(* ── The CSV parser could not parse CSV, and nothing said so ───────────────────────
+   This file raised no diagnostics at all. Every fault below is silent, and measured against
+   toke's `src/stdlib/str_glue.c` at the pinned commit:
 
+   1. **`str.charat` returns a BYTE CODE** — an `i64`, not a one-character string. It was fed
+      to `str.eq(ch;",")`, which takes two `char *`, and to `str.concat(current;ch)`, which
+      builds the field. So the delimiter test compared a small integer against a string pointer
+      and the field accumulator dereferenced a character code as a `char *`. That is the whole
+      parser, and it is the same shape as the T-28 segfault. Single characters are taken with
+      `str.slice` now, which is a result and is matched.
+
+   2. **`str.len` is `tk_str_len_w`, which is `strlen()` on a `char *`.** Applied to an ARRAY —
+      `lines`, `fields`, `rows`, `headers`, `samplefields`, `words`, twelve sites — it walks the
+      element buffer to its first zero byte. An array of 8-byte heap pointers has zero bytes in
+      every element's high half, so it returned about 3 regardless of length. `parsecsv`
+      therefore believed every file had about three lines, `gencolheaders` generated about three
+      columns, and the field-padding loop padded to a fictional width.
+
+   3. **`str.push` allocates and RETURNS a new array; all seven calls discarded the result**
+      (T-24). So `splitcsvline` returned an empty field list, `gencolheaders` an empty header
+      list, `parsecsv` an empty row list and an empty preview, and `guessname` an empty word
+      list. A successful parse reported `ok:true` with no data in it.
+
+   4. **`str.slice` is a result** and its value was bound as a plain string at three sites, and
+      **`str.toupper(str.charat(w;0))`** passed a character code to a function that expects a
+      string.
+
+   5. **`$parseresult.dataset` was `i64`** while a `$dataset` was stored in it. Member access on
+      an integer is not checked, so any reader was walking a raw word as a struct.
+
+   6. `str.fromi32`, `str.toupper`, `str.replaceall` and `str.lastindexof` are `gen:"abi"`
+      aliases in stdlib/str.tki rather than declared members. The declared spellings are
+      `str.fromint`, `str.upper`, `str.replace` and `str.lastindex`. *)
 
 t=$parseopts{
   delimiter:str;
@@ -15,60 +47,77 @@ t=$parseopts{
 
 t=$parseresult{
   ok:bool;
-  dataset:i64;
+  dataset:$dataset;
   error:str;
   rowcount:i32;
   colcount:i32;
   previewrows:@(@str)
 };
 
+(* One character as a string. `str.slice` is a result; an out-of-range index yields "" rather
+   than a bound error, which is what every caller here wants. *)
+f=charat(s:str;i:i64):str{
+  <mt str.slice(s;i;i+1) {
+    $ok:v v;
+    $sliceerr:e ""
+  }
+};
+
+f=sliceor(s:str;from:i64;to:i64;fallback:str):str{
+  <mt str.slice(s;from;to) {
+    $ok:v v;
+    $sliceerr:e fallback
+  }
+};
+
+f=occurrences(s:str;needle:str):i64{
+  <str.split(s;needle).len-1
+};
+
+f=firstline(text:str):str{
+  let nlidx=str.indexof(text;"\n");
+  if(nlidx<0){
+    <text
+  };
+  <sliceor(text;0;nlidx;text)
+};
+
+(* Tab wins only on a strict majority, so a comma-delimited file with a stray tab in a field
+   still parses as CSV. The old version walked the line with `str.charat` and compared character
+   codes against strings; counting split parts needs neither. *)
 f=detectdelimiter(text:str):str{
-  let firstline=mut."";
-  let nlidx=str.indexof(text;"
-");
-  if(nlidx>0){
-    firstline=str.slice(text;0;nlidx)
-  }el{
-    firstline=text
+  let head=firstline(text);
+  if(occurrences(head;"\t")>occurrences(head;",")){
+    <"\t"
   };
-  let commacount=mut.0;
-  let tabcount=mut.0;
-  let ci=mut.0;
-  lp(let lv=0;ci<str.len(firstline);lv=lv){
-    let ch=str.charat(firstline;ci);
-    if(str.eq(ch;",")){ commacount=commacount+1 }el{};
-    if(str.eq(ch;"	")){ tabcount=tabcount+1 }el{};
-    ci=ci+1
-  };
-  if(tabcount>commacount){
-    <"	"
-  }el{};
   <","
 };
 
+(* RFC 4180 quoting: a field may be quoted, and a doubled quote inside a quoted field is one
+   literal quote. *)
 f=splitcsvline(line:str;delimiter:str):@str{
-  let fields=@();
+  let fields=mut.@();
   let current=mut."";
   let inquotes=mut.false;
+  let linelen=str.len(line) as i64;
   let i=mut.0;
-  let linelen=str.len(line);
   lp(let lv=0;i<linelen;lv=lv){
-    let ch=str.charat(line;i);
-    if(str.eq(ch;"\"")&&inquotes==false){
-      inquotes=true;
-      i=i+1
-    }el{
-      if(str.eq(ch;"\"")&&inquotes){
-        if(i+1<linelen&&str.eq(str.charat(line;i+1);"\"")){
-          current=str.concat(current;"\"");
-          i=i+2
-        }el{
-          inquotes=false;
-          i=i+1
-        }
+    let ch=charat(line;i);
+    if(str.eq(ch;"\"") && inquotes){
+      if(i+1<linelen && str.eq(charat(line;i+1);"\"")){
+        current=str.concat(current;"\"");
+        i=i+2
       }el{
-        if(str.eq(ch;delimiter)&&inquotes==false){
-          str.push(fields;str.trim(current));
+        inquotes=false;
+        i=i+1
+      }
+    }el{
+      if(str.eq(ch;"\"")){
+        inquotes=true;
+        i=i+1
+      }el{
+        if(str.eq(ch;delimiter) && !inquotes){
+          fields=fields.push(str.trim(current));
           current="";
           i=i+1
         }el{
@@ -78,95 +127,93 @@ f=splitcsvline(line:str;delimiter:str):@str{
       }
     }
   };
-  str.push(fields;str.trim(current));
-  <fields
+  <fields.push(str.trim(current))
 };
 
-f=gencolheaders(count:i32):@str{
-  let headers=@();
-  let i=mut.0;
-  lp(let lv=0;i<count;lv=lv){
-    let h=str.concat("col_";str.fromi32(i));
-    str.push(headers;h);
-    i=i+1
+f=gencolheaders(count:i64):@str{
+  let headers=mut.@();
+  lp(let i=0;i<count;i=i+1){
+    headers=headers.push("col_\(str.fromint(i))")
   };
   <headers
+};
+
+f=emptydataset():$dataset{
+  <$dataset{
+    name:"";
+    headers:@();
+    rows:@()
+  }
+};
+
+f=padfields(fields:@str;colcount:i64):@str{
+  let out=mut.fields;
+  lp(let i=fields.len;i<colcount;i=i+1){
+    out=out.push("")
+  };
+  <out
+};
+
+(* A trailing newline leaves one empty final element in the split, which is not a row. *)
+f=datalines(text:str):@str{
+  let lines=str.split(text;"\n");
+  if(lines.len>1 && str.len(str.trim(lines.get(lines.len-1)))==0){
+    let out=mut.@();
+    lp(let i=0;i<lines.len-1;i=i+1){
+      out=out.push(lines.get(i))
+    };
+    <out
+  };
+  <lines
 };
 
 f=parsecsv(text:str;opts:$parseopts):$parseresult{
   let delim=mut.opts.delimiter;
   if(str.len(delim)==0){
     delim=detectdelimiter(text)
-  }el{};
-  let lines=str.split(text;"
-");
-  let totallines=mut.str.len(lines);
-  if(totallines==0){
-    let emptyds=$dataset{
-      name:"";
-      headers:@();
-      rows:@()
-    };
+  };
+  let lines=datalines(text);
+  if(lines.len==0){
     <$parseresult{
       ok:false;
-      dataset:emptyds;
+      dataset:emptydataset();
       error:"no data";
       rowcount:0;
       colcount:0;
       previewrows:@()
     }
-  }el{};
-
-  let lastidx=mut.totallines-1;
-  if(lastidx>0&&str.len(str.trim(str.get(lines;lastidx)))==0){
-    totallines=totallines-1;
-    lastidx=lastidx-1
-  }el{};
+  };
   let headers=mut.@();
   let startrow=mut.0;
-  if(opts.hasheader&&totallines>0){
-    let firstline=str.trim(str.get(lines;0));
-    headers=splitcsvline(firstline;delim);
+  if(opts.hasheader){
+    headers=splitcsvline(str.trim(lines.get(0));delim);
     startrow=1
   }el{
-    if(totallines>0){
-      let firstdata=str.trim(str.get(lines;0));
-      let samplefields=splitcsvline(firstdata;delim);
-      headers=gencolheaders(str.len(samplefields))
-    }el{}
+    headers=gencolheaders(splitcsvline(str.trim(lines.get(0));delim).len)
   };
-  let colcount=str.len(headers);
-  let rows=@();
-  let rowidx=mut.startrow;
-  lp(let lv=0;rowidx<totallines&&str.len(rows)<opts.maxrows;lv=lv){
-    let rawline=str.trim(str.get(lines;rowidx));
+  let colcount=headers.len;
+  let maxrows=opts.maxrows as i64;
+  let rows=mut.@();
+  lp(let rowidx=startrow;rowidx<lines.len && rows.len<maxrows;rowidx=rowidx+1){
+    let rawline=str.trim(lines.get(rowidx));
     if(str.len(rawline)>0){
-      let fields=mut.splitcsvline(rawline;delim);
-      lp(let lv2=0;str.len(fields)<colcount;lv2=lv2){
-        str.push(fields;"")
-      };
-      str.push(rows;fields)
-    }el{};
-    rowidx=rowidx+1
+      rows=rows.push(padfields(splitcsvline(rawline;delim);colcount))
+    }
   };
-  let rowcount=str.len(rows);
-  let ds=$dataset{
-    name:"";
-    headers:headers;
-    rows:rows
-  };
-  let preview=@();
-  let pi=mut.0;
-  lp(let lv3=0;pi<5&&pi<rowcount;lv3=lv3){
-    str.push(preview;str.get(rows;pi));
-    pi=pi+1
+  let preview=mut.@();
+  lp(let pi=0;pi<5 && pi<rows.len;pi=pi+1){
+    preview=preview.push(rows.get(pi))
   };
   <$parseresult{
     ok:true;
-    dataset:ds;
+    dataset:$dataset{
+      name:"";
+      headers:headers;
+      rows:rows
+    };
     error:"";
-    rowcount:rowcount;
-    colcount:colcount;
+    rowcount:rows.len as i32;
+    colcount:colcount as i32;
     previewrows:preview
   }
 };
@@ -179,35 +226,34 @@ f=defaultopts():$parseopts{
   }
 };
 
+f=capitalise(w:str):str{
+  let n=str.len(w) as i64;
+  if(n==0){ <"" };
+  if(n==1){ <str.upper(w) };
+  <"\(str.upper(charat(w;0)))\(sliceor(w;1;n;""))"
+};
+
 f=guessname(filename:str):str{
-  let dotidx=str.lastindexof(filename;".");
+  let dotidx=str.lastindex(filename;".");
   let base=mut.filename;
   if(dotidx>0){
-    base=str.slice(filename;0;dotidx)
-  }el{};
-  base=str.replaceall(base;"_";" ");
-  base=str.replaceall(base;"-";" ");
+    base=sliceor(filename;0;dotidx;filename)
+  };
+  base=str.replace(str.replace(base;"_";" ");"-";" ");
   let words=str.split(base;" ");
-  let resultwords=@();
-  let wi=mut.0;
-  lp(let lv=0;wi<str.len(words);lv=lv){
-    let w=str.get(words;wi);
+  let resultwords=mut.@();
+  lp(let wi=0;wi<words.len;wi=wi+1){
+    let w=words.get(wi);
     if(str.len(w)>0){
-      let firstch=str.toupper(str.charat(w;0));
-      let rest=mut."";
-      if(str.len(w)>1){
-        rest=str.slice(w;1;str.len(w))
-      }el{};
-      str.push(resultwords;str.concat(firstch;rest))
-    }el{};
-    wi=wi+1
+      resultwords=resultwords.push(capitalise(w))
+    }
   };
   <str.join(" ";resultwords)
 };
 
 f=validate(result:$parseresult):bool{
-  if(result.ok==false){ <false }el{};
-  if(!(result.colcount>0)){ <false }el{};
-  if(!(result.rowcount>0)){ <false }el{};
+  if(result.ok){}el{ <false };
+  if(result.colcount>0){}el{ <false };
+  if(result.rowcount>0){}el{ <false };
   <true
 };

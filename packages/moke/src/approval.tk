@@ -36,59 +36,82 @@ f=requiresreview(sensitivitylevel:str):bool{
   <false
 };
 
-f=builddiff(original:str;transformed:str;piientities:@str):@$difftoken{
-  let tokens=@();
+(* ── The diff builder could not have produced a diff ───────────────────────────────
+   Four faults stacked here, and only two of them were diagnostics:
 
+   1. `str.len(origwords)` applied `strlen()` to an ARRAY of words. `str.len` is
+      `tk_str_len_w`, which walks a `char *` to its first NUL byte; over an array of 8-byte
+      heap pointers that stops after two or three bytes, so both loop bounds were a small
+      constant unrelated to the word count. `arr.len` is the length.
+   2. The two exhaustion tests were `oi > len` and `ti > len`, one past the end. Even with a
+      correct length the loop read one word beyond each array before it agreed it was finished.
+   3. `let tokens=@()` was not `mut.` and all ten `tokens.push(...)` calls discarded the array
+      that `.push` returns (T-24), so `builddiff` returned an empty list whatever it walked.
+      The approval screen showed no diff at all — no PII removal, no anonymisation — which is
+      the one thing a human is being asked to approve.
+   4. `piientities.len()` read as property. That one was harmless -- measured in the emitted IR,
+      `arr.len()` and `arr.len` are the identical `getelementptr i64, i64* %p, i32 -1` -- and is
+      changed only for consistency.
+
+   The placeholder test and the PII test are lifted into predicates because the nesting had
+   reached six levels and the two-pointer merge is the part worth reading. *)
+f=containspii(word:str;piientities:@str):bool{
+  lp(let ei=0;ei<piientities.len;ei=ei+1){
+    if(str.contains(word;piientities.get(ei))){
+      <true
+    }
+  };
+  <false
+};
+
+(* A placeholder is what core.privacy.placeholder substitutes in; matching on the entity-type
+   name is how the demo recognises one without a round trip to the placeholder store. *)
+f=isplaceholder(word:str):bool{
+  if(str.contains(word;"PERSON")){ <true };
+  if(str.contains(word;"MEDICARE")){ <true };
+  if(str.contains(word;"ADDRESS")){ <true };
+  if(str.contains(word;"PHONE")){ <true };
+  if(str.contains(word;"EMAIL")){ <true };
+  if(str.contains(word;"DOB")){ <true };
+  if(str.contains(word;"SUPPRESSED")){ <true };
+  <false
+};
+
+f=builddiff(original:str;transformed:str;piientities:@str):@$difftoken{
   let origwords=str.split(original;" ");
   let transwords=str.split(transformed;" ");
+  let tokens=mut.@();
   let oi=mut.0;
   let ti=mut.0;
-
-  lp(let lv=0;true;lv=lv){
-    if(oi > str.len(origwords) && ti > str.len(transwords)){ <tokens }el{
-      if(oi > str.len(origwords)){
-        let tw=str.get(transwords;ti);
-        tokens.push($difftoken{ text:tw; kind:"anonymised" });
-        ti=ti+1
-      }el{
-        if(ti > str.len(transwords)){
-          let ow=str.get(origwords;oi);
-          let ispii=false;
-          let ei=0;
-          lp(let lv2=0;ei < piientities.len();lv2=lv2){
-            let e=piientities.get(ei);
-            if(str.contains(ow;e)){ ispii=true };
-            ei=ei+1
-          };
-          if(ispii){
-            tokens.push($difftoken{ text:ow; kind:"removed_pii" })
-          }el{
-            tokens.push($difftoken{ text:ow; kind:"compressed" })
-          };
-          oi=oi+1
+  lp(let lv=0;oi<origwords.len || ti<transwords.len;lv=lv){
+    if(oi>=origwords.len){
+      tokens=tokens.push($difftoken{ text:transwords.get(ti); kind:"anonymised" });
+      ti=ti+1
+    }el{
+      if(ti>=transwords.len){
+        let ow=origwords.get(oi);
+        if(containspii(ow;piientities)){
+          tokens=tokens.push($difftoken{ text:ow; kind:"removed_pii" })
         }el{
-          let ow=str.get(origwords;oi);
-          let tw=str.get(transwords;ti);
-          if(str.eq(ow;tw)){
-            tokens.push($difftoken{ text:ow; kind:"unchanged" });
-            oi=oi+1;
-            ti=ti+1
+          tokens=tokens.push($difftoken{ text:ow; kind:"compressed" })
+        };
+        oi=oi+1
+      }el{
+        let ow=origwords.get(oi);
+        let tw=transwords.get(ti);
+        if(str.eq(ow;tw)){
+          tokens=tokens.push($difftoken{ text:ow; kind:"unchanged" })
+        }el{
+          if(isplaceholder(tw)){
+            tokens=tokens.push($difftoken{ text:ow; kind:"removed_pii" });
+            tokens=tokens.push($difftoken{ text:tw; kind:"anonymised" })
           }el{
-            let isplaceholder=str.contains(tw;"PERSON") || str.contains(tw;"MEDICARE") ||
-                               str.contains(tw;"ADDRESS") || str.contains(tw;"PHONE") ||
-                               str.contains(tw;"EMAIL") || str.contains(tw;"DOB") ||
-                               str.contains(tw;"SUPPRESSED");
-            if(isplaceholder){
-              tokens.push($difftoken{ text:ow; kind:"removed_pii" });
-              tokens.push($difftoken{ text:tw; kind:"anonymised" })
-            }el{
-              tokens.push($difftoken{ text:ow; kind:"compressed" });
-              tokens.push($difftoken{ text:tw; kind:"compressed" })
-            };
-            oi=oi+1;
-            ti=ti+1
+            tokens=tokens.push($difftoken{ text:ow; kind:"compressed" });
+            tokens=tokens.push($difftoken{ text:tw; kind:"compressed" })
           }
-        }
+        };
+        oi=oi+1;
+        ti=ti+1
       }
     }
   };
@@ -96,7 +119,7 @@ f=builddiff(original:str;transformed:str;piientities:@str):@$difftoken{
 };
 
 f=logdecision(sessionlog:i64;requestid:str;action:str;sensitivity:str):i64{
-  let detail="request=" + requestid + " action=" + action + " sensitivity=" + sensitivity;
-  log.info("moke.approval: " + detail);
-  <clog.append(sessionlog;"approval";action;detail;0)
+  let detail="request=\(requestid) action=\(action) sensitivity=\(sensitivity)";
+  log.info("moke.approval: \(detail)";@());
+  <clog.append(sessionlog;"approval";action;detail;0 as i32)
 };

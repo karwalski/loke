@@ -6,85 +6,157 @@ m=page.moke.api.mcp;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=time:std.time;
+i=os:std.os;
+i=jx:shared.jsonobj;
 i=toolpanel:moke.mcp.toolpanel;
 i=broker:moke.mcp.brokerstatus;
 i=memory:moke.mcp.memorydemo;
 
-f=initstate():i64{
-  let gtoolstate=mut.toolpanel.newpanelstate();
-  let gbrokerstate=mut.broker.newpanelstate();
-  let gmemorystate=mut.memory.newstate("~/.loke/memory");
+(* These three panels are module-level state on purpose: an MCP tool panel is a running log of
+   invocations and the page has to show what the previous request did. They used to be declared
+   as locals inside an initstate() function, which left all five handlers below referring to
+   identifiers that did not exist — six E3011s, and this file had never compiled. Measured this
+   session at the pinned toolchain: a module-scope `let x=mut.<value>` is real state that
+   survives across calls, its initialiser may call an imported or a later-declared function, and
+   a write from inside a function persists. So the intent was reachable; only the scope was wrong.
+
+   initstate() also ended with the statement `$initialized==true;`. That is not an assignment.
+   toke has no assignment to a bare sum variant, and `==` in statement position is a comparison
+   whose result is discarded — a silent no-op, which is precisely the fix E2002 recommends and
+   T-26 warns against. And nothing ever called initstate(): ooke.handlers does not import this
+   module at all, so even if the globals had been global they would have started empty. The
+   broker panel is therefore seeded in its initialiser instead, where it cannot be skipped. *)
+let gtoolstate=mut.toolpanel.newpanelstate();
+let gbrokerstate=mut.seededbroker();
+let gmemorystate=mut.memory.newstate(memorydir());
+
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+(* errjson, because http.res.err does not exist. See the note on http.res above: the
+   three-segment name binds to libc's err(3) and terminates the process with the status code
+   as its exit status. This builds the same {"ok":false,"error":...} envelope the success
+   paths in this file use, with json.enc supplying the quotes and the escaping. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* The tilde is expanded by a SHELL, not by the filesystem and not by anything in this stack, so
+   the literal "~/.loke/memory" this file passed named a directory called "~" in the process's
+   working directory. scripts/find_tilde_path.py is in the gate for exactly this and it flags the
+   site. The house helper would be shared.types.homepath, but shared.types' interface does not
+   export homepath, lokedir, lokefile or configpath — neither the committed .tki nor the built one
+   lists them — and shared/src/types.tk builds them from std.homedir(), which has no
+   tk_std_homedir_w symbol in the runtime and does not link (measured this session). os.getenv is
+   declared (str) -> str, links, and returns the right thing; tkc.toml already grants `env`. *)
+f=memorydir():str{
+  <str.concat(os.getenv("HOME");"/.loke/memory")
+};
+
+f=seededbroker():$brokerpanelstate{
+  let st=mut.broker.newpanelstate();
   let demoservers=broker.demoservers();
   let dsi=mut.0;
   lp(let lv=0;dsi < demoservers.len();lv=lv){
-    gbrokerstate=broker.addserver(gbrokerstate;demoservers.get(dsi));
+    st=broker.addserver(st;demoservers.get(dsi));
     dsi=dsi + 1
   };
-  $initialized==true;
-  <0
+  <st
+};
+
+(* The tool arguments are a JSON value that may be an object, an array, a string or null, and
+   std.json cannot read a nested value at all (T-32) — json.getraw, which this file used to call,
+   is declared in no std.json interface and in no runtime. jx.valueraw returns the raw text of
+   whatever is at the key, brace- and quote-matched, and "null" when the key is absent; the
+   handlers below want an empty object in that case. *)
+f=argsraw(obj:$json):str{
+  let raw=jx.valueraw(obj;"args");
+  if(str.eq(raw;"null")){ <"{}" }el{ <raw }
 };
 
 f=gettools(req:i64):i64{
   let resp=toolpanel.panelstatetojson(gtoolstate);
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };
 
 
+(* json.dec once, then the typed json.str — json.getstr is one of the ~50 names std.json
+   declares `(i64, i64) -> i64`, which read a different representation and, handed raw request
+   text, dereference its first word. Measured: a program calling json.getstr on a str exits 139,
+   SIGSEGV. The arms are labelled $ok / $jsonerr rather than bare `ok` / `err`, and $ok is
+   written first, because mt binds a result's arms by POSITION and not by label (T-31).
+   str.fromint(time.nowms()) rather than str.fromi64(str.timestampms()): std.str declares no
+   timestampms in either the interface or the runtime, and std.nowms does not link either. *)
 f=postinvoke(req:i64):i64{
-  let body=req.body;
-  let toolname=mt json.getstr(body;"tool_name") {
-    ok:v v;
-    err:e ""
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  let args=mt json.getraw(body;"args") {
-    ok:v v;
-    err:e "{}"
+  let toolname=mt json.str(obj;"tool_name") {
+    $ok:v v;
+    $jsonerr:e ""
   };
+  let args=argsraw(obj);
 
   if(str.len(toolname) == 0){
-    <http.res.err(400;"{\"ok\":false,\"error\":\"tool_name is required\"}")
+    <errjson(400;"tool_name is required")
   };
 
   let inv=toolpanel.invoketool(toolname;args;"";"";
-    str.fromi64(str.timestampms()));
+    str.fromint(time.nowms()));
   gtoolstate=toolpanel.addinvocation(gtoolstate;inv);
 
   let resp=toolpanel.invocationtojson(inv);
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };
 
 
 f=getbroker(req:i64):i64{
   let resp=broker.panelstatetojson(gbrokerstate);
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };
 
 
 f=getmemory(req:i64):i64{
   let resp=memory.statetojson(gmemorystate);
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };
 
 
 f=postmemory(req:i64):i64{
-  let body=req.body;
-  let toolname=mt json.getstr(body;"tool_name") {
-    ok:v v;
-    err:e ""
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  let args=mt json.getraw(body;"args") {
-    ok:v v;
-    err:e "{}"
+  let toolname=mt json.str(obj;"tool_name") {
+    $ok:v v;
+    $jsonerr:e ""
   };
+  let args=argsraw(obj);
 
   if(str.len(toolname) == 0){
-    <http.res.err(400;"{\"ok\":false,\"error\":\"tool_name is required\"}")
+    <errjson(400;"tool_name is required")
   };
 
   let inv=memory.invoke(gmemorystate;toolname;args;
-    str.fromi64(str.timestampms()));
+    str.fromint(time.nowms()));
   gmemorystate=memory.recordinvocation(gmemorystate;inv);
 
   let resp=memory.invocationtojson(inv);
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };

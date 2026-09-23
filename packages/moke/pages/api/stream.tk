@@ -6,30 +6,77 @@ m=page.moke.api.stream;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=jx:shared.jsonobj;
 i=hooks:moke.hooks;
 i=streaming:moke.streaming;
-i=routing:moke.routingexplainer;
-i=cost:moke.costcomparison;
-i=consolelog:moke.consolelog;
 
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+(* errjson, because http.res.err does not exist. See the note on http.res above: the
+   three-segment name binds to libc's err(3) and terminates the process with the status code
+   as its exit status. This builds the same {"ok":false,"error":...} envelope the success
+   paths in this file use, with json.enc supplying the quotes and the escaping. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* The upstream call, split out so the response handle never leaves the match. http.post returns
+   a stdlib result and takes TWO arguments — the third, "application/json", which this file used
+   to pass, is an arity error (E4026): headers moved to http.postheaders. On a refused connection
+   http.post still takes the $ok arm (T-15), so http.isok has to be asked as well; measured
+   against a closed port, http.isok is 0 and http.body is "". "" therefore means "no usable
+   response" to the caller. *)
+f=upstreambodyof(c:i64):str{
+  if(http.isok(c)){ <http.body(c) }el{ <"" }
+};
+
+f=upstreamcall(body:str):str{
+  <mt http.post("http://127.0.0.1:11430/api/pipeline";body) {
+    $ok:c upstreambodyof(c);
+    $err:e ""
+  }
+};
+
+(* json.dec once, then the typed json.str, not json.getstr: json.getstr is one of the ~50 names
+   std.json declares `(i64, i64) -> i64`, which read a different representation and dereference
+   the first word of whatever they are handed. Measured this session, a program calling
+   json.getstr on a str exits 139, SIGSEGV. $ok is written first in every arm list because mt
+   binds a result's arms by POSITION, not by label (T-31). *)
 f=post(req:i64):i64{
-  let body=req.body;
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
 
-  let prompt=mt json.getstr(body;"prompt") {
-    ok:v v;
-    err:e ""
+  let prompt=mt json.str(obj;"prompt") {
+    $ok:v v;
+    $jsonerr:e ""
   };
-  let model=mt json.getstr(body;"model") {
-    ok:v v;
-    err:e ""
+  let model=mt json.str(obj;"model") {
+    $ok:v v;
+    $jsonerr:e ""
   };
-  let sessionid=mt json.getstr(body;"session_id") {
-    ok:v v;
-    err:e "unknown"
+  let sessionid=mt json.str(obj;"session_id") {
+    $ok:v v;
+    $jsonerr:e "unknown"
   };
 
   if(str.eq(prompt;"")){
-    <http.res.err(400;"missing required field: prompt")
+    <errjson(400;"missing required field: prompt")
   };
 
   let stream=mut.streaming.newsession(sessionid;model);
@@ -43,29 +90,38 @@ f=post(req:i64):i64{
   stream=streaming.setstage(stream;"llm_call");
 
   let upstreambody=mut."{";
-  upstreambody=str.concat(upstreambody;str.concat("\"text\":";str.jsonencode(effectiveprompt)));
+  upstreambody=str.concat(upstreambody;str.concat("\"text\":";json.enc(effectiveprompt)));
   upstreambody=str.concat(upstreambody;",\"system_prompt\":\"\"");
   upstreambody=str.concat(upstreambody;",\"tolerance\":\"instant\"");
   upstreambody=str.concat(upstreambody;",\"mode\":\"chat\"");
   upstreambody=str.concat(upstreambody;",\"stream\":true");
   if(str.len(model) > 0){
-    upstreambody=str.concat(upstreambody;str.concat(",\"model\":";str.jsonencode(model)))
+    upstreambody=str.concat(upstreambody;str.concat(",\"model\":";json.enc(model)))
   };
   upstreambody=str.concat(upstreambody;"}");
 
-  let upstreamres=http.post("http://127.0.0.1:11430/api/pipeline";
-    "application/json";upstreambody);
+  let upstreamjson=upstreamcall(upstreambody);
 
   stream=streaming.setstage(stream;"restore");
-  stream=streaming.setstate(stream;$complete);
+  (* 3, not $complete. moke.streaming carries the state as a plain i64 — setstate takes i64 and
+     statelabel maps 0 idle, 1 connecting, 2 streaming, 3 complete, 4 error — and its $streamstate
+     sum is vestigial; the module writes 0 and 2 as literals itself. A bare sum variant in a value
+     position does not evaluate to its ordinal, it produces a value that crashes when used (T-13),
+     and nothing diagnoses it. *)
+  stream=streaming.setstate(stream;3);
 
-  let upstreamjson=http.body(upstreamres);
-
+  (* str.concat, not `+`: both joins were E4031, a declared str on one side and an unresolved
+     return type on the other. ADR-0004. *)
   let respbody=mut."{";
   respbody=str.concat(respbody;"\"ok\":true");
-  respbody=str.concat(respbody;",\"stream_session\":" + streaming.sessiontojson(stream));
-  respbody=str.concat(respbody;",\"upstream\":" + upstreamjson);
+  respbody=str.concat(respbody;str.concat(",\"stream_session\":";streaming.sessiontojson(stream)));
+  (* `null` when the upstream gave us nothing. Splicing an empty body straight in produced
+     `"upstream":}` — a response this endpoint advertised as JSON and which no client could
+     parse, on exactly the path where the pipeline was unreachable. *)
+  let upstreamfield=mut."null";
+  if(str.len(upstreamjson) > 0){ upstreamfield=upstreamjson }el{};
+  respbody=str.concat(respbody;str.concat(",\"upstream\":";upstreamfield));
   respbody=str.concat(respbody;"}");
 
-  <http.res.json(200;respbody)
+  <http.res(200;respbody)
 };

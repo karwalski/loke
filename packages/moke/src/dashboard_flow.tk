@@ -4,229 +4,265 @@
 m=moke.dashboardflow;
 i=str:std.str;
 i=http:std.http;
+i=json:std.json;
+i=jx:shared.jsonobj;
+i=reach:shared.reachability;
 i=ddl:moke.ddl;
+
+(* ── What was wrong here, in order of consequence ──────────────────────────────────
+   1. `http.post(url; body; "application/json")` — three arguments; the client `http.post` takes
+      two, and what it RETURNS is a result, not a struct. `res.ok` and `res.body` were field
+      reads on a result value, which nothing checks. Both request functions therefore branched
+      on a field that does not exist. The pattern that works in this tree is the one
+      `core.privacy.presidio.analyze` uses: `http.client(baseurl)` then
+      `http.postheaders(hc; path; bytes; headersjson)`, matched with `mt` — `$ok` FIRST, because
+      `mt` binds a result's arms by position and writing the error arm first inverts the match
+      (T-31).
+   2. `dash.summary == rawjson` and `card.metric.label == card.metric.label + " [...]"` were
+      meant as assignments. The language has no field assignment and E2002 advises `==`, which
+      compiles to a DISCARDED COMPARISON and does nothing (T-26). So the fallback that stashes
+      an unparsed LLM reply never ran, and phase 2 — the entire point of which is to write the
+      resolved compute results back onto the metric cards — changed nothing at all. Both are
+      rebuilds now, phase 2 through `ddl.withmetric`.
+   3. `$flowstate.dashboard` was `i64` while every use read `.title`, `.summary` and `.cards`
+      off it. Member access on an integer is not checked, so the JSON renderer was walking a
+      raw word as a struct. It is `$dashboard`.
+   4. `str.charat` returns a BYTE CODE, and it was compared with `str.eq(ch;"{")` — a char code
+      passed where a `char *` is expected, which is the same shape as the T-28 segfault. The
+      brace scanner now compares codes: 123 is `{`, 125 is `}`, 34 is a double quote.
+   5. `str.slice` is a result and its value was bound as if it were a plain string. Title and
+      summary extraction goes through `shared.jsonobj` instead, which is the only json reader
+      that can see a value at all (T-32) and whose `sliceor` is bounds-safe.
+   6. `str.indexof(text;"```json") > 0` skipped the fenced-block path whenever the model's reply
+      BEGAN with the fence, which is the common case. It is `>= 0`. *)
 
 t=$flowphase{ $schemasent:i64; $ddlreceived:i64; $queriesresolved:i64; $rendered:i64};
 
 t=$flowstate{
   phase:str;
   schematoon:str;
-  dashboard:i64;
+  dashboard:$dashboard;
   requestid:str;
   error:str
 };
 
+f=pipelinebaseurl():str{
+  <"http://127.0.0.1:11430"
+};
+
+(* A brace-depth scan that ignores braces inside string literals. The previous version counted
+   every `{` in the text, so a JSON reply containing a brace in any string value closed the
+   object early and the DDL was truncated. *)
+f=objectspan(text:str;from:i64):i64{
+  let n=str.len(text) as i64;
+  let depth=mut.0;
+  let instring=mut.false;
+  let escaped=mut.false;
+  let i=mut.from;
+  lp(let lv=0;i<n;lv=lv){
+    let c=str.charat(text;i);
+    if(escaped){
+      escaped=false
+    }el{
+      if(instring){
+        if(c==92){ escaped=true };
+        if(c==34){ instring=false }
+      }el{
+        if(c==34){ instring=true };
+        if(c==123){ depth=depth+1 };
+        if(c==125){
+          depth=depth-1;
+          if(depth==0){
+            <i+1
+          }
+        }
+      }
+    };
+    i=i+1
+  };
+  <(0-1)
+};
+
 f=extractjson(text:str):str{
   let fencestart=str.indexof(text;"```json");
-  if(fencestart > 0){
-    let afterfence=str.slice(text;fencestart + 7;str.len(text));
+  if(fencestart>=0){
+    let afterfence=jx.sliceor(text;fencestart+7;str.len(text) as i64);
     let fenceend=str.indexof(afterfence;"```");
-    if(fenceend > 0){
-      <str.trim(str.slice(afterfence;0;fenceend))
+    if(fenceend>0){
+      <str.trim(jx.sliceor(afterfence;0;fenceend))
     }
   };
   let braceopen=str.indexof(text;"{");
-  if(braceopen < 0){ <"" };
-  let depth=mut.0;
-  let i=mut.braceopen;
-  let foundend=mut.-1;
-  lp(let lv=0;i < str.len(text);lv=lv){
-    let ch=str.charat(text;i);
-    if(str.eq(ch;"{")){ depth=depth+1 };
-    if(str.eq(ch;"}")){ depth=depth-1 };
-    if(depth == 0){
-      foundend=i;
-      i=str.len(text)
-    }el{
-      i=i+1
-    }
-  };
-  if(foundend < 0){ <"" };
-  <str.trim(str.slice(text;braceopen;foundend+1))
+  if(braceopen<0){ <"" };
+  let braceclose=objectspan(text;braceopen);
+  if(braceclose<0){ <"" };
+  <str.trim(jx.sliceor(text;braceopen;braceclose))
 };
-
 
 f=buildphase1prompt(schematoon:str;userquestion:str):str{
-  let p="You have access to this dataset. User asks: ";
-  p=str.concat(p;userquestion);
-  p=str.concat(p;"
-
-Design a dashboard as a JSON DDL object with the following top-level fields:
-");
-  p=str.concat(p;"  title (string), summary (string), cards (array).
-
-");
-  p=str.concat(p;"Each card must have:
-");
-  p=str.concat(p;"  id (unique string), kind (one of: metric, chart, table, text, list),
-");
-  p=str.concat(p;"  title (string), col_span (integer 1-3).
-
-");
-  p=str.concat(p;"For metric cards include a 'metric' object with: label, query_op, query_col, unit.
-");
-  p=str.concat(p;"For chart cards include a 'chart' object with: chart_type (line/bar/pie/area/scatter), x_col, y_col, query_op.
-");
-  p=str.concat(p;"For table cards include a 'table' object with: columns (string array), query_op, sort_col, limit.
-
-");
-  p=str.concat(p;"Respond with ONLY the JSON object, no explanation.
-
-");
-  p=str.concat(p;"Dataset schema:
-");
-  p=str.concat(p;schematoon);
-  <p
+  <"You have access to this dataset. User asks: \(userquestion)\n\nDesign a dashboard as a JSON DDL object with the following top-level fields:\n  title (string), summary (string), cards (array).\n\nEach card must have:\n  id (unique string), kind (one of: metric, chart, table, text, list),\n  title (string), col_span (integer 1-3).\nFor metric cards include a 'metric' object with: label, query_op, query_col, unit.\nFor chart cards include a 'chart' object with: chart_type (line/bar/pie/area/scatter), x_col, y_col, query_op.\nFor table cards include a 'table' object with: columns (string array), query_op, sort_col, limit.\n\nRespond with ONLY the JSON object, no explanation.\n\nDataset schema:\n\(schematoon)"
 };
 
-f=parseddlfromjson(json:str):i64{
-  let titlestart=str.indexof(json;"\"title\"");
-  let title="Untitled Dashboard";
-  if(titlestart > 0){
-    let afterkey=str.slice(json;titlestart+7;str.len(json));
-    let colon=str.indexof(afterkey;":");
-    if(colon > 0){
-      let aftercolon=str.trim(str.slice(afterkey;colon+1;str.len(afterkey)));
-      if(str.charat(aftercolon;0) == "\""){
-        let close=str.indexof(str.slice(aftercolon;1;str.len(aftercolon));"\"");
-        if(close > 0){
-          title=str.slice(aftercolon;1;close+1)
-        }
-      }
-    }
+(* `jx.valueraw` returns a value's raw JSON text, so a string arrives still quoted. The two
+   escapes an LLM-written title realistically carries are undone here; a title containing a
+   literal backslash is not round-tripped, which is a limit worth knowing rather than a scanner
+   worth writing for a demo. *)
+f=unquote(v:str):str{
+  let n=str.len(v) as i64;
+  if(n<2){ <"" };
+  if(str.startswith(v;"\"") && str.endswith(v;"\"")){
+    let inner=jx.sliceor(v;1;n-1);
+    <str.replace(str.replace(inner;"\\\"";"\"");"\\n";"\n")
   };
-  let summarystart=str.indexof(json;"\"summary\"");
-  let summary="";
-  if(summarystart > 0){
-    let afterkey=str.slice(json;summarystart+9;str.len(json));
-    let colon=str.indexof(afterkey;":");
-    if(colon > 0){
-      let aftercolon=str.trim(str.slice(afterkey;colon+1;str.len(afterkey)));
-      if(str.charat(aftercolon;0) == "\""){
-        let close=str.indexof(str.slice(aftercolon;1;str.len(aftercolon));"\"");
-        if(close > 0){
-          summary=str.slice(aftercolon;1;close+1)
-        }
-      }
-    }
+  <""
+};
+
+(* `$json` is std.json's `Json`, and the only way to get one is `json.dec`. $ok is written first
+   because `mt` binds a result's arms by position, not by label (T-31). *)
+f=topstring(raw:str;key:str):str{
+  <mt json.dec(raw) {
+    $ok:o unquote(jx.valueraw(o;key));
+    $jsonerr:e ""
+  }
+};
+
+(* A reply the title parser could not read is not discarded: the raw JSON goes into the summary
+   so the operator can see what the model actually said. That fallback was written as
+   `dash.summary == rawjson`, which did nothing. *)
+f=parseddlfromjson(raw:str):$dashboard{
+  let title=topstring(raw;"title");
+  if(str.len(title)==0){
+    <ddl.newdashboard("Untitled Dashboard";raw)
   };
-  let dash=ddl.newdashboard(title;summary);
-  <dash
+  <ddl.newdashboard(title;topstring(raw;"summary"))
+};
+
+f=pipelinebody(prompt:str;requestid:str):str{
+  <"{\"text\":\"\(jx.escape(prompt))\",\"system_prompt\":\"You are a dashboard design assistant. Output only valid JSON.\",\"tolerance\":\"patient\",\"mode\":\"dashboard\",\"request_id\":\"\(jx.escape(requestid))\"}"
+};
+
+f=jsonheaders():str{
+  <"{\"content-type\":\"application/json\"}"
+};
+
+f=errorstate(state:$flowstate;message:str):$flowstate{
+  <$flowstate{
+    phase:state.phase;
+    schematoon:state.schematoon;
+    dashboard:state.dashboard;
+    requestid:state.requestid;
+    error:message
+  }
+};
+
+(* The prompt was escaped with `str.replace(prompt;"\"";"\\\"")`, which handles the quote and
+   nothing else: a newline in the schema TOON — and there is one per column — went into the
+   JSON body raw and made it unparseable. `jx.escape` is the escaper. *)
+f=postprompt(prompt:str;requestid:str):str{
+  (* http.postheaders against a dead port reports $ok carrying nothing (T-15), so an empty reply
+     is indistinguishable from an unreachable pipeline unless the port is checked first. *)
+  if(reach.localserviceup(pipelinebaseurl())){}el{
+    <""
+  };
+  let hc=http.client(pipelinebaseurl());
+  <mt http.postheaders(hc;"/api/pipeline";str.tobytes(pipelinebody(prompt;requestid));jsonheaders()) {
+    $ok:raw raw;
+    $httperr:e ""
+  }
 };
 
 f=phase1request(schematoon:str;userquestion:str;requestid:str):$flowstate{
-  let prompt=buildphase1prompt(schematoon;userquestion);
-  let body="{\"text\":" + "\"" + str.replace(prompt;"\"";"\\\"") + "\""
-    + ",\"system_prompt\":\"You are a dashboard design assistant. Output only valid JSON.\""
-    + ",\"tolerance\":\"patient\""
-    + ",\"mode\":\"dashboard\""
-    + ",\"request_id\":\"" + requestid + "\""
-    + "}";
-  let emptydash=ddl.newdashboard("";"");
-  let errstate=$flowstate{
+  let base=$flowstate{
     phase:"ddl_received";
     schematoon:schematoon;
-    dashboard:emptydash;
+    dashboard:ddl.newdashboard("";"");
     requestid:requestid;
-    error:"pipeline unreachable"
+    error:""
   };
-  let res=http.post("http://127.0.0.1:11430/api/pipeline";body;"application/json");
-  if(!res.ok){
-    <errstate
+  let reply=postprompt(buildphase1prompt(schematoon;userquestion);requestid);
+  if(str.len(reply)==0){
+    <errorstate(base;"pipeline unreachable")
   };
-  let rawjson=extractjson(res.body);
-  if(str.len(rawjson) == 0){
-    let badstate=$flowstate{
-      phase:"ddl_received";
-      schematoon:schematoon;
-      dashboard:emptydash;
-      requestid:requestid;
-      error:"no JSON found in LLM response"
-    };
-    <badstate
-  };
-  let dash=parseddlfromjson(rawjson);
-  if(str.len(dash.title) == 0 || dash.title == "Untitled Dashboard"){
-    dash.summary==rawjson
+  let rawjson=extractjson(reply);
+  if(str.len(rawjson)==0){
+    <errorstate(base;"no JSON found in LLM response")
   };
   <$flowstate{
     phase:"ddl_received";
     schematoon:schematoon;
-    dashboard:dash;
+    dashboard:parseddlfromjson(rawjson);
     requestid:requestid;
     error:""
   }
 };
 
+(* `m` is annotated because `queryop` is declared by three structs in `moke.ddl` at different
+   offsets, and E4034 lands on the READ rather than on the binding. Same fix as `ddl.tojson`. *)
+f=annotatemetric(card:$dashboardcard;result:str):$dashboardcard{
+  let m:$metriccard=card.metric;
+  <ddl.withmetric(card;$metriccard{
+    label:"\(m.label) [\(result)]";
+    queryop:m.queryop;
+    querycol:m.querycol;
+    querygroup:m.querygroup;
+    unit:m.unit;
+    deltaqueryop:m.deltaqueryop
+  })
+};
+
+(* Phase 2 writes the locally computed results back onto the metric cards. Every card is carried
+   through, annotated or not, because a dashboard that silently loses its chart and table cards
+   when a compute result is missing is worse than one that shows an unannotated metric. *)
 f=phase2resolve(state:$flowstate;computeresults:@str):$flowstate{
+  let cards=mut.@();
   lp(let ii=0;ii<state.dashboard.cards.len;ii=ii+1){
-    let card=state.dashboard.cards.get(ii);
-    if(ii < computeresults.len()){
-      let result=computeresults.get(ii);
-      if(str.len(result) > 0 && card.kind == "metric"){
-        card.metric.label==card.metric.label + " [" + result + "]"
-      }
+    let card:$dashboardcard=state.dashboard.cards.get(ii);
+    let annotate=mut.false;
+    if(ii<computeresults.len){
+      if(str.len(computeresults.get(ii))>0 && card.kind == "metric"){ annotate=true }
+    };
+    if(annotate){
+      cards=cards.push(annotatemetric(card;computeresults.get(ii)))
+    }el{
+      cards=cards.push(card)
     }
   };
+  let d:$dashboard=state.dashboard;
   <$flowstate{
     phase:"queries_resolved";
     schematoon:state.schematoon;
-    dashboard:state.dashboard;
+    dashboard:$dashboard{
+      (* `d` annotated: `title` is declared by five structs in moke.ddl. *)
+      title:d.title;
+      summary:d.summary;
+      cards:cards
+    };
     requestid:state.requestid;
     error:""
   }
 };
 
 f=phase3render(state:$flowstate):str{
-  let json=ddl.tojson(state.dashboard);
-  <json
+  <ddl.tojson(state.dashboard)
+};
+
+f=buildrefineprompt(currentjson:str;instruction:str):str{
+  <"Refine this dashboard: \(currentjson)\n\nInstruction: \(instruction)\n\nRespond with ONLY the updated JSON object, no explanation."
 };
 
 f=refine(state:$flowstate;instruction:str):$flowstate{
-  let currentjson=ddl.tojson(state.dashboard);
-  let prompt="Refine this dashboard: ";
-  prompt=str.concat(prompt;currentjson);
-  prompt=str.concat(prompt;"
-
-Instruction: ");
-  prompt=str.concat(prompt;instruction);
-  prompt=str.concat(prompt;"
-
-Respond with ONLY the updated JSON object, no explanation.");
-  let body="{\"text\":" + "\"" + str.replace(prompt;"\"";"\\\"") + "\""
-    + ",\"system_prompt\":\"You are a dashboard design assistant. Output only valid JSON.\""
-    + ",\"tolerance\":\"patient\""
-    + ",\"mode\":\"dashboard\""
-    + ",\"request_id\":\"" + state.requestid + "-refine\""
-    + "}";
-  let res=http.post("http://127.0.0.1:11430/api/pipeline";body;"application/json");
-  if(!res.ok){
-    <$flowstate{
-      phase:state.phase;
-      schematoon:state.schematoon;
-      dashboard:state.dashboard;
-      requestid:state.requestid;
-      error:"refine: pipeline unreachable"
-    }
+  let reply=postprompt(buildrefineprompt(ddl.tojson(state.dashboard);instruction);"\(state.requestid)-refine");
+  if(str.len(reply)==0){
+    <errorstate(state;"refine: pipeline unreachable")
   };
-  let rawjson=extractjson(res.body);
-  if(str.len(rawjson) == 0){
-    <$flowstate{
-      phase:state.phase;
-      schematoon:state.schematoon;
-      dashboard:state.dashboard;
-      requestid:state.requestid;
-      error:"refine: no JSON in LLM response"
-    }
-  };
-  let dash=parseddlfromjson(rawjson);
-  if(str.len(dash.title) == 0 || dash.title == "Untitled Dashboard"){
-    dash.summary==rawjson
+  let rawjson=extractjson(reply);
+  if(str.len(rawjson)==0){
+    <errorstate(state;"refine: no JSON in LLM response")
   };
   <$flowstate{
     phase:"ddl_received";
     schematoon:state.schematoon;
-    dashboard:dash;
+    dashboard:parseddlfromjson(rawjson);
     requestid:state.requestid;
     error:""
   }

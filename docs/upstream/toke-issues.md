@@ -1314,6 +1314,146 @@ still errored is treated as a genuine type mismatch and gets the caller's fallba
 That works for numbers. There is no equivalent trick for `false`, which is why nothing in this
 codebase now reads a boolean out of JSON.
 
+## T-34 — a three-segment stdlib member is lowered as a call to a bare unqualified global
+
+**Severity: correctness AND availability, silent, and one case terminates the process.**
+
+`http.res.json`, `http.res.ok`, `http.res.bad` and `http.res.err` type-check, and none of them
+reaches `std.http`. The dotted name is lowered as a call to a global named by the LAST segment
+only:
+
+```toke
+m=t; i=http:std.http; i=io:std.io;
+f=main():i64{ let b=http.res.json(200;"{}"); io.println("built"); <0 };
+```
+
+→ `Undefined symbols: "_json", referenced from: _tk_main`. `http.res.ok` wants `_ok`,
+`http.res.bad` wants `_bad`. Those three fail at link, which is at least loud.
+
+**`http.res.err` links — to libc's `err(3)`.** So it type-checks, links, runs, and then:
+
+```
+$ ./t13
+t13: nope: Operation not permitted
+$ echo $?
+144
+```
+
+`err(3)` prints to stderr and **exits the process**. 144 is `400 & 0xff` — the status code we
+passed as `err`'s exit code. Every 4xx response built this way would have terminated the server
+process, and nothing in the toolchain says so at any stage.
+
+This is the same lowering defect T-7 records the *outcome* of. The mechanism is worth stating
+because it is shared with the receiver-dropping bug below: **a `.member()` call emits a
+declaration and call for the trailing identifier and discards everything to its left.**
+`a.pushcopy("y")` emits `declare i64 @pushcopy(i64)` and passes the ARGUMENT but not the
+receiver; `let b=a.clone();` emits `declare i64 @clone()` with no arguments at all. When libc
+happens to export the name, it is called with the wrong arguments. When it does not, the link
+fails.
+
+`http.res(status;body)` — two segments — links and runs correctly, and is what the migrated
+`packages/browser` tree uses throughout. It is declared nowhere in `http.tki`.
+
+**Ask.** Reject a member path that resolves to no declared export, rather than emitting a call
+to its last segment. A diagnostic naming `http.res.json` would have cost us nothing; the
+silent one cost a demo application's entire API surface.
+
+---
+
+## T-35 — emitted IR is silently truncated, and toke reports success
+
+**Severity: availability, silent, and the toolchain's own exit status says the build worked.**
+
+A module whose string constants exceed a limit emits IR that is cut off mid-token. `toke` exits
+**0**; only `clang` notices, and it reports a type mismatch or a parse error rather than a
+truncation, so the error points somewhere misleading.
+
+Two boundaries, both measured at `fedd48d`. They do not look like the same limit.
+
+**1. A ~64 KiB cap on emitted string-constant data.**
+
+| input | IR emitted | result |
+|---|---|---|
+| ONE string of 4,000 chars | 4,779 bytes | assembles |
+| ONE string of 300,000 chars | **66,257 bytes** | truncated |
+| 200 strings of 2,006 chars | 107,643 bytes, **32 of 200 declarations**, 64,480 declared string bytes | truncated |
+
+32 declarations totalling 64,480 bytes, and a 300,000-character string surviving as ~64 KiB of
+IR, both land just under **65,536**. That looks like a fixed 64 KiB buffer.
+
+**2. Separately, 670 short string constants truncate the LAST declaration; 669 do not.**
+
+```
+669 strings of 38 chars -> 203,997 bytes of IR, assembles
+670 strings of 38 chars -> 204,289 bytes of IR, TRUNCATED
+```
+
+The cut is in the final declaration, and clang reports the declared length no longer matching
+the content:
+
+```
+@.str.g_669 = private unnamed_addr constant [38 x i8] c"value-00669-padding-to-make
+  error: constant expression type mismatch: got type '[56 x i8]' but expected '[38 x i8]'
+```
+
+Total string data there is only ~25 KB, so this is not the 64 KiB boundary. Reproduction:
+
+```toke
+m=g; i=str:std.str;
+f=blob():@str{ <@("value-00000-padding-to-make-it-longer"; ... 670 of them ...) };
+```
+
+**What it cost us.** Four `packages/moke/data/*.tk` modules — 737 to 757 string constants each,
+because they hold demo datasets as literal arrays — emit IR that cannot be assembled. The cut
+point varies with the module (`priv`, `private unnamed_ad`, `private unnamed_addr consta`), which
+is consistent with a buffer whose remaining capacity differs. All four compile without a single
+diagnostic and all four fail at `clang -c -x ir`. Five more modules fail the same step for the
+unrelated type reasons listed under T-3.
+
+We only found it because `scripts/lib/build_tree.sh` assembles IR to objects as an explicit step
+and counts the failures. A build that goes straight from toke to a link would see "Undefined
+symbols" for every function in the affected module and no indication why.
+
+**Ask.** Whatever the buffer is, grow it or stream it — and **fail non-zero when the emitted IR
+is incomplete**. The silence is worse than the limit: a compiler that reports success having
+written a truncated artefact cannot be trusted by any build system.
+
+## T-36 — `str.tki`'s `gen:"abi"` block declares ~90 members as `(i64,…) -> i64`, disabling argument type checking for all of them
+
+**Severity: correctness, silent, and it is the reason most of the other defects here were
+invisible.**
+
+`stdlib/str.tki` declares 116 functions. **39 are typed.** The rest sit in a `gen:"abi"` block as
+`(i64, …) -> i64`, and because `i64` accepts a `str`, an array, a struct handle and a character
+code indifferently, every call to one of them type-checks whatever is passed.
+
+This is not T-12, which is the `.tki` disagreeing with the builtin table. Here the `.tki` itself
+defeats the checker.
+
+Measured: of **17 bogus `std.str` calls** in one module (`packages/moke/src/compute.tk`), only
+**5** names raised `E4027`. The other 12 type-checked in silence. What those silences were:
+
+| call | what it actually is |
+|---|---|
+| `str.len(<array>)` | `strlen()` on a `char *`. Over an array of heap pointers it stops at the first zero byte and returns about **3**. It was every loop bound in five modules |
+| `str.compare(a;b)` | `tk_str_eq_w(a,b) ? 0 : 1` (`str_glue.c:524`) — declared like a three-way comparator, implemented as INEQUALITY, **never negative**. So `str.compare(x;y) > 0` is true whenever the strings merely differ. It was a sort key |
+| `str.padleft(s;width;pad)` | `char ch = (char)(pad ? pad : ' ')` — the pad is a character CODE, and every call site passed a string, so the pad character was the low byte of a heap address |
+| `str.tof32(x)` | an alias for `tk_str_tofloat_w`: it PARSES A STRING, and was handed an `i64` row count to dereference |
+| `str.fromf32(x)` | an alias for `tk_str_fromfloat_w`: reads its argument as f64 bits, and was handed an f32 |
+
+The `str.len`-on-an-array case is the one to fix first. It is a one-character difference from
+correct code (`arr.len` versus `str.len(arr)`), it returns a plausible small number rather than
+crashing, and it silently truncates every loop written against it.
+
+**Ask.** Type the `gen:"abi"` block, or mark those names as unchecked so a diagnostic can say
+so. A stdlib of 116 functions where 77 accept anything, and where six of those are aliases for
+a differently-typed function, cannot be used safely from source.
+
+**A correction to an assumption we carried for a while, in case it saves someone the same
+trip.** `arr.len()` is **not** a defect: `arr.len()` and `arr.len` emit the identical
+`getelementptr i64, i64* %p, i32 -1`, and the compiler labels it `; .len()`. Only
+`str.len(<array>)` is wrong.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

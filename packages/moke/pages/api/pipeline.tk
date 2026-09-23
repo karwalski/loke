@@ -5,64 +5,133 @@ m=page.moke.api.pipeline;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=time:std.time;
+i=jx:shared.jsonobj;
 i=hooks:moke.hooks;
-i=compute:moke.compute;
 i=consolelog:moke.consolelog;
 
-f=post(req:i64):i64{
-  let body=req.body;
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
 
-  let prompt=mt json.getstr(body;"prompt") {
-    ok:v v;
-    err:e ""
+(* errjson, because http.res.err does not exist. See the note on http.res above: the
+   three-segment name binds to libc's err(3) and terminates the process with the status code
+   as its exit status. This builds the same {"ok":false,"error":...} envelope the success
+   paths in this file use, with json.enc supplying the quotes and the escaping. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* json.dec once and then the typed json.str, not json.getstr. json.getstr is one of ~50 names
+   std.json declares `(i64, i64) -> i64`; they read a different representation reached through
+   json.parse, and a handle and a one-field struct share an ABI, so handing one raw request text
+   compiles and then dereferences the string's first word as a pointer. Measured at the pinned
+   toolchain: a program calling json.getstr on a str exits 139, SIGSEGV. Every POST here killed
+   the server on the first field read. T-32.
+
+   The arms are also now labelled $ok / $jsonerr rather than bare `ok` / `err`. mt binds a
+   result's arms by POSITION, not by label (T-31), so an unlabelled arm list is unreadable:
+   nothing in the source says which arm is the success arm. $ok is written first everywhere
+   below, which is the one arrangement under which positional and label binding agree. *)
+(* The upstream call, split out so the response handle never escapes the match. http.post
+   returns a stdlib result; on a refused connection it takes the $ok arm anyway (T-15), so
+   http.isok has to be asked as well. "" means "no usable response" to the caller. *)
+f=upstreambodyof(c:i64):str{
+  if(http.isok(c)){ <http.body(c) }el{ <"" }
+};
+
+f=upstreamcall(body:str):str{
+  <mt http.post("http://127.0.0.1:11430/api/pipeline";body) {
+    $ok:c upstreambodyof(c);
+    $err:e ""
+  }
+};
+
+f=post(req:i64):i64{
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  let model=mt json.getstr(body;"model") {
-    ok:v v;
-    err:e ""
+
+  let prompt=mt json.str(obj;"prompt") {
+    $ok:v v;
+    $jsonerr:e ""
   };
-  let sessionid=mt json.getstr(body;"session_id") {
-    ok:v v;
-    err:e "unknown"
+  let model=mt json.str(obj;"model") {
+    $ok:v v;
+    $jsonerr:e ""
   };
-  let datasetname=mt json.getstr(body;"dataset_name") {
-    ok:v v;
-    err:e "dataset"
+  let sessionid=mt json.str(obj;"session_id") {
+    $ok:v v;
+    $jsonerr:e "unknown"
+  };
+  let datasetname=mt json.str(obj;"dataset_name") {
+    $ok:v v;
+    $jsonerr:e "dataset"
   };
 
   if(str.eq(prompt;"")){
-    <http.res.err(400;"missing required field: prompt")
+    <errjson(400;"missing required field: prompt")
   };
 
-  let clog=consolelog.newsession(sessionid);
+  (* mut., because every consolelog.append below rebinds it — consolelog is immutable and
+     append returns a new log. A plain `let` is not rebindable. *)
+  let clog=mut.consolelog.newsession(sessionid);
 
-  let t0=std.nowms();
+  (* time.nowms, not std.nowms. There is no `std` module interface, and no tk_std_nowms_w in the
+     runtime: measured this session, std.nowms() type-checks and then fails to link with
+     "Undefined symbols: _tk_std_nowms_w". Four calls in this function would have broken the
+     link for the whole moke binary. std.time.nowms() is the real one, epoch milliseconds, and
+     takes no argument despite what time.tki declares. *)
+  let t0=time.nowms();
   let hookresult=hooks.applyschemafirst(prompt;datasetname);
-  let t1=std.nowms();
+  let t1=time.nowms();
 
   let schemafirst=hookresult.rawdatadetected;
   let effectiveprompt=hookresult.transformed;
 
+  (* `as i32`, not str.toi32(str.fromi64(x)). That round trip went through two of std.str's
+     untyped `(i64) -> i64` names to convert a number to a number; a cast does it directly and
+     without the two allocations. str.fromint rather than str.fromi32 for the same reason:
+     fromint is declared (i64) -> str, fromi32 is one of the untyped names. *)
+  let hookms=(t1 - t0) as i32;
   if(schemafirst){
     clog=consolelog.append(clog;"schema_extract";"ok";
       str.concat("raw data replaced with schema profile — ";
-        str.concat(str.fromi32(hookresult.profile.colcount);" columns"));
-      str.toi32(str.fromi64(t1 - t0)));
+        str.concat(str.fromint(hookresult.profile.colcount as i64);" columns"));
+      hookms);
     clog=consolelog.append(clog;"profile";"ok";
-      str.concat(str.fromi32(hookresult.profile.rowcount);" rows profiled");
+      str.concat(str.fromint(hookresult.profile.rowcount as i64);" rows profiled");
       0)
   }el{
     clog=consolelog.append(clog;"schema_extract";"skip";
       "no raw tabular data detected in prompt";
-      str.toi32(str.fromi64(t1 - t0)))
+      hookms)
   };
 
-  let upstreambody="{";
-  upstreambody=str.concat(upstreambody;str.concat("\"text\":";str.jsonencode(effectiveprompt)));
+  (* json.enc, not str.jsonencode: std.str declares no jsonencode in either the interface or the
+     runtime. json.enc returns the value WITH its surrounding quotes, so the literals it is
+     concatenated to stop at the colon. mut. on the accumulator because the lines below rebind
+     it. *)
+  let upstreambody=mut."{";
+  upstreambody=str.concat(upstreambody;str.concat("\"text\":";json.enc(effectiveprompt)));
   upstreambody=str.concat(upstreambody;",\"system_prompt\":\"\"");
   upstreambody=str.concat(upstreambody;",\"tolerance\":\"instant\"");
   upstreambody=str.concat(upstreambody;",\"mode\":\"chat\"");
   if(str.len(model) > 0){
-    upstreambody=str.concat(upstreambody;str.concat(",\"model\":";str.jsonencode(model)))
+    upstreambody=str.concat(upstreambody;str.concat(",\"model\":";json.enc(model)))
   };
   upstreambody=str.concat(upstreambody;"}");
 
@@ -71,40 +140,52 @@ f=post(req:i64):i64{
     str.concat("forwarding to loke pipeline — model=";modeldisp);
     0);
 
-  let t2=std.nowms();
-  let upstreamres=http.post("http://127.0.0.1:11430/api/pipeline";
-    "application/json";upstreambody);
-  let t3=std.nowms();
-  let upstreamms=str.toi32(str.fromi64(t3 - t2));
+  let t2=time.nowms();
+  let upstreamjson=upstreamcall(upstreambody);
+  let t3=time.nowms();
+  let upstreamms=(t3 - t2) as i32;
 
-  if(!http.ok(upstreamres)){
+  (* An empty body is the failure signal, because there is no way to read a status code out of a
+     response from toke source: std.http declares no `status` (E4027 confirms it, and it is not
+     in the runtime either), and `http.ok` — which this branch used to call — IS declared in
+     http.tki but has no tk_http_ok_w symbol, so it type-checks and then breaks the link. Both
+     are gone; upstreamcall below returns "" for a refused connection, a transport error and a
+     non-2xx alike, which is measured: http.post to a closed port takes the $ok arm (T-15) with
+     http.isok 0 and http.body "". The old message interpolated the status number that
+     http.status would have returned, so it could not be kept honestly. *)
+  if(str.len(upstreamjson) == 0){
     clog=consolelog.append(clog;"response";"error";
-      str.concat("loke pipeline returned HTTP ";str.fromi32(http.status(upstreamres)));
+      "loke pipeline returned no usable response";
       upstreamms);
-    let errbody="{";
+    let errbody=mut."{";
     errbody=str.concat(errbody;"\"ok\":false");
     errbody=str.concat(errbody;str.concat(",\"error\":";
-      str.jsonencode(str.concat("upstream error: HTTP ";
-        str.fromi32(http.status(upstreamres))))));
+      json.enc("upstream error: the loke pipeline at 127.0.0.1:11430 returned no usable response")));
     let sfstr=mut."false"; if(schemafirst){ sfstr="true" }el{};
     errbody=str.concat(errbody;str.concat(",\"schema_first\":";sfstr));
     errbody=str.concat(errbody;",\"raw_data_detected\":false");
     errbody=str.concat(errbody;str.concat(",\"console_log\":";
       consolelog.tojson(clog)));
     errbody=str.concat(errbody;"}");
-    <http.res.json(502;errbody)
+    <http.res(502;errbody)
   };
 
   clog=consolelog.append(clog;"response";"ok";
     "loke pipeline response received";upstreamms);
 
-  let upstreamjson=http.body(upstreamres);
-
   let base=str.trim(upstreamjson);
   let baselen=str.len(base);
-  let respbody=base;
+  let respbody=mut.base;
   if(baselen > 1){
-    let inner=str.slice(base;0;baselen - 1);
+    (* str.slice is declared str!SliceErr and the old code bound it straight to a str. The guard
+       above makes the slice in range, so the error arm is unreachable — but it has to be
+       written, and $ok has to be written FIRST: mt binds a result's arms by position, not by
+       label (T-31), so an err-first arm list would hand the error payload to the success path
+       on every well-formed response. *)
+    let inner=mt str.slice(base;0;baselen - 1) {
+      $ok:v v;
+      $sliceerr:e base
+    };
     respbody=str.concat(inner;",");
     let sfstr2=mut."false"; if(schemafirst){ sfstr2="true" }el{};
     respbody=str.concat(respbody;str.concat("\"schema_first\":";sfstr2));
@@ -114,5 +195,14 @@ f=post(req:i64):i64{
     respbody=str.concat(respbody;"}")
   };
 
-  <http.res.json(200;respbody)
+  <http.res(200;respbody)
+};
+
+(* ooke.handlers routes GET /api/pipeline to page.moke.api.pipeline.get and this module had no
+   `get` — the only page/handler mismatch in the tree, checked mechanically against every
+   `<alias.get(req)` and `<alias.post(req)` call in packages/moke/src/_handlers.tk. Without it the
+   handlers module cannot compile. It answers the readiness probe the way page.moke.api.memory.get
+   already does; the pipeline itself is POST-only. *)
+f=get(req:i64):i64{
+  <http.res(200;"{\"ok\":true,\"message\":\"moke pipeline API ready\",\"method\":\"POST\"}")
 };

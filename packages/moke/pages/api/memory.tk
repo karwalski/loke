@@ -6,54 +6,101 @@ m=page.moke.api.memory;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
-i=std:std;
+i=time:std.time;
+i=jx:shared.jsonobj;
 
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+(* errjson, because http.res.err does not exist. See the note on http.res above: the
+   three-segment name binds to libc's err(3) and terminates the process with the status code
+   as its exit status. This builds the same {"ok":false,"error":...} envelope the success
+   paths in this file use, with json.enc supplying the quotes and the escaping. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* json.dec once and then the typed json.str, not json.getstr. json.getstr is one of the ~50
+   names std.json declares `(i64, i64) -> i64`; they read a different representation reached
+   via json.parse, and because a handle and a one-field struct share an ABI, passing raw text
+   to one compiles and then dereferences the string's first word as a pointer. Measured at the
+   pinned toolchain: a program doing `json.getstr("{\"rating\":\"x\"}";"rating")` exits 139,
+   SIGSEGV. Every POST here crashed the server on the first field read. T-32. *)
 f=post(req:i64):i64{
-  let body=req.body;
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
 
-  let action=mt json.getstr(body;"action") {
+  let action=mt json.str(obj;"action") {
     $ok:v v;
-    $err:e "store"
+    $jsonerr:e "store"
   };
 
   if(str.eq(action;"store")){
-    let wing=mt json.getstr(body;"wing") { $ok:v v; $err:e "work" };
-    let hall=mt json.getstr(body;"hall") { $ok:v v; $err:e "general" };
-    let room=mt json.getstr(body;"room") { $ok:v v; $err:e "default" };
-    let content=mt json.getstr(body;"content") { $ok:v v; $err:e "" };
-    let source=mt json.getstr(body;"source") { $ok:v v; $err:e "chat" };
+    let wing=mt json.str(obj;"wing") { $ok:v v; $jsonerr:e "work" };
+    let hall=mt json.str(obj;"hall") { $ok:v v; $jsonerr:e "general" };
+    let room=mt json.str(obj;"room") { $ok:v v; $jsonerr:e "default" };
+    let content=mt json.str(obj;"content") { $ok:v v; $jsonerr:e "" };
+    let source=mt json.str(obj;"source") { $ok:v v; $jsonerr:e "chat" };
 
     if(str.eq(content;"")){
-      <http.res.err(400;"missing required field: content")
+      <errjson(400;"missing required field: content")
     };
 
-    let id=str.concat("drw_";str.fromi64(std.nowms()));
+    (* time.nowms, not std.nowms. There is no `std` module interface and no `tk_std_nowms_w`
+       symbol in the runtime: measured this session, a program calling std.nowms() type-checks and
+       then fails to LINK with "Undefined symbols: _tk_std_nowms_w". The whole moke tree would have
+       failed at the link step on this one call. std.time.nowms() is the real one and returns epoch
+       milliseconds; it takes no argument despite what time.tki declares (T-12 class).
+       str.fromint rather than str.fromi64 for the same reason in reverse: fromi64 links, but it is
+       declared `(i64) -> i64` in str.tki and only passes for a str by ABI punning, while
+       str.fromint is declared `(i64) -> str` and is the accessor that is actually typed. *)
+    let id=str.concat("drw_";str.fromint(time.nowms()));
 
     let resp=mut."{";
     resp=str.concat(resp;"\"ok\":true");
-    resp=str.concat(resp;str.concat(",\"id\":";str.jsonencode(id)));
-    resp=str.concat(resp;str.concat(",\"wing\":";str.jsonencode(wing)));
-    resp=str.concat(resp;str.concat(",\"hall\":";str.jsonencode(hall)));
-    resp=str.concat(resp;str.concat(",\"room\":";str.jsonencode(room)));
+    (* json.enc: std.str declares no jsonencode in either the interface or the runtime, so the
+       five calls that used to be in this file did not compile. json.enc supplies the
+       surrounding quotes itself, which is why the literals here end at the colon. *)
+    resp=str.concat(resp;str.concat(",\"id\":";json.enc(id)));
+    resp=str.concat(resp;str.concat(",\"wing\":";json.enc(wing)));
+    resp=str.concat(resp;str.concat(",\"hall\":";json.enc(hall)));
+    resp=str.concat(resp;str.concat(",\"room\":";json.enc(room)));
     resp=str.concat(resp;"}");
 
-    <http.res.json(200;resp)
+    <http.res(200;resp)
   }el{
     if(str.eq(action;"aaak")){
-      let text=mt json.getstr(body;"text") { $ok:v v; $err:e "" };
-      let mode=mt json.getstr(body;"mode") { $ok:v v; $err:e "compress" };
+      let text=mt json.str(obj;"text") { $ok:v v; $jsonerr:e "" };
+      let mode=mt json.str(obj;"mode") { $ok:v v; $jsonerr:e "compress" };
 
-      let resp="{\"ok\":true,\"mode\":";
-      resp=str.concat(resp;str.jsonencode(mode));
+      (* mut., because the next line rebinds it. The store branch above declares its
+         accumulator `mut."{"`; this one did not, and a plain `let` is not rebindable. *)
+      let resp=mut."{\"ok\":true,\"mode\":";
+      resp=str.concat(resp;json.enc(mode));
       resp=str.concat(resp;"}");
-      <http.res.json(200;resp)
+      <http.res(200;resp)
     }el{
-      <http.res.err(400;"unknown action")
+      <errjson(400;"unknown action")
     }
   }
 };
 
 f=get(req:i64):i64{
   let resp="{\"ok\":true,\"message\":\"Memory Palace API ready\"}";
-  <http.res.json(200;resp)
+  <http.res(200;resp)
 };

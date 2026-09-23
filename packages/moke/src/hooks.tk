@@ -4,7 +4,30 @@
 m=moke.hooks;
 i=str:std.str;
 i=log:std.log;
-i=hooks:core.extensions.pipelinehooks;
+i=math:std.math;
+i=fmt:std.fmt;
+
+(* --- Two whole classes of fault, and a missing upstream entry point --------------
+   Diagnostics: `str.pushcopy` (three sites) and `str.count` (three sites) exist in neither
+   the std.str interface nor the runtime, `str.isnumeric` and `str.parsef32` likewise, and
+   `core.extensions.pipelinehooks` has no `dispatch` or `dispatchrule`. Behind them:
+
+   `str.len` is `strlen()` on a `char *`, and it was applied to an ARRAY as the bound of every
+   loop in this file. It walks the element buffer to its first zero byte, so `str.len(headers)`
+   returned about 3 for any header row and `extractschema` profiled the first three columns of
+   every dataset regardless of width. `str.push` allocates and returns a new array and its
+   result was discarded at all seven sites, so `columns`, `values`, `uniqueset` and
+   `samplevals` were all permanently empty -- which means every column came back as
+   `unknown` with zero nulls, zero uniques and no samples, and the TOON profile this module
+   exists to produce was a header line and nothing else.
+
+   `core.extensions.pipelinehooks` exports `newregistry`/`register`/`hooksfor`/`applytext`
+   over its own `hookregistry` and `hookfn` types. It has no way to invoke a hook by key, which
+   is the model moke.hooks' own `$pipelinehookregistry` uses and which pages/ and
+   moke.agents.schemadetector consume. Rather than reshape an exported type, the two hooks this
+   module defines are resolved here by key. That keeps the registry honest about what it can
+   actually run: a key with no hook behind it is a no-op, not a silent pass-through of an
+   unrelated hook's result. *)
 
 t=$coltype{ $numeric:i64; $categorical:i64; $datetime:i64; $boolean:i64; $text:i64; $unknown:i64};
 
@@ -81,13 +104,36 @@ t=$rulehookregistry{
   entries:@$rulehookentry
 };
 
+(* ── Constructors, because the type names collide across modules ──────────────────
+   `moke/extensions/core.tk` imports both `moke.hooks` and `core.extensions.gatewayhooks`, and
+   both declare a type called `rulehookregistry` — with different fields. A `$rulehookregistry{
+   entries:@() }` literal written in that module resolves to the CORE type and fails with
+   `E4025 struct 'rulehookregistry' has no field 'entries'`. Measured, not predicted: that is
+   exactly what happened when the registries were first threaded there.
+
+   A constructor is unambiguous because the call is qualified by the module alias —
+   `mokehooks.newruleregistry()` can only mean this module's type. The same collision exists
+   for `providerstore` between `moke.provider` and `core.extensions.providerregistry`, and it
+   is fixed the same way there. The collision itself is MK21.15; these two functions are how
+   callers live with it in the meantime.
+
+   `newpipelineregistry` has no collision today and exists anyway, so the two registries are
+   constructed the same way and a future collision costs nothing. *)
+f=newpipelineregistry():$pipelinehookregistry{
+  <$pipelinehookregistry{ entries:@() }
+};
+
+f=newruleregistry():$rulehookregistry{
+  <$rulehookregistry{ entries:@() }
+};
+
 f=registerbeforeanonymise(id:str;hookkey:str;registry:$pipelinehookregistry):$pipelinehookregistry{
   let entry=$pipelinehookentry{
     id:id;
     hookkey:hookkey;
     slot:"before_anonymise"
   };
-  let updated=str.pushcopy(registry.entries;entry);
+  let updated=registry.entries.push(entry);
   <$pipelinehookregistry{ entries:updated }
 };
 
@@ -97,24 +143,34 @@ f=registerafteranonymise(id:str;hookkey:str;registry:$pipelinehookregistry):$pip
     hookkey:hookkey;
     slot:"after_anonymise"
   };
-  let updated=str.pushcopy(registry.entries;entry);
+  let updated=registry.entries.push(entry);
   <$pipelinehookregistry{ entries:updated }
 };
 
+(* A hook key with nothing behind it leaves the state alone and reports `modified:false`, so a
+   registry entry for a hook this build does not carry cannot be mistaken for one that ran. *)
+f=dispatch(hookkey:str;state:$pipelinestate):$pipelinehookresult{
+  if(str.eq(hookkey;"moke.schema_first")){
+    <schemafirsthook(state)
+  };
+  <$pipelinehookresult{
+    state:state;
+    modified:false
+  }
+};
+
 f=runhooks(slot:str;state:$pipelinestate;beforeregistry:$pipelinehookregistry;afterregistry:$pipelinehookregistry):$pipelinestate{
-  let registry=beforeregistry;
+  let registry=mut.beforeregistry;
   if(str.eq(slot;"after_anonymise")){
     registry=afterregistry
   };
   let current=mut.state;
-  let idx=mut.0;
-  lp(let lv=0;idx<str.len(registry.entries);lv=lv){
-    let entry=str.get(registry.entries;idx);
-    let result=hooks.dispatch(entry.hookkey;current);
+  lp(let idx=0;idx<registry.entries.len;idx=idx+1){
+    let entry:$pipelinehookentry=registry.entries.get(idx);
+    let result=dispatch(entry.hookkey;current);
     if(result.modified){
       current=result.state
-    };
-    idx=idx+1
+    }
   };
   <current
 };
@@ -126,14 +182,7 @@ f=schemafirsthook(state:$pipelinestate):$pipelinehookresult{
       modified:false
     }
   };
-  let prefix="Dataset: ";
-  prefix=str.concat(prefix;state.datasetname);
-  prefix=str.concat(prefix;" Schema: ");
-  prefix=str.concat(prefix;state.schemaprofile);
-  prefix=str.concat(prefix;"
-
-");
-  let newtext=str.concat(prefix;state.original);
+  let newtext="Dataset: \(state.datasetname) Schema: \(state.schemaprofile)\n\n\(state.original)";
   let newstate=$pipelinestate{
     original:newtext;
     anonymised:state.anonymised;
@@ -154,19 +203,28 @@ f=registerrulehook(id:str;hookkey:str;registry:$rulehookregistry):$rulehookregis
     id:id;
     hookkey:hookkey
   };
-  let updated=str.pushcopy(registry.entries;entry);
+  let updated=registry.entries.push(entry);
   <$rulehookregistry{ entries:updated }
 };
 
+f=dispatchrule(hookkey:str;ctx:$evalcontext):$rulehookresult{
+  if(str.eq(hookkey;"moke.raw_data_guard")){
+    <rawdataguardhook(ctx)
+  };
+  <$rulehookresult{
+    blocked:false;
+    reason:"";
+    hookid:hookkey
+  }
+};
+
 f=evaluaterules(ctx:$evalcontext;registry:$rulehookregistry):$rulehookresult{
-  let idx=mut.0;
-  lp(let lv=0;idx<str.len(registry.entries);lv=lv){
-    let entry=str.get(registry.entries;idx);
-    let result=hooks.dispatchrule(entry.hookkey;ctx);
+  lp(let idx=0;idx<registry.entries.len;idx=idx+1){
+    let entry:$rulehookentry=registry.entries.get(idx);
+    let result=dispatchrule(entry.hookkey;ctx);
     if(result.blocked){
       <result
-    };
-    idx=idx+1
+    }
   };
   <$rulehookresult{
     blocked:false;
@@ -175,19 +233,20 @@ f=evaluaterules(ctx:$evalcontext;registry:$rulehookregistry):$rulehookresult{
   }
 };
 
+(* `str.count` does not exist. Splitting on the needle and taking one off the part count is
+   the occurrence count, and it is exact: n occurrences of a separator always yield n+1 parts. *)
+f=occurrences(s:str;needle:str):i64{
+  <str.split(s;needle).len-1
+};
+
 f=rawdataguardhook(ctx:$evalcontext):$rulehookresult{
-  let lines=str.split(ctx.text;"
-");
+  let lines=str.split(ctx.text;"\n");
   let heavylines=mut.0;
-  let idx=mut.0;
-  lp(let lv=0;idx<str.len(lines);lv=lv){
-    let line=str.get(lines;idx);
-    let semicount=str.count(line;";");
-    let commacount=str.count(line;",");
-    if(semicount>5 || commacount>5){
+  lp(let idx=0;idx<lines.len;idx=idx+1){
+    let line=lines.get(idx);
+    if(occurrences(line;";")>5 || occurrences(line;",")>5){
       heavylines=heavylines+1
-    };
-    idx=idx+1
+    }
   };
   if(heavylines>3){
     <$rulehookresult{
@@ -203,34 +262,25 @@ f=rawdataguardhook(ctx:$evalcontext):$rulehookresult{
   }
 };
 
+(* The pipe-table scan used to be gated on `str.contains(text;"|\n")`, a pipe immediately
+   before a newline. A markdown table's rows end `| ` or `|` with trailing space far more often
+   than not, so the gate was usually false and `pipelines` stayed 0. Both counts are taken in
+   one pass over the lines instead. *)
 f=detectrawdata(text:str):bool{
+  let lines=str.split(text;"\n");
   let pipelines=mut.0;
   let csvlines=mut.0;
-  let lines=str.split(text;"
-");
-  let idx=mut.0;
-  if(str.contains(text;"|
-")){
-    idx=0;
-    lp(let lv=0;idx<str.len(lines);lv=lv){
-      let line=str.get(lines;idx);
-      if(str.contains(line;"|")){
-        pipelines=pipelines+1
-      };
-      idx=idx+1
+  lp(let idx=0;idx<lines.len;idx=idx+1){
+    let line=lines.get(idx);
+    if(str.contains(line;"|")){
+      pipelines=pipelines+1
+    };
+    if(occurrences(line;",")>3){
+      csvlines=csvlines+1
     }
   };
   if(pipelines>5){
     <true
-  };
-  idx=0;
-  lp(let lv2=0;idx<str.len(lines);lv2=lv2){
-    let line=str.get(lines;idx);
-    let commacount=str.count(line;",");
-    if(commacount>3){
-      csvlines=csvlines+1
-    };
-    idx=idx+1
   };
   if(csvlines>5){
     <true
@@ -238,196 +288,174 @@ f=detectrawdata(text:str):bool{
   <false
 };
 
+(* ── Column profiling ─────────────────────────────────────────────────────────────
+   `str.isnumeric` and `str.parsef32` do not exist. `str.tofloat` is a result, which makes the
+   two one call: a cell that parses is numeric, and the parse gives the value. That is also
+   stricter than the old pair would have been, because `str.parsef32` would have returned 0.0
+   for a cell that is not a number and the sum would have counted it.
+
+   The min, max and mean are f64 here and leave as strings in `$colprofile`, so T-20 does not
+   apply. `str.fromf32` was an alias for the f64 formatter being handed an f32, which would have
+   printed the wrong number even once the arrays held anything. *)
+f=cellvalue(cell:str):f64{
+  <mt str.tofloat(str.trim(cell)) {
+    $ok:v v;
+    $parseerr:e 0.0
+  }
+};
+
+f=cellisnumeric(cell:str):bool{
+  let t=str.trim(cell);
+  if(str.len(t)==0){
+    <false
+  };
+  <mt str.tofloat(t) {
+    $ok:v true;
+    $parseerr:e false
+  }
+};
+
+f=containsval(arr:@str;v:str):bool{
+  lp(let i=0;i<arr.len;i=i+1){
+    if(str.eq(arr.get(i);v)){
+      <true
+    }
+  };
+  <false
+};
+
+f=isbooleanish(v:str):bool{
+  let l=str.lower(v);
+  if(str.eq(l;"yes")){ <true };
+  if(str.eq(l;"no")){ <true };
+  if(str.eq(l;"true")){ <true };
+  if(str.eq(l;"false")){ <true };
+  if(str.eq(l;"1")){ <true };
+  if(str.eq(l;"0")){ <true };
+  <false
+};
+
+(* Column cells for one column index, over at most `samplelimit` data rows. A short row yields
+   an empty cell rather than an out-of-range read. *)
+f=columncells(lines:@str;colidx:i64;samplelimit:i64):@str{
+  let values=mut.@();
+  lp(let rowidx=1;rowidx<=samplelimit;rowidx=rowidx+1){
+    let cells=str.split(lines.get(rowidx);",");
+    if(colidx<cells.len){
+      values=values.push(str.trim(cells.get(colidx)))
+    }el{
+      values=values.push("")
+    }
+  };
+  <values
+};
+
+f=inferredtype(nonnull:i64;numericcount:i64;boolcount:i64;datecount:i64;uniquecount:i64):str{
+  if(nonnull==0){ <"unknown" };
+  if(numericcount==nonnull){ <"numeric" };
+  if(boolcount==nonnull){ <"boolean" };
+  if(datecount>nonnull/2){ <"datetime" };
+  if(uniquecount<20){ <"categorical" };
+  <"text"
+};
+
+f=profilecolumn(colname:str;values:@str):$colprofile{
+  let nullcount=mut.0;
+  let uniqueset=mut.@();
+  let samplevals=mut.@();
+  let numericcount=mut.0;
+  let boolcount=mut.0;
+  let datecount=mut.0;
+  let nums=mut.@();
+  lp(let vidx=0;vidx<values.len;vidx=vidx+1){
+    let v=values.get(vidx);
+    if(str.len(v)==0){
+      nullcount=nullcount+1
+    }el{
+      if(containsval(uniqueset;v)){}el{
+        uniqueset=uniqueset.push(v)
+      };
+      if(samplevals.len<3){
+        samplevals=samplevals.push(v)
+      };
+      if(cellisnumeric(v)){
+        numericcount=numericcount+1;
+        nums=nums.push(cellvalue(v))
+      };
+      if(isbooleanish(v)){
+        boolcount=boolcount+1
+      };
+      (* A hyphen and eight or more characters is the ISO-8601-shaped test this demo uses; it is
+         deliberately loose because the demo datasets carry several date formats. *)
+      if(str.contains(v;"-") && str.len(v)>8){
+        datecount=datecount+1
+      }
+    }
+  };
+  let nonnull=values.len-nullcount;
+  let coltype=inferredtype(nonnull;numericcount;boolcount;datecount;uniqueset.len);
+  let minout=mut."";
+  let maxout=mut."";
+  let meanout=mut."";
+  if(str.eq(coltype;"numeric") && nums.len>0){
+    minout=fmt.f64(math.min(nums);4);
+    maxout=fmt.f64(math.max(nums);4);
+    meanout=fmt.f64(math.mean(nums);4)
+  };
+  <$colprofile{
+    name:colname;
+    coltype:coltype;
+    nullcount:nullcount as i32;
+    uniquecount:uniqueset.len as i32;
+    samplevalues:samplevals;
+    minval:minout;
+    maxval:maxout;
+    meanval:meanout
+  }
+};
+
 f=extractschema(csvtext:str;datasetname:str):$schemaprofile{
-  let lines=str.split(csvtext;"
-");
-  let totallines=str.len(lines);
-  let headerline=str.get(lines;0);
-  let headers=str.split(headerline;",");
-  let colcount=str.len(headers);
-  let rowcount=totallines-1;
+  let lines=str.split(csvtext;"\n");
+  let headers=str.split(lines.get(0);",");
+  let rowcount=lines.len-1;
   let samplelimit=mut.100;
   if(samplelimit>rowcount){ samplelimit=rowcount };
   let columns=mut.@();
-  let colidx=mut.0;
-  lp(let lv=0;colidx<colcount;lv=lv){
-    let colname=str.trim(str.get(headers;colidx));
-    let values=mut.@();
-    let rowidx=mut.1;
-    lp(let lv2=0;!(rowidx>samplelimit);lv2=lv2){
-      let rowline=str.get(lines;rowidx);
-      let cells=str.split(rowline;",");
-      let cell=str.trim(str.get(cells;colidx));
-      str.push(values;cell);
-      rowidx=rowidx+1
-    };
-    let nullcount=mut.0;
-    let uniqueset=mut.@();
-    let samplevals=mut.@();
-    let samplecollected=mut.0;
-    let numericcount=mut.0;
-    let boolcount=mut.0;
-    let datecount=mut.0;
-    let sumval=mut.0.0;
-    let minstr="";
-    let maxstr="";
-    let minnum=mut.0.0;
-    let maxnum=mut.0.0;
-    let firstnumeric=mut.true;
-    let vidx=mut.0;
-    lp(let lv4=0;vidx<str.len(values);lv4=lv4){
-      let v=str.get(values;vidx);
-      if(str.len(v)==0){
-        nullcount=nullcount+1
-      }el{
-        let already=mut.false;
-        let uidx=mut.0;
-        lp(let lv3=0;uidx<str.len(uniqueset);lv3=lv3){
-          if(str.eq(str.get(uniqueset;uidx);v)){
-            already=true
-          };
-          uidx=uidx+1
-        };
-        if(already==false){ str.push(uniqueset;v) };
-        if(samplecollected<3){
-          str.push(samplevals;v);
-          samplecollected=samplecollected+1
-        };
-        let isnum=str.isnumeric(v);
-        if(isnum){
-          numericcount=numericcount+1;
-          let n=str.parsef32(v);
-          sumval=sumval+n;
-          if(firstnumeric){
-            minnum=n;
-            maxnum=n;
-            firstnumeric=false
-          }el{
-            if(n<minnum){ minnum=n };
-            if(n>maxnum){ maxnum=n }
-          }
-        };
-        let vlower=str.lower(v);
-        if(str.eq(vlower;"yes") || str.eq(vlower;"no") || str.eq(vlower;"true") || str.eq(vlower;"false") || str.eq(vlower;"1") || str.eq(vlower;"0")){
-          boolcount=boolcount+1
-        };
-        if(str.contains(v;"-") && str.len(v)>8){
-          datecount=datecount+1
-        }
-      };
-      vidx=vidx+1
-    };
-    let uniquecount=str.len(uniqueset);
-    let nonnull=str.len(values)-nullcount;
-    let inferredtype=mut."unknown";
-    if(nonnull>0 && numericcount==nonnull){
-      inferredtype="numeric"
-    }el{
-      if(nonnull>0 && boolcount==nonnull){
-        inferredtype="boolean"
-      }el{
-        if(nonnull>0 && datecount>nonnull/2){
-          inferredtype="datetime"
-        }el{
-          if(uniquecount<20){
-            inferredtype="categorical"
-          }el{
-            inferredtype="text"
-          }
-        }
-      }
-    };
-    let minout="";
-    let maxout="";
-    let meanout="";
-    if(str.eq(inferredtype;"numeric")){
-      minout=str.fromf32(minnum);
-      maxout=str.fromf32(maxnum);
-      if(nonnull>0){
-        meanout=str.fromf32(sumval/str.tof32(nonnull))
-      }
-    };
-    let profile=$colprofile{
-      name:colname;
-      coltype:inferredtype;
-      nullcount:nullcount;
-      uniquecount:uniquecount;
-      samplevalues:samplevals;
-      minval:minout;
-      maxval:maxout;
-      meanval:meanout
-    };
-    str.push(columns;profile);
-    colidx=colidx+1
+  lp(let colidx=0;colidx<headers.len;colidx=colidx+1){
+    let colname=str.trim(headers.get(colidx));
+    columns=columns.push(profilecolumn(colname;columncells(lines;colidx;samplelimit)))
   };
   <$schemaprofile{
     datasetname:datasetname;
-    rowcount:rowcount;
-    colcount:colcount;
+    rowcount:rowcount as i32;
+    colcount:headers.len as i32;
     columns:columns
   }
 };
 
+f=coltoon(col:$colprofile):str{
+  <"\(col.name)(\(col.coltype),nulls=\(str.fromint(col.nullcount as i64)),unique=\(str.fromint(col.uniquecount as i64)),sample=[\(str.join(";";col.samplevalues))])"
+};
+
 f=profiletotoon(profile:$schemaprofile):str{
-  let out=mut."";
-  out=str.concat(out;"DATASET: ");
-  out=str.concat(out;profile.datasetname);
-  out=str.concat(out;" | ROWS: ");
-  out=str.concat(out;str.fromi32(profile.rowcount));
-  out=str.concat(out;" | COLS: ");
-  out=str.concat(out;str.fromi32(profile.colcount));
-  out=str.concat(out;"
-");
-  out=str.concat(out;"COLS: ");
-  let idx=mut.0;
-  lp(let lv=0;idx<str.len(profile.columns);lv=lv){
-    let col=str.get(profile.columns;idx);
-    out=str.concat(out;col.name);
-    out=str.concat(out;"(");
-    out=str.concat(out;col.coltype);
-    out=str.concat(out;",nulls=");
-    out=str.concat(out;str.fromi32(col.nullcount));
-    out=str.concat(out;",unique=");
-    out=str.concat(out;str.fromi32(col.uniquecount));
-    out=str.concat(out;",sample=[");
-    let sidx=mut.0;
-    lp(let lv2=0;sidx<str.len(col.samplevalues);lv2=lv2){
-      if(sidx>0){ out=str.concat(out;";") };
-      out=str.concat(out;str.get(col.samplevalues;sidx));
-      sidx=sidx+1
-    };
-    out=str.concat(out;"])");
-    if(idx<profile.colcount-1){ out=str.concat(out;" ") };
-    idx=idx+1
-  };
-  out=str.concat(out;"
-");
-  out=str.concat(out;"STATS: ");
-  let hasstats=mut.false;
-  let sidx=mut.0;
-  lp(let lv3=0;sidx<str.len(profile.columns);lv3=lv3){
-    let col=str.get(profile.columns;sidx);
+  let colparts=mut.@();
+  let statparts=mut.@();
+  lp(let idx=0;idx<profile.columns.len;idx=idx+1){
+    let col:$colprofile=profile.columns.get(idx);
+    colparts=colparts.push(coltoon(col));
     if(str.eq(col.coltype;"numeric")){
-      if(hasstats){ out=str.concat(out;" ") };
-      out=str.concat(out;col.name);
-      out=str.concat(out;"=");
-      out=str.concat(out;col.minval);
-      out=str.concat(out;"/");
-      out=str.concat(out;col.maxval);
-      out=str.concat(out;"/");
-      out=str.concat(out;col.meanval);
-      hasstats=true
-    };
-    sidx=sidx+1
+      statparts=statparts.push("\(col.name)=\(col.minval)/\(col.maxval)/\(col.meanval)")
+    }
   };
-  if(hasstats==false){ out=str.concat(out;"(none)") };
-  <out
+  let stats=mut."(none)";
+  if(statparts.len>0){ stats=str.join(" ";statparts) };
+  <"DATASET: \(profile.datasetname) | ROWS: \(str.fromint(profile.rowcount as i64)) | COLS: \(str.fromint(profile.colcount as i64))\nCOLS: \(str.join(" ";colparts))\nSTATS: \(stats)"
 };
 
 f=applyschemafirst(text:str;datasetname:str):$hookresult{
   let israw=detectrawdata(text);
   if(israw){
-    log.info("moke.hooks: raw data detected, extracting schema");
+    log.info("moke.hooks: raw data detected, extracting schema";@());
     let profile=extractschema(text;datasetname);
     let toon=profiletotoon(profile);
     let notice="[moke: raw data replaced by schema profile]

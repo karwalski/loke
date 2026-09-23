@@ -5,18 +5,68 @@ m=page.moke.api.agents;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=time:std.time;
+i=jx:shared.jsonobj;
 i=scanner:moke.agents.qualityscanner;
 i=detector:moke.agents.schemadetector;
 i=status:moke.agents.status;
 i=hooks:moke.hooks;
-i=registry:moke.data.registry;
 
-f=gagents():i64{ <0 };
-f=glastreport():i64{ <0 };
-f=glastdiff():i64{ <0 };
+(* ── The three "globals" were FUNCTIONS ───────────────────────────────────────────
+   This file used to declare
 
-f=init():void{
-  gagents=@(
+     f=gagents():i64{ <0 };  f=glastreport():i64{ <0 };  f=glastdiff():i64{ <0 };
+
+   and then assign to them — `gagents=@(...)`, `glastreport=report` — and read them as arrays,
+   `gagents.len()` and `gagents.get(0)`. That is ten E4031s: "expected 'func', got 'array'" on
+   the writes and "cannot index into 'func'" on the reads. The file had never compiled.
+
+   toke does have module-level mutable state, measured this session at the pinned toolchain: a
+   module-scope `let x=mut.<value>` is real state, its initialiser may call an imported or a
+   later-declared function, and a write from inside a function persists across calls. So the
+   intent was reachable and only the declaration was wrong. Module-level lets must sit between
+   the imports and the first `f=`, or every one of them is E2001.
+
+   The seeding used to live in `f=init():void` — `void` is not a toke type (W1020) and nothing
+   ever called init(), because ooke.handlers has no route to it. The agent list is therefore
+   built in the initialiser, where it cannot be skipped.
+
+   glastreport and glastdiff are written on every scan and every schema comparison and READ
+   nowhere: no route serves the last report or the last diff. They are kept because the diary
+   endpoint below is plainly meant to grow into that, but nothing in moke reads them today. *)
+let gagents=mut.initialagents();
+let glastreport=mut.scanner.newreport("none";"never");
+let glastdiff=mut.emptydiff();
+
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser
+   tree uses throughout; it links and runs. Filed as T-34. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* MK21.13, eleventh occurrence in this repo and the first outside SQL. Seven call sites in this
+   file passed the literal string "now" where a timestamp was wanted — to buildpanelstate,
+   newreport, newrunentry, completerun and compareschemas — and none of those functions
+   interprets it. moke.agents.status writes it straight into JSON, so the agents panel rendered
+   "started_at":"now", "finished_at":"now" and "last_updated":"now" for every run, and the run
+   history had no orderable time in it at all.
+
+   time.format(time.now();…) is the typed pair — time.now() -> u64, time.format(u64,str) -> str —
+   and it was measured this session returning 2026-09-23T13:36:10Z. str.nowiso8601 is NOT the one
+   to reach for: it is one of std.str's untyped `(i64) -> i64` names. *)
+f=nowstamp():str{
+  <time.format(time.now();"%Y-%m-%dT%H:%M:%SZ")
+};
+
+f=initialagents():@$agentstatus{
+  <@(
     status.newagentstatus(
       "data-quality-scanner";
       "Data Quality Scanner";
@@ -31,9 +81,11 @@ f=init():void{
       "";
       "file_change"
     )
-  );
-  glastreport=scanner.newreport("none";"never");
-  glastdiff=$schemadiff{
+  )
+};
+
+f=emptydiff():$schemadiff{
+  <$schemadiff{
     datasetid:"";
     timestamp:"";
     oldrowcount:0;
@@ -46,98 +98,229 @@ f=init():void{
   }
 };
 
-f=get(req:i64):i64{
-  let panel=status.buildpanelstate(gagents;"now");
-  let resp=status.panelstatetojson(panel);
-  <http.res.json(200;resp)
+(* ── Reading a JSON string array, and a 2-D one ────────────────────────────────────
+   json.getstrarray and json.parse2dstrarray, which this file called, are declared in no
+   std.json interface and exist in no runtime (E4027 on both). json.arr IS one of the eight
+   typed std.json accessors and it genuinely works: measured this session against
+   {"headers":["a","b c","q\"z"]} it returned three elements, and each element's `.raw` held that
+   element's exact JSON text — including a nested `["1","2"]` for an array of arrays. shared.jsonobj
+   declares Json as `{raw:str}`, which is what makes `.raw` readable from user code (T-32).
+
+   json.arr needs a KEY, so a bare array value is read by wrapping it in a one-field object first.
+   That is what wrapvalue does, and it is how the 2-D case recurses. *)
+f=rawof(o:$json):str{ <o.raw };
+
+(* The JSON string escapes, undone. Four sequential str.replace calls with the backslash pair last
+   is the obvious shape and it is WRONG. Consider a value whose real content is the three
+   characters backslash, n, b: JSON writes that as an escaped backslash followed by a plain n and
+   b, so the text contains two backslashes then "nb". A replace looking for backslash-then-n
+   matches the SECOND backslash and turns it into a real newline, and the value silently changes
+   under you. Doing the backslash pair first has the mirror problem.
+
+   Splitting the text on the escaped-backslash pair removes it as a delimiter, so no segment can
+   contain a backslash that was half of one, and inside a segment every backslash is the start of a
+   genuine escape. Rejoining with a single backslash puts the literal ones back. Measured against
+   six cases this session, including that one and a genuine newline escape. *)
+f=unescapeseg(s:str):str{
+  let a=str.replace(s;"\\n";"
+");
+  let b=str.replace(a;"\\t";"	");
+  let c=str.replace(b;"\\r";"
+");
+  <str.replace(c;"\\\"";"\"")
 };
 
-f=postscan(req:i64):i64{
-  let body=req.body;
-  let datasetid=mt json.getstr(body;"dataset_id") {
-    $ok:v v;
-    $err:e "unknown"
+f=unquote(raw:str):str{
+  let t=str.trim(raw);
+  if(str.len(t) < 2){ <"" }el{};
+  let inner=str.trimsuffix(str.trimprefix(t;"\"");"\"");
+  let segs=str.split(inner;"\\\\");
+  let out=mut.@();
+  lp(let i=0;i<segs.len();i=i+1){
+    out=out.push(unescapeseg(segs.get(i)))
   };
-  let headers=mt json.getstrarray(body;"headers") {
-    $ok:v v;
-    $err:e @()
-  };
-  let rowsjson=mt json.getstr(body;"rows_json") {
-    $ok:v v;
-    $err:e "@()"
-  };
-  let rows=mt json.parse2dstrarray(rowsjson) {
-    $ok:v v;
-    $err:e @()
-  };
+  <str.join("\\";out)
+};
 
+f=wrapvalue(raw:str):$json{
+  <mt json.dec(str.concat("{\"v\":";str.concat(raw;"}"))) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  }
+};
+
+f=strarrayat(o:$json;key:str):@str{
+  let arr=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<arr.len();i=i+1){
+    out=out.push(unquote(rawof(arr.get(i))))
+  };
+  <out
+};
+
+f=rows2d(raw:str):@(@str){
+  let outer=mt json.arr(wrapvalue(raw);"v") {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<outer.len();i=i+1){
+    out=out.push(strarrayat(wrapvalue(rawof(outer.get(i)));"v"))
+  };
+  <out
+};
+
+(* There is no assignment to an array ELEMENT in toke: `arr.get(i)=v` does not exist, and E2002's
+   advice to write `==` instead produces a comparison whose result is discarded — a silent no-op
+   (T-26). Both places this file recorded a run did exactly that:
+
+     gagents.get(0)==status.recordrun(gagents.get(0);run)
+
+   so no run was ever recorded against any agent, and the panel reported zero runs however many
+   scans had happened. The array has to be rebuilt. *)
+f=replaceagent(agents:@$agentstatus;idx:i64;updated:$agentstatus):@$agentstatus{
+  let out=mut.@();
+  lp(let i=0;i<agents.len();i=i+1){
+    if(i == idx){ out=out.push(updated) }el{ out=out.push(agents.get(i)) }
+  };
+  <out
+};
+
+(* A typed parameter, because the element type of a module-level array is not established at the
+   use site: `gagents.get(ai).agentid` is E4034 at codegen, "field 'agentid' is declared at
+   different offsets by more than one struct". Passing the element to a function whose parameter is
+   $agentstatus fixes the type, and the ABI makes it free. *)
+f=agentidof(a:$agentstatus):str{ <a.agentid };
+
+f=get(req:i64):i64{
+  let panel=status.buildpanelstate(gagents;nowstamp());
+  <http.res(200;status.panelstatetojson(panel))
+};
+
+(* json.dec once and then the typed json.str, not json.getstr. json.getstr is one of roughly fifty
+   names std.json declares `(i64, i64) -> i64`; they read a different representation reached
+   through json.parse, and because a handle and a one-field struct share an ABI, handing one raw
+   request text compiles, links, and then dereferences the string's first word as a pointer.
+   Measured at the pinned toolchain: a program calling json.getstr on a str exits 139, SIGSEGV.
+   Every POST to this endpoint would have killed the moke server on its first field read. T-32.
+
+   $ok is written first in every arm list: mt binds a result's arms by POSITION, not by label
+   (T-31), so an err-first list runs the error body on valid input. *)
+f=postscan(req:i64):i64{
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  let datasetid=mt json.str(obj;"dataset_id") {
+    $ok:v v;
+    $jsonerr:e "unknown"
+  };
+  let headers=strarrayat(obj;"headers");
+  let rowsjson=mt json.str(obj;"rows_json") {
+    $ok:v v;
+    $jsonerr:e "[]"
+  };
+  let rows=rows2d(rowsjson);
+
+  let startedat=nowstamp();
   let config=scanner.defaultconfig();
   let findings=scanner.scandataset(datasetid;headers;rows;config);
 
-  let scanid=str.concat("scan-";str.fromi64(str.timestampms()));
-  let report=scanner.newreport(scanid;"now");
-  let report=scanner.addfindings(report;findings);
+  (* str.fromint(time.nowms()), not str.fromi64(str.timestampms()). std.str declares no
+     timestampms in either the interface or the runtime (E4027), and std.nowms — which three other
+     pages in this directory called — has no tk_std_nowms_w symbol and fails to LINK. str.fromint
+     is the accessor declared (i64) -> str; str.fromi64 is one of the untyped `(i64) -> i64` ones.
+
+     One `let` per value rather than re-`let`ting `report` and `run`: a let that shadows an
+     enclosing let emits invalid IR (T-6), and re-binding the same name in one scope is the same
+     shape. *)
+  let scanid=str.concat("scan-";str.fromint(time.nowms()));
+  let emptyreport=scanner.newreport(scanid;startedat);
+  let report=scanner.addfindings(emptyreport;findings);
   glastreport=report;
 
-  let run=status.newrunentry(scanid;"data-quality-scanner";"now");
-  let run=status.completerun(run;"now";0;0;0.0;report.totalfindings;
-    str.concat(str.fromi32(report.totalfindings);" findings"));
+  let startedrun=status.newrunentry(scanid;"data-quality-scanner";startedat);
+  let run=status.completerun(startedrun;nowstamp();0;0;0.0;report.totalfindings;
+    str.concat(str.fromint(report.totalfindings as i64);" findings"));
   if(gagents.len() > 0){
-    gagents.get(0)==status.recordrun(gagents.get(0);run)
-  };
+    gagents=replaceagent(gagents;0;status.recordrun(gagents.get(0);run))
+  }el{};
 
-  let resp=scanner.reporttojson(report);
-  <http.res.json(200;resp)
+  <http.res(200;scanner.reporttojson(report))
 };
 
 f=postschema(req:i64):i64{
-  let body=req.body;
-  let datasetid=mt json.getstr(body;"dataset_id") {
-    $ok:v v;
-    $err:e "unknown"
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  let oldcsv=mt json.getstr(body;"old_csv") {
+  let datasetid=mt json.str(obj;"dataset_id") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e "unknown"
   };
-  let newcsv=mt json.getstr(body;"new_csv") {
+  let oldcsv=mt json.str(obj;"old_csv") {
     $ok:v v;
-    $err:e ""
+    $jsonerr:e ""
+  };
+  let newcsv=mt json.str(obj;"new_csv") {
+    $ok:v v;
+    $jsonerr:e ""
   };
 
+  (* errjson already supplies the {"ok":false,"error":...} envelope, so what it takes is a message
+     and not a document. This site used to hand it a whole JSON object, which would have come back
+     double-wrapped. *)
   if(str.len(oldcsv) == 0 || str.len(newcsv) == 0){
-    <http.res.err(400;"{\"ok\":false,\"error\":\"old_csv and new_csv are required\"}")
+    <errjson(400;"old_csv and new_csv are required")
   };
 
+  let startedat=nowstamp();
   let oldschema=hooks.extractschema(oldcsv;datasetid);
   let newschema=hooks.extractschema(newcsv;datasetid);
-  let diff=detector.compareschemas(datasetid;oldschema;newschema;"now");
+  let diff=detector.compareschemas(datasetid;oldschema;newschema;startedat);
   glastdiff=diff;
 
-  let runid=str.concat("schema-";str.fromi64(str.timestampms()));
-  let run=status.newrunentry(runid;"schema-change-detector";"now");
-  let run=status.completerun(run;"now";0;0;0.0;diff.changes.len();diff.summary);
+  let runid=str.concat("schema-";str.fromint(time.nowms()));
+  let startedrun=status.newrunentry(runid;"schema-change-detector";startedat);
+  let run=status.completerun(startedrun;nowstamp();0;0;0.0;diff.changes.len() as i32;diff.summary);
   if(gagents.len() > 1){
-    gagents.get(1)==status.recordrun(gagents.get(1);run)
-  };
+    gagents=replaceagent(gagents;1;status.recordrun(gagents.get(1);run))
+  }el{};
 
-  let resp=detector.difftojson(diff);
-  <http.res.json(200;resp)
+  <http.res(200;detector.difftojson(diff))
 };
 
+(* `lp`, not `if`. This search used to be
+
+     let ai=mut.0;  if(ai < gagents.len()){ ... ai=ai + 1 }el{};
+
+   which tests index 0, increments a counter nothing reads again, and falls through. So the diary
+   was reachable only for the FIRST agent and every other agent_id answered 404 — the same
+   if-for-lp substitution moke.agents.status carried in four places. An `if` where a `lp` was meant
+   type-checks and runs, so nothing objects to it. *)
 f=getdiary(req:i64):i64{
-  let agentid=http.queryparam(req;"agent_id");
+  (* http.reqparam, not http.queryparam: queryparam is declared to take the `req` struct, while a
+     handler is given a raw i64 pointer, and http.reqparam is declared (i64, str) -> str for that. *)
+  let agentid=http.reqparam(req;"agent_id");
   if(str.len(agentid) == 0){
-    <http.res.err(400;"{\"ok\":false,\"error\":\"agent_id query param is required\"}")
+    <errjson(400;"agent_id query param is required")
   };
-  let ai=mut.0;
-  if(ai < gagents.len()){
-    if(str.eq(gagents.get(ai).agentid;agentid)){
-      let resp=status.agentstatustojson(gagents.get(ai));
-      <http.res.json(200;resp)
-    };
-    ai=ai + 1
-  }el{};
-  <http.res.json(404;str.concat("{\"ok\":false,\"error\":\"agent not found: \"";
-    str.concat(str.jsonencode(agentid);"}")))
+  let found=mut.-1;
+  lp(let ai=0;ai < gagents.len();ai=ai + 1){
+    if(str.eq(agentidof(gagents.get(ai));agentid)){ found=ai }el{}
+  };
+  if(found < 0){
+    <errjson(404;str.concat("agent not found: ";agentid))
+  };
+  <http.res(200;status.agentstatustojson(gagents.get(found)))
 };

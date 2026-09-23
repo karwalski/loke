@@ -3,6 +3,8 @@
 
 m=moke.agents.status;
 i=str:std.str;
+i=fmt:std.fmt;
+i=jx:shared.jsonobj;
 
 
 t=$agentrunentry{
@@ -45,8 +47,39 @@ t=$agentpanelstate{
 };
 
 
+(* --- Sixteen diagnostics, and five silent faults behind them ----------------------
+   `str.jsonencode` exists in neither the std.str interface nor the runtime, so every string this
+   module put on the wire went out unquoted and unescaped: the JSON was malformed for any value
+   containing a quote, a backslash or a newline, and structurally malformed for all of them
+   because the quotes themselves were missing. `shared.jsonobj.escape` is the escaper -- std.json
+   is not usable for this (T-32). What the compiler could not see:
+
+   1. **Five loops were `if(i < n){ ...; i=i+1 }el{}`**, which runs ONCE. So the success-rate
+      calculation in `recordrun` counted at most one successful run out of the real total and
+      reported a rate near zero for a healthy agent; `buildpanelstate` counted at most one
+      running and one errored agent; `agentstatustojson` serialised one history entry; and
+      `panelstatetojson` serialised one agent. An `if` where a `lp` was meant type-checks and
+      runs, so nothing objected.
+   2. **`history.push(entry)` and the two `*parts.push(...)` calls discarded the array `.push`
+      returns** (T-24). Combined with (1), the run history never grew and the panel JSON carried
+      an empty agent list.
+   3. **The 50-entry trim was itself one of those `if` loops**, so when it fired it reduced the
+      history to a SINGLE entry rather than to its last fifty.
+   4. **`completerun`, `failrun` and `recordrun` took `entry:i64` / `agent:i64`** while reading
+      `.runid`, `.agentid`, `.runhistory`, `.totalruns` and the rest off them. Member access on
+      an integer is not checked, so all three walked a raw word as a struct.
+   5. **`str.tofloat(str.fromint(n))`** formatted an integer to a string and parsed it back to
+      get a float, and bound the RESULT of that parse as if it were an f64 without matching it.
+      `(n as f64)` is the cast. `str.fromi32` and `str.fromf64` are `gen:"abi"` aliases;
+      `str.fromint` and `fmt.f64` are the declared spellings, and `fmt.f64` also stops a cost
+      being printed in scientific notation. *)
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
+
 f=newagentstatus(agentid:str;name:str;description:str;schedule:str;triggertype:str):$agentstatus{
-  let next=mut.schedule; if(str.eq(triggertype;"manual")){ next="manual" }el{};
+  let next=mut.schedule;
+  if(str.eq(triggertype;"manual")){ next="manual" };
   <$agentstatus{
     agentid:agentid;
     name:name;
@@ -62,7 +95,7 @@ f=newagentstatus(agentid:str;name:str;description:str;schedule:str;triggertype:s
     totaltokens:0;
     successrate:100.0;
     runhistory:@()
-  };
+  }
 };
 
 f=newrunentry(runid:str;agentid:str;startedat:str):$agentrunentry{
@@ -78,11 +111,10 @@ f=newrunentry(runid:str;agentid:str;startedat:str):$agentrunentry{
     findingscount:0;
     errormessage:"";
     outputsummary:""
-  };
+  }
 };
 
-
-f=completerun(entry:i64;finishedat:str;durationms:i32;
+f=completerun(entry:$agentrunentry;finishedat:str;durationms:i32;
     tokensused:i32;costusd:f64;findingscount:i32;outputsummary:str):$agentrunentry{
   <$agentrunentry{
     runid:entry.runid;
@@ -96,10 +128,10 @@ f=completerun(entry:i64;finishedat:str;durationms:i32;
     findingscount:findingscount;
     errormessage:"";
     outputsummary:outputsummary
-  };
+  }
 };
 
-f=failrun(entry:i64;finishedat:str;durationms:i32;errormessage:str):$agentrunentry{
+f=failrun(entry:$agentrunentry;finishedat:str;durationms:i32;errormessage:str):$agentrunentry{
   <$agentrunentry{
     runid:entry.runid;
     agentid:entry.agentid;
@@ -112,36 +144,42 @@ f=failrun(entry:i64;finishedat:str;durationms:i32;errormessage:str):$agentrunent
     findingscount:0;
     errormessage:errormessage;
     outputsummary:""
-  };
+  }
 };
 
-
-f=recordrun(agent:i64;entry:$agentrunentry):$agentstatus{
-  let history=mut.agent.runhistory;
-  history.push(entry);
-  if(history.len() > 50){
-    let trimmed=@();
-    let ti=mut.history.len() - 50;
-    if(ti < history.len()){
-      trimmed.push(history.get(ti));
-      ti=ti + 1
-    }el{};
-    history=trimmed
+(* Keeps the most recent 50 run entries. *)
+f=trimhistory(history:@$agentrunentry;keep:i64):@$agentrunentry{
+  if(history.len<=keep){
+    <history
   };
+  let out=mut.@();
+  lp(let ti=history.len-keep;ti<history.len;ti=ti+1){
+    out=out.push(history.get(ti))
+  };
+  <out
+};
 
-  let newtotal=agent.totalruns + 1;
-  let successcount=mut.0;
-  let hi=mut.0;
-  if(hi < history.len()){
-    if(str.eq(history.get(hi).status;"success")){ successcount=successcount + 1 };
-    hi=hi + 1
-  }el{};
-  let rate=mut.100.0; if(newtotal > 0){
-    rate=str.tofloat(str.fromint(successcount)) * 100.0 / str.tofloat(str.fromint(newtotal))
-  }el{};
+f=countstatus(history:@$agentrunentry;status:str):i64{
+  let n=mut.0;
+  lp(let hi=0;hi<history.len;hi=hi+1){
+    let e:$agentrunentry=history.get(hi);
+    if(str.eq(e.status;status)){ n=n+1 }
+  };
+  <n
+};
 
-  let newstatus=mut."idle"; if(str.eq(entry.status;"error")){ newstatus="error" }el{};
-
+(* The success rate is over the RETAINED history, not over `totalruns`. Those diverge once the
+   50-entry trim fires, and the old code mixed them: it counted successes in the trimmed history
+   and divided by the all-time total, so an agent that had run 200 times could not report better
+   than 25 per cent however well it was doing. *)
+f=recordrun(agent:$agentstatus;entry:$agentrunentry):$agentstatus{
+  let history=trimhistory(agent.runhistory.push(entry);50);
+  let rate=mut.100.0;
+  if(history.len>0){
+    rate=(countstatus(history;"success") as f64)*100.0/(history.len as f64)
+  };
+  let newstatus=mut."idle";
+  if(str.eq(entry.status;"error")){ newstatus="error" };
   <$agentstatus{
     agentid:agent.agentid;
     name:agent.name;
@@ -152,115 +190,51 @@ f=recordrun(agent:i64;entry:$agentrunentry):$agentstatus{
     status:newstatus;
     lastrun:entry.finishedat;
     nextrun:agent.nextrun;
-    totalruns:newtotal;
+    totalruns:agent.totalruns + 1;
     totalcostusd:agent.totalcostusd + entry.costusd;
     totaltokens:agent.totaltokens + entry.tokensused;
     successrate:rate;
     runhistory:history
-  };
+  }
 };
 
+f=countagentstatus(agents:@$agentstatus;status:str):i64{
+  let n=mut.0;
+  lp(let ai=0;ai<agents.len;ai=ai+1){
+    let a:$agentstatus=agents.get(ai);
+    if(str.eq(a.status;status)){ n=n+1 }
+  };
+  <n
+};
 
 f=buildpanelstate(agents:@$agentstatus;now:str):$agentpanelstate{
-  let running=mut.0;
-  let errors=mut.0;
-  let ai=mut.0;
-  if(ai < agents.len()){
-    if(str.eq(agents.get(ai).status;"running")){ running=running + 1 };
-    if(str.eq(agents.get(ai).status;"error")){ errors=errors + 1 };
-    ai=ai + 1
-  }el{};
   <$agentpanelstate{
     agents:agents;
-    totalagents:agents.len();
-    runningcount:running;
-    errorcount:errors;
+    totalagents:agents.len as i32;
+    runningcount:countagentstatus(agents;"running") as i32;
+    errorcount:countagentstatus(agents;"error") as i32;
     lastupdated:now
-  };
+  }
 };
 
-
 f=runentrytojson(entry:$agentrunentry):str{
-  <str.concat("{\"run_id\":";
-    str.concat(str.jsonencode(entry.runid);
-    str.concat(",\"agent_id\":";
-    str.concat(str.jsonencode(entry.agentid);
-    str.concat(",\"started_at\":";
-    str.concat(str.jsonencode(entry.startedat);
-    str.concat(",\"finished_at\":";
-    str.concat(str.jsonencode(entry.finishedat);
-    str.concat(",\"status\":";
-    str.concat(str.jsonencode(entry.status);
-    str.concat(",\"duration_ms\":";
-    str.concat(str.fromi32(entry.durationms);
-    str.concat(",\"tokens_used\":";
-    str.concat(str.fromi32(entry.tokensused);
-    str.concat(",\"cost_usd\":";
-    str.concat(str.fromf64(entry.costusd);
-    str.concat(",\"findings_count\":";
-    str.concat(str.fromi32(entry.findingscount);
-    str.concat(",\"error_message\":";
-    str.concat(str.jsonencode(entry.errormessage);
-    str.concat(",\"output_summary\":";
-    str.concat(str.jsonencode(entry.outputsummary);
-    "}"))))))))))))))))))))))
+  <"{\"run_id\":\(jsonencode(entry.runid)),\"agent_id\":\(jsonencode(entry.agentid)),\"started_at\":\(jsonencode(entry.startedat)),\"finished_at\":\(jsonencode(entry.finishedat)),\"status\":\(jsonencode(entry.status)),\"duration_ms\":\(str.fromint(entry.durationms as i64)),\"tokens_used\":\(str.fromint(entry.tokensused as i64)),\"cost_usd\":\(fmt.f64(entry.costusd;6)),\"findings_count\":\(str.fromint(entry.findingscount as i64)),\"error_message\":\(jsonencode(entry.errormessage)),\"output_summary\":\(jsonencode(entry.outputsummary))}"
 };
 
 f=agentstatustojson(agent:$agentstatus):str{
-  let runparts=@();
-  let ri=mut.0;
-  if(ri < agent.runhistory.len()){
-    runparts.push(runentrytojson(agent.runhistory.get(ri)));
-    ri=ri + 1
-  }el{};
-  let enabledstr=mut."false"; if(agent.enabled){ enabledstr="true" }el{};
-  <str.concat("{\"agent_id\":";
-    str.concat(str.jsonencode(agent.agentid);
-    str.concat(",\"name\":";
-    str.concat(str.jsonencode(agent.name);
-    str.concat(",\"description\":";
-    str.concat(str.jsonencode(agent.description);
-    str.concat(",\"schedule\":";
-    str.concat(str.jsonencode(agent.schedule);
-    str.concat(",\"trigger_type\":";
-    str.concat(str.jsonencode(agent.triggertype);
-    str.concat(",\"enabled\":";
-    str.concat(enabledstr;
-    str.concat(",\"status\":";
-    str.concat(str.jsonencode(agent.status);
-    str.concat(",\"last_run\":";
-    str.concat(str.jsonencode(agent.lastrun);
-    str.concat(",\"next_run\":";
-    str.concat(str.jsonencode(agent.nextrun);
-    str.concat(",\"total_runs\":";
-    str.concat(str.fromi32(agent.totalruns);
-    str.concat(",\"total_cost_usd\":";
-    str.concat(str.fromf64(agent.totalcostusd);
-    str.concat(",\"total_tokens\":";
-    str.concat(str.fromi32(agent.totaltokens);
-    str.concat(",\"success_rate\":";
-    str.concat(str.fromf64(agent.successrate);
-    str.concat(",\"run_history\":[";
-    str.concat(str.join(",";runparts);
-    "]}"))))))))))))))))))))))))))))
+  let runparts=mut.@();
+  lp(let ri=0;ri<agent.runhistory.len;ri=ri+1){
+    runparts=runparts.push(runentrytojson(agent.runhistory.get(ri)))
+  };
+  let enabled=mut."false";
+  if(agent.enabled){ enabled="true" };
+  <"{\"agent_id\":\(jsonencode(agent.agentid)),\"name\":\(jsonencode(agent.name)),\"description\":\(jsonencode(agent.description)),\"schedule\":\(jsonencode(agent.schedule)),\"trigger_type\":\(jsonencode(agent.triggertype)),\"enabled\":\(enabled),\"status\":\(jsonencode(agent.status)),\"last_run\":\(jsonencode(agent.lastrun)),\"next_run\":\(jsonencode(agent.nextrun)),\"total_runs\":\(str.fromint(agent.totalruns as i64)),\"total_cost_usd\":\(fmt.f64(agent.totalcostusd;6)),\"total_tokens\":\(str.fromint(agent.totaltokens as i64)),\"success_rate\":\(fmt.f64(agent.successrate;2)),\"run_history\":[\(str.join(",";runparts))]}"
 };
 
 f=panelstatetojson(state:$agentpanelstate):str{
-  let agentparts=@();
-  let ai=mut.0;
-  if(ai < state.agents.len()){
-    agentparts.push(agentstatustojson(state.agents.get(ai)));
-    ai=ai + 1
-  }el{};
-  <str.concat("{\"total_agents\":";
-    str.concat(str.fromi32(state.totalagents);
-    str.concat(",\"running_count\":";
-    str.concat(str.fromi32(state.runningcount);
-    str.concat(",\"error_count\":";
-    str.concat(str.fromi32(state.errorcount);
-    str.concat(",\"last_updated\":";
-    str.concat(str.jsonencode(state.lastupdated);
-    str.concat(",\"agents\":[";
-    str.concat(str.join(",";agentparts);
-    "]}"))))))))))
+  let agentparts=mut.@();
+  lp(let ai=0;ai<state.agents.len;ai=ai+1){
+    agentparts=agentparts.push(agentstatustojson(state.agents.get(ai)))
+  };
+  <"{\"total_agents\":\(str.fromint(state.totalagents as i64)),\"running_count\":\(str.fromint(state.runningcount as i64)),\"error_count\":\(str.fromint(state.errorcount as i64)),\"last_updated\":\(jsonencode(state.lastupdated)),\"agents\":[\(str.join(",";agentparts))]}"
 };

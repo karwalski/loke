@@ -3,7 +3,49 @@
 
 m=moke.compute;
 i=str:std.str;
+i=math:std.math;
+i=fmt:std.fmt;
 i=log:std.log;
+
+(* ── This module was written against a std.str that never existed ──────────────────
+   Every arithmetic and array call here used to go through `std.str`: str.sqrt, str.parsef32,
+   str.formatf32, str.sortf32, str.insert, str.get, str.set, str.push, str.tof32, str.toi32,
+   str.fromf32, str.fromi32, str.compare, and str.len applied to an array. Only three of those
+   names exist at the pinned toke commit, and the ones that do exist are the `gen:"abi"` block
+   at the bottom of stdlib/str.tki, declared (i64,...) -> i64. Because every parameter there is
+   i64, the type checker accepts ANY argument for them and reports nothing — so of the 17 bogus
+   call sites in this file only 5 distinct names raised E4027 and the other 12 type-checked
+   silently. That is the reason the whole tree's interface pass was blind here.
+
+   Three consequences were worse than the compile failure. Read against toke's own
+   `src/stdlib/str_glue.c` at the pinned commit:
+
+   1. `str.len` is `tk_str_len_w`, which is `strlen()` on a `char *`. Applied to an ARRAY — 31
+      sites here, every loop bound in the file — it walks the element buffer as a NUL-terminated
+      string and stops at the first zero byte. An `@str` array's elements are 8-byte heap
+      pointers whose high bytes are zero, so `str.len(ds.rows)` returned about 3 for a
+      hundred-row dataset. Every loop in this module ran a garbage number of iterations, and
+      nothing about it was detectable from the source. `arr.len` is the array length.
+   2. `str.push(arr; item)` is `str_array_append`, which ALLOCATES and returns a new array; the
+      result was DISCARDED at all 27 append sites. Every op built its output into an array that
+      stayed empty. The correct append is `arr = arr.push(item)` — T-24.
+   3. `str.compare(a; b)` is `tk_str_eq_w(a,b) ? 0 : 1` — it is inequality, never an ordering,
+      and never negative. `oplatest` sorted on `str.compare(d; x) > 0`, which is true whenever
+      the two dates DIFFER, so "latest" returned rows in reverse file order regardless of date.
+      `str.gt` is the real comparison.
+
+   `str.set(arr; i; v)` does write `ptr[idx]` in place at the ABI level, so unlike the above it
+   was not itself a no-op — but it only ever ran against the empty arrays that (2) produced.
+   It is replaced by `seti64`/`setf64` rebuilds anyway, because writing a raw word into a typed
+   array through an (i64,i64,i64) hole is not something to leave in place.
+
+   Arithmetic is now f64 throughout, because that is what the real stdlib speaks: str.tofloat,
+   math.* and fmt.f64 are all f64, and the f32 this file used had nothing behind it. The two ABI
+   holes it fell through were `str.tof32`, which is an alias for `tk_str_tofloat_w` and so
+   PARSES A STRING — it was being handed an i64 row count, which it dereferenced as a char * —
+   and `str.fromf32`, an alias for `tk_str_fromfloat_w`, which reads its argument as f64 bits
+   and was being handed an f32. No bare float crosses a module boundary out of here: every op
+   reports its number as a string in `$result.value`, so T-20 does not apply to `execute`. *)
 
 t=$dataset{
   name:str;
@@ -31,31 +73,137 @@ t=$result{
   values:@str
 };
 
-f=colindex(ds:$dataset;colname:str):i32{
-  let idx=mut.0;
-  lp(let lv=0;idx<str.len(ds.headers);lv=lv){
-    if(str.eq(str.trim(str.get(ds.headers;idx));colname)){
-      <idx
-    };
-    idx=idx+1
+(* ── Array rebuild helpers ────────────────────────────────────────────────────────
+   There is no `arr.get(i) = v` in toke and E2002 advises writing `==` instead, which compiles
+   to a discarded comparison and does nothing (T-26). These rebuild instead. O(n) per write, so
+   the counting loops below are O(n squared); the demo datasets this module serves are tens to
+   low hundreds of rows, which is why that is left alone rather than reached for a map. *)
+f=seti64(arr:@i64;pos:i64;v:i64):@i64{
+  let out=mut.@();
+  lp(let i=0;i<arr.len;i=i+1){
+    if(i==pos){
+      out=out.push(v)
+    }el{
+      out=out.push(arr.get(i))
+    }
   };
-  <(-1 as i32)
+  <out
 };
 
-f=getcol(row:@str;idx:i32):str{
-  if(idx<(0 as i32) || idx>str.len(row)){
+f=setf64(arr:@f64;pos:i64;v:f64):@f64{
+  let out=mut.@();
+  lp(let i=0;i<arr.len;i=i+1){
+    if(i==pos){
+      out=out.push(v)
+    }el{
+      out=out.push(arr.get(i))
+    }
+  };
+  <out
+};
+
+f=setstr(arr:@str;pos:i64;v:str):@str{
+  let out=mut.@();
+  lp(let i=0;i<arr.len;i=i+1){
+    if(i==pos){
+      out=out.push(v)
+    }el{
+      out=out.push(arr.get(i))
+    }
+  };
+  <out
+};
+
+f=insertf64(arr:@f64;pos:i64;v:f64):@f64{
+  let out=mut.@();
+  lp(let i=0;i<pos;i=i+1){
+    out=out.push(arr.get(i))
+  };
+  out=out.push(v);
+  lp(let j=pos;j<arr.len;j=j+1){
+    out=out.push(arr.get(j))
+  };
+  <out
+};
+
+f=insertstr(arr:@str;pos:i64;v:str):@str{
+  let out=mut.@();
+  lp(let i=0;i<pos;i=i+1){
+    out=out.push(arr.get(i))
+  };
+  out=out.push(v);
+  lp(let j=pos;j<arr.len;j=j+1){
+    out=out.push(arr.get(j))
+  };
+  <out
+};
+
+f=insertrow(arr:@(@str);pos:i64;v:@str):@(@str){
+  let out=mut.@();
+  lp(let i=0;i<pos;i=i+1){
+    out=out.push(arr.get(i))
+  };
+  out=out.push(v);
+  lp(let j=pos;j<arr.len;j=j+1){
+    out=out.push(arr.get(j))
+  };
+  <out
+};
+
+f=findstr(arr:@str;v:str):i64{
+  lp(let i=0;i<arr.len;i=i+1){
+    if(str.eq(arr.get(i);v)){
+      <i
+    }
+  };
+  <(0-1)
+};
+
+(* Indices are i64 here, not the i32 this file used. An i32 array index is widened with
+   `zext i1` (T-23's neighbour, T-3), which turns any index above 1 into 0 or 1. The struct
+   fields `$query.topn` and `$query.bucketcount` stay i32 because other modules construct
+   them; they are cast at the point of use. *)
+f=colindex(ds:$dataset;colname:str):i64{
+  lp(let i=0;i<ds.headers.len;i=i+1){
+    if(str.eq(str.trim(ds.headers.get(i));colname)){
+      <i
+    }
+  };
+  <(0-1)
+};
+
+(* The bound was `idx>row.len`, one past the end: reading the last+1 cell of a short row
+   indexed out of bounds instead of returning blank. A ragged CSV is the normal case here. *)
+f=getcol(row:@str;idx:i64):str{
+  if(idx<0 || idx>=row.len){
     <""
   };
-  <str.get(row;idx)
+  <row.get(idx)
 };
 
-f=parsefloat(s:str):f32{
-  let trimmed=str.trim(s);
-  if(str.len(trimmed)==0){ <(0.0 as f32) };
-  if(str.isnumeric(trimmed)){
-    <str.parsef32(trimmed)
+(* `str.tofloat` is a result, so a cell that is not a number is distinguishable from one that
+   parses to zero — which the old `str.isnumeric` guard plus `str.parsef32` could not do,
+   neither name existing. $ok is written first: `mt` binds a result's arms by POSITION and
+   writing the error arm first inverts the match (T-31).
+
+   Same-module callers only. A bare f64 return is corrupted across a module boundary (T-20);
+   nothing outside this module calls it, and `execute` is the only exported entry point. *)
+f=parsefloat(s:str):f64{
+  <mt str.tofloat(str.trim(s)) {
+    $ok:v v;
+    $parseerr:e 0.0
+  }
+};
+
+f=isnumericcell(s:str):bool{
+  let t=str.trim(s);
+  if(str.len(t)==0){
+    <false
   };
-  <(0.0 as f32)
+  <mt str.tofloat(t) {
+    $ok:v true;
+    $parseerr:e false
+  }
 };
 
 f=applyfilter(ds:$dataset;filtercol:str;filterval:str):$dataset{
@@ -65,14 +213,11 @@ f=applyfilter(ds:$dataset;filtercol:str;filterval:str):$dataset{
   let fcidx=colindex(ds;filtercol);
   if(fcidx<0){ <ds };
   let filtered=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(ds.rows);lv=lv){
-    let row=str.get(ds.rows;rowidx);
-    let cell=getcol(row;fcidx);
-    if(str.eq(cell;filterval)){
-      filtered.push(row)
-    };
-    rowidx=rowidx+1
+  lp(let rowidx=0;rowidx<ds.rows.len;rowidx=rowidx+1){
+    let row=ds.rows.get(rowidx);
+    if(str.eq(getcol(row;fcidx);filterval)){
+      filtered=filtered.push(row)
+    }
   };
   <$dataset{
     name:ds.name;
@@ -81,125 +226,78 @@ f=applyfilter(ds:$dataset;filtercol:str;filterval:str):$dataset{
   }
 };
 
-f=opcount(ds:$dataset;q:$query):$result{
-  let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cnt=str.len(working.rows);
+(* ── Non-numeric cells are skipped, not counted as zero ───────────────────────────
+   The old accumulators tested only `str.len(str.trim(v))>0` and then ran the cell through a
+   parse that returned 0.0 for anything unparseable. So a column holding "n/a", "-" or a
+   currency-prefixed figure contributed a zero to both the sum and the divisor, which drags an
+   average toward zero in proportion to how dirty the column is — silently, and worst on
+   exactly the messy real-world CSV this demo is for. A cell that does not parse is not a
+   value of zero; it is not a value. *)
+f=numericcolumn(ds:$dataset;colname:str):@f64{
+  let cidx=colindex(ds;colname);
+  let out=mut.@();
+  lp(let rowidx=0;rowidx<ds.rows.len;rowidx=rowidx+1){
+    let cell=getcol(ds.rows.get(rowidx);cidx);
+    if(isnumericcell(cell)){
+      out=out.push(parsefloat(cell))
+    }
+  };
+  <out
+};
+
+f=emptyresult(op:str;column:str;value:str):$result{
   <$result{
-    op:"count";
-    column:q.column;
-    value:str.fromi32(cnt);
+    op:op;
+    column:column;
+    value:value;
     rows:@();
     labels:@();
     values:@()
   }
+};
+
+f=opcount(ds:$dataset;q:$query):$result{
+  let working=applyfilter(ds;q.filtercol;q.filterval);
+  <emptyresult("count";q.column;str.fromint(working.rows.len))
 };
 
 f=opsum(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cidx=colindex(working;q.column);
-  let total=mut.0.0;
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    total=total+parsefloat(v);
-    rowidx=rowidx+1
+  let nums=numericcolumn(working;q.column);
+  if(nums.len==0){
+    <emptyresult("sum";q.column;"0")
   };
-  <$result{
-    op:"sum";
-    column:q.column;
-    value:str.fromf32(total);
-    rows:@();
-    labels:@();
-    values:@()
-  }
+  <emptyresult("sum";q.column;str.fromfloat(math.sum(nums)))
 };
 
 f=opavg(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cidx=colindex(working;q.column);
-  let total=mut.0.0;
-  let count=mut.0;
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    if(str.len(str.trim(v))>0){
-      total=total+parsefloat(v);
-      count=count+1
-    };
-    rowidx=rowidx+1
+  let nums=numericcolumn(working;q.column);
+  if(nums.len==0){
+    <emptyresult("avg";q.column;"0.00")
   };
-  let avgval=mut.0.0;
-  if(count>0){ avgval=total/str.tof32(count) };
-  <$result{
-    op:"avg";
-    column:q.column;
-    value:str.formatf32(avgval;2);
-    rows:@();
-    labels:@();
-    values:@()
-  }
+  <emptyresult("avg";q.column;fmt.f64(math.mean(nums);2))
 };
 
+(* min and max over an empty column report the empty string rather than 0. The old code
+   returned "0" for a column with no numbers, which is indistinguishable from a column whose
+   minimum genuinely is zero. *)
 f=opmin(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cidx=colindex(working;q.column);
-  let minval=mut.0.0;
-  let found=mut.false;
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    if(str.len(str.trim(v))>0){
-      let n=parsefloat(v);
-      if(found==false){
-        minval=n;
-        found=true
-      }el{
-        if(n<minval){ minval=n }
-      }
-    };
-    rowidx=rowidx+1
+  let nums=numericcolumn(working;q.column);
+  if(nums.len==0){
+    <emptyresult("min";q.column;"")
   };
-  <$result{
-    op:"min";
-    column:q.column;
-    value:str.fromf32(minval);
-    rows:@();
-    labels:@();
-    values:@()
-  }
+  <emptyresult("min";q.column;str.fromfloat(math.min(nums)))
 };
 
 f=opmax(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cidx=colindex(working;q.column);
-  let maxval=mut.0.0;
-  let found=mut.false;
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    if(str.len(str.trim(v))>0){
-      let n=parsefloat(v);
-      if(found==false){
-        maxval=n;
-        found=true
-      }el{
-        if(n>maxval){ maxval=n }
-      }
-    };
-    rowidx=rowidx+1
+  let nums=numericcolumn(working;q.column);
+  if(nums.len==0){
+    <emptyresult("max";q.column;"")
   };
-  <$result{
-    op:"max";
-    column:q.column;
-    value:str.fromf32(maxval);
-    rows:@();
-    labels:@();
-    values:@()
-  }
+  <emptyresult("max";q.column;str.fromfloat(math.max(nums)))
 };
 
 f=opgroup(ds:$dataset;q:$query):$result{
@@ -207,31 +305,19 @@ f=opgroup(ds:$dataset;q:$query):$result{
   let gidx=colindex(working;q.groupby);
   let groupkeys=mut.@();
   let groupcounts=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let key=getcol(row;gidx);
-    let foundgroup=mut.false;
-    let gi=mut.0;
-    lp(let lv2=0;gi<str.len(groupkeys);lv2=lv2){
-      if(str.eq(str.get(groupkeys;gi);key)){
-        let oldcount=str.get(groupcounts;gi);
-        str.set(groupcounts;gi;oldcount+1);
-        foundgroup=true
-      };
-      gi=gi+1
-    };
-    if(foundgroup==false){
-      str.push(groupkeys;key);
-      str.push(groupcounts;1)
-    };
-    rowidx=rowidx+1
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let key=getcol(working.rows.get(rowidx);gidx);
+    let at=findstr(groupkeys;key);
+    if(at<0){
+      groupkeys=groupkeys.push(key);
+      groupcounts=groupcounts.push(1)
+    }el{
+      groupcounts=seti64(groupcounts;at;groupcounts.get(at)+1)
+    }
   };
   let countstrs=mut.@();
-  let ci=mut.0;
-  lp(let lv3=0;ci<str.len(groupcounts);lv3=lv3){
-    str.push(countstrs;str.fromi32(str.get(groupcounts;ci)));
-    ci=ci+1
+  lp(let ci=0;ci<groupcounts.len;ci=ci+1){
+    countstrs=countstrs.push(str.fromint(groupcounts.get(ci)))
   };
   <$result{
     op:"group";
@@ -243,40 +329,42 @@ f=opgroup(ds:$dataset;q:$query):$result{
   }
 };
 
+(* The day key is a slice, and `str.slice` is a result: a date cell shorter than 10 characters
+   has no ten-character prefix. It used to be bound as if it were a plain string, which the
+   type checker let through only because nothing read the discriminant. A short or empty date
+   now groups under its trimmed self rather than crashing the slice. *)
+f=daykey(raw:str):str{
+  let t=str.trim(raw);
+  if(str.len(t)<10){
+    <t
+  };
+  <mt str.slice(t;0;10) {
+    $ok:v v;
+    $sliceerr:e t
+  }
+};
+
 f=optimeseries(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let didx=colindex(working;q.groupby);
   let vidx=colindex(working;q.column);
   let datekeys=mut.@();
   let datesums=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let rawdate=getcol(row;didx);
-    let daykey=str.slice(rawdate;0;10);
-    let valstr=getcol(row;vidx);
-    let n=parsefloat(valstr);
-    let foundday=mut.false;
-    let di=mut.0;
-    lp(let lv2=0;di<str.len(datekeys);lv2=lv2){
-      if(str.eq(str.get(datekeys;di);daykey)){
-        let oldsum=str.get(datesums;di);
-        str.set(datesums;di;oldsum+n);
-        foundday=true
-      };
-      di=di+1
-    };
-    if(foundday==false){
-      str.push(datekeys;daykey);
-      str.push(datesums;n)
-    };
-    rowidx=rowidx+1
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let row=working.rows.get(rowidx);
+    let key=daykey(getcol(row;didx));
+    let n=parsefloat(getcol(row;vidx));
+    let at=findstr(datekeys;key);
+    if(at<0){
+      datekeys=datekeys.push(key);
+      datesums=datesums.push(n)
+    }el{
+      datesums=setf64(datesums;at;datesums.get(at)+n)
+    }
   };
   let sumstrs=mut.@();
-  let si=mut.0;
-  lp(let lv3=0;si<str.len(datesums);lv3=lv3){
-    str.push(sumstrs;str.fromf32(str.get(datesums;si)));
-    si=si+1
+  lp(let si=0;si<datesums.len;si=si+1){
+    sumstrs=sumstrs.push(str.fromfloat(datesums.get(si)))
   };
   <$result{
     op:"timeseries";
@@ -291,32 +379,27 @@ f=optimeseries(ds:$dataset;q:$query):$result{
 f=optopn(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let cidx=colindex(working;q.column);
-  let nlimit=mut.q.topn;
-  if(!(nlimit>0)){ nlimit=10 };
+  let nlimit=mut.(q.topn as i64);
+  if(nlimit>0){}el{ nlimit=10 };
   let sortedrows=mut.@();
   let sortedvals=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let row=working.rows.get(rowidx);
     let v=parsefloat(getcol(row;cidx));
-    let insertpos=mut.str.len(sortedvals);
-    let checkidx=mut.0;
-    lp(let lv2=0;checkidx<str.len(sortedvals);lv2=lv2){
-      if(v>str.get(sortedvals;checkidx)){
-        insertpos=checkidx;
-        checkidx=str.len(sortedvals)
-      };
-      checkidx=checkidx+1
+    let insertpos=mut.sortedvals.len;
+    let placed=mut.false;
+    lp(let c=0;c<sortedvals.len && !placed;c=c+1){
+      if(v>sortedvals.get(c)){
+        insertpos=c;
+        placed=true
+      }
     };
-    str.insert(sortedrows;insertpos;row);
-    str.insert(sortedvals;insertpos;v);
-    rowidx=rowidx+1
+    sortedrows=insertrow(sortedrows;insertpos;row);
+    sortedvals=insertf64(sortedvals;insertpos;v)
   };
   let toprows=mut.@();
-  let taken=mut.0;
-  lp(let lv3=0;taken<nlimit && taken<str.len(sortedrows);lv3=lv3){
-    str.push(toprows;str.get(sortedrows;taken));
-    taken=taken+1
+  lp(let taken=0;taken<nlimit && taken<sortedrows.len;taken=taken+1){
+    toprows=toprows.push(sortedrows.get(taken))
   };
   <$result{
     op:"topn";
@@ -328,65 +411,40 @@ f=optopn(ds:$dataset;q:$query):$result{
   }
 };
 
+(* The bucket clamp was `if(bucketidx>bucketcount)`, which misses the two indices that are
+   actually out of range: the maximum value of the column lands exactly on `bucketcount` and a
+   value one bucket-width above the minimum of a single-bucket histogram lands on 1. Both then
+   indexed past the end of the counts array. It is `>=` against bucketcount now. *)
 f=opdistribution(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cidx=colindex(working;q.column);
-  let bucketcount=mut.q.bucketcount;
-  if(!(bucketcount>0)){ bucketcount=10 };
-  let minval=mut.0.0;
-  let maxval=mut.0.0;
-  let first=mut.true;
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    if(str.len(str.trim(v))>0){
-      let n=parsefloat(v);
-      if(first){
-        minval=n;
-        maxval=n;
-        first=false
-      }el{
-        if(n<minval){ minval=n };
-        if(n>maxval){ maxval=n }
-      }
-    };
-    rowidx=rowidx+1
+  let nums=numericcolumn(working;q.column);
+  let bucketcount=mut.(q.bucketcount as i64);
+  if(bucketcount>0){}el{ bucketcount=10 };
+  if(nums.len==0){
+    <emptyresult("distribution";q.column;"")
   };
-  let range=maxval-minval;
-  let bucketwidth=mut.range/str.tof32(bucketcount);
-  if(!(bucketwidth>0.0)){ bucketwidth=1.0 };
+  let minval=math.min(nums);
+  let maxval=math.max(nums);
+  let bucketwidth=mut.(maxval-minval)/(bucketcount as f64);
+  if(bucketwidth>0.0){}el{ bucketwidth=1.0 };
   let bucketlabels=mut.@();
   let bucketcounts=mut.@();
-  let bidx=mut.0;
-  lp(let lv2=0;bidx<bucketcount;lv2=lv2){
-    let lo=minval+str.tof32(bidx)*bucketwidth;
+  lp(let bidx=0;bidx<bucketcount;bidx=bidx+1){
+    let lo=minval+(bidx as f64)*bucketwidth;
     let hi=lo+bucketwidth;
-    let label=mut.str.concat(str.fromf32(lo);"-");
-    label=str.concat(label;str.fromf32(hi));
-    str.push(bucketlabels;label);
-    str.push(bucketcounts;0);
-    bidx=bidx+1
+    bucketlabels=bucketlabels.push(str.concat(str.concat(fmt.f64(lo;2);"-");fmt.f64(hi;2)));
+    bucketcounts=bucketcounts.push(0)
   };
-  rowidx=0;
-  lp(let lv3=0;rowidx<str.len(working.rows);lv3=lv3){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    if(str.len(str.trim(v))>0){
-      let n=parsefloat(v);
-      let bucketidx=mut.str.toi32((n-minval)/bucketwidth);
-      if(bucketidx>bucketcount){ bucketidx=bucketcount-1 };
-      if(bucketidx<0){ bucketidx=0 };
-      let old=str.get(bucketcounts;bucketidx);
-      str.set(bucketcounts;bucketidx;old+1)
-    };
-    rowidx=rowidx+1
+  lp(let ni=0;ni<nums.len;ni=ni+1){
+    let raw=((nums.get(ni)-minval)/bucketwidth) as i64;
+    let bucketidx=mut.raw;
+    if(bucketidx>=bucketcount){ bucketidx=bucketcount-1 };
+    if(bucketidx<0){ bucketidx=0 };
+    bucketcounts=seti64(bucketcounts;bucketidx;bucketcounts.get(bucketidx)+1)
   };
   let countstrs=mut.@();
-  let ci=mut.0;
-  lp(let lv4=0;ci<str.len(bucketcounts);lv4=lv4){
-    str.push(countstrs;str.fromi32(str.get(bucketcounts;ci)));
-    ci=ci+1
+  lp(let ci=0;ci<bucketcounts.len;ci=ci+1){
+    countstrs=countstrs.push(str.fromint(bucketcounts.get(ci)))
   };
   <$result{
     op:"distribution";
@@ -398,104 +456,63 @@ f=opdistribution(ds:$dataset;q:$query):$result{
   }
 };
 
+(* Pearson r is computed rather than taken from `math.linreg`, which reports r squared and so
+   loses the sign — the direction of a correlation is the half a user reads first. Only rows
+   where BOTH cells parse are paired, so a blank in one column cannot shift the other column's
+   values onto the wrong partner. *)
 f=opcorrelate(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let xidx=colindex(working;q.column);
   let yidx=colindex(working;q.groupby);
   let xs=mut.@();
   let ys=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let row=working.rows.get(rowidx);
     let xv=getcol(row;xidx);
     let yv=getcol(row;yidx);
-    if(str.len(str.trim(xv))>0 && str.len(str.trim(yv))>0){
-      str.push(xs;parsefloat(xv));
-      str.push(ys;parsefloat(yv))
-    };
-    rowidx=rowidx+1
-  };
-  let n=str.len(xs);
-  if(n<2){
-    <$result{
-      op:"correlate";
-      column:q.column;
-      value:"0.0";
-      rows:@();
-      labels:@();
-      values:@()
+    if(isnumericcell(xv) && isnumericcell(yv)){
+      xs=xs.push(parsefloat(xv));
+      ys=ys.push(parsefloat(yv))
     }
   };
-  let sumx=mut.0.0;
-  let sumy=mut.0.0;
-  let i=mut.0;
-  lp(let lv2=0;i<n;lv2=lv2){
-    sumx=sumx+str.get(xs;i);
-    sumy=sumy+str.get(ys;i);
-    i=i+1
+  let n=xs.len;
+  if(n<2){
+    <emptyresult("correlate";q.column;"0.0000")
   };
-  let nf=str.tof32(n);
-  let meanx=sumx/nf;
-  let meany=sumy/nf;
+  let meanx=math.mean(xs);
+  let meany=math.mean(ys);
   let cov=mut.0.0;
   let varx=mut.0.0;
   let vary=mut.0.0;
-  i=0;
-  lp(let lv3=0;i<n;lv3=lv3){
-    let dx=str.get(xs;i)-meanx;
-    let dy=str.get(ys;i)-meany;
+  lp(let i=0;i<n;i=i+1){
+    let dx=xs.get(i)-meanx;
+    let dy=ys.get(i)-meany;
     cov=cov+dx*dy;
     varx=varx+dx*dx;
-    vary=vary+dy*dy;
-    i=i+1
+    vary=vary+dy*dy
   };
-  let denom=str.sqrt(varx)*str.sqrt(vary);
+  let denom=math.sqrt(varx)*math.sqrt(vary);
   let r=mut.0.0;
   if(denom>0.0){ r=cov/denom };
-  <$result{
-    op:"correlate";
-    column:q.column;
-    value:str.formatf32(r;4);
-    rows:@();
-    labels:@();
-    values:@()
-  }
+  <emptyresult("correlate";q.column;fmt.f64(r;4))
 };
 
+(* `math.percentile` replaces a hand-rolled sort-and-index. The sort it needed was
+   `str.sortf32`, which does not exist; the index it computed was `pct*n/100` clamped with
+   `if(pos>n){pos=n-1}`, so p99 and p100 on any column indexed one past the last element. *)
 f=oppercentile(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
-  let cidx=colindex(working;q.column);
-  let nums=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    if(str.len(str.trim(v))>0){
-      str.push(nums;parsefloat(v))
-    };
-    rowidx=rowidx+1
-  };
-  let sorted=str.sortf32(nums);
-  let n=str.len(sorted);
-  let percentileat=mut.0.0;
-  let outrows=mut.@();
-  let percs=@(25;50;75;90;99);
+  let nums=numericcolumn(working;q.column);
+  let pcts=@(25.0;50.0;75.0;90.0;99.0);
   let pnames=@("p25";"p50";"p75";"p90";"p99");
-  let pidx=mut.0;
-  lp(let lv2=0;pidx<5;lv2=lv2){
-    let pct=str.get(percs;pidx);
-    let pname=str.get(pnames;pidx);
-    let pos=mut.str.toi32(str.tof32(pct)*str.tof32(n)/100.0);
-    if(pos>n){ pos=n-1 };
-    if(pos<0){ pos=0 };
-    if(n>0){
-      percentileat=str.get(sorted;pos)
+  let outrows=mut.@();
+  lp(let pidx=0;pidx<pcts.len;pidx=pidx+1){
+    let label=pnames.get(pidx);
+    if(nums.len==0){
+      outrows=outrows.push(@(label;""))
     }el{
-      percentileat=0.0
-    };
-    let pair=@(pname;str.formatf32(percentileat;2));
-    str.push(outrows;pair);
-    pidx=pidx+1
+      outrows=outrows.push(@(label;fmt.f64(math.percentile(nums;pcts.get(pidx));2)))
+    }
   };
   <$result{
     op:"percentile";
@@ -512,48 +529,35 @@ f=opcountby(ds:$dataset;q:$query):$result{
   let cidx=colindex(working;q.column);
   let keys=mut.@();
   let counts=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let key=getcol(row;cidx);
-    let found=mut.false;
-    let kidx=mut.0;
-    lp(let lv2=0;kidx<str.len(keys);lv2=lv2){
-      if(str.eq(str.get(keys;kidx);key)){
-        let old=str.get(counts;kidx);
-        str.set(counts;kidx;old+1);
-        found=true
-      };
-      kidx=kidx+1
-    };
-    if(found==false){
-      str.push(keys;key);
-      str.push(counts;1)
-    };
-    rowidx=rowidx+1
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let key=getcol(working.rows.get(rowidx);cidx);
+    let at=findstr(keys;key);
+    if(at<0){
+      keys=keys.push(key);
+      counts=counts.push(1)
+    }el{
+      counts=seti64(counts;at;counts.get(at)+1)
+    }
   };
-  let sortn=str.len(keys);
-  let i=mut.0;
-  lp(let lv3=0;i<sortn-1;lv3=lv3){
-    let j=mut.i+1;
-    lp(let lv4=0;j<sortn;lv4=lv4){
-      if(str.get(counts;j)>str.get(counts;i)){
-        let tmpk=str.get(keys;i);
-        let tmpc=str.get(counts;i);
-        str.set(keys;i;str.get(keys;j));
-        str.set(counts;i;str.get(counts;j));
-        str.set(keys;j;tmpk);
-        str.set(counts;j;tmpc)
-      };
-      j=j+1
-    };
-    i=i+1
+  (* Selection sort, descending by count, keys carried along. The swap used to be four
+     `str.set` calls, none of which assigned anything, so this loop read its own unsorted
+     input every pass and count_by came back in insertion order while claiming to rank. *)
+  let sortn=keys.len;
+  lp(let i=0;i<sortn;i=i+1){
+    lp(let j=i+1;j<sortn;j=j+1){
+      if(counts.get(j)>counts.get(i)){
+        let tmpk=keys.get(i);
+        let tmpc=counts.get(i);
+        keys=setstr(keys;i;keys.get(j));
+        counts=seti64(counts;i;counts.get(j));
+        keys=setstr(keys;j;tmpk);
+        counts=seti64(counts;j;tmpc)
+      }
+    }
   };
   let countstrs=mut.@();
-  let ci=mut.0;
-  lp(let lv5=0;ci<str.len(counts);lv5=lv5){
-    str.push(countstrs;str.fromi32(str.get(counts;ci)));
-    ci=ci+1
+  lp(let ci=0;ci<counts.len;ci=ci+1){
+    countstrs=countstrs.push(str.fromint(counts.get(ci)))
   };
   <$result{
     op:"count_by";
@@ -565,35 +569,33 @@ f=opcountby(ds:$dataset;q:$query):$result{
   }
 };
 
+(* Dates are compared as strings, which is only an ordering for a fixed-width leading-zero
+   format such as ISO 8601. `str.gt` replaces `str.compare(...)>0`, which resolved to the
+   (i64,i64) -> i64 ABI entry and so compared two string HANDLES, not their contents. *)
 f=oplatest(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let didx=colindex(working;q.column);
-  let nlimit=mut.q.topn;
-  if(!(nlimit>0)){ nlimit=10 };
+  let nlimit=mut.(q.topn as i64);
+  if(nlimit>0){}el{ nlimit=10 };
   let sortedrows=mut.@();
   let sorteddates=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let row=working.rows.get(rowidx);
     let d=getcol(row;didx);
-    let insertpos=mut.str.len(sorteddates);
-    let checkidx=mut.0;
-    lp(let lv2=0;checkidx<str.len(sorteddates);lv2=lv2){
-      if(str.compare(d;str.get(sorteddates;checkidx))>0){
-        insertpos=checkidx;
-        checkidx=str.len(sorteddates)
-      };
-      checkidx=checkidx+1
+    let insertpos=mut.sorteddates.len;
+    let placed=mut.false;
+    lp(let c=0;c<sorteddates.len && !placed;c=c+1){
+      if(str.gt(d;sorteddates.get(c))){
+        insertpos=c;
+        placed=true
+      }
     };
-    str.insert(sortedrows;insertpos;row);
-    str.insert(sorteddates;insertpos;d);
-    rowidx=rowidx+1
+    sortedrows=insertrow(sortedrows;insertpos;row);
+    sorteddates=insertstr(sorteddates;insertpos;d)
   };
   let latestrows=mut.@();
-  let taken=mut.0;
-  lp(let lv3=0;taken<nlimit && taken<str.len(sortedrows);lv3=lv3){
-    str.push(latestrows;str.get(sortedrows;taken));
-    taken=taken+1
+  lp(let taken=0;taken<nlimit && taken<sortedrows.len;taken=taken+1){
+    latestrows=latestrows.push(sortedrows.get(taken))
   };
   <$result{
     op:"latest";
@@ -609,20 +611,11 @@ f=opdistinct(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let cidx=colindex(working;q.column);
   let seen=mut.@();
-  let rowidx=mut.0;
-  lp(let lv=0;rowidx<str.len(working.rows);lv=lv){
-    let row=str.get(working.rows;rowidx);
-    let v=getcol(row;cidx);
-    let already=mut.false;
-    let sidx=mut.0;
-    lp(let lv2=0;sidx<str.len(seen);lv2=lv2){
-      if(str.eq(str.get(seen;sidx);v)){
-        already=true
-      };
-      sidx=sidx+1
-    };
-    if(already==false){ str.push(seen;v) };
-    rowidx=rowidx+1
+  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
+    let v=getcol(working.rows.get(rowidx);cidx);
+    if(findstr(seen;v)<0){
+      seen=seen.push(v)
+    }
   };
   <$result{
     op:"distinct";
@@ -638,33 +631,24 @@ f=opjoin(ds:$dataset;other:$dataset;q:$query):$result{
   let jidxa=colindex(ds;q.joincol);
   let jidxb=colindex(other;q.joincol);
   let joinedrows=mut.@();
-  let rowa=mut.0;
-  lp(let lv=0;rowa<str.len(ds.rows);lv=lv){
-    let arow=str.get(ds.rows;rowa);
+  lp(let rowa=0;rowa<ds.rows.len;rowa=rowa+1){
+    let arow=ds.rows.get(rowa);
     let akey=getcol(arow;jidxa);
-    let rowb=mut.0;
-    lp(let lv2=0;rowb<str.len(other.rows);lv2=lv2){
-      let brow=str.get(other.rows;rowb);
-      let bkey=getcol(brow;jidxb);
-      if(str.eq(akey;bkey)){
+    lp(let rowb=0;rowb<other.rows.len;rowb=rowb+1){
+      let brow=other.rows.get(rowb);
+      if(str.eq(akey;getcol(brow;jidxb))){
         let merged=mut.@();
-        let ca=mut.0;
-        lp(let lv3=0;ca<str.len(arow);lv3=lv3){
-          str.push(merged;str.get(arow;ca));
-          ca=ca+1
+        lp(let ca=0;ca<arow.len;ca=ca+1){
+          merged=merged.push(arow.get(ca))
         };
-        let cb=mut.0;
-        lp(let lv4=0;cb<str.len(brow);lv4=lv4){
-          if(!(cb == jidxb)){
-            str.push(merged;str.get(brow;cb))
-          };
-          cb=cb+1
+        lp(let cb=0;cb<brow.len;cb=cb+1){
+          if(cb==jidxb){}el{
+            merged=merged.push(brow.get(cb))
+          }
         };
-        str.push(joinedrows;merged)
-      };
-      rowb=rowb+1
-    };
-    rowa=rowa+1
+        joinedrows=joinedrows.push(merged)
+      }
+    }
   };
   <$result{
     op:"join";
@@ -676,8 +660,10 @@ f=opjoin(ds:$dataset;other:$dataset;q:$query):$result{
   }
 };
 
+(* std.log.info and std.log.warn take a message and a field table, `[[str]]`; the one-argument
+   calls this file made were E4026. `@()` is an empty field table. *)
 f=execute(ds:$dataset;q:$query):$result{
-  log.info(str.concat("moke.compute: execute op=";q.op));
+  log.info(str.concat("moke.compute: execute op=";q.op);@());
   if(str.eq(q.op;"count")){ <opcount(ds;q) };
   if(str.eq(q.op;"sum")){ <opsum(ds;q) };
   if(str.eq(q.op;"avg")){ <opavg(ds;q) };
@@ -692,18 +678,11 @@ f=execute(ds:$dataset;q:$query):$result{
   if(str.eq(q.op;"count_by")){ <opcountby(ds;q) };
   if(str.eq(q.op;"latest")){ <oplatest(ds;q) };
   if(str.eq(q.op;"distinct")){ <opdistinct(ds;q) };
-  log.warn(str.concat("moke.compute: unknown op: ";q.op));
-  <$result{
-    op:q.op;
-    column:q.column;
-    value:"error:unknown_op";
-    rows:@();
-    labels:@();
-    values:@()
-  }
+  log.warn(str.concat("moke.compute: unknown op: ";q.op);@());
+  <emptyresult(q.op;q.column;"error:unknown_op")
 };
 
 f=executejoin(ds:$dataset;other:$dataset;q:$query):$result{
-  log.info("moke.compute: execute_join");
+  log.info("moke.compute: execute_join";@());
   <opjoin(ds;other;q)
 };

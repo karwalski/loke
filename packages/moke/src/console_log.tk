@@ -4,6 +4,28 @@
 m=moke.consolelog;
 i=str:std.str;
 i=time:std.time;
+i=jx:shared.jsonobj;
+
+(* ── Strings do not concatenate with `+` ───────────────────────────────────────────
+   Every line of the two formatters here built its output with `a + b`, which is arithmetic:
+   23 of this file's 26 diagnostics were E4031 on that operator. Interpolation is the form
+   that works and is what the rest of the tree uses. Three further faults were hiding behind
+   those, none of which the compiler reports:
+
+     - `log.entries.pushcopy(entry)` in `append`. There is no `pushcopy` method, and an unknown
+       method call is not type-checked at all (T-7). Measured in the emitted IR it lowers to a
+       call to a BARE GLOBAL named after the method with the RECEIVER DROPPED --
+       `declare i64 @pushcopy(i64)` -- so `append` had no implementation behind it and the module
+       could not link. The append that works is `entries.push(entry)`, and the result must be
+       used: a bare `arr.push(x)` lowers to `tk_array_append_w`, which allocates a fresh array and
+       leaves the original alone, while `x = x.push(e)` lowers to `tk_array_append_inplace_w`.
+     - `lines.push(...)` and `parts.push(obj)` discarded their result (T-24) on top of that,
+       and `let lines=@()` was not `mut.`, so neither formatter could have accumulated a line
+       even if `append` had worked.
+     - `str.jsonescape` does not exist. It resolved to nothing in `tojson`, which means an
+       unescaped quote or backslash in a stage detail would have produced invalid JSON on the
+       wire. `shared.jsonobj.escape` is the real one, and `std.json` is not usable here
+       anyway (T-32). *)
 
 t=$logstage{
   $schemaextract:i64;
@@ -45,9 +67,8 @@ f=append(log:$sessionlog;stage:str;status:str;detail:str;durationms:i32):$sessio
     durationms:durationms;
     ts:time.nowms()
   };
-  let updatedentries=log.entries.pushcopy(entry);
   <$sessionlog{
-    entries:updatedentries;
+    entries:log.entries.push(entry);
     requestid:log.requestid
   }
 };
@@ -65,42 +86,47 @@ f=stagename(stage:str):str{
   <stage
 };
 
+(* `str.padleft` is one of the `gen:"abi"` entries in stdlib/str.tki, declared
+   (i64,i64,i64) -> i64, so nothing checks its third argument. Its runtime wrapper is
+   `char ch = (char)(pad ? pad : ' ')`: the pad is a CHARACTER CODE, and the `"0"` passed here
+   is a pointer, so the pad character was the low byte of a heap address. Two digits of a clock
+   do not need it. *)
+f=pad2(n:i64):str{
+  let s=str.fromint(n);
+  if(str.len(s)<2){
+    <"0\(s)"
+  };
+  <s
+};
+
+f=statustag(status:str):str{
+  if(status == "ok"){ <"OK" };
+  if(status == "skip"){ <"--" };
+  if(status == "error"){ <"ERROR" };
+  <status
+};
+
 f=formatentry(entry:$logentry):str{
   let secs=entry.ts / 1000;
-  let hh=str.padleft(str.fromint((secs / 3600) % 24);2;"0");
-  let mm=str.padleft(str.fromint((secs / 60) % 60);2;"0");
-  let ss=str.padleft(str.fromint(secs % 60);2;"0");
-  let timestr="[" + hh + ":" + mm + ":" + ss + "]";
-  let label=stagename(entry.stage);
-  let dur=" (" + str.fromint(entry.durationms) + "ms)";
-  let statustag=mut." " + entry.status;
-  if(entry.status == "ok"){ statustag=" OK"
-  }el{ if(entry.status == "skip"){ statustag=" --"
-  }el{ if(entry.status == "error"){ statustag=" ERROR"
-  }el{} }};
-  <timestr + statustag + " " + label + " -- " + entry.detail + dur
+  let clock="\(pad2((secs / 3600) % 24)):\(pad2((secs / 60) % 60)):\(pad2(secs % 60))";
+  <"[\(clock)] \(statustag(entry.status)) \(stagename(entry.stage)) -- \(entry.detail) (\(str.fromint(entry.durationms as i64))ms)"
 };
 
 f=formatlog(log:$sessionlog):str{
-  let lines=@();
-  lp(let ii=0;ii<log.entries.len;ii=ii+1){ let e=log.entries.get(ii);
-    lines.push(formatentry(e))
+  let lines=mut.@();
+  lp(let ii=0;ii<log.entries.len;ii=ii+1){
+    let e:$logentry=log.entries.get(ii);
+    lines=lines.push(formatentry(e))
   };
-  <str.join("
-";lines)
+  <str.join("\n";lines)
 };
 
 f=tojson(log:$sessionlog):str{
-  let parts=@();
-  lp(let ii=0;ii<log.entries.len;ii=ii+1){ let e=log.entries.get(ii);
-    let obj=mut."{";
-    obj=obj + "\"stage\":\"" + str.jsonescape(e.stage) + "\",";
-    obj=obj + "\"status\":\"" + str.jsonescape(e.status) + "\",";
-    obj=obj + "\"detail\":\"" + str.jsonescape(e.detail) + "\",";
-    obj=obj + "\"duration_ms\":" + str.fromint(e.durationms) + ",";
-    obj=obj + "\"ts\":" + str.fromint64(e.ts);
-    obj=obj + "}";
-    parts.push(obj)
+  let parts=mut.@();
+  lp(let ii=0;ii<log.entries.len;ii=ii+1){
+    let e:$logentry=log.entries.get(ii);
+    let obj="{\"stage\":\"\(jx.escape(e.stage))\",\"status\":\"\(jx.escape(e.status))\",\"detail\":\"\(jx.escape(e.detail))\",\"duration_ms\":\(str.fromint(e.durationms as i64)),\"ts\":\(str.fromint(e.ts))}";
+    parts=parts.push(obj)
   };
-  <"[" + str.join(",";parts) + "]"
+  <"[\(str.join(",";parts))]"
 };

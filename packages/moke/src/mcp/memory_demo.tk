@@ -5,6 +5,7 @@ m=moke.mcp.memorydemo;
 i=str:std.str;
 i=mcpmem:core.memory.mcpserver;
 i=proto:core.mcp.protocol;
+i=jx:shared.jsonobj;
 
 
 t=$memoryinvocation{
@@ -24,6 +25,28 @@ t=$memorydemostate{
 };
 
 
+(* --- Four faults, one diagnostic between them -------------------------------------
+   `str.jsonencode` exists in neither the std.str interface nor the runtime, so every string this
+   module put on the wire went out unquoted and unescaped: the JSON was malformed for any value
+   containing a quote, a backslash or a newline, and structurally malformed for all of them
+   because the quotes themselves were missing. `shared.jsonobj.escape` is the escaper -- std.json
+   is not usable for this (T-32).
+
+   `statetojson` and the trim in `recordinvocation` wrote `if(i < arr.len()){ ...; i=i+1 }el{}`
+   where a `lp` was meant, so each handled exactly ONE element: the state JSON listed one of the
+   six available tools and one invocation, and the 50-entry trim cut the history to a single
+   entry. The `.push` results were discarded (T-24), which raises nothing; the `.len()` spelling
+   was harmless -- measured in the emitted IR it produces the identical
+   `getelementptr i64, i64* %p, i32 -1` as `.len` -- and reads as property here for consistency.
+
+   `invoke` and `recordinvocation` took `state:i64` and read `.datadir`, `.invocations`,
+   `.availabletools` and `.totalinvocations` off it. Both take a `$memorydemostate`.
+
+   `str.slice` is a result, and its value was bound in `invoke` as if it were a plain string. *)
+f=jsonencode(s:str):str{
+  <"\"\(jx.escape(s))\""
+};
+
 f=newstate(datadir:str):$memorydemostate{
   <$memorydemostate{
     availabletools:@("memory.search";"memory.store";"memory.status";"memory.facts";"memory.context";"memory.diary_write");
@@ -34,12 +57,19 @@ f=newstate(datadir:str):$memorydemostate{
 };
 
 
-f=invoke(state:i64;toolname:str;argsjson:str;timestamp:str):$memoryinvocation{
-  let result=mcpmem.handlememorytool(toolname;argsjson;state.datadir);
-  let preview=mut.result.text;
-  if(str.len(preview) > 200){
-    preview=str.concat(str.slice(preview;0;200);"...")
+f=preview200(text:str):str{
+  if(str.len(text)<=200){
+    <text
   };
+  <mt str.slice(text;0;200) {
+    $ok:v "\(v)...";
+    $sliceerr:e text
+  }
+};
+
+f=invoke(state:$memorydemostate;toolname:str;argsjson:str;timestamp:str):$memoryinvocation{
+  let result=mcpmem.handlememorytool(toolname;argsjson;state.datadir);
+  let preview=preview200(result.text);
   <$memoryinvocation{
     toolname:toolname;
     argsjson:argsjson;
@@ -51,16 +81,14 @@ f=invoke(state:i64;toolname:str;argsjson:str;timestamp:str):$memoryinvocation{
 };
 
 
-f=recordinvocation(state:i64;inv:$memoryinvocation):$memorydemostate{
-  let invocations=mut.state.invocations;
-  invocations.push(inv);
-  if(invocations.len() > 50){
-    let trimmed=@();
-    let ti=mut.invocations.len() - 50;
-    if(ti < invocations.len()){
-      trimmed.push(invocations.get(ti));
-      ti=ti + 1
-    }el{};
+(* Keeps the most recent 50 invocations. *)
+f=recordinvocation(state:$memorydemostate;inv:$memoryinvocation):$memorydemostate{
+  let invocations=mut.state.invocations.push(inv);
+  if(invocations.len > 50){
+    let trimmed=mut.@();
+    lp(let ti=invocations.len-50;ti<invocations.len;ti=ti+1){
+      trimmed=trimmed.push(invocations.get(ti))
+    };
     invocations=trimmed
   };
   <$memorydemostate{
@@ -75,38 +103,34 @@ f=recordinvocation(state:i64;inv:$memoryinvocation):$memorydemostate{
 f=invocationtojson(inv:$memoryinvocation):str{
   let successstr=mut."false"; if(inv.success){ successstr="true" }el{};
   <str.concat("{\"tool_name\":";
-    str.concat(str.jsonencode(inv.toolname);
+    str.concat(jsonencode(inv.toolname);
     str.concat(",\"args_json\":";
-    str.concat(str.jsonencode(inv.argsjson);
+    str.concat(jsonencode(inv.argsjson);
     str.concat(",\"timestamp\":";
-    str.concat(str.jsonencode(inv.timestamp);
+    str.concat(jsonencode(inv.timestamp);
     str.concat(",\"success\":";
     str.concat(successstr;
     str.concat(",\"result_preview\":";
-    str.concat(str.jsonencode(inv.resultpreview);
+    str.concat(jsonencode(inv.resultpreview);
     str.concat(",\"duration_ms\":";
-    str.concat(str.fromi32(inv.durationms);
+    str.concat(str.fromint(inv.durationms as i64);
     "}"))))))))))))
 };
 
 f=statetojson(state:$memorydemostate):str{
-  let toolparts=@();
-  let ti=0;
-  if(ti < state.availabletools.len()){
-    toolparts.push(str.jsonencode(state.availabletools.get(ti)));
-    ti=ti + 1
-  }el{};
-  let invparts=@();
-  let ii=mut.0;
-  if(ii < state.invocations.len()){
-    invparts.push(invocationtojson(state.invocations.get(ii)));
-    ii=ii + 1
-  }el{};
+  let toolparts=mut.@();
+  lp(let ti=0;ti<state.availabletools.len;ti=ti+1){
+    toolparts=toolparts.push(jsonencode(state.availabletools.get(ti)))
+  };
+  let invparts=mut.@();
+  lp(let ii=0;ii<state.invocations.len;ii=ii+1){
+    invparts=invparts.push(invocationtojson(state.invocations.get(ii)))
+  };
   <str.concat("{\"available_tools\":[";
     str.concat(str.join(",";toolparts);
     str.concat("],\"invocations\":[";
     str.concat(str.join(",";invparts);
     str.concat("],\"total_invocations\":";
-    str.concat(str.fromi32(state.totalinvocations);
+    str.concat(str.fromint(state.totalinvocations as i64);
     "}"))))))
 };

@@ -6,37 +6,64 @@ m=page.moke.api.datasets;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=jx:shared.jsonobj;
 i=registry:moke.data.registry;
 i=profiler:moke.profiler;
+i=compute:moke.compute;
 
-f=post(req:i64):i64{
-  let body=req.body;
-  let id=mt json.getstr(body;"id") {
-    $ok:v v;
-    $err:e ""
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+(* errjson, because http.res.err does not exist. See the note on http.res above: the
+   three-segment name binds to libc's err(3) and terminates the process with the status code
+   as its exit status. This builds the same {"ok":false,"error":...} envelope the success
+   paths in this file use, with json.enc supplying the quotes and the escaping. *)
+f=errjson(status:i64;message:str):i64{
+  <http.res(status;str.concat("{\"ok\":false,\"error\":";str.concat(json.enc(message);"}")))
+};
+
+(* json.encodestrarray does not exist — in no std.json interface and in no runtime, so the two
+   calls this file made to it were E4027. json.enc is the typed encoder and returns a string WITH
+   its surrounding quotes, so a JSON array of strings is join-with-commas inside brackets. *)
+f=strarrayjson(items:@str):str{
+  let parts=mut.@();
+  lp(let i=0;i<items.len();i=i+1){
+    parts=parts.push(json.enc(items.get(i)))
   };
+  <str.concat("[";str.concat(str.join(",";parts);"]"))
+};
 
-  if(str.len(str.trim(id)) == 0){
-    <http.res.err(400;"{\"ok\":false,\"error\":\"missing required field: id\"}")
-  };
+(* moke.data.registry.getdataset is declared `(str) -> i64`, so the value it returns carries no
+   type and every field read off it — ds.name, ds.headers, ds.rows — was E4034 at codegen, a stage
+   --check never reaches: "field 'name' is declared at different offsets by more than one struct,
+   and the type of this value is not established", and for `rows`, "no struct in scope declares a
+   field 'rows'" because $dataset lives in moke.compute and this file did not import it.
 
-  let ds=registry.getdataset(id);
+   A typed PARAMETER establishes it. That is the shape core.providers.anthropic uses for the same
+   problem: an i64-returning entry point immediately hands the handle to a function whose parameter
+   is the real struct type, and the ABI makes the pun free. So the body below takes ds:$dataset and
+   post() only routes. *)
+f=datasetjson(id:str;ds:$dataset):str{
+  let headersjson=strarrayjson(ds.headers);
 
-  if(str.len(ds.name) == 0){
-    let err=str.concat("{\"ok\":false,\"error\":";
-      str.concat(str.jsonencode(str.concat("dataset not found: ";id));
-      "}"));
-    <http.res.json(404;err)
-  };
-
-  let headersjson=json.encodestrarray(ds.headers);
-
-  let rowparts=mut.@(str);
+  (* mut.@(), not mut.@(str). `str` in expression position is a bare type name, which draws no
+     diagnostic (T-4), so @(str) is a ONE-element array literal holding that name — and its
+     codegen is invalid IR: measured this session, a program containing `let a=mut.@(str)` fails
+     out of llc with "use of undefined value '%str'", no toke diagnostic and no line number. The
+     three accumulators this file declared that way would have broken codegen for the page tree. *)
+  let rowparts=mut.@();
   lp(let ri=0;ri<ds.rows.len();ri=ri+1){
     let row=ds.rows.get(ri);
-    let cellparts=mut.@(str);
+    let cellparts=mut.@();
     lp(let ci=0;ci<row.len();ci=ci+1){
-      cellparts=cellparts.push(str.jsonencode(row.get(ci)))
+      cellparts=cellparts.push(json.enc(row.get(ci)))
     };
     rowparts=rowparts.push(str.concat("[";str.concat(str.join(",";cellparts);"]")))
   };
@@ -44,49 +71,88 @@ f=post(req:i64):i64{
 
   let prof=profiler.profile(ds.headers;ds.rows;ds.name);
 
-  let statparts=mut.@(str);
+  let statparts=mut.@();
   lp(let si=0;si<prof.stats.len();si=si+1){
-    let s=prof.stats.get(si);
-    let samplejson=json.encodestrarray(s.sample);
+    let cs=prof.stats.get(si);
     let ispiistr=mut."false";
-    if(s.ispiicandidate){ispiistr="true"}el{};
+    if(cs.ispiicandidate){ispiistr="true"}el{};
     let stat=str.concat("{\"name\":";
-      str.concat(str.jsonencode(s.name);
+      str.concat(json.enc(cs.name);
       str.concat(",\"inferred_type\":";
-      str.concat(str.jsonencode(s.inferredtype);
+      str.concat(json.enc(cs.inferredtype);
+      str.concat(",\"sample\":";
+      str.concat(strarrayjson(cs.sample);
       str.concat(",\"is_pii_candidate\":";
       str.concat(ispiistr;
-      "}"))))));
+      "}"))))))));
     statparts=statparts.push(stat)
   };
 
+  (* str.fromint, not str.fromi32: fromi32 is one of std.str's untyped `(i64) -> i64` names, while
+     fromint is declared (i64) -> str. The counts are i32 and u64, so they are cast. *)
   let profilejson=str.concat("{\"dataset_name\":";
-    str.concat(str.jsonencode(prof.datasetname);
+    str.concat(json.enc(prof.datasetname);
     str.concat(",\"row_count\":";
-    str.concat(str.fromi32(prof.rowcount);
+    str.concat(str.fromint(prof.rowcount as i64);
     str.concat(",\"col_count\":";
-    str.concat(str.fromi32(prof.colcount);
+    str.concat(str.fromint(prof.colcount as i64);
     str.concat(",\"pii_col_count\":";
-    str.concat(str.fromi32(prof.piicolcount);
+    str.concat(str.fromint(prof.piicolcount as i64);
     str.concat(",\"stats\":[";
     str.concat(str.join(",";statparts);
     "]}"))))))))));
 
-  let resp=str.concat("{\"ok\":true,\"id\":";
-    str.concat(str.jsonencode(id);
+  <str.concat("{\"ok\":true,\"id\":";
+    str.concat(json.enc(id);
     str.concat(",\"name\":";
-    str.concat(str.jsonencode(ds.name);
+    str.concat(json.enc(ds.name);
     str.concat(",\"col_count\":";
-    str.concat(str.fromi32(ds.headers.len());
+    str.concat(str.fromint(ds.headers.len() as i64);
     str.concat(",\"row_count\":";
-    str.concat(str.fromi32(ds.rows.len());
+    str.concat(str.fromint(ds.rows.len() as i64);
     str.concat(",\"headers\":";
     str.concat(headersjson;
     str.concat(",\"rows\":";
     str.concat(rowsjson;
     str.concat(",\"profile\":";
     str.concat(profilejson;
-    "}"))))))))))))));
+    "}"))))))))))))))
+};
 
-  <http.res.json(200;resp)
+f=datasetname(ds:$dataset):str{ <ds.name };
+
+(* json.dec once, then the typed json.str, not json.getstr: json.getstr is one of the ~50 names
+   std.json declares `(i64, i64) -> i64`. They read a different representation and dereference the
+   first word of whatever they are given — measured, a program calling json.getstr on a str exits
+   139, SIGSEGV. $ok stays first because mt binds a result's arms by POSITION (T-31). *)
+f=post(req:i64):i64{
+  (* http.reqbody(req), not the `body` field of req. std.http declares five structs and three of
+     them carry a `body` at a different offset (req, res, httpreq, httpresp), and `req` here is an
+     i64 handle whose type the checker cannot establish — so the field access is E4034 at codegen,
+     a stage --check never reaches. http.reqbody is declared (i64) -> str for exactly this:
+     "extract body from raw req pointer in handler". *)
+  let body=http.reqbody(req);
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  let id=mt json.str(obj;"id") {
+    $ok:v v;
+    $jsonerr:e ""
+  };
+
+  (* errjson already builds the {"ok":false,"error":...} envelope, so what it is handed is a
+     message, not a document. It used to be handed a whole JSON object, which would have come back
+     double-wrapped. *)
+  if(str.len(str.trim(id)) == 0){
+    <errjson(400;"missing required field: id")
+  };
+
+  let ds=registry.getdataset(id);
+
+  if(str.len(datasetname(ds)) == 0){
+    <errjson(404;str.concat("dataset not found: ";id))
+  };
+
+  <http.res(200;datasetjson(id;ds))
 };

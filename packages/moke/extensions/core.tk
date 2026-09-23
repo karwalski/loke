@@ -7,30 +7,73 @@ i=gwhooks:core.extensions.gatewayhooks;
 i=providers:core.extensions.providerregistry;
 i=mokehooks:moke.hooks;
 i=mokeprovider:moke.provider;
-i=log:std.log;
+i=log:shared.log;
 i=str:std.str;
 
+(* Six registries, and the fields are `i64` for a reason worth writing down rather than
+   repeating by habit.
+
+   `moke.provider` declares a type `$providerstore` and `core.extensions.providerregistry`
+   declares one called `providerstore` too, with different fields — and this module imports
+   BOTH. Declaring `providerstore:$providerstore` here would be ambiguous, and E4034 (two
+   structs declaring the same field name at different offsets) is the diagnostic that shows up
+   when such an ambiguity is resolved the wrong way, at the READ rather than at the binding.
+   So these stay `i64`. That is a workaround for the collision, not a design; the collision
+   itself is filed as MK21.15.
+
+   The three `moke*` fields are new. The moke-side registrations used to be called and their
+   results DISCARDED — `mokehooks.registerafteranonymise(...)` as a bare statement — and since
+   those functions take a registry and return an updated copy, nothing was ever registered.
+   They are threaded now, which is the only reason they do anything. *)
 t=$corestate{
   hookregistry:i64;
   gwregistry:i64;
-  providerstore:i64
+  providerstore:i64;
+  mokehookregistry:i64;
+  mokeruleregistry:i64;
+  mokeproviderstore:i64
 };
 
+(* Built through the owning modules' constructors, not from literals. A
+   `$rulehookregistry{entries:@()}` literal written HERE resolves to
+   `core.extensions.gatewayhooks`' type of the same name, not moke's, and fails with E4025 —
+   measured. A qualified call cannot be ambiguous. MK21.15. *)
 f=newstate():$corestate{
   <$corestate{
     hookregistry:hooks.newregistry();
     gwregistry:gwhooks.newregistry();
-    providerstore:providers.newstore()
+    providerstore:providers.newstore();
+    mokehookregistry:mokehooks.newpipelineregistry();
+    mokeruleregistry:mokehooks.newruleregistry();
+    mokeproviderstore:mokeprovider.newstore()
   }
 };
 
 f=init(ookecfg:i64):$corestate{
   let state=newstate();
 
+  (* `hooks.slotafteranonymise()`, not `$slotafterner`.
+
+     Two things were wrong. `$slotafterner` is not declared anywhere — slots are not a sum in
+     `core.extensions.pipeline_hooks`, they are four functions returning strings, and
+     `register`'s third parameter is a plain `str`. And there IS no after-NER slot: the four
+     are `before_ner`, `after_anonymise`, `before_restore` and `after_restore`.
+
+     after_anonymise is the right one rather than the nearest one, because eleven lines below
+     this the SAME hook id is already registered there —
+     `mokehooks.registerafteranonymise("moke.schema_first"; ...)`. Registering one id in two
+     different slots in two registries is how a hook comes to fire twice, or in an order
+     nobody predicted. It is also sound on its own terms: the hook blocks requests carrying raw
+     structured data outside NER's coverage, and after anonymisation the entities are known and
+     the request has not yet been dispatched, so a block there still prevents disclosure.
+
+     This single undeclared identifier was the last cascade root in the tree: it stopped
+     `moke.extension.core` emitting an interface, which is the only reason `moke/src/main.tk`
+     reported `E2030 module 'moke.extension.core' not found`. *)
   let hookregistry=hooks.register(
     state.hookregistry;
     "moke.schema_first";
-    $slotafterner
+    hooks.slotafteranonymise()
   );
 
   let guard=$rulehook{
@@ -55,23 +98,34 @@ f=init(ookecfg:i64):$corestate{
   };
   let providerstore=providers.register(state.providerstore;localprovider);
 
-  mokehooks.registerafteranonymise(
+  (* Threaded, not discarded. Each of these takes its registry and returns an updated COPY —
+     there is no mutation — so calling them as bare statements registered nothing at all. The
+     moke-side stores are separate from the core ones above on purpose: `moke.provider`'s
+     `$providerstore` and `core.extensions.providerregistry`'s `providerstore` are different
+     types that share a name (MK21.15), and passing one where the other is wanted would type-
+     check and then read the wrong offsets. *)
+  let mokehookreg=mokehooks.registerafteranonymise(
     "moke.schema_first";
-    "moke.hooks.schema_first_hook"
+    "moke.hooks.schema_first_hook";
+    state.mokehookregistry
   );
 
-  mokeprovider.registerschemafirstprovider();
+  let mokeproviderstore=mokeprovider.registerschemafirstprovider(state.mokeproviderstore);
 
-  mokehooks.registerrulehook(
+  let mokerulereg=mokehooks.registerrulehook(
     "moke.raw_data_guard";
-    "moke.hooks.raw_data_guard_hook"
+    "moke.hooks.raw_data_guard_hook";
+    state.mokeruleregistry
   );
 
   log.info("moke extension initialised";"moke.extension.core";"system");
   <$corestate{
     hookregistry:hookregistry;
     gwregistry:gwregistry;
-    providerstore:providerstore
+    providerstore:providerstore;
+    mokehookregistry:mokehookreg;
+    mokeruleregistry:mokerulereg;
+    mokeproviderstore:mokeproviderstore
   }
 };
 

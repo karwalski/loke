@@ -6,8 +6,19 @@ i=http:std.http;
 i=str:std.str;
 i=process:std.process;
 
+(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
+   this toolchain as a call to a BARE global named after its last segment, so it never reaches
+   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
+   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
+   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
+   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
+   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
+   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
+   uses throughout; it links and runs. Filed as T-34. *)
+
+
 f=get(req:i64):i64{
-  <http.res.json(200;buildstatsjson())
+  <http.res(200;buildstatsjson())
 };
 
 f=buildstatsjson():str{
@@ -43,7 +54,12 @@ f=buildstatsjson():str{
   };
   mt process.wait(h2) {$ok:v v;$err:e 0};
   let out2=mt process.stdout(h2) {$ok:v v;$err:e "0"};
-  let mb=mt str.parseint(str.trim(out2)) {$ok:v v/1048576;$err:e 0};
+  (* str.toint, not str.parseint. parseint is one of std.str's untyped `(i64) -> i64` names and
+     is declared to return a plain i64, so matching it with mt leans on the "the word is zero"
+     heuristic rather than on a tag (T-33): a genuine 0 takes the ERROR arm. str.toint is declared
+     str -> i64!ParseErr and discriminates — measured, str.toint("notanumber") takes the error arm
+     and str.toint("1234") the ok arm. *)
+  let mb=mt str.toint(str.trim(out2)) {$ok:v v/1048576;$err:e 0};
   totalram=str.fromint(mb);
 
   let h3=mt process.spawn(@("sysctl";"-n";"hw.ncpu")) {
@@ -54,8 +70,8 @@ f=buildstatsjson():str{
   let out3=mt process.stdout(h3) {$ok:v v;$err:e "0"};
   cpucount=str.trim(out3);
 
-  let ollamarammb=str.fromint(mt str.parseint(ollamaram) {$ok:v v/1024;$err:e 0});
-  let lokerammb=str.fromint(mt str.parseint(lokeram) {$ok:v v/1024;$err:e 0});
+  let ollamarammb=str.fromint(mt str.toint(ollamaram) {$ok:v v/1024;$err:e 0});
+  let lokerammb=str.fromint(mt str.toint(lokeram) {$ok:v v/1024;$err:e 0});
 
   let j1=str.concat("{\"cpu_count\":";cpucount);
   let j2=str.concat(j1;str.concat(",\"total_ram_mb\":";totalram));
@@ -68,12 +84,26 @@ f=buildstatsjson():str{
   <j8
 };
 
+(* Two faults here, and both were silent.
+
+   `mut.@(str)` is not an empty array of str. `str` in expression position is a bare type name,
+   which gets no diagnostic (T-4), so this is a ONE-element array literal whose element is that
+   name — and the codegen for it is invalid LLVM: measured this session, a program containing
+   `let a=mut.@(str)` fails with "use of undefined value '%str'" out of llc, with no toke
+   diagnostic and no line number. The whole page tree would have failed codegen on this line.
+   `@()` is the empty-array literal.
+
+   And `result.push(x)` discarded its result. push returns a NEW array; it does not mutate in
+   place, and an unknown or unused method result is not checked (T-7, T-24). So splitws returned
+   whatever it started with for every input — which means the `ps` parse above it read cpu and
+   rss out of an empty array, and the sysmon panel reported 0% CPU and 0 MB for both ollama and
+   loke on every poll, on every machine. *)
 f=splitws(s:str):@str{
   let parts=str.split(s;" ");
-  let result=mut.@(str);
+  let result=mut.@();
   lp(let pi=0;pi<parts.len();pi=pi+1){
     let p=parts.get(pi);
-    if(str.len(str.trim(p))>0){result.push(str.trim(p))}el{}
+    if(str.len(str.trim(p))>0){result=result.push(str.trim(p))}el{}
   };
   <result
 };
