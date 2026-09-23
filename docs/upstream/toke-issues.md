@@ -1540,6 +1540,45 @@ paths disagree, and only one of them is wrong.
 **Ask.** Use the array conversion for any `@T`, including `@f64`. The element type should not
 select the conversion for the container.
 
+## T-38 — a name's type is resolved function-wide, so a later `let` retypes an earlier binder and the diagnostic points at the wrong line
+
+**Severity: diagnostic quality, and the suggested fix is actively wrong.**
+
+Two bindings of the same name in one function, in disjoint scopes, are resolved as one name. The
+LATER annotated `let` decides the type, and the error is reported against the EARLIER use:
+
+```toke
+m=repro.one;
+i=str:std.str;
+t=$a{p:i64};
+t=$b{q:i64};
+t=$e{ $bad:str };
+f=mk():$a!$e{ <$ok($a{p:7}) };
+f=main():i64{
+  let v:$a=mt mk() { $ok:s s; $err:e $a{p:0} };   (* E4031 reported HERE *)
+  let xs=@($b{q:1});
+  lp(let i=0;i<xs.len;i=i+1){
+    let s:$b=xs.get(i);                           (* the actual cause *)
+    str.fromint(s.q)
+  };
+  <v.p
+};
+```
+
+→ `E4031 type mismatch: expected 'a', got 'b'`, attributed to the `mt` line, with
+`fix: cast RHS to a using 'as'`. **Following that advice would be wrong**: the `mt` arm binder
+`s` is correctly an `$a`, and the `$b` comes from a `let s` inside a loop eleven lines away. Rename
+either `s` and the module compiles.
+
+This is adjacent to **T-6** (a shadowed `let` reusing a name across sibling scopes) but the symptom
+is different and arguably worse: T-6 produces invalid IR, which fails loudly at the right file.
+This produces a type error attributed to a line that is correct, with a fix that would break it.
+A reader has no way to connect the two sites, and it cost us a build cycle to find.
+
+**Ask.** Scope a `let` to its block for type resolution. Failing that, when two bindings of one
+name disagree, name **both** locations in the diagnostic — the way E4034 does for a field declared
+at two offsets, which is the same class of problem and is reported far better.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

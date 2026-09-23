@@ -108,7 +108,13 @@ f=buildpendingentries(rows:@$row):@$feedbackentry{
       }el{}
     };
     let areas=db.rowstr(row;"feature_area");
-    let area=mut.$other(areas);
+    (* `str.trimprefix`, because `core.feedback.types.arealabel` renders `$other(label)` as
+       `str.concat("Other: ";label)` — so the STORED string already carries the prefix, and
+       rebuilding `$other` from the whole stored string made `arealabel` add a second one.
+       Measured: a free-form area round-tripped as `"Other: Other: Widget X"`, and once more on
+       every subsequent save-and-read. trimprefix is a no-op on the labels that match a named
+       variant below, so it is safe to apply unconditionally here. *)
+    let area=mut.$other(str.trimprefix(areas;"Other: "));
     if(str.eq(areas;"Chat response")){
       area=$featurearea{$chatresponse:0}
     }el{
@@ -159,15 +165,39 @@ f=pendingsubmission(store:i64):@$feedbackentry!$lokeerr{
 };
 
 
+(* ── It marked only the FIRST id ───────────────────────────────────────────────────
+   The loop body began with `<mt db.exec(...)`. `<` is a RETURN, so the first iteration returned
+   out of the function and the `<$ok(0)` after the loop was unreachable. Measured: three ids in,
+   **one** row with `submitted=1`, two still pending.
+
+   Latent — nothing calls this today. It matters the day a reporter batches, because every entry
+   after the first stays pending and is re-sent on the next run, forever.
+
+   The result is matched and dropped rather than returned, and `$ok` is first (T-31). A failed
+   UPDATE is logged, not propagated: `i64!$lokeerr` cannot carry a partial failure a caller could
+   act on — the error side is a user-declared sum whose discriminant toke never reads (T-18) —
+   and abandoning the loop on the first failure would leave the rest pending, which is the
+   behaviour being fixed. So every id is attempted and the count of failures is reported. *)
 f=marksubmitted(store:i64;ids:@str):i64!$lokeerr{
+  let failed=mut.0;
   lp(let ii162=0;ii162<ids.len;ii162=ii162+1){
     let id=ids.get(ii162);
-    <mt db.exec("UPDATE feedback SET submitted=1 WHERE id=?";@(id)) {
-      $ok:v void;
-      $err:e $err($storageerr(str.concat("failed to mark feedback submitted: ";id)))
+    let ok=mt db.exec("UPDATE feedback SET submitted=1 WHERE id=?";@(id)) {
+      $ok:v true;
+      $err:e false
+    };
+    if(ok){}el{
+      failed=failed+1;
+      log.warn(str.concat("failed to mark feedback submitted: ";id);"feedback";"system")
     }
-
   };
+  if(failed>0){
+    log.warn(
+      str.concat(str.fromint(failed);str.concat(" of ";str.concat(str.fromint(ids.len);" feedback entries could not be marked submitted")));
+      "feedback";
+      "system"
+    )
+  }el{};
   log.debug(
     str.concat("marked ";str.concat(str.fromint(ids.len);" feedback entries submitted"));
     "feedback";

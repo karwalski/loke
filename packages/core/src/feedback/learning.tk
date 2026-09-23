@@ -72,20 +72,43 @@ f=computesignals(store:$store):@$learningsignal{
 
 
 
+(* ── Two defects, either of which made this function inert ────────────────────────
+   **1. The accumulator was immutable and every push was discarded.** `let result=@();` with no
+   `mut.`, and all three branches wrote a bare `result.push(...)`. An array push in toke RETURNS
+   the new array and does not mutate in place (T-24), so the value went nowhere. Measured before
+   the fix: **zero adjustments for every input**, including a 0.30-rate routing signal that
+   should yield one at −0.2 and a 0.92-rate n=30 signal that should yield one at +0.1. The
+   function was entirely inert.
+
+   **2. The only negative-adjustment branch could never fire on real data, even once (1) was
+   fixed.** The guard was `str.contains(featurearea;"routing")` in lower case, and a real signal
+   carries the label `core.feedback.types.arealabel` writes — `"Routing decision"`, capital R.
+   `str.contains` is case-sensitive: measured false. So thumbs-down could never lower anything,
+   and only the `el{}` branch — which reinforces a HIGH rate — was reachable. A feedback loop
+   that can raise a score and not lower it is worse than none.
+
+   Matching on `str.lower(...)` fixes it without depending on the label's capitalisation, which
+   is a presentation string and may reasonably change. The `$other` label is free-form user text
+   (`"Other: <whatever they typed>"`), so a user writing "Routing" would also match — that is
+   the intended reading of a feature area, not a bug.
+
+   Both were found by `tests/unit/feedback/test_learning.tk`, which was written as two deliberate
+   red markers and is green now. *)
 f=deriveadjustments(signals:@$learningsignal):@$routingadjustment{
-  let result=@();
-  lp(let i=0;i<str.arraylen(signals);i=i+1){ let signal=str.arrayget(signals;i);
-    if(str.contains(signal.featurearea;"routing")){
+  let result=mut.@();
+  lp(let i=0;i<str.arraylen(signals);i=i+1){
+    let signal:$learningsignal=str.arrayget(signals;i);
+    if(str.contains(str.lower(signal.featurearea);"routing")){
       if(signal.thumbsuprate < 0.5){
-        result.push($routingadjustment{
+        result=result.push($routingadjustment{
           model:"router";
-          adjustment:-0.2;
+          adjustment:0.0-0.2;
           reason:str.concat("low thumbs-up rate on routing area: ";signal.featurearea)
         })
       }el{
         if(signal.thumbsuprate > 0.85){
           if(signal.samplesize > 10){
-            result.push($routingadjustment{
+            result=result.push($routingadjustment{
               model:"router";
               adjustment:0.1;
               reason:str.concat("high thumbs-up rate, reinforcing: ";signal.featurearea)
@@ -93,17 +116,7 @@ f=deriveadjustments(signals:@$learningsignal):@$routingadjustment{
           }el{}
         }el{}
       }
-    }el{
-      if(signal.thumbsuprate > 0.85){
-        if(signal.samplesize > 10){
-          result.push($routingadjustment{
-            model:"router";
-            adjustment:0.1;
-            reason:str.concat("high thumbs-up rate, reinforcing: ";signal.featurearea)
-          })
-        }el{}
-      }el{}
-    }
+    }el{}
   };
   <result
 };
@@ -121,9 +134,31 @@ f=applylearning(state:$learningstate;store:$store):bool{
        compiler rejects assignment there. That is why this read `saved==saved+1`
        before — a comparison that satisfied the parser and counted nothing, so
        applylearning always returned false. *)
+    (* ── The write was always rejected, and the function always said it succeeded ──
+       Two independent defects, and the second hid the first.
+
+       The statement named only `(key, value)`. `settings` declares **`value_type TEXT NOT
+       NULL`** and **`updated_at TEXT NOT NULL`**, neither with a default (migrations.tk
+       version 2), so every INSERT violated NOT NULL and wrote nothing.
+
+       And `db.execparams` returns `i64!$lokeerr`, whose error side is a user-declared sum —
+       toke never reads the discriminant of such a result and arm 0 always runs (T-18). With
+       `$ok` first, `ok` was **unconditionally true**. Measured: `applylearning` returned true
+       having written zero rows.
+
+       `value_type` is `"float"` because the value is `str.fromfloat(adj.adjustment)`, matching
+       what `core.storage.settings.setfloat` records, so a reader using `getfloator` finds the
+       type it expects. `updated_at` is `datetime('now')` **in the statement text, unquoted** —
+       a bound parameter is a value and is never evaluated, which is GA5.1 and cost eleven sites
+       elsewhere in this repo.
+
+       The `ok` flag is still not trustworthy — T-18 makes it unconditional and nothing here can
+       change that. The count below is therefore a count of ATTEMPTS, and the honest confirmation
+       is the caller reading a value back, as `core.storage.settings` does. Recorded rather than
+       papered over. *)
     let ok=mt db.execparams(
       store;
-      "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+      "INSERT OR REPLACE INTO settings (key, value, value_type, namespace, updated_at) VALUES (?, ?, 'float', 'learning', datetime('now'))";
       @(key;val)
     ) {
       $ok:v true;
