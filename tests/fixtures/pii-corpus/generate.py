@@ -278,12 +278,22 @@ def cases(rng: random.Random) -> list[dict]:
                         "plus-addressing")})
 
     for _ in range(4):
-        t = tfn_valid(rng)
+        # Two INDEPENDENT checksum-valid TFNs, not one value with its last digit
+        # bumped. The bump was there only to keep the two spans unambiguous, and it
+        # silently produced a checksum-INVALID number still labelled AU_TFN with
+        # expected_detected=True — so the corpus asserted that a nine-digit run which
+        # is not a TFN must be detected as one. That is 4 of the 16 AU_TFN positives,
+        # and it is exactly the assertion that would have blocked gating au_tfn on its
+        # checksum. A real TFN has a valid check digit; a fixture claiming otherwise is
+        # measuring the wrong thing. Two draws are unambiguous and both valid.
+        spaced = tfn_valid(rng)
+        dashed = tfn_valid(rng)
+        while dashed == spaced:
+            dashed = tfn_valid(rng)
         add("adversarial",
             "TFN supplied as {spaced} on the form and {dashed} in the attachment.",
-            {"spaced": ("AU_TFN", f"{t[:3]} {t[3:6]} {t[6:]}", True, "space-separated"),
-             "dashed": ("AU_TFN", f"{t[:3]}-{t[3:6]}-{t[6:]}"[:-1] + str((int(t[-1]) + 1) % 10), True,
-                        "dash-separated, different value to keep the case unambiguous")})
+            {"spaced": ("AU_TFN", f"{spaced[:3]} {spaced[3:6]} {spaced[6:]}", True, "space-separated, checksum-valid"),
+             "dashed": ("AU_TFN", f"{dashed[:3]}-{dashed[3:6]}-{dashed[6:]}", True, "dash-separated, checksum-valid")})
 
     for _ in range(4):
         add("adversarial",

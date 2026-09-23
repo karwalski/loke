@@ -44,6 +44,125 @@ f=ishighersensitivity(levela:$sensitivitylevel;levelb:$sensitivitylevel):bool{
 };
 
 
+(* PL1.10 — the digit-boundary test, and why it is done here rather than in the pattern.
+
+   str.charat is total: it returns 0 for a negative index and for an index at or past the
+   end of the string, verified rather than assumed. So the character before a match at
+   offset 0, and the character after a match that ends the text, are both 0 and neither is
+   a digit. That is what makes the two tests below need no bounds guard, and it is the only
+   reason this can be two character comparisons instead of a regex the engine cannot
+   express: toke's engine has no word boundary, no lookaround, and \d matches nothing. *)
+f=digitatindex(text:str;idx:i64):bool{
+  let code=str.charat(text;idx);
+  let isdigit=mut.false;
+  if(code>=48){
+    if(code<=57){
+      isdigit=true
+    }el{}
+  }el{};
+  <isdigit
+};
+
+
+(* Which patterns are a bare run of digits, and therefore match the middle of a longer
+   number as readily as the whole of a shorter one.
+
+   THE DEFECT THIS EXISTS FOR, measured: patautfn is
+   `[0-9]{3}[ ]?[0-9]{3}[ ]?[0-9]{3}|...` with nothing anchoring either end, so on
+   "Call us on 0412 345 678" it matched the trailing nine digits — "412 345 678" — and
+   every Australian mobile number in the corpus was also reported as a tax file number.
+   That is not merely a spurious entity. au_tfn carries RESTRICTED and phone_au carries
+   CONFIDENTIAL, and the pipeline takes the maximum, so a phone number silently raised the
+   whole prompt to the sensitivity of a tax file number. Sensitivity drives routing and
+   gating, so over-detection is NOT fail-safe here the way over-redaction is: it changes
+   which provider a request is allowed to reach.
+
+   The named patterns are those where the match is a digit run with, at most, internal
+   separators: a digit immediately before or after the match means the engine matched a
+   fragment of a longer number, and a fragment of a longer number is not an instance of
+   the type. email, api_key and url are deliberately absent — they carry their own
+   delimiters, the api_key patterns are prefix-anchored, and a digit next to them is
+   ordinary content rather than evidence of a fragment. *)
+f=digitrunpattern(name:str):bool{
+  let bounded=mut.false;
+  if(str.eq(name;"au_tfn")){bounded=true}el{
+    if(str.eq(name;"au_abn")){bounded=true}el{
+      if(str.eq(name;"ssn_us")){bounded=true}el{
+        if(str.eq(name;"credit_card")){bounded=true}el{
+          if(str.eq(name;"phone_au")){bounded=true}el{
+            if(str.eq(name;"phone_us")){bounded=true}el{
+              if(str.eq(name;"ip_v4")){bounded=true}el{}
+            }
+          }
+        }
+      }
+    }
+  };
+  <bounded
+};
+
+
+(* True when neither neighbour of [start,end) is a digit. `end` is exclusive, so
+   text[end] is the following character. *)
+f=boundaryclear(text:str;start:i64;end:i64):bool{
+  let clear=mut.true;
+  if(digitatindex(text;start-1)){
+    clear=false
+  }el{
+    if(digitatindex(text;end)){
+      clear=false
+    }el{}
+  };
+  <clear
+};
+
+
+(* PL1.10, considered and NOT WIRED IN. Read the comment before enabling it.
+
+   The Australian TFN check: nine digits weighted 1,4,3,7,5,8,6,9,10, and the weighted sum
+   divisible by 11. docs/metrics-baseline.md records that 36 of the 49 measured false
+   positives are bare nine-digit au_tfn and ssn_us matches with no checksum, which makes
+   this the single largest measured source of false positives in the regex layer, and
+   tests/fixtures/pii-corpus already generates checksum-valid TFNs for its positives and
+   deliberately checksum-invalid ones for its negatives. So the corpus is built for this
+   check and the precision gain is real.
+
+   It is a predicate with its own assertions and no production caller, because gating
+   au_tfn on it changes a currently green test: the harness fixture in
+   privacy/test_harness.tk is "My TFN is 123 456 789", whose weighted sum is 323, which is
+   not divisible by 11. 123 456 789 is not a valid tax file number. Gating detection on
+   this predicate therefore makes that case detect nothing and report PUBLIC where it
+   expects RESTRICTED, and the fix for that is changing the fixture to a real TFN — a
+   decision about what the test suite asserts, not a detail of the detector, so it is not
+   taken silently here.
+
+   Only the nine-digit form is answered. Eight-digit TFNs exist and use a different weight
+   set; this returns false for them, so a caller that gates on it must handle the
+   eight-digit alternative of patautfn separately or it will turn a miss into a silent one.
+   Separators are ignored, so the spaced and unspaced forms agree. *)
+f=tfnchecksumvalid(value:str):bool{
+  let digits=mut."";
+  let len=str.len(value) as i64;
+  lp(let i=0;i<len;i=i+1){
+    if(digitatindex(value;i)){
+      digits=str.concat(digits;str.substr(value;i;i+1))
+    }el{}
+  };
+  let dlen=str.len(digits) as i64;
+  if(dlen==9){
+    let weights=@(1;4;3;7;5;8;6;9;10);
+    let total=mut.0;
+    lp(let k=0;k<9;k=k+1){
+      let digit=str.charat(digits;k)-48;
+      total=total+digit*weights.get(k)
+    };
+    <total-(total/11)*11==0
+  }el{
+    <false
+  }
+};
+
+
 
 (* Detection only. PL1.1: this layer no longer numbers its own entities.
 
@@ -64,11 +183,40 @@ f=ishighersensitivity(levela:$sensitivitylevel;levelb:$sensitivitylevel):bool{
    standalone (privacy/test_harness.tk, tests/integration). It is assigned after the
    scan from the same single generator, with an empty salt — a standalone caller has no
    request id. pipeline.run ignores this field and re-anonymises from the deduped list,
-   so the unsalted numbering never reaches a provider. *)
+   so the unsalted numbering never reaches a provider.
+
+   PL1.7 — THIS LAYER NOW REPORTS REAL SPANS. It used to set start:0;end:0 on every entity,
+   which is why pipeline.dedupentities could not resolve overlaps for the only detection
+   layer that runs without a network sidecar: shadowing is decided on spans, and every span
+   was the same empty one.
+
+   The spans do not come from the regex engine, because toke's engine does not expose a
+   match offset anywhere. Checked, not assumed: str.findall, str.find, str.matches,
+   str.countre and str.replacere are all typed (i64,i64)->i64 in the stdlib interface and
+   none of them returns a position. What is available is the matched VALUE, and
+   str.indexof, so the offset is recovered by locating the value in the text.
+
+   HOW THE OFFSET IS RECOVERED, and its one honest limitation. `cursor` advances past each
+   match, and each value is located in the remainder of the text rather than in the whole
+   of it, so a pattern that matches the same value twice gets two distinct spans rather
+   than the first one twice. That depends on str.findall returning its matches in
+   left-to-right order, which it does — measured on a nineteen-digit run, where au_tfn
+   returned the leading nine digits before the trailing nine. Where a value genuinely
+   cannot be located from the cursor, which should not happen for a value the engine just
+   matched, the entity keeps the old spanless 0/0 rather than being given an invented
+   offset or dropped: a fabricated span would silently mis-drive dedup, and dropping would
+   lose a detection the layer actually made.
+
+   PL1.10 — a digit-bounded match is rejected here rather than filtered downstream, because
+   the sensitivity maximum is taken in this loop and a rejected match must not raise it.
+   See digitrunpattern for the defect that motivates it. A match with no recovered span
+   cannot be boundary-checked and is kept, which is the fail-safe direction for redaction
+   and the pre-PL1.10 behaviour. *)
 f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
   let entities=mut.@();
   let sensitivity=mut.$sensitivitylevel{$public:0};
   let patcount=str.arraylen(patterns);
+  let textlen=str.len(text) as i64;
   let pi=mut.0;
   lp(let lv=0;true;lv=lv){
     if(pi>=patcount){
@@ -78,25 +226,67 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
       let matches=str.findall(text;pdef.pattern);
       let matchcount=str.arraylen(matches);
       let mi=mut.0;
+      let cursor=mut.0;
       lp(let lv2=0;true;lv2=lv2){
         if(mi>=matchcount){
           br
         }el{
           let matchedvalue=str.arrayget(matches;mi);
-          let entity=$piientity{
-            entitytype:pdef.name;
-            value:matchedvalue;
-            start:0;
-            end:0;
-            confidence:pdef.confidence;
-            placeholder:""
+          let start=mut.0;
+          let end=mut.0;
+          let spanned=mut.false;
+          let offset=str.indexof(str.substr(text;cursor;textlen);matchedvalue);
+          if(offset<0){}el{
+            start=cursor+offset;
+            end=start+(str.len(matchedvalue) as i64);
+            spanned=true;
+            cursor=end
           };
-          entities=str.arraypush(entities;entity);
-          if(ishighersensitivity(pdef.sensitivity;sensitivity)){
-            sensitivity=pdef.sensitivity
-          }el{
-            
-          };
+          let keep=mut.true;
+          if(spanned){
+            if(digitrunpattern(pdef.name)){
+              keep=boundaryclear(text;start;end)
+            }el{}
+          }el{};
+          (* au_tfn is gated on its checksum, and the measurement that justifies it:
+             against tests/fixtures/pii-corpus the check rejects ALL 22 nine-digit
+             NOT_PII decoys and loses NONE of the 16 labelled AU_TFN positives.
+             docs/metrics-baseline.md records that 36 of 49 measured false positives were
+             bare nine-digit au_tfn/ssn_us matches with no checksum — the single largest
+             false-positive source in the project.
+
+             It could not be switched on until the corpus was fixed. generate.py built the
+             dash-separated adversarial case by bumping a valid TFN's last digit "to keep
+             the case unambiguous", which broke the checksum as a side effect while still
+             labelling it AU_TFN with expected_detected=true. So 4 of 16 positives asserted
+             that a number which is not a TFN must be detected as one, and gating would have
+             read as a 25% recall loss caused by a fixture bug. The generator now draws two
+             independent checksum-valid numbers.
+
+             ssn_us is deliberately NOT gated: its check digit rules are not a single
+             modulus and inventing one would reject valid numbers. It keeps the boundary
+             check only. *)
+          if(keep){
+            if(str.eq(pdef.name;"au_tfn")){
+              keep=tfnchecksumvalid(matchedvalue)
+            }el{}
+          }el{};
+          if(keep){
+            let entity=$piientity{
+              entitytype:pdef.name;
+              value:matchedvalue;
+              start:start as u32;
+              end:end as u32;
+              confidence:pdef.confidence;
+              placeholder:""
+            };
+            entities=str.arraypush(entities;entity);
+            if(ishighersensitivity(pdef.sensitivity;sensitivity)){
+              sensitivity=pdef.sensitivity
+            }el{
+
+            }
+          }el{};
           mi=mi+1
         }
       };

@@ -1,0 +1,119 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.harnessrunner;
+
+i=t:std.test;
+i=str:std.str;
+i=th:core.privacy.testharness;
+
+(* AD1.8 — the entry point core.privacy.testharness never had.
+
+   That module is a real 217-line table-driven harness: seven PII cases over
+   regex.detect, three assertion helpers, and a formatter. It had never executed once.
+   scripts/run_tests.sh skipped it by path, it declares no main, and runalltests had no
+   caller anywhere in the repository, so it was dead code compiled into the shipped
+   binary. Two defects lived in it undetected for exactly that reason: runtestcase
+   rebound `results` with `let` on every push and therefore returned an empty array
+   (the harness ran its assertions and discarded all of them), and formatresults
+   rebound its loop counter and did not terminate. Both are fixed; neither was
+   observable until something ran the thing.
+
+   The driver lives HERE rather than as a main() in packages/core/src, because
+   scripts/build_loke.sh links on the invariant that main.ll.o is the only object
+   defining a main. A product module with an entry point is a link-order hazard, and
+   the harness stays a library.
+
+   What is asserted: that every one of the harness's own assertions passes, per case
+   with the failing message in the diagnostic; that runtestcase reports the assertions
+   it ran rather than swallowing them; that caseresults agrees with a direct count; and
+   that formatresults returns and its tally matches the assertions actually run. *)
+
+f=passedin(results:@$testresult):i64{
+  let n=mut.0;
+  lp(let i=0;i<results.len;i=i+1){
+    let r:$testresult=results.get(i);
+    if(r.passed){
+      n=n+1
+    }el{}
+  };
+  <n
+};
+
+f=failedin(results:@$testresult):i64{
+  let n=mut.0;
+  lp(let i=0;i<results.len;i=i+1){
+    let r:$testresult=results.get(i);
+    if(r.passed){}el{
+      n=n+1
+    }
+  };
+  <n
+};
+
+(* The first failing assertion, formatted for the diagnostic line. A bare "case failed"
+   says nothing about which of the seven expectations the regex layer missed, and the
+   measured recall of that layer makes a genuine miss the likelier explanation than a
+   broken harness. *)
+f=firstfailure(results:@$testresult):str{
+  let found=mut."";
+  lp(let i=0;i<results.len;i=i+1){
+    let r:$testresult=results.get(i);
+    if(r.passed){}el{
+      if(str.eq(found;"")){
+        found="\(r.name) -- \(r.message)"
+      }el{}
+    }
+  };
+  <found
+};
+
+f=caselabel(tc:$testcase;results:@$testresult):str{
+  let firstfail=firstfailure(results);
+  let label=mut."\(tc.name): all \(results.len) harness assertions pass";
+  if(str.eq(firstfail;"")){}el{
+    label="\(tc.name): harness assertion failed: \(firstfail)"
+  };
+  <label
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let cases=th.testcases();
+  if(t.assert(str.arraylen(cases)==7;"the harness declares its seven PII cases")){pass=pass+1}el{fail=fail+1};
+
+  let everyresult=mut.@();
+  lp(let ci=0;ci<cases.len;ci=ci+1){
+    let tc:$testcase=cases.get(ci);
+    let results:@$testresult=th.runtestcase(tc);
+
+    (* RED BEFORE THE FIX to runtestcase, which returned @() for every case. *)
+    if(t.assert(results.len>0;"\(tc.name): runtestcase returns the assertions it ran")){pass=pass+1}el{fail=fail+1};
+
+    if(t.assert(failedin(results)==0;caselabel(tc;results))){pass=pass+1}el{fail=fail+1};
+
+    (* caseresults is the harness's own verdict on a case. It had no caller that ran
+       either, so it is asserted to agree with a direct count rather than trusted. *)
+    if(t.assert(th.caseresults(tc;results)==(failedin(results)==0);"\(tc.name): caseresults agrees with the assertion count")){pass=pass+1}el{fail=fail+1};
+
+    lp(let ri=0;ri<results.len;ri=ri+1){
+      everyresult=everyresult.push(results.get(ri))
+    }
+  };
+
+  if(t.assert(str.arraylen(everyresult)>=21;"the harness ran at least three assertions for each of its seven cases")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(failedin(everyresult)==0;"no harness assertion failed across the whole table")){pass=pass+1}el{fail=fail+1};
+
+  (* RED BEFORE THE FIX to formatresults, which did not terminate. Reaching the next
+     line at all is most of what this asserts. *)
+  let report=th.formatresults(everyresult);
+  if(t.assert(str.contains(report;"Privacy Pipeline Tests");"formatresults returns a report")){pass=pass+1}el{fail=fail+1};
+  let tally="Result: \(passedin(everyresult))/\(str.arraylen(everyresult)) passed";
+  if(t.assert(str.contains(report;tally);"the report tallies every assertion the harness ran")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(th.runalltests();"runalltests reports the harness green")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

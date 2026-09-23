@@ -1,0 +1,197 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.regexspans;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+
+(* PL1.7 and PL1.10 — the spans the regex layer reports, and the digit-boundary rejection
+   that those spans make possible.
+
+   WHAT WAS RED BEFORE THIS LANDED, measured by running core.privacy.testharness rather
+   than reasoned about: `patautfn` is unanchored, so on "Call us on 0412 345 678" it
+   matched the trailing nine digits, "412 345 678", and the detector reported both a
+   phone_au and an au_tfn. au_tfn carries RESTRICTED against phone_au's CONFIDENTIAL and
+   the pipeline takes the maximum, so EVERY AUSTRALIAN MOBILE NUMBER RAISED THE PROMPT TO
+   THE SENSITIVITY OF A TAX FILE NUMBER. Two of the harness's seven cases were red on that
+   alone. Sensitivity chooses the route and the gate, so this was not a cosmetic extra
+   entity: it changed which providers a request was permitted to reach.
+
+   Over-detection is fail-safe for redaction and is NOT fail-safe for sensitivity. That
+   asymmetry is the reason this is fixed in the detector rather than tolerated.
+
+   The spans are asserted separately from the rejection because they are separately
+   load-bearing: pipeline.strictlyshadows decides overlap on spans and requires end>start
+   on both sides, so a spanless entity neither shadows nor is shadowed, and before PL1.7
+   every entity from this layer was spanless. *)
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){
+      n=n+1
+    }el{}
+  };
+  <n
+};
+
+(* Every entity's span must reproduce its own value when sliced out of the text. This is
+   the invariant that says the offsets are real rather than plausible: a span that is off
+   by one, or that points at the first of two identical occurrences when it should point at
+   the second, fails it. str.substr takes an EXCLUSIVE end, verified against the stdlib
+   rather than assumed. *)
+f=spansreproducevalues(text:str;entities:@$piientity):bool{
+  let ok=mut.true;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(str.substr(text;e.start as i64;e.end as i64);e.value)){}el{
+      ok=false
+    }
+  };
+  <ok
+};
+
+f=allspanned(entities:@$piientity):bool{
+  let ok=mut.true;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(e.end>e.start){}el{
+      ok=false
+    }
+  };
+  <ok
+};
+
+f=sensname(s:$sensitivitylevel):str{
+  <mt s {
+    $public:v "PUBLIC" ;
+    $internal:v "INTERNAL" ;
+    $confidential:v "CONFIDENTIAL" ;
+    $restricted:v "RESTRICTED"
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* PL1.7 — the offsets themselves, on a single unambiguous match. *)
+  let mailtext="Contact john.smith@example.com for info";
+  let mail=rx.detect(mailtext);
+  if(t.assert(str.arraylen(mail.entities)==1;"one entity in the email case")){pass=pass+1}el{fail=fail+1};
+  let mailent:$piientity=mail.entities.get(0);
+  if(t.assert((mailent.start as i64)==8;"the email span starts at the offset of the address, not at 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((mailent.end as i64)==30;"and ends one past its last character")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(spansreproducevalues(mailtext;mail.entities);"slicing the text at the span reproduces the matched value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(allspanned(mail.entities);"and the entity is spanned, so shadowing can reason about it")){pass=pass+1}el{fail=fail+1};
+
+  (* A match at offset 0 must be spanned, not mistaken for the spanless 0/0 that every
+     entity from this layer used to carry. end>start is what separates the two. *)
+  let attext="0412 345 678 rings twice";
+  let at=rx.detect(attext);
+  if(t.assert(str.arraylen(at.entities)==1;"a match at offset 0 is reported once")){pass=pass+1}el{fail=fail+1};
+  let atent:$piientity=at.entities.get(0);
+  if(t.assert((atent.start as i64)==0;"its span starts at 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(atent.end>atent.start;"and it is still a real span, not the spanless 0/0")){pass=pass+1}el{fail=fail+1};
+
+  (* The same value twice. str.indexof alone would give the first occurrence both times;
+     the search advances past each match, so the second occurrence gets its own span. *)
+  let twicetext="0412 345 678 and again 0412 345 678";
+  let twice=rx.detect(twicetext);
+  if(t.assert(countoftype(twice.entities;"phone_au")==2;"both occurrences of a repeated value are detected")){pass=pass+1}el{fail=fail+1};
+  let first:$piientity=twice.entities.get(0);
+  let second:$piientity=twice.entities.get(1);
+  if(t.assert((first.start as i64)==0;"the first occurrence spans from 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((second.start as i64)==23;"and the second gets its OWN offset, not the first one again")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(spansreproducevalues(twicetext;twice.entities);"both spans slice back to the value")){pass=pass+1}el{fail=fail+1};
+
+  (* PL1.10 — the defect the seven harness cases were red on. *)
+  let phonetext="Call us on 0412 345 678";
+  let phone=rx.detect(phonetext);
+  if(t.assert(countoftype(phone.entities;"au_tfn")==0;"an AU mobile is not also reported as a tax file number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(phone.entities;"phone_au")==1;"and the phone number itself is still detected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.arraylen(phone.entities)==1;"so the case reports one entity, not two")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(sensname(phone.sensitivity);"CONFIDENTIAL");"and the prompt stays CONFIDENTIAL rather than being escalated to RESTRICTED")){pass=pass+1}el{fail=fail+1};
+
+  (* The rejection must not cost the genuine detection.
+
+     123 456 782, not 123 456 789: au_tfn is now gated on its checksum (PL1.10) and
+     123 456 789 fails it — its weighted sum is 323, not a multiple of 11. Using an invalid
+     number here would have asserted that the detector must report a nine-digit run that is
+     not a tax file number, which is the assertion the corpus was making and that had to be
+     fixed before the checksum could be switched on at all. *)
+  let tfntext="My TFN is 123 456 782";
+  let tfn=rx.detect(tfntext);
+  if(t.assert(countoftype(tfn.entities;"au_tfn")==1;"a tax file number with no digit beside it is still detected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(sensname(tfn.sensitivity);"RESTRICTED");"and still carries RESTRICTED")){pass=pass+1}el{fail=fail+1};
+
+  (* A long digit run is one number, not three overlapping identifiers. Before PL1.10 this
+     reported au_tfn twice and au_abn once, and anonymisation then replaced the middle of
+     the run and left the rest of it in the text. *)
+  let runtext="Invoice 9988776655443322110 ref";
+  let run=rx.detect(runtext);
+  if(t.assert(str.arraylen(run.entities)==0;"a nineteen-digit invoice number yields no identifiers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(sensname(run.sensitivity);"PUBLIC");"and does not escalate the prompt's sensitivity")){pass=pass+1}el{fail=fail+1};
+
+  (* The exemption. api_key is prefix-anchored and carries its own delimiter, so a digit
+     immediately before it is ordinary text and not evidence of a fragment. *)
+  let keytext="id4321sk-ant-abcdefghijklmnopqrst end";
+  let key=rx.detect(keytext);
+  if(t.assert(countoftype(key.entities;"api_key")==1;"a key preceded by a digit is still detected: the boundary test is for digit runs only")){pass=pass+1}el{fail=fail+1};
+
+  (* The predicate, directly, so a future change to the pattern set is diagnosed here
+     rather than as a puzzling miss in a detection case. *)
+  let ntfn="au_tfn";
+  let nabn="au_abn";
+  let nssn="ssn_us";
+  let ncc="credit_card";
+  let nmail="email";
+  let nkey="api_key";
+  let nurl="url";
+  if(t.assert(rx.digitrunpattern(ntfn);"au_tfn is digit-bounded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.digitrunpattern(nabn);"au_abn is digit-bounded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.digitrunpattern(nssn);"ssn_us is digit-bounded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.digitrunpattern(ncc);"credit_card is digit-bounded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.digitrunpattern(nmail);"email is not, because it carries its own delimiters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.digitrunpattern(nkey);"api_key is not, because it is prefix-anchored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.digitrunpattern(nurl);"url is not")){pass=pass+1}el{fail=fail+1};
+
+  (* str.charat is total — 0 for an index off either end — which is what lets the boundary
+     test run at offset 0 and at the end of the text with no bounds guard. Asserted, because
+     the whole check rests on it. *)
+  let bclear="ab 123 cd";
+  let bleft="ab9123 cd";
+  let bright="ab 1239cd";
+  let bzero="123 cd";
+  let bend="cd 123";
+  if(t.assert(rx.boundaryclear(bclear;3;6);"a match between two spaces is boundary-clear")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.boundaryclear(bleft;3;6);"a digit immediately before the match is not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.boundaryclear(bright;3;6);"nor is a digit immediately after it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.boundaryclear(bzero;0;3);"a match at offset 0 has no preceding character and is clear")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.boundaryclear(bend;3;6);"and a match ending the text has no following character")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.digitatindex(bzero;0-1);"index -1 is not a digit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.digitatindex(bzero;99);"nor is an index past the end")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.digitatindex(bzero;0);"and a real digit is one")){pass=pass+1}el{fail=fail+1};
+
+  (* The TFN checksum. A predicate with no production caller — see the comment on it in
+     privacy/regex.tk. The last assertion here is the reason it has none: the harness's own
+     TFN fixture fails the real checksum, so gating detection on this predicate turns a
+     green case red, and choosing a different fixture is a decision about the test suite
+     rather than about the detector. *)
+  let chkvalid="123 456 782";
+  let chkvalidplain="123456782";
+  let chkfixture="123 456 789";
+  let chkshort="12345678";
+  let chkempty="";
+  if(t.assert(rx.tfnchecksumvalid(chkvalid);"a checksum-valid TFN passes, separators and all")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.tfnchecksumvalid(chkvalidplain);"and the unspaced form of the same number agrees")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.tfnchecksumvalid(chkshort);"the eight-digit form is not answered, so it returns false")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.tfnchecksumvalid(chkempty);"and neither is an empty value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.tfnchecksumvalid(chkfixture);"the harness fixture 123 456 789 is NOT a valid TFN, which is why the checksum is not wired into detection")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

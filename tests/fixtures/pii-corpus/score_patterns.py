@@ -93,14 +93,69 @@ def load_patterns() -> dict[str, str]:
     return found
 
 
-def detect(text: str, patterns: dict[str, str]) -> list[dict]:
-    """Run every pattern, as the detector does, and collect spans."""
+# ── The two post-match filters the shipped detector applies (PL1.10) ──────────
+#
+# IMPORTANT, and a genuine weakening of this instrument: the pattern strings above
+# are READ from patterns.tk, so they are not reimplemented. These two predicates
+# ARE reimplemented, from `packages/core/src/privacy/regex.tk`
+# (`digitrunpattern`, `boundaryclear`, `tfnchecksumvalid`). That is the stub-test
+# antipattern this file's header warns about, applied knowingly and for one reason:
+# without them this script scores a detector that no longer exists, and a figure
+# describing code that does not ship is worse than a figure with a stated caveat.
+#
+# So both are reported — unfiltered and filtered — and the delta is the filters'
+# contribution. If the toke predicates change, these must be changed with them, and
+# the only real fix is AD1.2's harness driving the compiled detector.
+
+# Patterns whose whole match is a bare digit run, so an adjacent digit means the
+# match is a fragment of a longer number. Mirrors regex.digitrunpattern.
+# Keyed by the toke FUNCTION name, which is what load_patterns returns — the toke
+# side keys the same set by pdef.name (au_tfn, au_abn, …). Getting this wrong is
+# silent: the filter simply never fires and the figures come out unchanged, which is
+# how the first version of this looked like it worked.
+DIGIT_RUN_PATTERNS = {
+    "patautfn", "patauabn", "patssnus", "patcreditcard", "patphoneau",
+    "patphoneus", "patipv4",
+}
+
+TFN_WEIGHTS = [1, 4, 3, 7, 5, 8, 6, 9, 10]
+
+
+def boundary_clear(text: str, start: int, end: int) -> bool:
+    """Mirrors regex.boundaryclear: no digit immediately either side of the match."""
+    if start > 0 and text[start - 1].isdigit():
+        return False
+    if end < len(text) and text[end].isdigit():
+        return False
+    return True
+
+
+def tfn_checksum_valid(value: str) -> bool:
+    """Mirrors regex.tfnchecksumvalid: weighted sum mod 11."""
+    digits = [int(c) for c in value if c.isdigit()]
+    if len(digits) != 9:
+        return False
+    return sum(w * d for w, d in zip(TFN_WEIGHTS, digits)) % 11 == 0
+
+
+def detect(text: str, patterns: dict[str, str], filters: bool = True) -> list[dict]:
+    """Run every pattern, as the detector does, and collect spans.
+
+    With `filters=False` this is the pre-PL1.10 detector, which is what the
+    2026-09-19 figures in docs/metrics-baseline.md describe.
+    """
     out = []
     for fn, pat in patterns.items():
         try:
             # No IGNORECASE: the patterns do not request it, and whether the
             # detector applies it is exactly one of the things under test.
             for m in re.finditer(pat, text):
+                if filters and fn in DIGIT_RUN_PATTERNS:
+                    if not boundary_clear(text, m.start(), m.end()):
+                        continue
+                if filters and fn == "patautfn":
+                    if not tfn_checksum_valid(m.group(0)):
+                        continue
                 out.append({
                     "type": PATTERN_TO_TYPE[fn],
                     "pattern": fn,
@@ -117,7 +172,7 @@ def overlaps(a: dict, b: dict) -> bool:
     return a["start"] < b["end"] and b["start"] < a["end"]
 
 
-def score(corpus: list[dict], patterns: dict[str, str]) -> dict:
+def score(corpus: list[dict], patterns: dict[str, str], filters: bool = True) -> dict:
     # Recall is computed only over entities loke claims to detect. Entities with
     # expected_detected false are counted separately, because scoring loke
     # against types it has no detector for would conflate two different problems.
@@ -130,7 +185,7 @@ def score(corpus: list[dict], patterns: dict[str, str]) -> dict:
 
     for case in corpus:
         text = case["text"]
-        dets = detect(text, patterns)
+        dets = detect(text, patterns, filters)
         labelled = case["entities"]
 
         claimed = [e for e in labelled if e["expected_detected"] and e["type"] != "NOT_PII"]

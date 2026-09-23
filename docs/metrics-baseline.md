@@ -61,6 +61,80 @@ python3 tests/fixtures/pii-corpus/generate.py
 python3 tests/fixtures/pii-corpus/score_patterns.py
 ```
 
+### PII detection, regex layer with the PL1.10 filters — 2026-09-23
+
+**The figures above describe a detector that no longer ships.** PL1.7 and PL1.10 added two
+post-match filters, and this is the same corpus and the same ten pattern strings re-scored with
+them. The 2026-09-19 block is kept because it is what earlier claims were made against, not
+because it is current.
+
+| Metric | Pre-filter | **Ships today** | N |
+|---|---|---|---|
+| Recall, regex-addressable types only | 0.955 | **0.955** | 88 entities |
+| Recall, all claimed types | 0.792 | **0.792** | 106 entities |
+| Recall, exact span match | 0.717 | **0.717** | 106 entities |
+| Precision | 0.700 | **0.894** | 36 → **10** false positives |
+
+**26 of 36 false positives removed, and not one true positive lost.** That is the whole result:
+recall is byte-identical on all three definitions, and precision moves 0.700 → 0.894.
+
+**Workload:** `tests/fixtures/pii-corpus`, 74 synthetic cases (40 positive, 20 negative, 14
+adversarial), spans verified by construction, seed 20260919.
+**Arm:** `regex-layer-python-re-with-pl110-filters`.
+
+**Why the pre-filter column differs from the 2026-09-19 block** (0.955 against 0.932, 36 false
+positives against 49): the corpus generator was corrected. It built the dash-separated adversarial
+TFN by bumping a valid number's last digit "to keep the case unambiguous", which broke the
+checksum as a side effect while still labelling the result `AU_TFN` with
+`expected_detected: true`. So 4 of 16 `AU_TFN` positives asserted that a nine-digit run which is
+**not** a tax file number must be detected as one — and that assertion is precisely what would
+have made checksum gating look like a 25% recall loss. The generator now draws two independent
+checksum-valid numbers. The 2026-09-19 figures were measured against the uncorrected fixture.
+
+**Caveats, both mandatory and one of them new:**
+
+1. As before: evaluated with Python's regex engine rather than toke's, and the regex layer is one
+   of several. A real figure needs the compiled detector — which is now much closer, because
+   AD1.8 made the detector testable for the first time.
+2. **New, and a real weakening of the instrument.** The ten pattern strings are still *read* from
+   `packages/core/src/privacy/patterns.tk`, so they are not reimplemented. The two filters **are**
+   reimplemented in Python, from `regex.digitrunpattern`, `regex.boundaryclear` and
+   `regex.tfnchecksumvalid`. That is the stub-test antipattern this project is trying to leave
+   behind, done knowingly: without it this script would score a detector that does not exist, and
+   a figure describing absent code is worse than a figure with a stated caveat. If those three
+   toke predicates change, the Python must change with them. The only real fix is AD1.2's harness
+   driving the compiled detector.
+
+**What changed in the detector, and what it cost:**
+
+- `au_tfn` and six other bare-digit-run patterns now reject a match with a digit immediately
+  either side of it, which is what "unanchored" meant in practice: the pattern matched the
+  trailing nine digits of any Australian mobile, so **every AU phone number was also reported as
+  a Tax File Number** and the request's sensitivity escalated CONFIDENTIAL → RESTRICTED. That
+  label drives routing, so over-detection was not fail-safe here.
+- `au_tfn` is additionally gated on its real weighted-modulus checksum. Against this corpus that
+  rejects **all 22** nine-digit `NOT_PII` decoys and loses none of the 16 labelled positives.
+- `ssn_us` is deliberately **not** checksum-gated: its rules are not a single modulus and
+  inventing one would reject valid numbers. It keeps the boundary check only, which is why 10
+  false positives remain.
+
+**Still true from the 2026-09-19 findings, and not addressed:**
+
+- Every `EMAIL` miss is still a mixed-case address against a lower-case-only character class.
+  Fixing it means changing a pattern string, which moves these figures again and is a separate
+  decision.
+- Medicare, BSB, ACN and bank account numbers still have **no detector at all**.
+- `au_tfn` still fires inside `au_abn` — `"ABN 51 824 753 556"` reports both. The boundary check
+  cannot see it, because the characters either side of the TFN match are spaces. Recorded as
+  PL1.10's remaining tail.
+
+Reproduce:
+
+```sh
+python3 tests/fixtures/pii-corpus/generate.py
+python3 tests/fixtures/pii-corpus/score_patterns.py
+```
+
 ---
 
 ### Serialisation baselines, input tokens only — 2026-09-20
