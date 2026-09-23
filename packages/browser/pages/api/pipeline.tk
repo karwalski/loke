@@ -10,7 +10,10 @@ i=std:std;
 i=log:shared.log;
 i=t:shared.types;
 i=pipe:core.privacy.pipeline;
+i=ph:core.privacy.placeholder;
 i=ks:core.governance.killswitch;
+i=policy:core.governance.policy;
+i=audit:core.storage.audit;
 i=dbmod:core.storage.db;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
@@ -61,50 +64,231 @@ f=privacyfields(run:$pipelinerun):str{
   <",\"entities_found\":\(run.totalentities),\"sensitivity\":\(json.enc(t.senslabel(res.sensitivity))),\"layers_completed\":\(run.layerscompleted),\"layers_degraded\":\(run.layersdegraded),\"request_id\":\(json.enc(run.requestid))"
 };
 
-f=anthropicreply(r:$httpresp;piifields:str):i64{
-  <http.res(200;"{\"ok\":true,\"anthropic_raw\":\(str.frombytes(r.body)),\"model\":\"claude-sonnet-4-20250514\",\"provider\":\"anthropic\"\(piifields)}")
-};
+(* GA1.10 — restoration, policy and audit, recovered from 2b8942e.
 
-f=toanthropic(anonymised:str;sysprompt:str;key:str;piifields:str):i64{
-  let abody="{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
-  let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
-  <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
-    $ok:r anthropicreply(r;piifields);
-    $err:e http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
+   These three were implemented, committed, and then silently deleted: 09b0a67, a
+   mechanical tplrenderfile sweep, cut this file from 240 lines to 79, kept the imports
+   and removed every call. Its message does not mention the file and it was the only one
+   of 24 to shrink. So GA1.2/GA1.4/GA1.8 were never "unwritten" — they were lost, and
+   2b8942e is the reference rather than prose.
+
+   Recovered as intent, not as code: the lost version carried four defect classes that are
+   now known and must not come back.
+
+     - sensitivitylabel and risktierstr had a BARE trailing `mt` as their whole body, so
+       they discarded it and returned garbage (T-19). Everything here uses `<mt`.
+     - parsetolerance returned bare `$patient`/`$instant` variants, which crash in a value
+       position (T-13). Sums are constructed.
+     - buildplaceholdermap discarded ph.addentry's return, looped `if(i>count)` one past
+       the end, and used str.arrayget, which erases the element type. ph.mapfromentities
+       replaces it.
+     - datadir() hardcoded /Users/matthew.watt/.loke (X8.5). std.homedir() via str.concat. *)
+f=openstore():i64{
+  (* A sentinel, not a result. `mt` on an X!$lokeerr takes the first arm whatever the
+     value is (T-18), so a failed open returned as $err would read as a live handle. 0
+     means "no store", and every caller checks it with an `if`. *)
+  <mt dbmod.openstore(str.concat(std.homedir();"/.loke")) {
+    $ok:s s;
+    $err:e 0
   }
 };
 
-f=toollama(anonymised:str;piifields:str):i64{
+f=risklabel(tier:$risktier):str{
+  <mt tier {
+    $low:v "low";
+    $medium:v "medium";
+    $high:v "high";
+    $critical:v "critical"
+  }
+};
+
+f=isdeny(d:$policydecision):bool{
+  <mt d {
+    $allow:m false;
+    $allowwithwarning:m false;
+    $requireapproval:m false;
+    $deny:m true
+  }
+};
+
+f=policymessage(d:$policydecision):str{
+  <mt d {
+    $allow:m "";
+    $allowwithwarning:m m;
+    $requireapproval:m m;
+    $deny:m m
+  }
+};
+
+(* GA1.8. classifyrisk takes its cost as an f64 PARAMETER, which crosses a module boundary
+   intact — only f64 RETURNS are corrupted (T-20). 0.0 is passed because the real estimate
+   needs core.providers.*.calccost, which returns an f64 across a boundary and so cannot be
+   trusted until LS1.1h converts it. Recorded rather than guessed at. *)
+f=decide(run:$pipelinerun):$policydecision{
+  let res:$piidetectionresult=run.result;
+  let tier=policy.classifyrisk(res.sensitivity;$risktier{$low:0};0.0);
+  <policy.evaluate(tier;res.sensitivity;"";"browser-chat")
+};
+
+f=risktierof(run:$pipelinerun):$risktier{
+  let res:$piidetectionresult=run.result;
+  <policy.classifyrisk(res.sensitivity;$risktier{$low:0};0.0)
+};
+
+(* GA1.4. insertevent, not logevent: logevent wraps a correctly-discriminated stdlib
+   result in $ok/$err of a user sum, and a caller matching THAT always takes the first arm
+   (T-18) — so a failed insert would be read as a success and the hash chain would attest
+   to a history with a hole in it. insertevent returns a plain bool. *)
+f=recordevent(store:i64;run:$pipelinerun;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64;decision:$policydecision):bool{
+  if(store==0){
+    <false
+  }el{
+    let res:$piidetectionresult=run.result;
+    let ev=$auditevent{
+      eventtype:"llm_request";
+      usecase:"browser-chat";
+      modelid:modelid;
+      provider:provider;
+      sensitivity:t.senslabel(res.sensitivity);
+      risktier:risklabel(risktierof(run));
+      tokensin:tokensin as u32;
+      tokensout:tokensout as u32;
+      costusd:0.0;
+      durationms:durationms as u32;
+      correlationid:run.requestid
+    };
+    <audit.insertevent(store;ev)
+  }
+};
+
+(* Anthropic returns {"content":[{"type":"text","text":...}],"usage":{...}}.
+
+   json.arr is the TYPED accessor and returns a stdlib result, which does discriminate
+   correctly — unlike a result whose error side is a user-declared sum (T-18). Extracting
+   the text rather than handing back the raw body is what makes restoration safe: the
+   original values are restored into PLAIN TEXT and the result is escaped afterwards, so a
+   name containing a quote cannot malform the response. Restoring over the raw JSON body
+   would have had exactly that hazard. *)
+f=anthropictext(raw:str):str{
+  let obj=json.dec(raw);
+  <mt json.arr(obj;"content") {
+    $ok:parts firstpartext(parts);
+    $err:e ""
+  }
+};
+
+f=firstpartext(parts:@$json):str{
+  if(parts.len==0){
+    <""
+  }el{
+    let first=parts.get(0);
+    <mt json.str(first;"text") {
+      $ok:s s;
+      $err:e ""
+    }
+  }
+};
+
+f=usagetokens(raw:str;field:str):i64{
+  let obj=json.dec(raw);
+  <mt json.i64(obj;field) {
+    $ok:n n;
+    $err:e 0
+  }
+};
+
+(* GA1.2 — restoration. The user sees their own words back, not [PERSON_a3f1_1].
+
+   The map is derived from the deduped entity list the pipeline already carries, via
+   ph.mapfromentities. That is deliberate: the parallel $placeholdermap the layers used to
+   build was the thing regex.rundetection threw away, and PL1.1 removed it rather than
+   plumbing it through. One list, one map, derived where it is needed. *)
+f=restoretext(run:$pipelinerun;text:str):str{
+  let res:$piidetectionresult=run.result;
+  <ph.restore(text;ph.mapfromentities(res.entities))
+};
+
+f=anthropicreply(store:i64;run:$pipelinerun;r:$httpresp;piifields:str;startms:i64;decision:$policydecision):i64{
+  let raw=str.frombytes(r.body);
+  let restored=restoretext(run;anthropictext(raw));
+  let tin=usagetokens(raw;"input_tokens");
+  let tout=usagetokens(raw;"output_tokens");
+  let elapsed=str.nowunix()-startms;
+  let logged=recordevent(store;run;"anthropic";"claude-sonnet-4-20250514";tin;tout;elapsed;decision);
+  if(logged){}el{
+    log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
+  };
+  (* anthropic_raw stays for compatibility and carries the ANONYMISED body, which is what
+     the provider actually returned. `response` is the restored text. Keeping them distinct
+     matters: one is what left the machine, the other is what the user should read. *)
+  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"anthropic_raw\":\(json.enc(raw)),\"model\":\"claude-sonnet-4-20250514\",\"provider\":\"anthropic\",\"audited\":\(logged)\(piifields)}")
+};
+
+f=toanthropic(store:i64;run:$pipelinerun;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  let abody="{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
+  let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
+  <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
+    $ok:r anthropicreply(store;run;r;piifields;startms;decision);
+    $err:e providerfailed(store;run;"anthropic";"claude-sonnet-4-20250514";startms;decision)
+  }
+};
+
+(* A failed provider call is audited too. An audit trail that records only successes
+   describes a system that never has an outage, which is worse than no trail. *)
+f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
+  let elapsed=str.nowunix()-startms;
+  recordevent(store;run;provider;modelid;0;0;elapsed;decision);
+  <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
+};
+
+f=toollama(store:i64;run:$pipelinerun;anonymised:str;piifields:str;startms:i64;decision:$policydecision):i64{
   let payload="{\"model\":\"qwen2.5:3b\",\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
   let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
   let response=json.str(json.dec(raw);"response");
-  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(response)),\"model\":\"qwen2.5:3b\",\"provider\":\"ollama\"\(piifields)}")
+  let restored=restoretext(run;response);
+  let elapsed=str.nowunix()-startms;
+  let logged=recordevent(store;run;"ollama";"qwen2.5:3b";0;0;elapsed;decision);
+  if(logged){}el{
+    log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
+  };
+  <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"model\":\"qwen2.5:3b\",\"provider\":\"ollama\",\"audited\":\(logged)\(piifields)}")
 };
 
-(* Forwards the pipeline's anonymised text, never the original. *)
-f=forward(run:$pipelinerun;sysprompt:str):i64{
+(* Forwards the pipeline's anonymised text, never the original.
+
+   The provider is still chosen by key length rather than by core.router.selector.select —
+   that is GA1.7, and it is deliberately still open: select returns a $selectionresult!
+   $lokeerr, and under T-18 a failed selection would read as a success and pick a garbage
+   provider. For sensitivity-scored routing that means potentially sending restricted data
+   to a cloud endpoint, introduced by the story meant to prevent it. It waits for the
+   sentinel refactor (LS1.1j). *)
+f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision):i64{
   let res:$piidetectionresult=run.result;
   let piifields=privacyfields(run);
   let key=anthropickey();
   if(str.len(key)>20){
-    <toanthropic(res.anonymised;sysprompt;key;piifields)
+    <toanthropic(store;run;res.anonymised;sysprompt;key;piifields;startms;decision)
   }el{
-    <toollama(res.anonymised;piifields)
+    <toollama(store;run;res.anonymised;piifields;startms;decision)
   }
 };
 
-(* The kill switch needs the store. If the store cannot be opened, the switch cannot
-   be read — and an unreadable kill switch is treated as ENGAGED, not as disengaged.
-   The same reasoning as NC1.9: the unknown state is the unsafe one. *)
-f=killswitchengaged():bool{
-  <mt dbmod.openstore(str.concat(std.homedir();"/.loke")) {
-    $ok:store ks.isengaged(store);
-    $err:e true
+(* If the store cannot be opened the switch cannot be read, and an unreadable kill switch
+   is treated as ENGAGED, not as disengaged. The same reasoning as NC1.9: the unknown state
+   is the unsafe one. The store is now opened once per request and threaded, because the
+   audit trail needs the same handle. *)
+f=killswitchengaged(store:i64):bool{
+  if(store==0){
+    <true
+  }el{
+    <ks.isengaged(store)
   }
 };
 
 f=post(req:i64):i64{
-  if(killswitchengaged()){
+  let startms=str.nowunix();
+  let store=openstore();
+  if(killswitchengaged(store)){
     <http.res(403;"{\"ok\":false,\"error\":\"kill switch engaged or unreadable\"}")
   }el{};
 
@@ -123,7 +307,18 @@ f=post(req:i64):i64{
   let sysprompt=json.str(parsed;"system_prompt");
   let run=pipe.runforward(text;sysprompt;pipelineconfig());
   if(pipe.issafetoforward(run)){
-    <forward(run;sysprompt)
+    (* GA1.8 — the governance gate, between detection and dispatch. policy.evaluate returns
+       a PLAIN struct, so T-18 cannot touch it, which is why this one could be wired now
+       while GA1.5-GA1.7 wait. A deny is audited before the refusal is returned: a blocked
+       request is exactly the kind an auditor asks about. *)
+    let decision=decide(run);
+    if(isdeny(decision)){
+      let why=policymessage(decision);
+      recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+      log.warn("pipeline denied by policy: \(why)";"api.pipeline";run.requestid);
+      <http.res(403;"{\"ok\":false,\"error\":\(json.enc(why)),\"policy_denied\":true\(privacyfields(run))}")
+    }el{};
+    <forward(store;run;sysprompt;startms;decision)
   }el{
     <refused("no privacy detection layer is available")
   }
