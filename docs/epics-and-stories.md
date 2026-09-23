@@ -464,6 +464,8 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | M1.5 | XL | **Done** | Knowledge graph with temporal awareness (entity extraction by local SLM; relationship mapping; temporal validity windows — facts have start/end dates; contradiction detection flags for user review; `loke memory facts "who works on project-alpha?"`; `--as-of` time queries; graph visualisation in browser mode; privacy pipeline on any externally-included graph data) |
 | M1.6 | L | **Done** | Agent memory / diaries (each AG1 agent gets a dedicated palace wing; structured diary entries in AAAK after each run; diary loaded as context on startup; searchable; agent-scoped permissions; diary entries feed into project wings; older entries auto-compressed to closets) |
 | M1.7 | M |  | **Four memory tables are never created** — Found 2026-09-23 while converting the row-accessor defects (LS1.1i). `memory_graph_entities`, `memory_graph_relations`, `memory_scores` and `memory_settings` are referenced **24 times** across `memory/graph.tk`, `memory/decay.tk` and `memory/privacy.tk`, and have **no `CREATE TABLE` anywhere in the repository**. `storage/migrations.tk` and `memory/schema.tk` between them create eight tables: `audit_log`, `memory_closets`, `memory_drawers`, `memory_index`, `placeholder_maps`, `schema_migrations`, `sessions`, `settings`. So the whole knowledge-graph path (M1.5), decay scoring and the memory privacy preferences write and read tables that do not exist. It was invisible because every read went through a JSON accessor and returned empty-or-zero regardless (LS1.1i) — fixing those accessors is what will surface this as a real error. Add the DDL with a migration, then assert each table exists in a test rather than inferring it from a query that returns nothing |
+| M1.7a | S |  | **Nothing inserts into `memory_scores`** — found 2026-09-23 while closing M1.7. Repo-wide the table has one `UPDATE` (`accessed_at`), several `SELECT`s and a `DELETE`, and **no `INSERT` anywhere**. So the table now exists and stays empty: `core.memory.privacy`'s `WHERE pii_flagged=1` can never match, and `core.memory.decay`'s sweep has nothing to sweep. The export joins were written to cope (`COALESCE(ms.score,1.0)`), which is why nothing looked broken. A score row should be created when a drawer is created — `core.memory.storage.adddrawer` is the natural place, in the same transaction, so a drawer can never exist without a score. Decide whether `pii_flagged` is set there from the pipeline's detection result or by a later pass; setting it late means a window in which PII-bearing memories are not flagged. |
+| M1.7b | S |  | **A pre-existing `datadir/memory.db` is no longer read** — `core.memory.palace.open` opened its own `memory.db` until 2026-09-23, which was not merely untidy: `std.db` keeps ONE global connection (T-30), so opening it silently replaced the process's connection and `audit_log` and `settings` ceased to exist for every reader afterwards. The palace now uses `loke.db`, the same file `core.storage.db.openstore` opens, and the four `memory_*` tables are created by migrations 10-16. Anyone who ran an earlier build still has `memory.db` on disk with drawers in it; nothing deletes it and nothing migrates it. Decide: a one-shot migration that copies `memory_drawers`/`memory_closets`/`memory_index` across and renames the file, or a release note saying the old file is orphaned. Given that no release has shipped and the palace's write path was itself broken (M1.7a — no score rows), a release note is probably honest and sufficient; the point of this row is that the choice is recorded rather than assumed. |
 
 ## Epic M2: AAAK Shorthand Integration
 
@@ -1044,7 +1046,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| MEMORY PALACE AND AAAK SHORTHAND | 2 | 13 | 11 | — | — | — | — | — | — | 2 |
+| MEMORY PALACE AND AAAK SHORTHAND | 2 | 15 | 11 | — | — | — | — | — | — | 4 |
 | CROSS-CUTTING | 9 | 78 | 77 | — | — | — | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 23 | — | 42 | — | — | — | — | — |
@@ -1054,7 +1056,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 40 | 37 | — | 2 | — | — | — | — | 1 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 15 | 1 | — | — | — | — | — | 16 |
 | VERIFICATION PROGRAMME | 14 | 114 | 50 | 10 | — | 6 | 3 | — | — | 45 |
-| **Total** | **88** | **655** | **471** | **18** | **47** | **6** | **3** | **1** | — | **109** |
+| **Total** | **88** | **657** | **471** | **18** | **47** | **6** | **3** | **1** | — | **111** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1087,7 +1089,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | G3 | 1 | 2 | 2 | — | — | — | — | — | — | — |
 | G4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AG1 | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| M1 | 1 | 8 | 6 | — | — | — | — | — | — | 2 |
+| M1 | 1 | 10 | 6 | — | — | — | — | — | — | 4 |
 | M2 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | X1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X2 | 1 | 3 | 3 | — | — | — | — | — | — | — |
@@ -1148,9 +1150,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 22 | 12 | 1 | — | — | — | — | — | 9 |
 | RV1 | 1 | 10 | 3 | — | — | — | — | — | — | 7 |
-| **Total** | **88** | **655** | **471** | **18** | **47** | **6** | **3** | **1** | — | **109** |
+| **Total** | **88** | **657** | **471** | **18** | **47** | **6** | **3** | **1** | — | **111** |
 
-Rows parsed: **655**, across **88** epics and **16** level-1 headings.
+Rows parsed: **657**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 

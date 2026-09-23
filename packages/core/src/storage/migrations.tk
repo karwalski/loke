@@ -20,6 +20,87 @@ t=$migration{
   sql:str
 };
 
+(* ── The memory palace's tables ───────────────────────────────────────────────────
+   These live here, in the migrations, rather than only in `core.memory.schema`, and the
+   reason is T-30. `std.db` keeps ONE global connection: `db.open` returns something shaped
+   like a handle, but `conn_db` resolves only id 0, so a second `db.open` silently replaces
+   the first. The memory palace used to open its own `datadir/memory.db`, which hijacked the
+   process's connection — after that, `audit_log` and `settings` did not exist for any reader,
+   and before it `memory_drawers` did not. Both directions failed silently, because the row
+   accessors map a failed read to 0 or "".
+
+   So there is one database, and anything in it is created by the migration runner like
+   everything else. `core.memory.schema.createtables` calls these same functions, so the DDL
+   has one definition: a palace opened against a store whose migrations have already run finds
+   the tables present, and `CREATE TABLE IF NOT EXISTS` makes the second call a no-op.
+
+   `memory_scores` is the one that had no creator ANYWHERE — it was absent from
+   `core.memory.schema` as well, while `memory/decay.tk`, `memory/export.tk` and
+   `memory/privacy.tk` all read and write it. That is the root of M1.7.
+
+   Its `created_at` defaults to `datetime('now')` in the DDL rather than being supplied by a
+   writer, because supplying it is what went wrong everywhere else (GA5.1: eleven sites stored
+   the literal text `now()`). A default the database computes cannot be got wrong by a caller. *)
+f=memdrawerssql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_drawers (
+  id TEXT PRIMARY KEY,
+  wing TEXT NOT NULL,
+  hall TEXT NOT NULL,
+  room TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  session_id TEXT,
+  model_id TEXT,
+  tokens INTEGER DEFAULT 0,
+  sensitivity TEXT DEFAULT 'PUBLIC',
+  created_at TEXT NOT NULL
+)"
+};
+
+f=memclosetssql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_closets (
+  id TEXT PRIMARY KEY,
+  wing TEXT NOT NULL,
+  hall TEXT NOT NULL,
+  room TEXT NOT NULL,
+  aaak_summary TEXT NOT NULL,
+  drawer_ids TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)"
+};
+
+f=memindexsql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_index (
+  drawer_id TEXT NOT NULL,
+  keyword TEXT NOT NULL,
+  weight REAL DEFAULT 1.0,
+  PRIMARY KEY (drawer_id, keyword)
+)"
+};
+
+f=memscoressql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_scores (
+  id TEXT PRIMARY KEY,
+  score REAL NOT NULL DEFAULT 1.0,
+  tags TEXT NOT NULL DEFAULT '',
+  pii_flagged INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  accessed_at TEXT
+)"
+};
+
+f=memdrawersidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_drawers_location ON memory_drawers(wing, hall, room)"
+};
+
+f=memkeywordidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_index_keyword ON memory_index(keyword)"
+};
+
+f=mempiiidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_scores_pii ON memory_scores(pii_flagged)"
+};
+
 f=allmigrations():@$migration{
   <@(
     $migration{
@@ -199,6 +280,44 @@ END"
       version:9;
       description:"drop the plaintext placeholder_maps table, superseded by placeholder_map_records";
       sql:"DROP TABLE IF EXISTS placeholder_maps"
+    };
+    (* Versions 10-16: the memory palace, moved into the one database this toolchain can
+       address. Seven entries because one migration is ONE statement — see the note at the
+       top of this file. *)
+    $migration{
+      version:10;
+      description:"create memory_drawers";
+      sql:memdrawerssql()
+    };
+    $migration{
+      version:11;
+      description:"create memory_closets";
+      sql:memclosetssql()
+    };
+    $migration{
+      version:12;
+      description:"create memory_index";
+      sql:memindexsql()
+    };
+    $migration{
+      version:13;
+      description:"create memory_scores, which had no creator anywhere (M1.7)";
+      sql:memscoressql()
+    };
+    $migration{
+      version:14;
+      description:"index memory_drawers by location";
+      sql:memdrawersidxsql()
+    };
+    $migration{
+      version:15;
+      description:"index memory_index by keyword";
+      sql:memkeywordidxsql()
+    };
+    $migration{
+      version:16;
+      description:"index memory_scores by pii_flagged";
+      sql:mempiiidxsql()
     }
   )
 };

@@ -82,9 +82,40 @@ f=main():i64{
      corrupted — and it is the one that has to go green before core.memory.decay can be
      called from anywhere but itself.
 
-     Measured today: fresh=2, and every aged value is -inf. See the note at the top. *)
-  let fresh=dec.apply(1.0 as f32;0;0;c);
-  if(t.assert(fresh<=1.0 as f32;"apply returns a decay factor no greater than the score it was given — RED: T-20 corrupts the f32 return across the module boundary, measured as 2 for a fresh memory and -inf once aged")){pass=pass+1}el{fail=fail+1};
+     Measured before the fix: fresh=2, and every aged value -inf.
+
+     Fixed 2026-09-23 by `applybp`, which returns integer BASIS POINTS (1.0 = 10000) and so
+     crosses a module boundary intact. `apply` survives as a same-module f32 wrapper and is
+     deliberately NOT asserted from here, because asserting it would be asserting T-20.
+
+     The curve is now assertable, so it is asserted — by equality where the arithmetic is
+     exact, since a decay policy a reviewer cannot read off a test is a policy nobody checks.
+     defaultconfig: halflife 30 days, minscore 0.1 (1000bp), prunebelow 0.05 (500bp). *)
+  if(t.assert(dec.applybp(10000;1000;1000;c)==10000;"a memory created at the instant it is measured has not decayed: 10000bp in, 10000bp out")){pass=pass+1}el{fail=fail+1};
+
+  (* One half-life is 30 days. 2592000 seconds. A full-score memory must read half. *)
+  let onehalflife=dec.applybp(10000;0+1;2592000+1;c);
+  if(t.assert(onehalflife>4900;"after exactly one half-life a 1.0 memory is about 0.5 — above 4900bp")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(onehalflife<5100;"and below 5100bp. The curve is fractional: math.pow, not pow2neg, which would have truncated 1.9 half-lives to 1")){pass=pass+1}el{fail=fail+1};
+
+  (* Monotonic, which is the property the sweep's DELETE depends on. *)
+  let older=dec.applybp(10000;1;2592000*4;c);
+  if(t.assert(older<onehalflife;"an older memory decays further than a younger one")){pass=pass+1}el{fail=fail+1};
+
+  (* The floor. Without it a memory decays to zero and is indistinguishable from absent. *)
+  if(t.assert(dec.applybp(10000;1;2592000*400;c)==1000;"decay floors at minscore (1000bp), so an ancient memory is faint rather than gone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dec.applybp(10000;1;2592000*400;c)>=500;"and the floor is ABOVE prunebelow (500bp), so decay alone never makes a row sweepable — only an explicit policy change can")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The guard that stops the first sweep deleting the palace ────────────────
+     created_at was written as the literal SQL text `now()` until 2026-09-23 (GA5.1), so
+     db.rowi64 reads 0 for every row written before then. Zero is 1970, which is maximally
+     aged, which is below prunebelow — so the first sweep after M1.7 creates the memory tables
+     would have deleted every pre-existing memory, and it would have looked like the decay
+     policy working. An unknown age must not authorise a delete. *)
+  if(t.assert(!dec.agereadable(0;2592000);"a created_at of 0 — what a pre-GA5.1 row reads as — is NOT a readable age")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dec.agereadable(0-5;2592000);"nor is a negative one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dec.agereadable(2592000*2;2592000);"nor is one in the future")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dec.agereadable(1000;2592000);"a real past timestamp is readable")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

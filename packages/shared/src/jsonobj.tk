@@ -160,3 +160,156 @@ f=elemstr(o:$json;key:str;idx:i64;field:str;fallback:str):str{
     $jsonerr:e fallback
   }
 };
+
+
+(* ── Escaping a string INTO JSON ──────────────────────────────────────────────────
+   `json.enc` does this correctly and is what to reach for first. This exists because two
+   modules needed an escaper that demonstrably works on the values they actually hold:
+   `core.memory.export` found `json.enc` returning empty for `db.rowstr` values (cause not
+   established — see the note in that file), and `core.mcp.protocol` was interpolating an error
+   message between two literal quote characters with no escaping at all, so any provider or
+   validation message containing a quote broke the JSON-RPC envelope and the client saw a parse
+   error instead of the diagnosis.
+
+   Order is load-bearing. BACKSLASH FIRST: escape the quotes first and the backslash you just
+   inserted gets escaped a moment later, turning `\"` into `\\"`. Newlines and tabs matter
+   because an error message quoting a prompt, or a memory drawer, is multi-line more often than
+   not, and a raw newline inside a JSON string is invalid. *)
+f=escape(s:str):str{
+  let b=str.replace(s;"\\";"\\\\");
+  let q=str.replace(b;"\"";"\\\"");
+  let n=str.replace(q;"
+";"\\n");
+  let r=str.replace(n;"\r";"\\r");
+  let tb=str.replace(r;"\t";"\\t");
+  <str.concat("\"";str.concat(tb;"\""))
+};
+
+(* ── The raw text of ANY value at a key, not just an object ───────────────────────
+   `nested` above brace-matches `{...}`, which is right for a `usage` block and wrong for a
+   JSON-RPC `params`, which may be an object, an array, or null.
+
+   This is what `core.mcp.protocol` needed. It was doing
+
+       let paramsraw=json.enc(json.getval(obj;"params"));
+
+   and `json.getval` is one of std.json's untyped `(i64,i64)->i64` helpers while `json.enc`
+   takes a `str` — so it rendered the HANDLE. Every MCP request arrived at the tool layer with
+   its params replaced by a decimal pointer value, which is why no tool call carrying arguments
+   could ever have worked.
+
+   Returns "null" when the key is absent, because that is what a JSON-RPC params field means
+   when it is missing and because a caller concatenating this into a document needs something
+   syntactically valid rather than an empty gap. *)
+f=spanend(s:str;n:i64;openc:i64;closec:i64):i64{
+  let depth=mut.0;
+  let instr=mut.false;
+  let esc=mut.false;
+  let end=mut.0-1;
+  lp(let k=0;k<n;k=k+1){
+    if(end<0){
+      let c=str.charat(s;k);
+      if(esc){
+        esc=false
+      }el{
+        if(instr){
+          if(c==92){ esc=true }el{
+            if(c==34){ instr=false }el{}
+          }
+        }el{
+          if(c==34){ instr=true }el{
+            if(c==openc){ depth=depth+1 }el{
+              if(c==closec){
+                depth=depth-1;
+                if(depth==0){ end=k+1 }el{}
+              }el{}
+            }
+          }
+        }
+      }
+    }el{}
+  };
+  <end
+};
+
+f=strend(s:str;n:i64):i64{
+  let esc=mut.false;
+  let end=mut.0-1;
+  lp(let k=1;k<n;k=k+1){
+    if(end<0){
+      let c=str.charat(s;k);
+      if(esc){
+        esc=false
+      }el{
+        if(c==92){ esc=true }el{
+          if(c==34){ end=k+1 }el{}
+        }
+      }
+    }el{}
+  };
+  <end
+};
+
+(* A bare value — number, true, false, null — ends at the first comma or closing bracket that
+   is not inside something else. Leading whitespace has already been skipped by the caller. *)
+f=bareend(s:str;n:i64):i64{
+  let end=mut.n;
+  lp(let k=0;k<n;k=k+1){
+    if(end==n){
+      let c=str.charat(s;k);
+      if(c==44){ end=k }el{
+        if(c==125){ end=k }el{
+          if(c==93){ end=k }el{}
+        }
+      }
+    }el{}
+  };
+  <end
+};
+
+f=skipws(s:str;n:i64):i64{
+  let at=mut.n;
+  lp(let k=0;k<n;k=k+1){
+    if(at==n){
+      let c=str.charat(s;k);
+      if(c==32){}el{
+        if(c==9){}el{
+          if(c==10){}el{
+            if(c==13){}el{ at=k }
+          }
+        }
+      }
+    }el{}
+  };
+  <at
+};
+
+f=valueraw(o:$json;key:str):str{
+  let needle=str.concat(str.concat("\"";key);"\":");
+  let at=str.indexof(o.raw;needle);
+  if(at<0){ <"null" }el{};
+  let from=at+(str.len(needle) as i64);
+  let after=sliceor(o.raw;from;str.len(o.raw) as i64);
+  let alen=str.len(after) as i64;
+  let vs=skipws(after;alen);
+  if(vs>=alen){ <"null" }el{};
+  let rest=sliceor(after;vs;alen);
+  let rlen=str.len(rest) as i64;
+  let c=str.charat(rest;0);
+  if(c==123){
+    let e=spanend(rest;rlen;123;125);
+    if(e<0){ <"null" }el{};
+    <sliceor(rest;0;e)
+  }el{};
+  if(c==91){
+    let e=spanend(rest;rlen;91;93);
+    if(e<0){ <"null" }el{};
+    <sliceor(rest;0;e)
+  }el{};
+  if(c==34){
+    let e=strend(rest;rlen);
+    if(e<0){ <"null" }el{};
+    <sliceor(rest;0;e)
+  }el{};
+  <sliceor(rest;0;bareend(rest;rlen))
+};

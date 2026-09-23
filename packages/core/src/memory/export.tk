@@ -11,6 +11,7 @@ i=fs:std.fs;
 i=str:std.str;
 i=log:shared.log;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=s:core.storage.db;
 i=memtypes:core.memory.types;
 
@@ -58,6 +59,40 @@ f=formatmemorymd(id:str;content:str;tags:str;score:f32;ts:i64):str{
    not a JSON object, so json.getfloat returned 0 and every exported memory carried
    score 0.0 whatever its real weight. The other columns here already used the row
    accessors. The division happens after the module boundary is crossed (T-20). *)
+(* ── JSON escaping, and why not json.enc ─────────────────────────────────────────
+   These seven string fields were escaped with `csvescape`, which DOUBLES a quote:
+   `he said "hi"` became `"he said ""hi"""`, which is correct for CSV and invalid JSON. Every
+   JSON export of a memory whose content held a double quote was unparseable — and an
+   assistant reply is about the likeliest place in this product to find one. `rowtocsv2` below
+   is where csvescape belongs and still uses it; it was used here, presumably, because it was
+   the escaper already in the file.
+
+   `json.enc` is the obvious replacement and does not work here, and I cannot say why.
+   Measured, by swapping it in for exactly these seven fields: three assertions in
+   tests/unit/memory/test_export.tk that had been PASSING went red — the export carried
+   neither the id, nor the content, nor the tags — while `validjson` stayed green, so the
+   output remained well-formed and empty.
+
+   What that is NOT: `json.enc` is correct on an ordinary string, and it is correct on a
+   result-typed one. Probed directly at 0b0bc4e, `json.enc(str.slice("hello";0;5))` — a bare
+   `str!SliceErr` where a `str` is wanted — and the same expression with the result matched and
+   unwrapped both returned the 7 characters `"hello"`. So the first explanation I wrote here,
+   that a stdlib function cannot read a `db.rowstr` result, is **false** and has been removed
+   rather than left to mislead the next reader. The cause is specific to values coming out of
+   `db.rowstr` and is not established.
+
+   Rather than guess at that boundary, `jsonescape` is built from the same `str.replace` the
+   working escaper used. The order is load-bearing: BACKSLASH FIRST, or the backslash inserted
+   while escaping a quote is itself escaped a moment later and `\"` becomes `\\"`. Newlines
+   and tabs are escaped too, which csvescape never did and which memory content needs more
+   often than not — a multi-line drawer produced a raw newline inside a JSON string. *)
+f=jsonescape(s:str):str{
+  (* One definition, in shared.jsonobj — core.mcp.protocol needs the same escaper, and two
+     copies of an escaper is how two outputs come to disagree about what is escaped. *)
+  <jx.escape(s)
+};
+
+
 f=rowtojson(row:$row):str{
   let wing=db.rowstr(row;"wing");
   let hall=db.rowstr(row;"hall");
@@ -67,15 +102,15 @@ f=rowtojson(row:$row):str{
   let tags=db.rowstr(row;"tags");
   let score=(s.rowf64hundredths(row;"score") as f64) / 100.0;
   let ts=db.rowi64(row;"created_at");
-  
+
   let obj="{";
-  let obj=str.concat(obj;str.concat("\"id\":";str.concat(csvescape(db.rowstr(row;"id"));",")));
-  let obj=str.concat(obj;str.concat("\"wing\":";str.concat(csvescape(wing);",")));
-  let obj=str.concat(obj;str.concat("\"hall\":";str.concat(csvescape(hall);",")));
-  let obj=str.concat(obj;str.concat("\"room\":";str.concat(csvescape(room);",")));
-  let obj=str.concat(obj;str.concat("\"role\":";str.concat(csvescape(role);",")));
-  let obj=str.concat(obj;str.concat("\"content\":";str.concat(csvescape(content);",")));
-  let obj=str.concat(obj;str.concat("\"tags\":";str.concat(csvescape(tags);",")));
+  let obj=str.concat(obj;str.concat("\"id\":";str.concat(jsonescape(db.rowstr(row;"id"));",")));
+  let obj=str.concat(obj;str.concat("\"wing\":";str.concat(jsonescape(wing);",")));
+  let obj=str.concat(obj;str.concat("\"hall\":";str.concat(jsonescape(hall);",")));
+  let obj=str.concat(obj;str.concat("\"room\":";str.concat(jsonescape(room);",")));
+  let obj=str.concat(obj;str.concat("\"role\":";str.concat(jsonescape(role);",")));
+  let obj=str.concat(obj;str.concat("\"content\":";str.concat(jsonescape(content);",")));
+  let obj=str.concat(obj;str.concat("\"tags\":";str.concat(jsonescape(tags);",")));
   let obj=str.concat(obj;str.concat("\"score\":";str.concat(str.fromfloat(score);",")));
   let obj=str.concat(obj;str.concat("\"created_at\":";str.concat(str.fromint(ts);"}")));
   <obj

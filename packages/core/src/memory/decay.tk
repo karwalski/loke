@@ -25,20 +25,63 @@ t=$decayconfig{
 
 
 
-f=apply(score:f32;createdat:i64;now:i64;cfg:$decayconfig):f32{
-  
-  (* math.pow2neg takes an INTEGER number of half-lives, so it would truncate:
-     a memory 1.9 half-lives old would decay as if it were 1. math.pow over
-     f64 keeps the fraction, which is what a decay curve needs. *)
+(* ── Decay in integer basis points, and why a DELETE must not read a float ────────
+   `apply` returns a bare f32, and a bare float return is corrupted across a module boundary
+   (T-20, recorded for f64; measured here for f32). Called from another module it returned
+   **2** for a memory created now — the correct answer is 1.0 — and **-inf** for every decayed
+   one, at ages of 30, 60 and 3650 days and starting scores of 0.4, 0.8 and 1.0. The
+   `$decayconfig` struct fields read back perfectly in the same run, which is the signature:
+   parameters and struct fields cross intact, returns do not.
+
+   It was latent, because the only consumer was `sweeprows` in this same module. What made it
+   worth fixing rather than noting is the shape of the failure. `sweeprows` does:
+
+       if(decayed < cfg.prunebelow){ DELETE FROM memory_scores ...; DELETE FROM memory_drawers ... }
+
+   If that comparison ever sees -inf it is TRUE FOR EVERY ROW and the sweep deletes the user's
+   entire memory palace. A destructive comparison should not be one refactor away from that, so
+   the delete path now compares INTEGERS and `applybp` is what a caller in another module gets.
+   `apply` survives for same-module callers and for readability of the curve itself.
+
+   Basis points: 1.0 = 10000, so two decimal places of a score without a float. *)
+f=applybp(scorebp:i64;createdat:i64;now:i64;cfg:$decayconfig):i64{
+  (* math.pow2neg takes an INTEGER number of half-lives, so it would truncate: a memory 1.9
+     half-lives old would decay as if it were 1. math.pow over f64 keeps the fraction, which
+     is what a decay curve needs — and a stdlib f64 return is intact (its wrapper really does
+     bitcast), unlike a loke-module one. *)
   let days=((now - createdat) as f64) / 86400.0;
   let halflives=days / (cfg.halflifedays as f64);
   let decayfactor=math.pow(2.0;0.0 - halflives);
-  let raw=score * decayfactor;
-  
-  if(raw < cfg.minscore){
-    <cfg.minscore
+  let decayedbp=((scorebp as f64) * decayfactor) as i64;
+  let minbp=((cfg.minscore as f64) * 10000.0) as i64;
+  if(decayedbp < minbp){
+    <minbp
   }el{
-    <raw
+    <decayedbp
+  }
+};
+
+(* Same-module callers only — the f32 return is corrupted across a boundary. *)
+f=apply(score:f32;createdat:i64;now:i64;cfg:$decayconfig):f32{
+  <((applybp(((score as f64) * 10000.0) as i64;createdat;now;cfg) as f64) / 10000.0) as f32
+};
+
+(* ── A row whose created_at cannot be read must never be swept ────────────────────
+   `created_at` was written as the literal SQL text `now()` until 2026-09-23 (GA5.1), so
+   `db.rowi64(row;"created_at")` returns **0** for every row this product wrote before that
+   date. A created_at of 0 is 1970, which makes the row maximally aged, which drives the decay
+   factor to zero, which puts it below prunebelow — so the first sweep after the memory tables
+   exist would delete **every pre-existing memory in the palace**, and it would look like the
+   decay policy working correctly.
+
+   A timestamp that is zero, negative, or in the future is not evidence of age; it is evidence
+   that the row's age is unknown. An unknown age must not authorise a delete. Such a row is
+   skipped and counted, so it shows up rather than silently accumulating. *)
+f=agereadable(createdat:i64;now:i64):bool{
+  if(createdat<=0){
+    <false
+  }el{
+    <createdat<=now
   }
 };
 
@@ -49,10 +92,12 @@ f=sweeprows(palace:i64;cfg:$decayconfig;now:i64;rows:@$row):i32{
   lp(let ii42=0;ii42<rows.len;ii42=ii42+1){
     let row:$row=rows.get(ii42);
     let mid=db.rowstr(row;"id");
-    let basescore=((s.rowf64hundredths(row;"score") as f64) / 100.0) as f32;
+    (* Hundredths from the column, basis points for the arithmetic: 1 hundredth = 100 bp. *)
+    let basescorebp=s.rowf64hundredths(row;"score")*100;
     let createdat=db.rowi64(row;"created_at");
-    let decayed=apply(basescore;createdat;now;cfg);
-    if(decayed < cfg.prunebelow){
+    let decayedbp=applybp(basescorebp;createdat;now;cfg);
+    let prunebelowbp=((cfg.prunebelow as f64) * 10000.0) as i64;
+    if(agereadable(createdat;now) & (decayedbp < prunebelowbp)){
       mt db.exec("DELETE FROM memory_scores WHERE id=?";@(mid)) {
         $ok:v void;
         $err:v void

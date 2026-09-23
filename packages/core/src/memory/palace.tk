@@ -20,15 +20,37 @@ t=$palace{
 };
 
 
+(* ── One database, because std.db has one connection ─────────────────────────────
+   This used to open `datadir/memory.db`, a SECOND file, and that is not possible in this
+   toolchain. `std.db` keeps a single global `sqlite3 *g_db`; `db.open` returns something
+   shaped like a handle but `conn_db` resolves only id 0, so a second `db.open` silently
+   REPLACES the first without closing it and every subsequent query — from either subsystem —
+   goes to whichever file was opened last (upstream T-30).
+
+   So opening the memory palace hijacked the process's connection: after it,
+   `audit_log`, `settings` and `sessions` did not exist for any reader, and before it
+   `memory_drawers` did not. Both directions failed silently, because the row accessors map a
+   failed read to `0` or `""`. It was found only when a de-stubbed test began asserting that
+   the memory tables exist in the store it had opened.
+
+   The palace now uses `loke.db`, the same file `core.storage.db.openstore` uses. The `memory_*`
+   tables are namespaced by their prefix and `schema.createtables` is `CREATE TABLE IF NOT
+   EXISTS`, so sharing the file costs nothing. When T-30 is fixed, splitting them again is a
+   two-line change — but it should not be made merely because it becomes possible.
+
+   **A pre-existing `datadir/memory.db` is no longer read.** Anyone who ran a build that wrote
+   drawers into it still has the file; nothing deletes it, and nothing migrates it either. That
+   is M1.7b, and it is a real if narrow data-visibility change rather than a silent one. *)
 f=open(datadir:str):$palace!$lokeerr{
-  let path=str.concat(datadir;"/memory.db");
+  let path=str.concat(datadir;"/loke.db");
   let conn=mt db.open(path) {
     $ok:conn conn;
     $err:e $err($storageerr(str.concat("failed to open memory database: ";path)))
   };
-  mt schema.createtables(conn) {
-    $ok:v true;
-    $err:e $err(e)
+  (* createtables returns a plain bool: its old `i64!$lokeerr` had dead `$err` arms (T-18) and
+     four of its five statements discarded their results, so a failure could not reach here. *)
+  if(schema.createtables(conn)){}el{
+    <$err($storageerr("failed to create the memory palace tables"))
   };
   log.info("memory palace opened";"palace";"system");
   <$ok($palace{conn:conn;datadir:datadir})
