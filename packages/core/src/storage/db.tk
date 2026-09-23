@@ -74,12 +74,45 @@ f=ensuredbkey():str!$lokeerr{
   <$ok(hexkey)
 };
 
-(* GA2.2: apply PRAGMA key to enable SQLCipher encryption after opening *)
-f=applyencryptionkey(conn:$dbconn;hexkey:str):i64!$lokeerr{
-  let pragmasql=str.concat("PRAGMA key='x''";str.concat(hexkey;"''"));
-  <mt db.exec(pragmasql;@()) {
-    $ok:v $ok(v);
-    $err:e $err($storageerr("failed to apply database encryption key via PRAGMA key"))
+(* Database-level encryption is NOT available, and saying so is the deliverable.
+
+   What used to be here was `applyencryptionkey`, issuing a `PRAGMA key`. It was removed
+   under X8.1 rather than repaired, because repairing it would have been worse. It was
+   broken three independent ways:
+
+   1. The toolchain links plain SQLite — `-lsqlite3` in both build_loke.sh and
+      run_tests.sh, and there is no sqlcipher anywhere in it. Plain SQLite **accepts**
+      `PRAGMA key`, ignores it, and reports success.
+   2. The SQL was malformed anyway: it built `PRAGMA key='x''<hex>''`, quotes unbalanced,
+      the string literal never terminated.
+   3. The call site discarded its own result, and the result's error side is a
+      user-declared sum, so T-18 meant the first arm was taken whatever happened. The
+      failure could not have surfaced even if the SQL had been valid.
+
+   So fixing the quoting would have turned a latent honest failure into a control that
+   LOOKS like it works, reports success, and encrypts nothing — indistinguishable from
+   real encryption from inside the program. That is precisely the state GA2.2 was marked
+   Done in, and X8.1 exists to reverse.
+
+   The replacement is a predicate that everything asserting encryption must read, so the
+   disclosure is derived from one place and flips automatically if the toolchain ever
+   gains SQLCipher. `core.governance.compliance` reads it; `docs/metrics-baseline.md`
+   states the same thing in prose.
+
+   The mapping table — the highest-value data in the system, rated Maximum in
+   docs/threat-model.md:181 — is to be protected by FIELD-level encryption via
+   `std.encrypt` (`aes256gcmencrypt`/`decrypt`/`keygen`/`noncegen`, `hkdfsha256`, all
+   verified present in the toolchain) under X8.2. Do not reinstate a database-level
+   claim. *)
+f=dbencryptionavailable():bool{
+  <false
+};
+
+f=dbencryptionstatus():str{
+  if(dbencryptionavailable()){
+    <"database encrypted at rest"
+  }el{
+    <"NOT encrypted at rest: the toolchain links plain SQLite, which has no encryption and silently accepts PRAGMA key. Field-level encryption of the mapping table is tracked as X8.2"
   }
 };
 
@@ -89,14 +122,13 @@ f=openstore(datadir:str):$store!$lokeerr{
     $ok:conn conn;
     $err:e $err($storageerr(str.concat("failed to open database: ";path)))
   };
-  (* GA2.2: enable SQLCipher encryption *)
-  let hexkey=mt ensuredbkey() {
+  (* No encryption step. See dbencryptionavailable() above: there was one, it could not
+     work, and its failure could not surface. ensuredbkey() is still called because the
+     key it manages is real and X8.2 will use it for field-level encryption — but it is
+     no longer fed to a PRAGMA that ignores it. *)
+  mt ensuredbkey() {
     $ok:k k;
-    $err:e $err(e)
-  };
-  mt applyencryptionkey(conn;hexkey) {
-    $ok:v 1;
-    $err:e $err(e)
+    $err:e ""
   };
   <mt runmigrations(conn) {
     $ok:v2 $ok($store{conn:conn;datadir:datadir});

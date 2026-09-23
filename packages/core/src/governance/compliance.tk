@@ -5,6 +5,8 @@ m=core.governance.compliance;
 
 i=time:std.time;
 i=str:std.str;
+i=db:std.db;
+i=s:core.storage.db;
 
 t=$compliancecheck{
   name:str;
@@ -21,51 +23,129 @@ t=$compliancereport{
 
 
 
+(* FAIL dominates WARN dominates PASS; ASSERTED is non-blocking.
+
+   Rewritten from a nested if/else over str.arrayget, which erases the element type. The
+   typed `.get()` over `@$compliancecheck` keeps it. *)
 f=overallstatus(checks:@$compliancecheck):str{
-  let result=mut."PASS";
-  lp(let i=0;i<str.arraylen(checks);i=i+1){ let c=str.arrayget(checks;i);
-    if(str.eq(c.status;"FAIL")){
-      result="FAIL"
-    }el{
-      if(str.eq(c.status;"WARN")){
-        if(str.eq(result;"FAIL")){
-        }el{
-          result="WARN"
-        }
-      }el{}
-    }
+  let anyfail=mut.false;
+  let anywarn=mut.false;
+  lp(let i=0;i<checks.len;i=i+1){
+    let c=checks.get(i);
+    if(str.eq(c.status;"FAIL")){anyfail=true}el{};
+    if(str.eq(c.status;"WARN")){anywarn=true}el{}
   };
-  <result
+  if(anyfail){
+    <"FAIL"
+  }el{
+    if(anywarn){
+      <"WARN"
+    }el{
+      <"PASS"
+    }
+  }
 };
 
+f=countrows(sql:str):i64{
+  (* A plain i64, no result type. T-18 makes the $err arm of a user-declared error union
+     dead, but db.many is a STDLIB result and does discriminate, so the arms here are
+     real. A failed query returns 0, which reads as "no evidence" — the safe direction
+     for a compliance check. *)
+  <mt db.many(sql;@()) {
+    $ok:rows rows.len as i64;
+    $err:e 0
+  }
+};
 
+f=tableexists(name:str):bool{
+  let sql=str.concat("SELECT name FROM sqlite_master WHERE type='table' AND name='";str.concat(name;"'"));
+  <countrows(sql)>0
+};
+
+f=auditrowcount():i64{
+  if(tableexists("audit_log")){
+    <countrows("SELECT id FROM audit_log")
+  }el{
+    <0
+  }
+};
+
+f=checkauditrecording():$compliancecheck{
+  let n=auditrowcount();
+  if(n>0){
+    <$compliancecheck{
+      name:"Audit log enabled";
+      status:"PASS";
+      detail:str.concat("audit_log holds ";str.concat(str.fromint(n);" event(s)"))
+    }
+  }el{
+    <$compliancecheck{
+      name:"Audit log enabled";
+      status:"FAIL";
+      detail:"audit_log is EMPTY. core.storage.audit.logevent has no callers, so no request has ever been recorded (GA1.4). This was previously reported as PASS"
+    }
+  }
+};
+
+f=checkaudittrailcomplete():$compliancecheck{
+  let n=auditrowcount();
+  if(n>0){
+    (* Non-empty is necessary and not sufficient: completeness means the hash chain is
+       unbroken, and the verifier for that is GA5.3 and does not exist yet. So this says
+       what it knows and names what it cannot yet check, rather than claiming both. *)
+    <$compliancecheck{
+      name:"Audit trail complete";
+      status:"WARN";
+      detail:str.concat(str.concat("audit_log holds ";str.fromint(n));" event(s), but chain integrity is unverified — the verifier is GA5.3")
+    }
+  }el{
+    <$compliancecheck{
+      name:"Audit trail complete";
+      status:"FAIL";
+      detail:"audit_log is EMPTY, so there is no trail to be complete (GA1.4). This was previously reported as PASS"
+    }
+  }
+};
+
+f=checkencryptionatrest():$compliancecheck{
+  (* Derived from the one predicate that knows, so this row cannot drift from reality and
+     flips on its own if the toolchain ever gains SQLCipher. *)
+  if(s.dbencryptionavailable()){
+    <$compliancecheck{name:"Encryption at rest";status:"PASS";detail:s.dbencryptionstatus()}
+  }el{
+    <$compliancecheck{name:"Encryption at rest";status:"WARN";detail:s.dbencryptionstatus()}
+  }
+};
+
+f=checkconsentrecorded():$compliancecheck{
+  if(tableexists("consent_records")){
+    let n=countrows("SELECT id FROM consent_records");
+    if(n>0){
+      <$compliancecheck{name:"User consent recorded";status:"PASS";detail:str.concat("consent_records holds ";str.concat(str.fromint(n);" record(s)"))}
+    }el{
+      <$compliancecheck{name:"User consent recorded";status:"WARN";detail:"consent_records exists but is empty"}
+    }
+  }el{
+    <$compliancecheck{name:"User consent recorded";status:"WARN";detail:"Consent capture not yet implemented — no consent_records table"}
+  }
+};
+
+f=asserted(name:str;detail:str):$compliancecheck{
+  <$compliancecheck{name:name;status:"ASSERTED";detail:detail}
+};
 
 f=rungdprchecks(store:i64):$compliancereport{
   let checks=@(
-    $compliancecheck{
-      name:"Audit log enabled";
-      status:"PASS";
-      detail:"Audit log is active and recording all requests"
-    };
-    $compliancecheck{
-      name:"PII anonymised before cloud";
-      status:"PASS";
-      detail:"Privacy filter strips PII before any outbound request"
-    };
-    $compliancecheck{
-      name:"Data minimisation active";
-      status:"PASS";
-      detail:"TOON compression reduces token payload before transmission"
-    };
-    $compliancecheck{
-      name:"User consent recorded";
-      status:"WARN";
-      detail:"Consent capture not yet implemented"
-    };
+    checkauditrecording();
+    asserted("PII anonymised before cloud";
+      "Held by the pipeline's fail-closed gate, not by stored state: core.privacy.pipeline.issafetoforward refuses the request when no detection layer completed, asserted in tests/unit/privacy/test_fail_closed.tk (NC1.9)");
+    asserted("Data minimisation active";
+      "core.optimiser.toon reduces the payload, but it is NOT yet called from any request path (GA1.5), so this is an available capability rather than an active control");
+    checkconsentrecorded();
     $compliancecheck{
       name:"Right to erasure supported";
       status:"WARN";
-      detail:"Data deletion workflow not yet implemented"
+      detail:"Deletion drops rows; verifiable deletion that proves the bytes are gone is X8.4"
     }
   );
   let overall=overallstatus(checks);
@@ -81,25 +161,14 @@ f=rungdprchecks(store:i64):$compliancereport{
 
 f=runhipaachecks(store:i64):$compliancereport{
   let checks=@(
-    $compliancecheck{
-      name:"PHI detection active";
-      status:"PASS";
-      detail:"Privacy filter detects and redacts PHI in all requests"
-    };
-    $compliancecheck{
-      name:"Audit trail complete";
-      status:"PASS";
-      detail:"All requests are recorded in the audit log with full metadata"
-    };
-    $compliancecheck{
-      name:"Encryption at rest";
-      status:"WARN";
-      detail:"SQLCipher integration pending — database not yet encrypted at rest"
-    };
+    asserted("PHI detection active";
+      "Held by the detection layers and their corpus, not by stored state. The measured figure is in docs/metrics-baseline.md and is regex-layer-only; the recall floor on the full pipeline is AD1.2 and is not yet measured");
+    checkaudittrailcomplete();
+    checkencryptionatrest();
     $compliancecheck{
       name:"Access controls";
       status:"WARN";
-      detail:"Multi-user access controls not yet implemented"
+      detail:"Single-user local install; multi-user access controls not implemented"
     }
   );
   let overall=overallstatus(checks);

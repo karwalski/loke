@@ -78,19 +78,35 @@ fixed value — E5–E9, F1, F2, G2, K2–K4.
 
 Two findings dominate the rest.
 
-**The browser's live request path does not use the privacy pipeline (A13).** The route registered for
-`/api/pipeline` calls the sidecar over HTTP and, when the sidecar does not answer, falls through to
-five literal column-name checks that increment a counter without altering the text — and then posts
-that unaltered text to the provider while reporting an entity count and a sensitivity label. None of
-the nine capabilities claimed for that path at `docs/features-loke.md:52` is present on it. This is the
-one finding with a live disclosure consequence rather than an evidence consequence, and it invalidates
-the unqualified form of A11 and K6.
+**The browser's live request path did not use the privacy pipeline (A13). Fixed 2026-09-22 — but read
+the rest of this entry before treating the path as claimed.** The route registered for `/api/pipeline`
+called the sidecar over HTTP and, when the sidecar did not answer, fell through to five literal
+column-name checks that incremented a counter without altering the text — then posted that unaltered
+text to the provider while reporting an entity count and a sensitivity label. It now routes through
+`core.privacy.pipeline.runforward`, forwards only `res.anonymised`, refuses with 503 when no detection
+layer completed, and treats an unreadable kill switch as engaged. That is asserted in
+`tests/unit/privacy/test_fail_closed.tk` rather than argued (NC1.9, commit `027e383`).
 
-**The audit trail is never written (E4).** `core.storage.audit::logevent` has no callers anywhere in
-the tree, and nothing else inserts into `audit_log`. The claim that the ledger is "wired into every
-browser and CLI request path" is `absent`, not merely "not tamper-evident". Every downstream claim —
-report generation, compliance evidence, the governance dashboard's request log, the scorecard — rests
-on a table that stays empty. See [E. Governance, audit and compliance](#e-governance-audit-and-compliance).
+**What is still absent on that path**, so A11 and K6 stay qualified: of the nine capabilities claimed
+at `docs/features-loke.md:52`, the path now has detection, anonymisation, the kill switch and the
+fail-closed refusal. It does **not** have response restoration (GA1.2 — and it cannot yet, because
+`regex.rundetection` builds a placeholder map and the `$piidetectionresult` it returns has no field to
+carry it, so there is no map to restore from), audit logging (GA1.4), policy evaluation (GA1.8), token
+optimisation (GA1.5), the semantic cache (GA1.6), or intelligent routing (GA1.7 — the provider is
+chosen by `str.len(anthropickey)>20`). So the disclosure consequence is closed and the capability
+claim is not.
+
+**The audit trail is never written (E4). Still true.** `core.storage.audit::logevent` has no callers
+anywhere in the tree, and nothing else inserts into `audit_log`. The claim that the ledger is "wired
+into every browser and CLI request path" is `absent`, not merely "not tamper-evident". Two things did
+change in 2026-09-23 and neither closes it: `logevent` **works** now (it segfaulted on a reversed
+`str.join`, so it could not have written a row even if called — T-23), and its digest is a real hash
+chain over the previous hash plus all fourteen fields with a real timestamp (GA5.1, GA5.2). So the
+table is now correct and empty rather than incorrect and empty. Every downstream claim — report
+generation, compliance evidence, the governance dashboard's request log, the scorecard — still rests on
+it. `core.governance.compliance` no longer pretends otherwise: it queries the row count and reports
+**FAIL** where it used to report PASS. See
+[E. Governance, audit and compliance](#e-governance-audit-and-compliance).
 
 ---
 
@@ -110,7 +126,7 @@ on a table that stays empty. See [E. Governance, audit and compliance](#e-govern
 | A10 | "Database encryption … Database encryption is **not** currently active" | `README.md:125-129`, `docs/features-loke.md:101-107` | `absent` | `packages/core/src/storage/db.tk:37-43` issues `PRAGMA key`; the toolchain links plain SQLite, which ignores it and returns success | `packages/core/src/governance/compliance.tk:91-95` already reports this honestly. X8 | Already stated accurately in both documents and in [metrics-baseline.md](metrics-baseline.md). The database is plaintext on disk |
 | A11 | "Every code path in this repository that sends a prompt to an external provider routes it through the filter first" | `README.md:114-117`, `docs/architecture.md:214-219` | `absent` | `packages/core/src/privacy/pipeline.tk` is imported by the CLI proxy, the MCP broker, the MCP server, the agent executor and the response scanner — **not by the browser's live request path**. See A13 | `tests/integration/test_privacy_pipeline_e2e.tk` exercises the core pipeline in isolation, not the browser route. AD1.6 | Already qualified in both files as a review-enforced invariant rather than a host property — but the invariant **does not currently hold**. The browser `/api/pipeline` route sends the user's text onward without invoking the filter whenever the sidecar is unavailable (A13) |
 | A12 | Sensitivity escalation "PUBLIC → INTERNAL → CONFIDENTIAL → RESTRICTED" | `docs/features-loke.md:52` | `verified` | `packages/core/src/privacy/regex.tk:35` (`ishighersensitivity`), `packages/core/src/privacy/pipeline.tk` | `tests/integration/test_privacy_pipeline_e2e.tk` | Verified in the core pipeline. The browser route computes its own two-threshold approximation instead (A13) |
-| A13 | "The browser handler now calls the core privacy pipeline directly (GA1.1-GA1.8 completed) — all browser traffic flows through the full detection stack, response restoration, kill switch check, audit logging, token optimisation, semantic cache, intelligent routing, and governance policy evaluation" | `docs/features-loke.md:52`; implied by `README.md:225`, `docs/architecture.md:96-133` | `partial` | At **HEAD**, `packages/browser/pages/api/pipeline.tk` imports thirteen modules including `core.privacy.pipeline`, `core.privacy.placeholder`, `core.governance.killswitch`, `core.storage.audit` and `core.governance.policy`, and calls `pipe.run()` (`:125`), `ph.restore()` (`:195`), `ks.isengaged()` (`:116`), `policy.evaluate()` (`:138`) and `audit.logevent()` (`:217`). Five of the nine clauses hold. **Four do not:** there is no call to any optimiser, no semantic-cache lookup, and no `selector.select()` — the provider is chosen by an if/else on whether an Anthropic key is longer than twenty characters (`:152-159`) | `tests/unit/browser/test_pipeline_handler.tk` imports the handler but asserts on its JSON shape, not on whether anonymisation occurred. GA1.5, GA1.6 and GA1.7 need reopening; NC1.3, AD1.6, X8.6 | **Corrected 2026-09-19.** This row previously read `absent` and described a four-import handler that posted raw text. That described the **uncommitted working-tree copy** of `pipeline.tk`, not the repository: the earlier audit read the working tree as if it were the committed state. At HEAD the wiring is real but incomplete. Two things follow. First, the working-tree copy is a **regression that strips all nine core imports** and must not be committed (F10.13, X8.5). Second, the fail-open is a **core** defect rather than a browser one: `packages/core/src/privacy/pipeline.tk:568-582` initialises `anonymisedtext` to the raw input and reassigns it from `anonymisetext(text; deduped)`, so when both detection layers are unreachable — logged as degraded mode at `:392`, `:523`, `:540` and not failed — `deduped` is empty and the raw text is what gets sent (NC1.9) |
+| A13 | "The browser handler now calls the core privacy pipeline directly (GA1.1-GA1.8 completed) — all browser traffic flows through the full detection stack, response restoration, kill switch check, audit logging, token optimisation, semantic cache, intelligent routing, and governance policy evaluation" | `docs/features-loke.md:52`; implied by `README.md:225`, `docs/architecture.md:96-133` | `partial` | **Corrected again 2026-09-23.** The evidence below described commit `2b8942e`, where the wiring was real — `ph.newmap()` `:85`, `ph.addentry()` `:93`, `ks.isengaged()` `:116`, `policy.classifyrisk()`/`evaluate()` `:137-138`, `ph.restore()` `:195`, `audit.logevent()` `:217`, in a 240-line file. **That file is now 134 lines and none of those six calls survives.** `09b0a67`, a mechanical `tplrenderfile` sweep, cut it to 79 lines (net -161) keeping the imports and deleting every call; its message does not mention the file and it was the only one of 24 to shrink. NC1.9 then rebuilt the detection half on top of the stripped version. So at HEAD the path has detection, anonymisation, the kill switch and a fail-closed 503 — and does **not** have restoration, audit, policy, optimisation, cache or routing | `tests/unit/privacy/test_fail_closed.tk` asserts the fail-closed property for real (NC1.9). `tests/unit/browser/test_pipeline_handler.tk` still asserts only on JSON shape. GA1.2, GA1.4, GA1.8 reopened as **destroyed, not unwritten** — recover from `2b8942e` per **GA1.10**. GA1.5/1.6/1.7 remain unwritten; X4.6 covers the gate gap that let the deletion through | **Corrected 2026-09-19.** This row previously read `absent` and described a four-import handler that posted raw text. That described the **uncommitted working-tree copy** of `pipeline.tk`, not the repository: the earlier audit read the working tree as if it were the committed state. At HEAD the wiring is real but incomplete. Two things follow. First, the working-tree copy is a **regression that strips all nine core imports** and must not be committed (F10.13, X8.5). Second, the fail-open is a **core** defect rather than a browser one: `packages/core/src/privacy/pipeline.tk:568-582` initialises `anonymisedtext` to the raw input and reassigns it from `anonymisetext(text; deduped)`, so when both detection layers are unreachable — logged as degraded mode at `:392`, `:523`, `:540` and not failed — `deduped` is empty and the raw text is what gets sent (NC1.9) |
 
 ## B. Multi-layer composition — epic F3b
 
