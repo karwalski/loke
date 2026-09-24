@@ -1664,6 +1664,41 @@ by `scripts/find_multistatement_exec.py`, which resolves literals, `str.concat` 
 `let` bindings, same-file helpers, pass-through wrappers and `sql:` field initialisers. The
 guard exists because the work-around lives in one file and the hazard does not.
 
+## T-41 — interpolating a `std.str` result prints the string's ADDRESS for fifteen functions
+
+**Severity: wrong output, silently. This one reached the privacy pipeline's own summary line.**
+
+Measured 2026-09-24 against `fedd48d`, the commit loke's figures are labelled with. I re-ran
+it on main `444a55c` and got the same result:
+
+    io.println("[\(str.fromi64(5))]")      -> [4349761984]
+    io.println("[\(str.randhex(4))]")      -> [4335262192]
+    io.println("[\(str.tolower("A"))]")    -> [a]
+
+Interpolation formats a value by its declared type. `std.str` declares its functions in a
+`gen:"abi"` block, many of them with return type `i64` (T-36). The functions that really
+return a string are therefore formatted as integers, and the integer is the pointer. A
+binding inherits the declared type, so `let s=str.fromi64(5); "\(s)"` fails the same way.
+`let s:str=str.fromi64(5)` retypes the binding and prints `5`. `str.concat` takes its
+arguments as strings and is also correct.
+
+The affected set cannot be read off the interface. `tolower`, `toupper` and `substr` sit in
+the same block with the same declared return, and interpolate correctly. I probed each
+string-producing name one call at a time. These fifteen print an address: `fromi64`,
+`fromint64`, `fromi32`, `fromu32`, `fromu16`, `frombool`, `randhex`, `nowiso8601`, `padleft`,
+`padright`, `sha256prefix`, `trimws`, `strip`, `reverse`, `replaceall`.
+
+This is the T-21 family. T-21 was one function, `std.homedir()`, whose interpolated result is
+truncated. The ask is the same as T-36: declare these functions with the type they return. Any
+interpolation of an `i64` that is really a handle would then be reported rather than formatted.
+
+**What it cost in loke.** `core.privacy.pipeline.summariserun`, the one line that tells a
+person what the pipeline did, printed "4378090592 entities detected (4378090624 RESTRICTED,
+...)". Its test asserted only that the words were present, so it passed. moke's project
+ids were `p-` followed by an address. **Worked around** by annotating the binding or using
+`str.concat`. **Guarded** by `scripts/find_interp_abi_str.py`, in the quality gate. The guard
+flags direct interpolation and unannotated bindings for the fifteen measured names.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

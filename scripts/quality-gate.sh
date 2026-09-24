@@ -251,6 +251,12 @@ step_checks() {
            failed=1; }
   fi
 
+  if [[ -f ./scripts/find_interp_abi_str.py ]]; then
+    echo "  no std.str result interpolated as an address"
+    python3 ./scripts/find_interp_abi_str.py --check packages tests >/dev/null \
+      || { python3 ./scripts/find_interp_abi_str.py packages tests >&2; failed=1; }
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1

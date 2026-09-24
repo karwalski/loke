@@ -538,6 +538,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | X4.9 | S | **Done** | **A stale test binary in `/tmp/loke-tests` produces phantom failures, twice in one session** — `scripts/run_tests.sh` rebuilds `libloke.a` when any object is newer than the archive, but it does **not** compare each per-test binary against its source or the archive. So a suite run that overlaps an edit leaves `/tmp/loke-tests/<name>` built against a half-written tree, and every later run re-uses it. Observed twice on 2026-09-24, both times as a test failing in a full run while passing in isolation and on a fresh database — `test_pipeline_api` once, `test_kill_switch` once — and both times cleared by `rm -rf /tmp/loke-tests` with no source change. That is the worst shape a build-cache bug can take here, because the obvious reading is an order-dependent product defect and the session spent real time chasing one. Two candidate fixes: stat each test binary against its `.tk` and the archives and rebuild when older (cheap, and matches what the archive step already does), or make `BUILDDIR` default to a per-run directory now that it is overridable. Prefer the first — a per-run directory throws away the caching the script exists to provide. Until then, `rm -rf /tmp/loke-tests` before trusting a surprising failure. **Done 2026-09-24.** `scripts/run_tests.sh` refuses to run when a `.tk` source is newer than the newest object in the directory the tests link against, naming the object, up to three newer sources, and the build command to run. It had already produced a false product defect **three times** — `test_pipeline_api`, `test_kill_switch`, and `test_pipeline_api` again while GA5.10 was being verified — each time costing a careful reading of a module that was not wrong. Once in the other direction too: a test passed against stale objects after its subject had changed. The existing freshness check compared the ARCHIVE against the OBJECTS, which is the wrong end of the chain; nothing compared the objects against the source. It **refuses rather than rebuilding** deliberately — rebuilding would make this script a second build system with its own opinion about module order and which trees exist, and when that opinion drifts from `build_loke.sh` the symptom is an unplaceable linker error. Proved by touching a source and observing exit 2 with the file named. Separately: **never run two suites concurrently** — both share `/tmp/loke-tests`, and doing so produced a run reporting 290 of 290, each test counted twice. |
 | X4.10 | S | **Done** — 2026-09-24 | **Every ratchet baseline was gitignored, so no ratchet could fail outside this working copy** — found while adding the lint ratchet, which would have inherited the same defect. `build_census.py` wrote its floor to `build/trees/<tree>/census-baseline.json`, and `build/` is gitignored (`.gitignore:7`). So the baselines were **never committed**: on a fresh clone, and therefore in CI, there was no floor at all, `--check` had nothing to compare against, and the per-tree ratchet F10.23b exists to provide was inert everywhere except the machine that recorded it. That is the **fifth** check in this repository found unable to fail for a reason of this kind, after `ci.yml`'s `grep … \|\| echo` licence check, `verify_held_changes.py` reporting rather than enforcing, `find_sql_literal_now.py`'s length-deleting comment stripper, and the `--emit-llvm` flag whose absence made 146 of 179 interfaces silently missing. Fixed by moving every floor to a committed `baselines/` directory — `census-<tree>.json` and `lint.json` — with a README that states the rule the files exist to enforce: **re-record a baseline only downwards**, because moving the floor up to make a run green is the one use of them that defeats their purpose. Verified: the census still reads its floor (`baseline 0 -> now 0`), and the lint ratchet fires on a forced regression (baseline lowered by 50 → exit 1). |
 | X4.11 | S | **Done** — 2026-09-24 | **T-27 was documented for weeks with nothing detecting it, and it cost two build cycles in ten minutes** — comments NEST in toke, so one stray open-paren-star inside a comment opens another level and a single close closes only one: the rest of the file is swallowed. The module still **type-checks**, because the swallowed text simply is not there; what is lost is every declaration after the comment, and it surfaces somewhere else entirely as `module X has no exported member Y`. Both failures were mine, on 2026-09-24, and the second is the instructive one. (1) A comment added to `core/storage/db.tk` contained a SQL aggregate written with a star: `db.tk` checked clean, its interface silently lost every export after that comment, and **fourteen call sites across six modules** failed — none of them near the cause. (2) The paragraph written to explain (1) contained the sequence **twice**, in prose, while describing it. `scripts/find_nested_comment_open.py` is now in the gate over `packages` and `src`. It reports a file that ENDS at comment depth greater than zero, which is exact rather than heuristic — a source file whose comment never closes is wrong in every circumstance, so there is no allowlist and no judgement. Its first version flagged nested depth alone and produced **three false positives**, all comments written earlier the same day that quote defective code which itself contains a comment: balanced nesting is legal, harmless, and must not be flagged. Verified both ways — clean across 454 files, exit 1 on a reintroduced hazard. |
+| X4.12 | S | **Done** — 2026-09-24 | **Interpolating a `std.str` result printed a pointer, and the privacy pipeline's summary did it three times** — Found 2026-09-24 while clearing a lint ratchet. Interpolating `str.fromi64(n)` renders the string's address, because `std.str` declares the function's return as `i64` (T-41 upstream, T-36 family). Measured one name at a time: 15 functions are affected, and `tolower`/`toupper`/`substr` are not, so the set cannot be derived from the interface. **Two live sites.** `core.privacy.pipeline.summariserun` printed addresses for the total, RESTRICTED, CONFIDENTIAL and stage counts. Its test checked only for the words, so it passed. `moke.workspace.newproject` gave every project the id `p-<address>`. Both are fixed: the bindings are annotated `:str` in one and `str.concat` is used in the other. Two assertions now pin the counts in `test_pipeline_orchestrator.tk`, and both FAILED against the unfixed module before they were trusted. `scripts/find_interp_abi_str.py` is wired into `quality-gate.sh --step checks`. It flags direct interpolation and unannotated bindings of the 15 names, and reports 0 sites across `packages` and `tests` |
 
 ## Epic X4a: Module-Aware API Handler Compilation
 
@@ -1052,7 +1053,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 15 | 12 | — | — | — | — | — | — | 3 |
-| CROSS-CUTTING | 9 | 82 | 80 | — | — | — | — | — | — | 2 |
+| CROSS-CUTTING | 9 | 83 | 81 | — | — | — | — | — | — | 2 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 25 | 6 | 12 | 22 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
@@ -1061,7 +1062,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 41 | 37 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
 | VERIFICATION PROGRAMME | 14 | 121 | 66 | 12 | — | 6 | 3 | — | — | 34 |
-| **Total** | **88** | **675** | **504** | **27** | **17** | **28** | **3** | **1** | — | **95** |
+| **Total** | **88** | **676** | **505** | **27** | **17** | **28** | **3** | **1** | — | **95** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1099,7 +1100,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | X1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X2 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | X3 | 1 | 6 | 6 | — | — | — | — | — | — | — |
-| X4 | 1 | 11 | 9 | — | — | — | — | — | — | 2 |
+| X4 | 1 | 12 | 10 | — | — | — | — | — | — | 2 |
 | X4a | 1 | 21 | 21 | — | — | — | — | — | — | — |
 | X4b | 1 | 18 | 18 | — | — | — | — | — | — | — |
 | X4c | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1155,9 +1156,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 24 | 17 | 4 | — | — | — | — | — | 3 |
 | RV1 | 1 | 10 | 3 | — | — | — | — | — | — | 7 |
-| **Total** | **88** | **675** | **504** | **27** | **17** | **28** | **3** | **1** | — | **95** |
+| **Total** | **88** | **676** | **505** | **27** | **17** | **28** | **3** | **1** | — | **95** |
 
-Rows parsed: **675**, across **88** epics and **16** level-1 headings.
+Rows parsed: **676**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
