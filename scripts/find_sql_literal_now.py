@@ -27,7 +27,7 @@ The two correct forms, both already in the tree:
 `str.fromint`, not `str.fromi64`, which this docstring recommended until LS1.1s. `fromi64` is
 declared `(i64)->i64` (T-36): its result interpolates as an address (T-41), and a
 `let s:str=str.fromi64(...)` binding used as an array element is dropped from the literal
-(T-42), so the bound timestamp becomes NULL. `fromint` is declared to return `str`.
+(T-46), so the bound timestamp becomes NULL. `fromint` is declared to return `str`.
 
 What it flags
 -------------

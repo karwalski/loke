@@ -18,7 +18,7 @@ were measured:
     let s:str=str.fromi64(5); "\\(s)"          -> 5     (the annotation retypes it)
     str.concat("n=";str.fromi64(5))           -> n=5   (concat takes it as a string)
 
-BUT THE ANNOTATION IS NOT SAFE EITHER (LS1.1s, measured 2026-09-24 at `fedd48d`, T-42). A
+BUT THE ANNOTATION IS NOT SAFE EITHER (LS1.1s, measured 2026-09-24 at `fedd48d`, T-46). A
 `let s:str=` binding of one of these names, written as an ELEMENT of an array literal, is
 compiled as a SPREAD of `s`: the literal reads a length header off the string and copies
 that many words. For `fromi64` the length reads 0, so the element silently disappears —
@@ -106,7 +106,7 @@ def scan(raw: str) -> list[tuple[int, str]]:
                 hits.append((line(pos), f"\\({name}) where {name} is an unannotated "
                                         f"str.{fn} result (line {line(m.start())}) — prints an ADDRESS, "
                                         f"not the string"))
-    # LS1.1s / T-42: an ANNOTATED binding of an affected name, used as an array-literal
+    # LS1.1s / T-46: an ANNOTATED binding of an affected name, used as an array-literal
     # element, is compiled as a spread of it and dropped (or crashes).
     annotated = re.compile(r"\blet\s+(\w+)\s*:\s*str\s*=\s*(?:mut\.)?(?:" + alias + r")\.("
                            + NAMES + r")\(")
@@ -124,7 +124,7 @@ def scan(raw: str) -> list[tuple[int, str]]:
             if name in [e.strip() for e in u.group(1).split(";")]:
                 hits.append((line(pos), f"{name} is a `let {name}:str=str.{fn}(...)` binding "
                                         f"used as an ARRAY ELEMENT (line {line(m.start())}) — "
-                                        f"compiled as a spread, so it is dropped (T-42)"))
+                                        f"compiled as a spread, so it is dropped (T-46)"))
     return sorted(hits)
 
 
@@ -153,7 +153,7 @@ def main() -> int:
         return 0
     print(f"\n{total} site(s). Use a function declared to return str: `str.fromint(n)` for a "
           f"number, `str.concat(\"\";...)` otherwise. Annotating the binding fixes interpolation "
-          f"but not an array element (T-42).",
+          f"but not an array element (T-46).",
           file=sys.stderr)
     return 1 if args.check else 0
 

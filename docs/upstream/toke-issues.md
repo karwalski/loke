@@ -1681,7 +1681,7 @@ return a string are therefore formatted as integers, and the integer is the poin
 binding inherits the declared type, so `let s=str.fromi64(5); "\(s)"` fails the same way.
 `let s:str=str.fromi64(5)` retypes the binding and prints `5`. `str.concat` takes its
 arguments as strings and is also correct.
-**But see T-42:** the annotated binding is then dropped from any array literal it is
+**But see T-46:** the annotated binding is then dropped from any array literal it is
 written into, so it is not a safe workaround. Use `str.fromint` or `str.concat`.
 
 The affected set cannot be read off the interface. `tolower`, `toupper` and `substr` sit in
@@ -1701,7 +1701,7 @@ ids were `p-` followed by an address. **Worked around** by annotating the bindin
 `str.concat`. **Guarded** by `scripts/find_interp_abi_str.py`, in the quality gate. The guard
 flags direct interpolation and unannotated bindings for the fifteen measured names.
 
-## T-42 — an annotated `let s:str=` binding of a T-41 function, used as an array element, is compiled as a spread
+## T-46 — an annotated `let s:str=` binding of a T-41 function, used as an array element, is compiled as a spread
 
 **Severity: a value silently disappears from an array; for some functions, SIGBUS.**
 
