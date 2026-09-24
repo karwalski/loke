@@ -1,0 +1,123 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testmetricsdispatch;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sdb:core.storage.db;
+i=h:page.api.pipeline;
+
+(* DA1.3 - every dispatch writes exactly one metrics_raw row.
+
+   Drives the route's own two dispatch ends, `completed` (a provider answered) and
+   `providerfailed` (a provider was called and did not), and counts rows by request id.
+   `post` itself is unreachable from a test (T-16), and `forward` would reach a real
+   provider - it reads the real settings.json - so the two ends are called directly with
+   a routing decision built here. That is not a stub: both are the page module's own
+   functions, and removing the recordmetric call from either fails this file.
+
+   Before DA1.3 nothing called core.metrics.collector at all, so both counts below were 0. *)
+
+f=teststore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-metrics-dispatch");
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=resetstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-metrics-dispatch");
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <0
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=rows(rid:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM metrics_raw WHERE request_id=?";@(rid);"n";0-1)
+};
+
+f=coli64(rid:str;col:str):i64{
+  <sdb.scalari64(str.concat("SELECT ";str.concat(col;" AS v FROM metrics_raw WHERE request_id=?"));@(rid);"v";0-1)
+};
+
+f=firststr(rs:@$row;col:str):str{
+  if(rs.len==0){ <"" }el{ <db.rowstr(rs.get(0);col) }
+};
+
+f=colstr(rid:str;col:str):str{
+  <mt db.many(str.concat("SELECT ";str.concat(col;" AS v FROM metrics_raw WHERE request_id=?"));@(rid)) {
+    $ok:rs firststr(rs;"v");
+    $err:e ""
+  }
+};
+
+f=localroute():$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:"qwen2.5:3b";
+      provider:$provider{$ollama:0};
+      contextwindow:32768 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"test";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=main():i64{
+  resetstore();
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=teststore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  (* One request that a provider answered. *)
+  let run=pipe.runforward("Please email john.smith@example.com about the invoice.";"";localonly());
+  let decision=h.decide(run);
+  let rid=run.requestid;
+  if(t.assert(rows(rid)==0;"no metrics row exists for the request before it is dispatched")){pass=pass+1}el{fail=fail+1};
+  let startms=str.nowunix();
+  let resp=h.completed(store;run;localroute();"Done.";12;7;h.privacyfields(run);startms;decision);
+  if(t.assert(resp>0;"completed returns a response")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows(rid)==1;"after one answered dispatch, exactly one metrics row exists")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"model_id");"qwen2.5:3b";"the row names the model the router chose")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"provider_id");"ollama";"the row names the provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"pii_found")==run.totalentities as i64;"pii_found is the pipeline's entity count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"pii_found")>0;"and that count is not zero for a prompt carrying an email")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"pii_blocked")==run.totalentities as i64;"every detected entity was replaced before dispatch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"routed_local")==1;"an ollama dispatch is recorded as local")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"tokens_before")==19;"the provider-reported tokens are recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"tokens_saved")==0;"no saving is invented: nothing on this path optimises")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid;"timestamp")>1700000000;"the row carries a real unix timestamp")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(colstr(rid;"savings_by_stage");"john.smith");"the row carries no entity value")){pass=pass+1}el{fail=fail+1};
+
+  (* One request whose provider failed. The bytes left, so it is still a dispatch. *)
+  let run2=pipe.runforward("Call 0412 345 678 tomorrow.";"";localonly());
+  let rid2=run2.requestid;
+  if(t.assert(!str.eq(rid;rid2);"the two runs have distinct request ids")){pass=pass+1}el{fail=fail+1};
+  h.providerfailed(store;run2;"anthropic";"claude-test";str.nowunix();h.decide(run2));
+  if(t.assert(rows(rid2)==1;"after one failed dispatch, exactly one metrics row exists")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid2;"provider_id");"anthropic";"the failed row names the provider it was sent to")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(coli64(rid2;"routed_local")==0;"a cloud dispatch is not recorded as local")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows(rid)==1;"the first request still has exactly one row")){pass=pass+1}el{fail=fail+1};
+
+  resetstore();
+  <fail
+};

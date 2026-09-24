@@ -24,6 +24,7 @@ i=inf:core.models.infer;
 i=pt:core.providers.types;
 i=kc:core.storage.keychain;
 i=org:shared.origin;
+i=mc:core.metrics.collector;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -242,6 +243,57 @@ f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;
 };
 
 
+(* DA1.3 - one metrics_raw row per dispatch, written by core.metrics.collector.
+
+   Called from exactly two places, `completed` and `providerfailed`, which are the two ends a
+   request handed to a provider can reach. A cache hit, a budget stop, a policy deny and a
+   refused route are NOT dispatches - nothing left the process - so they write no row, as the
+   disclosure-accounting spec requires (§2.1, C7). A failed dispatch writes one, because the
+   bytes left whether or not an answer came back.
+
+   What the row carries is what this endpoint actually knows: the request id, the model and
+   provider the router chose, whether that provider is local, the provider-reported token
+   counts (0 on a failure), the router's cost for them, and the entity count - every entity
+   the pipeline detected was replaced by a placeholder before dispatch, so found and blocked
+   are the same number here. tokens_saved and cost_saved are 0 because nothing on this path
+   optimises the prompt; writing an estimate there would publish a saving nobody measured.
+   It never carries a value: no prompt, no response, no entity. *)
+f=metricevent(run:$pipelinerun;provider:str;modelid:str;routedlocal:bool;tin:i64;tout:i64;cost:f64):$metricevent{
+  let ts:str=str.fromint(str.nowunix());
+  let n=run.totalentities as i64;
+  <$metricevent{
+    requestid:run.requestid;
+    timestamp:ts;
+    tokensbefore:tin+tout;
+    tokensafter:tin+tout;
+    tokenssaved:0;
+    costbeforeusd:cost;
+    costafterusd:cost;
+    costsavedusd:0.0;
+    piientitiesfound:n;
+    piientitiesblocked:n;
+    routedlocal:routedlocal;
+    cachehit:false;
+    modelid:modelid;
+    providerid:provider;
+    savingsbystage:""
+  }
+};
+
+f=islocalprovider(provider:str):bool{
+  if(str.eq(provider;"ollama")){ <true }el{};
+  <str.eq(provider;"local")
+};
+
+f=recordmetric(run:$pipelinerun;provider:str;modelid:str;tin:i64;tout:i64;cost:f64):bool{
+  let ok=mc.insert(metricevent(run;provider;modelid;islocalprovider(provider);tin;tout;cost));
+  if(ok){}el{
+    log.warn("metrics row was not written for this dispatch";"api.pipeline";run.requestid)
+  };
+  <ok
+};
+
+
 (* GA1.2 — restoration. The user sees their own words back, not [PERSON_a3f1_1].
 
    The map is derived from the deduped entity list the pipeline already carries, via
@@ -259,6 +311,7 @@ f=restoretext(run:$pipelinerun;text:str):str{
 f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
   let elapsed=str.nowunix()-startms;
   recordevent(store;run;"llm_request_failed";provider;modelid;0;0;elapsed;decision);
+  recordmetric(run;provider;modelid;0;0;0.0);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
 };
 
@@ -559,6 +612,7 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
   };
 
   let logged=recordevent(store;run;"llm_request";provstr;spec.id;tin;tout;elapsed;decision);
+  recordmetric(run;provstr;spec.id;tin;tout;requestcost(spec;tin;tout));
   if(logged){}el{
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
   };

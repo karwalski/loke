@@ -1073,9 +1073,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | TOOLCHAIN | 1 | 48 | 29 | 3 | — | — | — | 1 | — | 15 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 35 | 13 | 4 | — | — | — | — | — | 18 |
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
-| NO-CUSTODY ARCHITECTURE | 4 | 34 | 20 | 1 | — | — | — | — | — | 13 |
+| NO-CUSTODY ARCHITECTURE | 4 | 35 | 20 | 2 | — | — | — | — | — | 13 |
 | VERIFICATION PROGRAMME | 14 | 122 | 76 | 13 | — | 7 | 3 | — | — | 23 |
-| **Total** | **88** | **687** | **520** | **38** | **21** | **31** | **3** | **1** | — | **73** |
+| **Total** | **88** | **688** | **520** | **39** | **21** | **31** | **3** | **1** | — | **73** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1152,7 +1152,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | GA4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | T15 | 1 | 10 | 10 | — | — | — | — | — | — | — |
 | NC1 | 1 | 11 | 6 | — | — | — | — | — | — | 5 |
-| DA1 | 1 | 6 | 2 | 1 | — | — | — | — | — | 3 |
+| DA1 | 1 | 7 | 2 | 2 | — | — | — | — | — | 3 |
 | EM1 | 1 | 5 | 2 | — | — | — | — | — | — | 3 |
 | PL1 | 1 | 12 | 10 | — | — | — | — | — | — | 2 |
 | VM1 | 1 | 8 | 5 | 2 | — | — | — | — | — | 1 |
@@ -1169,9 +1169,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 25 | 17 | 4 | — | — | — | — | — | 4 |
 | RV1 | 1 | 10 | 7 | 1 | — | — | — | — | — | 2 |
-| **Total** | **88** | **687** | **520** | **38** | **21** | **31** | **3** | **1** | — | **73** |
+| **Total** | **88** | **688** | **520** | **39** | **21** | **31** | **3** | **1** | — | **73** |
 
-Rows parsed: **687**, across **88** epics and **16** level-1 headings.
+Rows parsed: **688**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
@@ -1540,10 +1540,11 @@ never leaves, not even for categorisation.
 |-------|------|--------|---------|
 | DA1.1 | M | **Done** | **Define the disclosure record** — Per external call: bytes transmitted, estimated tokens, field/column names disclosed, entity types and counts, whether any real data values were included, a custody flag (`no-custody` / `redacted-data` / `raw`), model and provider, and the correlation ID. This is the substrate every later claim depends on. |
 | DA1.2 | M | **Done** — 2026-09-24 | **Create the missing metrics table** — `packages/core/src/metrics/collector.tk` writes to `metrics_raw`, which **no migration creates** (`packages/core/src/storage/migrations.tk` defines only `schema_migrations`, `settings`, `audit_log`, `placeholder_maps`, `sessions`), so `record()` fails at runtime. Add the migration, extend the schema with the DA1.1 fields, and fix `summarise()`'s hardcoded `avgsavingpct:0.0` (`collector.tk:91`).<br><br>**Done 2026-09-24.** `metrics_raw` is migration **20**, indexed by `timestamp` at 23 because every summary query filters on it. Found by the same sweep as M1.7's three, and it had not been connected to them because it belonged to a different epic. Columns follow what `core.metrics.collector.record` actually writes — counters INTEGER, costs REAL, `savings_by_stage` TEXT — and `timestamp` is INTEGER rather than the TEXT `datetime('now')` used elsewhere in this schema, because `event.timestamp` is an i64 and `summarise` does arithmetic on it. That inconsistency is real and deliberate: changing it would change what `summarise` returns. **Worth reading next to LS1.1q:** `collector.record` built a 15-placeholder INSERT against a table that did not exist, so no metric event this project ever emitted was stored, while `eval/bench.tk` reported 0 ms for every benchmark because the clock returned 0. Between them, nothing measurable was being measured. DA1.3 (wire the collector) is the next step and is still open. |
-| DA1.3 | M |  | **Wire the collector** — Nothing anywhere calls `collector.record`. Call it on every external dispatch. Acceptance: after one request, exactly one row exists with non-null disclosure fields. |
+| DA1.3 | M | **Partial** — the collector is wired and asserted; the DA1.1 fields beyond entity count, model and provider need DA1.7 | **Wire the collector** — Nothing anywhere calls `collector.record`. Call it on every external dispatch. Acceptance: after one request, exactly one row exists with non-null disclosure fields.<br><br>**Partial 2026-09-24.** `page.api.pipeline.recordmetric` writes one `metrics_raw` row through the new `core.metrics.collector.insert` from the two places a dispatched request can end: `completed` (a provider answered) and `providerfailed` (it was called and did not). A cache hit, budget stop, policy deny or refused route writes none, because nothing left the process (disclosure-accounting spec §2.1, C7). The row carries request id, unix timestamp, model, provider, whether the provider is local, provider-reported tokens, the router's cost, and the entity count as both found and blocked. `tokens_saved` and `cost_saved` are 0 because nothing on this path optimises. `insert` does not forward the event to external governance endpoints the way `record` does: `record` passes an i64 `extconfig` to a function expecting `$externalconfig`, so a 0 there is a null struct that gets dereferenced. **Evidence:** `tests/integration/test_metrics_dispatch.tk` (19 assertions). After one answered dispatch there is exactly one row, with model, provider, `pii_found`, `pii_blocked`, `routed_local`, tokens and timestamp asserted. After one failed dispatch there is exactly one row too. With the two `recordmetric` calls removed, 14 assertions fail. `scripts/smoke_serve.sh` passes. **What remains:** the acceptance says "disclosure fields", and DA1.1 defines those as bytes transmitted, custody flag, field names disclosed and entity types. `metrics_raw` holds none of them, and the spec (§6.3 P3) says it must not become their home. They belong in `disclosure_log`, which does not exist. That is DA1.7. |
 | DA1.4 | S |  | **Typed stage records** — `packages/moke/src/console_log.tk`'s `$logentry{stage, status, detail, durationms, ts}` already rides along in the pipeline response and already reports column counts, but `detail` is free text. Add typed disclosure fields so the per-stage record is machine-readable rather than a string. |
 | DA1.5 | S | **Partial** | **Surface it** — Show disclosure per request in the pipeline panel and in aggregate on the savings view, replacing the hardcoded percentages currently in `packages/browser/templates/savings.tkt:138,225` and `packages/moke/templates/chat.tkt:2764`.<br><br>**Status detail:** **Partial — the fabrications are gone; the real figures need DA1.2.** `packages/browser/templates/savings.tkt` was 238 lines reporting thirteen invented numbers under "Cost & token savings / Today": $1.47 saved, 38% cache hit rate, 1.31x compression, 14 620 chars removed, 24% average prompt reduction, 142 optimised requests, and a per-provider table with costs to the cent for 142 requests that never happened. The page had **no data source at all** — no fetch, no storage read — and directly contradicted `metrics-baseline.md`, which says no cost, cache or token-reduction figure has been measured. Every figure now renders as unmeasured with the story that would produce it. The chat.tkt:2764 reference in this story is stale; that code is the locally-computed series path and is correct |
 | DA1.6 | M |  | **Replace the stubbed metrics module** — `packages/core/src/audit/metrics.tk:37-87` returns zeros from every function and `""` from `export()`, while ignoring the `store` and `period` arguments it is passed. Implement against DA1.2. |
+| DA1.7 | M |  | **Create and write `disclosure_log`** — Filed 2026-09-24 by DA1.3. `docs/specifications/disclosure-accounting.md` §6.3 P1/P2 puts the per-dispatch disclosure record in its own table, one row per dispatch on `correlation_id`, written at the same call site as `audit_log` in one transaction, with a non-null value in every reserve field of §5.1 to §5.4 (G3). No migration creates it and nothing writes it. So "bytes transmitted" (octets of the request body as handed to transport), the custody flag, field names disclosed and entity types are recorded nowhere. `toanthropic` and `toollama` build the body and could measure `bytes_body` themselves. Custody has to be observed rather than declared (C1 to C3), which needs NC1.2's sentinel check. Until that exists, the honest value on the redact-and-forward path is `redacted-data`, with `custody_check = not_run`. |
 
 ## Epic EM1: Exposure Metric
 
