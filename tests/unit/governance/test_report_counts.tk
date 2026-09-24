@@ -1,0 +1,88 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.reportcounts;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=rep:core.governance.report;
+
+(* GA5.12 — core.governance.report counts from audit_log, the table the request path
+   writes, and not from `audit_events`, which no migration ever created.
+
+   Every query in the module used to read audit_events, so each count came back 0 through
+   the error arm and the governance report said "0 requests, 0 violations, 0 quota
+   breaches" on every installation. The module now reads audit_log with created_at in
+   place of ts. Nothing tested it. What is asserted here is that each figure is the number
+   of matching rows actually written through core.storage.audit.insertevent — the same
+   writer the request path uses — so a regression to a missing table, a wrong column or a
+   wrong event_type reads as a wrong number rather than as a quiet zero. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-report-counts")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=event(eventtype:str;corrid:str):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:"anthropic";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:10;
+    tokensout:20;
+    costusd:0.0;
+    durationms:5 as u32;
+    correlationid:corrid
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  (* Six rows of the four event types the request path writes. *)
+  audit.insertevent(store;event("llm_request";"corr-rc-1"));
+  audit.insertevent(store;event("llm_request";"corr-rc-2"));
+  audit.insertevent(store;event("llm_request_failed";"corr-rc-3"));
+  audit.insertevent(store;event("policy_deny";"corr-rc-4"));
+  audit.insertevent(store;event("policy_deny";"corr-rc-5"));
+  audit.insertevent(store;event("quota_exceeded";"corr-rc-6"));
+
+  (* A window from the epoch to far in the future, in epoch MILLISECONDS to match
+     created_at. *)
+  let all=rep.generate(store;"test";0;9999999999999);
+  if(t.assert(all.totalrequests==6 as i32;"total requests counts every audit_log row in the window: 6")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(all.violations==2 as i32;"violations counts the two policy_deny rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(all.quotabreaches==1 as i32;"quota breaches counts the one quota_exceeded row")){pass=pass+1}el{fail=fail+1};
+
+  (* The window binds: a period ending before any row was written holds none. *)
+  let empty=rep.generate(store;"test";0;1000);
+  if(t.assert(empty.totalrequests==0 as i32;"a window that ends in 1970 holds no rows")){pass=pass+1}el{fail=fail+1};
+
+  (* The section with no source says so rather than printing an empty list as "none". *)
+  let md=rep.formatmarkdown(all);
+  if(t.assert(str.contains(md;"| Total requests | 6 |");"the markdown table carries the measured total")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"| Quota breaches | 1 |");"and the measured quota figure")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(md;"carries no rule identifier");"top triggered rules is reported as not recorded, not as none")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
