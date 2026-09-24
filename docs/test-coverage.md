@@ -848,7 +848,6 @@ because it will be wrong again tomorrow: the census is generated, a prose list i
 - layer_config.tk
 - layer_health.tk
 - ner.tk
-- ner_local.tk
 - patterns.tk
 - pipeline_types.tk
 - presidio.tk
@@ -1203,7 +1202,7 @@ because they sit beside the file.
 
 | Epic Story | Gap Area | Untested Modules |
 |------------|----------|------------------|
-| T15.2 | Privacy pipeline | consensus, entity_routing, evaluation, filter_registry, ner, ner_local, patterns, layer_health, filter_metrics, layer_config, pipeline_types, presidio, sidecar_client, web_meta |
+| T15.2 | Privacy pipeline | consensus, entity_routing, evaluation, filter_registry, ner, patterns, layer_health, filter_metrics, layer_config, pipeline_types, presidio, sidecar_client, web_meta |
 | T15.3 | Router + optimiser | selector, intent, latency_router, escalation, routellm, cache, profiler, llmlingua |
 | T15.4 | Governance + storage | policy, compliance, monitoring, quota, suppression, trace, response-scanner, db, migrations, sync_queue |
 | T15.5 | Browser handlers | All 33 browser modules (pages/api/, src/, components/) |

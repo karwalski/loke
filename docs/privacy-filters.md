@@ -64,8 +64,7 @@ gracefully — if a layer is unavailable, remaining layers continue processing.
 | Module | File | Purpose |
 |--------|------|---------|
 | Regex patterns | `privacy/regex.tk` | Deterministic pattern matching for structured PII (emails, phone numbers, credit cards, etc.) |
-| NER (local) | `privacy/ner_local.tk` | On-device named entity recognition for contextual detection |
-| NER (remote) | `privacy/ner.tk` | Remote NER service integration |
+| NER | `privacy/ner.tk` | Entity recognition by a model served through Ollama (localhost by default). It recovers no entities today — PL1.12. An in-process layer, `ner_local.tk`, was removed under PL1.6: it sat on `std.infer`, which is a stub, and no request path reached it |
 | Presidio | `privacy/presidio.tk` | Microsoft Presidio integration via REST API |
 | Layer config | `privacy/layer_config.tk` | Layer definitions, priorities, and enable/disable |
 | Consensus | `privacy/consensus.tk` | Overlap resolution and multi-layer agreement |
