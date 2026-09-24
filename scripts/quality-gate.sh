@@ -169,6 +169,27 @@ step_checks() {
   # (M1.7's remaining three), metrics_raw (DA1.2 — so no metric event was ever stored) and
   # compliance_events (so a policy-violation rate was always 0%, the most flattering possible
   # number). scripts/known-tables.txt carries the two deliberate exceptions with their reasons.
+  # `toke --lint` has rules for real defects and NOTHING in this repo ran it. Measured
+  # 2026-09-24: 3,287 diagnostics over 454 files, including 61 sites of
+  # "result discarded — write x=x.push(...)" — the T-24 class this session had been finding by
+  # hand, one module at a time, from failing tests. Ten were in the built trees, and every one
+  # was a silently empty collection: a model download that reported no progress or outcome, L3
+  # deep memory contributing nothing to any context, and a `ps` parse that never read a pid or a
+  # CPU figure for any process.
+  #
+  # Only the defect-class rules fail. The 1,619 style diagnostics (concat nesting, unused
+  # imports) are counted and printed — they are LS1.2/LS1.3/LS1.4's work, and failing on them
+  # today would mean the gate is switched off. moke and legacy src/ are out of scope for the
+  # same reason as the other sweeps: MK21.16 and the F10.12 decision.
+  if [[ -f ./scripts/check_lint_rules.py ]]; then
+    echo "  no defect-class lint rule fires"
+    python3 ./scripts/check_lint_rules.py --check \
+      packages/core packages/shared packages/browser >/dev/null \
+      || { python3 ./scripts/check_lint_rules.py \
+             packages/core packages/shared packages/browser >&2
+           failed=1; }
+  fi
+
   if [[ -f ./scripts/find_uncreated_tables.py ]]; then
     echo "  every table referenced in SQL is created somewhere"
     python3 ./scripts/find_uncreated_tables.py --check \

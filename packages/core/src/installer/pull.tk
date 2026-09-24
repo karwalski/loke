@@ -42,15 +42,28 @@ f=extractbytes(line:str):$bytesinfo{
   }
 };
 
+(* ── Every push into `results` was discarded, so a pull reported nothing ───────────
+   `results` is a PARAMETER, threaded in and returned, which is the right shape under T-26 —
+   toke has no mutable struct field and no in-place array update. But every `results.push(...)`
+   here was written bare, and an array push RETURNS the new array (T-24), so all five sites threw
+   their value away and each function returned its input unchanged.
+
+   What that cost: `handlepullchild` parsed every progress line from `ollama pull` and kept none,
+   then appended a "complete" or "error" record and kept that either — so a model download
+   reported **no progress and no outcome**, whatever happened. `handlepullerror` likewise
+   swallowed the spawn failure it exists to record.
+
+   `results` is reassigned through a `mut.` local, because a parameter cannot be rebound. *)
 f=handlepullchild(handle:i64;modelid:str;results:@$pullprogress):@$pullprogress{
+  let acc=mut.results;
   let lines=proc.readlines(handle);
   lp(let i=0;i<str.arraylen(lines);i=i+1){ let line=str.arrayget(lines;i);
     let progress=parseprogressline(modelid;line);
-    results.push(progress)
+    acc=acc.push(progress)
   };
   let exitcode=proc.wait(handle);
   if(exitcode == 0){
-    results.push($pullprogress{
+    acc=acc.push($pullprogress{
       modelid:modelid;
       totalbytes:0;
       downloadedbytes:0;
@@ -60,7 +73,7 @@ f=handlepullchild(handle:i64;modelid:str;results:@$pullprogress):@$pullprogress{
     })
   }el{
     log.error(str.concat("ollama pull failed with exit code: ";str.fromint(exitcode));"installer.pull";"system");
-    results.push($pullprogress{
+    acc=acc.push($pullprogress{
       modelid:modelid;
       totalbytes:0;
       downloadedbytes:0;
@@ -69,12 +82,13 @@ f=handlepullchild(handle:i64;modelid:str;results:@$pullprogress):@$pullprogress{
       status:"error"
     })
   };
-  <results
+  <acc
 };
 
 f=handlepullerror(e:str;modelid:str;results:@$pullprogress):@$pullprogress{
   log.error(str.concat("failed to spawn ollama pull: ";e);"installer.pull";"system");
-  results.push($pullprogress{
+  let acc=mut.results;
+  acc=acc.push($pullprogress{
     modelid:modelid;
     totalbytes:0;
     downloadedbytes:0;
@@ -82,7 +96,7 @@ f=handlepullerror(e:str;modelid:str;results:@$pullprogress):@$pullprogress{
     etaseconds:0;
     status:"error"
   });
-  <results
+  <acc
 };
 
 f=pullmodel(modelid:str):@$pullprogress{
@@ -272,7 +286,9 @@ f=ismodelavailable(modelid:str):bool{
 f=parseinstalledmodels(output:str):@str{
   let lines=str.split(output;"
 ");
-  let models=@();
+  (* `mut.` and an assignment below: `models.push(modelname)` discarded the new array (T-24),
+     so this listed **no installed models, ever**, whatever `ollama list` printed. *)
+  let models=mut.@();
   let i=mut.0;
   lp(let ii=0;ii<lines.len;ii=ii+1){     if(i > 0){
       let trimmed=str.trim(lines.get(ii));
@@ -282,7 +298,7 @@ f=parseinstalledmodels(output:str):@str{
         let modelname=mut.nametab;
         if(str.len(name) > 0){modelname=name}el{};
         if(str.len(modelname) > 0){
-          models.push(modelname)
+          models=models.push(modelname)
         }el{}
       }el{}
     }el{};
