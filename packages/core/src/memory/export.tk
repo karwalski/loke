@@ -13,6 +13,7 @@ i=log:shared.log;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=s:core.storage.db;
+i=ty:shared.types;
 
 t=$exportformat{
   $json:i64;
@@ -230,6 +231,47 @@ f=exportrange(palace:i64;fromts:i64;tots:i64;outpath:str;format:$exportformat;no
 
 
 
+f=importitem(item:$json):bool{
+  let id=jx.strvalue(item;"id";"");
+  if(str.len(id) == 0){
+    log.warn("import_json: skipped an element with no id";"export";"system");
+    <false
+  }el{};
+  let wing=jx.strvalue(item;"wing";"");
+  let hall=jx.strvalue(item;"hall";"");
+  let room=jx.strvalue(item;"room";"");
+  let role=jx.strvalue(item;"role";"");
+  let content=jx.strvalue(item;"content";"");
+  let tags=jx.strvalue(item;"tags";"");
+  let scores=jx.numtext(item;"score";"1.0");
+  let tss=jx.numtext(item;"created_at";str.fromint(ty.nowi64()));
+  let insertok=mt db.exec("INSERT INTO memory_drawers (id,wing,hall,room,role,content,created_at) VALUES (?,?,?,?,?,?,?)";@(id;wing;hall;room;role;content;tss)) {
+    $ok:v true;
+    $err:v false
+  };
+  if(insertok){
+    mt db.exec("INSERT OR IGNORE INTO memory_scores (id,tags,score,created_at,accessed_at) VALUES (?,?,?,?,?)";@(id;tags;scores;tss;tss)) {
+      $ok:v void;
+      $err:v void
+    };
+    <true
+  }el{
+    log.warn(str.concat("import_json: skipped duplicate id: ";id);"export";"system");
+    <false
+  }
+};
+
+(* LS1.1k — each element is read with the JSON accessors. Until 2026-09-24 this read
+   `json.parsearray` elements with `db.rowstr`, a ROW accessor; std.db declares the row
+   accessors `(i64,i64)->i64` under `gen:"abi"`, so nothing refused a JSON value and every
+   field came back empty — and the test that first ran it crashed. The file is wrapped in an
+   object so `json.arr`, the typed accessor, yields each element as a `$json`; strings are
+   decoded by `shared.jsonobj.strvalue` because `json.str` loses escapes (T-47), and numbers
+   are bound as their JSON text.
+
+   The drawer INSERT is a plain INSERT, not OR IGNORE: an id already in the palace is a
+   duplicate and must not be counted as imported. The score row carries the file's
+   `created_at` (M1.7c), so the memory ages from when it was made, not from the import. *)
 f=importjson(palace:i64;path:str):i32{
   let raw=mt fs.read(path) {
     $ok:raw raw;
@@ -239,9 +281,9 @@ f=importjson(palace:i64;path:str):i32{
     log.warn(str.concat("import_json: could not read file: ";path);"export";"system");
     <0 as i32
   }el{};
-  let items=mt json.parsearray(raw) {
-    $ok:items items;
-    $err:v @()
+  let items=mt json.arr($json{raw:str.join("";@("{\"items\":";raw;"}"))};"items") {
+    $ok:a a;
+    $jsonerr:e @()
   };
   if(items.len == 0){
     log.warn(str.concat("import_json: failed to parse JSON array from: ";path);"export";"system");
@@ -249,29 +291,7 @@ f=importjson(palace:i64;path:str):i32{
   }el{};
   let count=mut.0;
   lp(let ii=0;ii<items.len;ii=ii+1){
-    let item=items.get(ii);
-    let id=db.rowstr(item;"id");
-    let wing=db.rowstr(item;"wing");
-    let hall=db.rowstr(item;"hall");
-    let room=db.rowstr(item;"room");
-    let role=db.rowstr(item;"role");
-    let content=db.rowstr(item;"content");
-    let tags=db.rowstr(item;"tags");
-    let scores=str.fromfloat(json.getfloat(item;"score"));
-    let tss=str.fromint(db.rowi64(item;"created_at"));
-    let insertok=mt db.exec("INSERT OR IGNORE INTO memory_drawers (id,wing,hall,room,role,content,created_at) VALUES (?,?,?,?,?,?,?)";@(id;wing;hall;room;role;content;tss)) {
-      $ok:v true;
-      $err:v false
-    };
-    if(insertok){
-      mt db.exec("INSERT OR IGNORE INTO memory_scores (id,tags,score,accessed_at) VALUES (?,?,?,?)";@(id;tags;scores;tss)) {
-        $ok:v void;
-        $err:v void
-      };
-      count=count + 1
-    }el{
-      log.warn(str.concat("import_json: skipped duplicate id: ";id);"export";"system")
-    }
+    if(importitem(items.get(ii))){ count=count + 1 }el{}
   };
   log.info(str.concat("imported ";str.concat(str.fromint(count);" memories from JSON"));"export";"system");
   <count

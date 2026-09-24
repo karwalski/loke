@@ -1449,6 +1449,14 @@ crashing, and it silently truncates every loop written against it.
 so. A stdlib of 116 functions where 77 accept anything, and where six of those are aliases for
 a differently-typed function, cannot be used safely from source.
 
+**It is not only `std.str`.** `std.db` declares its row accessors (`db.rowstr`, `db.rowi64`)
+and `std.json` most of its helpers (`json.parsearray`, `json.getval`, `json.getstr`, ...) the
+same way. So a JSON value handed to a row accessor type-checks: `core.memory.export.importjson`
+read every element of an imported file with `db.rowstr(item;...)`, got nothing back for any
+field, and crashed (LS1.1k). It is the mirror of LS1.1i, a row read through a JSON accessor.
+Every call-site check is defeated by the signature, which is the root cause T-23 and T-24
+share with this one.
+
 **A correction to an assumption we carried for a while, in case it saves someone the same
 trip.** `arr.len()` is **not** a defect: `arr.len()` and `arr.len` emit the identical
 `getelementptr i64, i64* %p, i32 -1`, and the compiler labels it `; .len()`. Only
@@ -1731,6 +1739,28 @@ declared to return `str`: `str.fromint`, or `str.concat("";...)`.
 
 **Guarded** by the array-element check in `scripts/find_interp_abi_str.py`. The ask is T-36's:
 declare these functions with the type they return.
+
+## T-47 — `json.str` unescapes by dropping the backslash, so `\n` reads back as the letter `n`
+
+**Severity: data corruption on a round trip, silently.**
+
+Measured 2026-09-24 at `fedd48d` (LS1.1k). `json_str` in `src/stdlib/json.c` copies a string
+value with a "basic unescape":
+
+```c
+if (*p == '\\') { p++; *w++ = *p++; }
+```
+
+so `\"` and `\\` come back right, and `\n`, `\t`, `\r`, `\b`, `\f` and `\uXXXX` come back
+as the letter after the backslash. `{"c":"he said \"hi\"\nthen"}` reads as
+`he said "hi"nthen`. `json.getstr`, `json.getstring` and `json.get` all route to it, and
+`json_keys` has the same loop. The streaming parser in the same file has a correct unescape
+(`case 'n': *wp++ = '\n'`) that this path does not use.
+
+In loke it meant a memory export, which escapes newlines correctly, could not be imported
+without every multi-line memory collapsing onto one line. **Worked around** in
+`shared.jsonobj.strvalue`, which takes the raw value with `json.getval` and decodes it.
+**Ask:** use the streaming parser's unescape in `json_str`.
 
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 

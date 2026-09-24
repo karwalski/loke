@@ -1,0 +1,97 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.importjson;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=ex:core.memory.export;
+
+(* LS1.1k — core.memory.export.importjson against a real migrated store and a JSON file in
+   the shape exportall writes.
+
+   importjson read each element of its parsed array with `db.rowstr(item;...)`, a ROW
+   accessor, on a JSON value. `std.db` declares the row accessors `(i64,i64)->i64` in a
+   `gen:"abi"` block, so nothing stopped it. Every field came back empty.
+
+   It also left memory_scores.created_at to the column default, so an imported memory aged
+   from the moment of import rather than from when it was made (M1.7c). The file's own
+   created_at is carried through now, and the last assertions are that. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-import-json")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=q1(sql:str;id:str):str{
+  <mt db.many(sql;@(id)) {
+    $ok:rows firstcol(rows);
+    $err:e ""
+  }
+};
+
+f=firstcol(rows:@$row):str{
+  if(rows.len==0){ <"" }el{ <db.rowstr(rows.get(0);"v") }
+};
+
+f=exportfile():str{
+  <str.concat(testdir();"/import.json")
+};
+
+(* Two memories, the second with a quote, a newline and a backslash in its content, which
+   is what an assistant reply looks like. *)
+f=writefixture():bool{
+  let a="{\"id\":\"imp-1\",\"wing\":\"technical\",\"hall\":\"Code\",\"room\":\"general\",\"role\":\"user\",\"content\":\"first imported memory\",\"tags\":\"alpha,beta\",\"score\":0.75,\"created_at\":1790000000}";
+  let b="{\"id\":\"imp-2\",\"wing\":\"personal\",\"hall\":\"Notes\",\"room\":\"misc\",\"role\":\"assistant\",\"content\":\"he said \\\"hi\\\"\\nthen C:\\\\tmp\",\"tags\":\"\",\"score\":1.0,\"created_at\":1790086400}";
+  let body=str.concat("[\n  ";str.concat(a;str.concat(",\n  ";str.concat(b;"\n]"))));
+  <mt file.write(exportfile();body) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the store opened on a fresh file and its migrations ran")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writefixture();"the fixture file was written")){pass=pass+1}el{fail=fail+1};
+
+  let n=ex.importjson(0;exportfile());
+  if(t.assert(n==2;"importjson reports two memories imported")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The defect: every field read through a row accessor came back empty ───── *)
+  if(t.asserteq(q1("SELECT wing AS v FROM memory_drawers WHERE id=?";"imp-1");"technical";"imp-1 is stored under its id with its wing (LS1.1k)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT hall AS v FROM memory_drawers WHERE id=?";"imp-1");"Code";"and its hall")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT room AS v FROM memory_drawers WHERE id=?";"imp-1");"general";"and its room")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT role AS v FROM memory_drawers WHERE id=?";"imp-1");"user";"and its role")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT content AS v FROM memory_drawers WHERE id=?";"imp-1");"first imported memory";"and its content")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT content AS v FROM memory_drawers WHERE id=?";"imp-2");"he said \"hi\"\nthen C:\\tmp";"escaped content is unescaped on the way in: quote, newline and backslash")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT tags AS v FROM memory_scores WHERE id=?";"imp-1");"alpha,beta";"the score row carries the tags")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT CAST(score*100 AS INTEGER) AS v FROM memory_scores WHERE id=?";"imp-1");"75";"and the score")){pass=pass+1}el{fail=fail+1};
+
+  (* ── M1.7c: the memory's age comes from the file, not from the import ───────── *)
+  if(t.asserteq(q1("SELECT created_at AS v FROM memory_scores WHERE id=?";"imp-1");"1790000000";"the score's created_at is the exported one, so decay ages the memory from when it was made")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(q1("SELECT created_at AS v FROM memory_scores WHERE id=?";"imp-2");"1790086400";"for every imported memory")){pass=pass+1}el{fail=fail+1};
+
+  (* Importing the same file again adds nothing: ids are the identity. *)
+  let again=ex.importjson(0;exportfile());
+  if(t.assert(again==0;"a second import of the same file imports nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT id FROM memory_drawers";@())==2;"and the store still holds exactly two drawers")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
