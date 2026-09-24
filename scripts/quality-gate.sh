@@ -511,7 +511,12 @@ step_build() {
 
 step_test() {
   [[ -x ./scripts/run_tests.sh ]] || { echo "scripts/run_tests.sh missing or not executable" >&2; return 1; }
-  ./scripts/run_tests.sh .
+  ./scripts/run_tests.sh . || return 1
+  # F10.36: one real HTTP request per route. Handler tests never enter ooke's accept
+  # loop, and that is where a server that crashed on every API request was hiding.
+  if [[ -x ./scripts/smoke_serve.sh ]]; then
+    ./scripts/smoke_serve.sh || return 1
+  fi
 }
 
 # --- Run -----------------------------------------------------------------

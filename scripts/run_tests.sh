@@ -166,16 +166,23 @@ if [ -d "$MOKE_OBJ_DIR" ]; then
 fi
 
 # ooke's objects, for the page modules: they call ooke.template and ooke.serve.
-OOKE_DIR="${OOKE_DIR:-$HOME/tk/toke-ooke}"
+# Taken from build/ooke-objs, which build_tree.sh compiles from ooke's source with the
+# same toke as everything else. Not from $OOKE_DIR/src/ooke: that IR came from an older
+# toke and declared tk_current_error as a plain global, which crashed the server
+# (F10.36).
+OOKE_BUILD="$PROJECTDIR/build/ooke-objs"
 OOKE_A="$BUILDDIR/libooke.a"
-if [ -d "$OOKE_DIR/src/ooke" ]; then
-  NEWEST_OO=$(find "$OOKE_DIR/src/ooke" -name '*.o' -newer "$OOKE_A" 2>/dev/null | head -1)
+if [ -d "$OOKE_BUILD" ]; then
+  NEWEST_OO=$(find "$OOKE_BUILD" -name '*.o' -newer "$OOKE_A" 2>/dev/null | head -1)
   if [ ! -f "$OOKE_A" ] || [ -n "$NEWEST_OO" ]; then
     echo "Building $OOKE_A (once) ..."
     rm -f "$OOKE_A"
-    find "$OOKE_DIR/src/ooke" -name '*.o' ! -name 'handlers.o' -print0 \
+    find "$OOKE_BUILD" -name '*.o' ! -name 'handlers.o' -print0 \
       | xargs -0 ar rcs "$OOKE_A" 2>/dev/null
   fi
+else
+  echo "ERROR: $OOKE_BUILD is missing. Run scripts/build_loke.sh first (F10.36)." >&2
+  exit 1
 fi
 
 # LOKE_DB_KEY — no longer a key path, and that is the change X8.3 made.

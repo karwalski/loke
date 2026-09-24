@@ -404,6 +404,60 @@ if [ -f "$OBJROOT/main.ll" ]; then
 fi
 [ "$IRFAIL" -gt 0 ] && echo "[$NAME] $IRFAIL object(s) did not assemble from IR" >&2
 
+# ── Step 5: ooke's own objects, compiled by THIS toke (F10.36) ─────────────────
+#
+# This used to link the IR files under $OOKE_DIR/src/ooke/ as they were, re-assembling
+# them with clang in place. That IR was whatever toke emitted on the day ooke was last
+# built, and it is a different compiler from the one that builds loke. Measured
+# 2026-09-24: all twelve modules declared
+#
+#     @tk_current_error = external global i64
+#
+# but the runtime this toke links defines it `thread_local` (toke 127.101). ld accepts
+# the mismatch without a word. So ooke's server code read and wrote the thread-local
+# DESCRIPTOR as if it were the variable, and clearing the error flag stored 0 over the
+# descriptor's thunk. The next thread-local access from C jumped to address 0.
+# /api/health, /api/models, /api/pipeline and three pages segfaulted the worker on
+# every request. Every unit test passed, because tests call handlers directly and
+# never enter ooke's accept loop.
+#
+# Two rules follow. ooke is compiled from source by $TOKE, into this project's build
+# directory, so the whole binary has one compiler. And nothing is written into
+# $OOKE_DIR: this script used to drop .o files into a shared checkout that other
+# builds, including other worktrees, were reading at the same time.
+OOKE_BUILD="$PROJECTDIR/build/ooke-objs"
+OOKE_MODS="config store router template validate repair run build serve apihealth handlers cli"
+build_ooke_objs() {
+  local stamp="$OOKE_BUILD/.stamp" want
+  want="$TOKE $(stat -f %m "$TOKE" 2>/dev/null || stat -c %Y "$TOKE")"
+  if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] \
+     && [ -z "$(find "$OOKE_DIR/src" -maxdepth 1 -name '*.tk' -newer "$stamp" | head -1)" ]; then
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/ooke_objs.XXXXXX")
+  mkdir -p "$tmp/src/ooke"
+  cp "$OOKE_DIR"/src/*.tk "$tmp/src/"
+  local m src
+  for m in $OOKE_MODS; do
+    src="$m.tk"; [ "$m" = handlers ] && src="_handlers.tk"
+    ( cd "$tmp/src" && "$TOKE" --emit-interface --emit-llvm --out "ooke/$m" "$src" ) \
+      >"$tmp/$m.log" 2>&1 || { cat "$tmp/$m.log" >&2; rm -rf "$tmp"; die "ooke module $m does not compile with $TOKE"; }
+    clang -c -x ir "$tmp/src/ooke/$m" -o "$tmp/src/ooke/$m.o" 2>"$tmp/$m.cc.log" \
+      || { cat "$tmp/$m.cc.log" >&2; rm -rf "$tmp"; die "ooke module $m does not assemble"; }
+  done
+  if grep -l '^@tk_current_error = external global' "$tmp"/src/ooke/* 2>/dev/null | grep -q .; then
+    rm -rf "$tmp"; die "ooke IR declares tk_current_error without thread_local; see F10.36"
+  fi
+  echo "$want" > "$tmp/src/ooke/.stamp"
+  rm -rf "$OOKE_BUILD.old"
+  [ -d "$OOKE_BUILD" ] && mv "$OOKE_BUILD" "$OOKE_BUILD.old"
+  mv "$tmp/src/ooke" "$OOKE_BUILD"
+  rm -rf "$tmp" "$OOKE_BUILD.old"
+  echo "[$NAME] ooke recompiled from source by $TOKE into build/ooke-objs"
+}
+[ "$OOKE_OBJS" -eq 1 ] && build_ooke_objs
+
 # ── Step 5a: undefined-symbol census (F10.23c) ───────────────────────────────
 #
 # An unknown method call is not checked at compile time; it becomes an undefined
@@ -419,11 +473,11 @@ if [ "$SYMBOLS" -eq 1 ]; then
   # handlers.o is skipped for the same reason step 7 leaves it off the link line: the
   # APPLICATION supplies ooke.handlers, and treating ooke's placeholder as a definition
   # made the moke census report 1 undefined symbol where the link then found two.
-  [ "$OOKE_OBJS" -eq 1 ] && SYMARGS="$SYMARGS --defines-objdir $OOKE_DIR/src/ooke --defines-skip handlers.o"
+  [ "$OOKE_OBJS" -eq 1 ] && SYMARGS="$SYMARGS --defines-objdir $OOKE_BUILD --defines-skip handlers.o"
   for r in $ROOTS; do SYMARGS="$SYMARGS --source-root $r"; done
   if [ "$PROBE" -eq 1 ]; then
     SYMARGS="$SYMARGS --probe --stdlib-archive $(ensure_stdlib_archive)"
-    [ "$OOKE_OBJS" -eq 1 ] && SYMARGS="$SYMARGS --probe-archive-dir $OOKE_DIR/src/ooke"
+    [ "$OOKE_OBJS" -eq 1 ] && SYMARGS="$SYMARGS --probe-archive-dir $OOKE_BUILD"
   elif [ -f "$STDLIB_A" ]; then
     # Used only to SUBTRACT the C runtime's definitions. It is not built here when it
     # is absent: that costs two minutes and only changes the c-runtime line, which
@@ -454,13 +508,6 @@ if [ "$LINK" = none ]; then
 fi
 
 [ -f "$OBJROOT/main.ll.o" ] || die "no main object at $OBJROOT/main.ll.o; cannot link"
-if [ "$OOKE_OBJS" -eq 1 ]; then
-  for f in "$OOKE_DIR"/src/ooke/*; do
-    [ -f "$f" ] || continue
-    case "$f" in *.tki|*.o) continue ;; esac
-    clang -c -x ir "$f" -o "$f.o"
-  done
-fi
 
 # ── Step 7: link ─────────────────────────────────────────────────────────────
 echo "[$NAME] linking $BINARY..."
@@ -487,7 +534,7 @@ for _nl in $NO_LINK; do
   echo "[$NAME] kept off the link line: $_nl" >&2
 done
 if [ "$OOKE_OBJS" -eq 1 ]; then
-  find "$OOKE_DIR/src/ooke" -name '*.o' ! -name 'handlers.o' >> "$OBJLIST"
+  find "$OOKE_BUILD" -name '*.o' ! -name 'handlers.o' >> "$OBJLIST"
 fi
 
 # sys_glue.c and llm_tool.c are INCLUDED. They were excluded from build_loke.sh's

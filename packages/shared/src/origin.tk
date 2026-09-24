@@ -1,0 +1,73 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=shared.origin;
+
+i=http:std.http;
+i=str:std.str;
+
+(* Cross-origin request refusal for loke's state-changing endpoints (GA2.6).
+
+   CORS does not protect a local server from a hostile web page. It decides whether the
+   page may READ the response. It does not stop the request being sent. A "simple"
+   request needs no preflight: a POST with Content-Type text/plain qualifies. Measured
+   2026-09-24: a POST to /api/pipeline carrying `Origin: https://evil.example` and a
+   text/plain JSON body was parsed, scanned and FORWARDED to the provider, and it
+   failed only because none was running. So any site the user had open could spend
+   their API budget, write rows into their audit trail, and, through /api/settings,
+   change what loke is configured to talk to.
+
+   A browser always sends Origin on a cross-origin POST, and a page cannot forge it. The
+   rule is therefore narrow. A request that carries an Origin header must come from a
+   loopback origin: http on 127.0.0.1, localhost or [::1], with or without a port. That
+   is loke's own UI, or moke on its own port. A request with no Origin at all is not a
+   browser acting for a page. It is curl, the CLI or a test, and it is allowed. `null`
+   is refused. Browsers send it from sandboxed frames and file:// pages, and nothing
+   legitimate that drives loke is one of those. *)
+
+f=isdigits(s:str):bool{
+  let n=str.len(s) as i64;
+  if(n==0){ <false }el{};
+  let ok=mut.true;
+  lp(let k=0;k<n;k=k+1){
+    if(str.contains("0123456789";str.slice(s;k;k+1))){}el{ ok=false }
+  };
+  <ok
+};
+
+(* True when `rest` is what may follow a loopback host: nothing, or `:` and a port. *)
+f=portsuffixok(rest:str):bool{
+  if(str.len(rest)==0){ <true }el{};
+  if(str.startswith(rest;":")){
+    <isdigits(str.slice(rest;1;str.len(rest)))
+  }el{
+    <false
+  }
+};
+
+f=isloopbackorigin(origin:str):bool{
+  if(str.startswith(origin;"http://127.0.0.1")){
+    <portsuffixok(str.slice(origin;16;str.len(origin)))
+  }el{};
+  if(str.startswith(origin;"http://localhost")){
+    <portsuffixok(str.slice(origin;16;str.len(origin)))
+  }el{};
+  if(str.startswith(origin;"http://[::1]")){
+    <portsuffixok(str.slice(origin;12;str.len(origin)))
+  }el{};
+  <false
+};
+
+(* The decision on an Origin header's value. "" means the header was absent. *)
+f=originrefused(origin:str):bool{
+  if(str.len(origin)==0){ <false }el{};
+  <!isloopbackorigin(origin)
+};
+
+f=crossoriginrefused(req:i64):bool{
+  <originrefused(http.reqheader(req;"Origin"))
+};
+
+f=refuse():i64{
+  <http.res(403;"{\"ok\":false,\"error\":\"cross-origin request refused: loke accepts state-changing requests only from its own pages or from a client that sends no Origin\",\"cross_origin_refused\":true}")
+};
