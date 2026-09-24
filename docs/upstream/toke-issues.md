@@ -1781,3 +1781,16 @@ comes back with a trailing `n`, so an exact comparison fails. `core.router.inten
 matches the task name by prefix (F5.9). Any other exact comparison on a `json.str` result
 from an LLM is exposed to this in the same way. The ask: decode the JSON escapes as the
 spec defines them.
+
+## T-43 — `json.enc` escapes only `"` and `\`
+
+**Severity: malformed output, silently.**
+
+`json_enc` in `src/stdlib/json.c` at `fedd48d` escapes the quote and the backslash and copies
+every other byte through. A newline, tab or carriage return in the input is therefore a raw
+control character inside a JSON string, which RFC 8259 forbids. std.json's own reader accepts it,
+so a round trip inside toke looks fine; Go's `encoding/json`, which is what Ollama uses, rejects
+it. Found 2026-09-24: `core.router.intent.classifybody` (F5.10) sent every multi-line prompt to
+Ollama as invalid JSON. **Worked around** with `shared.jsonobj.escape`, which escapes newline,
+CR and tab as well. Other control characters below 0x20 are still not escaped by either.
+The ask: escape all control characters, as the spec requires.

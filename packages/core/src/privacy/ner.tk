@@ -6,6 +6,7 @@ m=core.privacy.ner;
 i=http:std.http;
 i=reach:shared.reachability;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=str:std.str;
 i=t:shared.types;
 
@@ -106,36 +107,50 @@ f=nerconfidence(entitytype:str):f64{
    every occurrence — so with two people in one prompt, person B's detail came back
    attached to person A's name. placeholder.assignplaceholders numbers the deduped list
    in one place instead. *)
-f=buildentities(arr:i64):@$piientity{
+(* PL1.12. The model's reply is a top-level JSON array. This used to call
+   `json.getarr(arr;"")`, which looks up the key "" in an OBJECT and returns a null array
+   for anything else -- the PL1.11 defect -- and the loop's null-safe length turned that
+   into zero entities for every reply. json.parsearray yields each element's own JSON. *)
+f=buildentities(content:str):@$piientity{
   let entities=mut.@($piientity);
-  let items=json.getarr(arr;"");
-  lp(let i=0;i<str.arraylen(items);i=i+1){ let item=str.arrayget(items;i);
-    let entitytype=json.str(item;"type");
-    let value=json.str(item;"value");
-    let confidence=nerconfidence(entitytype);
-    let entity=$piientity{
-      entitytype:entitytype;
-      value:value;
-      start:0;
-      end:0;
-      confidence:confidence;
-      placeholder:""
-    };
-    entities=entities.push(entity)
+  let items=json.parsearray(content);
+  lp(let i=0;i<str.arraylen(items);i=i+1){
+    entities=mt json.dec(str.arrayget(items;i)) {
+      $ok:item addentity(entities;item);
+      $jsonerr:e entities
+    }
   };
   <entities
+};
+
+f=addentity(entities:@$piientity;item:i64):@$piientity{
+  let entitytype=json.str(item;"type");
+  <entities.push($piientity{
+    entitytype:entitytype;
+    value:json.str(item;"value");
+    start:0;
+    end:0;
+    confidence:nerconfidence(entitytype);
+    placeholder:""
+  })
 };
 
 f=parsecontent(content:str):@$piientity!$lokeerr{
   let arrparsed=json.dec(content);
   <mt arrparsed {
-    $ok:arr $ok(buildentities(arr));
+    $ok:arr $ok(buildentities(content));
     $jsonerr:e2 $err($privacyerr("ner detect_entities: model response is not valid JSON array"))
   }
 };
 
+(* PL1.12. Ollama's `message` is an object. `json.str(obj;"message.content")` asked
+   std.json for a dotted path it does not support, so `content` was empty for every
+   response. The object is fetched with json.getval and read in a second step. *)
 f=parseobj(obj:i64):@$piientity!$lokeerr{
-  let content=json.str(obj;"message.content");
+  let content=mt json.dec(json.getval(obj;"message")) {
+    $ok:m json.str(m;"content");
+    $jsonerr:e ""
+  };
   <parsecontent(content)
 };
 
@@ -147,14 +162,25 @@ f=parseresponse(raw:str):@$piientity!$lokeerr{
   }
 };
 
+(* PL1.12. The prompt was spliced into the JSON body unescaped, so any quote, backslash
+   or newline in it produced a malformed request. shared.jsonobj.escape quotes it and
+   escapes backslash, quote, newline, CR and tab -- std.json's json.enc escapes only the
+   first two, which leaves a raw newline inside a JSON string. The system
+   message also names the fields buildentities reads, which it did not. *)
+f=requestbody(modelid:str;text:str):str{
+  let systemmsg="You are a named entity recognition system. Extract named entities from the text and return ONLY a JSON array of objects with fields type and value, for example [{\"type\":\"PERSON\",\"value\":\"Jane Citizen\"}]. Types: PERSON, ORGANIZATION, LOCATION, DATE, MEDICAL, FINANCIAL. No explanation.";
+  let usermsg=jx.escape(str.concat("Extract entities from: ";text));
+  let head=str.concat("{\"model\":";str.concat(jx.escape(modelid);",\"stream\":false,\"messages\":[{\"role\":\"system\",\"content\":"));
+  let mid=str.concat(head;str.concat(jx.escape(systemmsg);"},{\"role\":\"user\",\"content\":"));
+  <str.concat(mid;str.concat(usermsg;"}]}"))
+};
+
 f=detectentities(client:$nerclient;text:str):@$piientity!$lokeerr{
   let hc=http.client(client.ollamaurl);
-  let systemmsg="You are a named entity recognition system. Extract named entities from the text and return ONLY a JSON array. No explanation.";
-  let usermsg=str.concat("Extract entities from: ";text);
-  let body=str.concat("{\"model\":\"";str.concat(client.modelid;str.concat("\",\"messages\":[{\"role\":\"system\",\"content\":\"";str.concat(systemmsg;str.concat("\"},{\"role\":\"user\",\"content\":\"";str.concat(usermsg;"\"}],\"stream\":false}"))))));
-  let result=http.postheaders(hc;"/api/chat";str.tobytes(body);"{\"content-type\":\"application/json\"}");
+  let result=http.postheaders(hc;"/api/chat";str.tobytes(requestbody(client.modelid;text));"{\"content-type\":\"application/json\"}");
   <mt result {
     $ok:raw parseresponse(raw);
     $httperr:e $err($networkerr("ner detect_entities: failed to reach Ollama /api/chat"))
   }
 };
+
