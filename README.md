@@ -150,7 +150,7 @@ property of the host.
 - **Local NER** — SLM-based entity recognition via Ollama
 - **Presidio** — 180+ entity types via optional Python sidecar
 - **Privacy Filter sidecar** — OpenAI Privacy Filter model (1.5B params)
-- **OS keychain** — API keys stored in macOS Keychain, never in plaintext
+- **OS keychain** — an API key saved through settings is stored in the macOS Keychain and removed from `settings.json`. A key that was already in `settings.json` is **not** migrated automatically, and is still read from there until you save it again (GA2.1)
 - **Log redaction** — all log output auto-redacted for PII before writing
 - **Database encryption** — *not currently active.* The encryption key is generated and stored in the
   OS keychain correctly, but the toolchain links plain SQLite, which silently ignores the

@@ -394,7 +394,7 @@ log line and discards the structure. Persisting it is story **GA5.5**.
   every provider dispatch — the browser route does not check it at all (E4/A13 in
   [claims.md](claims.md)). Same class of gap as the first bullet: AD1.6.
 - **OS keychain for secrets.** API keys and OAuth tokens are stored in the OS keychain (F1.5 / P5.2). They are never written to disk, never appear in logs, and are fetched per-request with expiry validation.
-- **Localhost-only HTTP server.** The HTTP server (port 11430) binds to `127.0.0.1` by default. CORS is restricted to localhost origins. External binding requires explicit configuration and is logged as a warning.
+- **HTTP server: NOT localhost-only today.** The intent is that the server (port 11430) binds to `127.0.0.1`. Measured 2026-09-24, it listens on every interface: the `host` setting in `ooke.toml` is ignored, and toke offers no way to choose a bind address (T-42, GA2.5). What is enforced is per request. State-changing requests from a foreign browser Origin are refused (GA2.6), and so is any request whose Host is not loopback (GA2.7). A non-browser client on the local network can still reach the API. CORS is restricted to localhost origins.
 
 ---
 

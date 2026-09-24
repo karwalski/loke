@@ -308,7 +308,7 @@ the structure. Persisting it, and adding its fields to the audit record, is stor
 
 ### HTTP Server
 
-Port 11430 (localhost-only by default). ooke native binary serving both API endpoints and UI pages.
+Port 11430. Intended to be localhost-only; measured 2026-09-24, it listens on every interface, because the bind address cannot yet be set (GA2.5, T-42). ooke native binary serving both API endpoints and UI pages.
 
 **API Endpoints:**
 
@@ -480,5 +480,5 @@ The following GA (General Availability) epics have been completed, bringing all 
   (`packages/browser/pages/api/pipeline.tk`, registered at `packages/browser/src/_handlers.tk:129`), and
   the audit trail is not written from anywhere at all. See the Pipeline Orchestrator and Audit Trail notes
   above, and A13/E4 in [claims.md](claims.md). Tracked as **NC1.3**, **NC1.9**, **AD1.6**, **GA5**, **DA1**.
-- **GA2: Security Hardening** (GA2.1-GA2.5) — API keys migrated to OS keychain, auto-redaction on all log output, localhost-only HTTP binding enforced. Two items in this epic did not hold: database encryption is not active (above), and the source licence headers were subsequently removed wholesale by a migration script. Attribution is via `LICENSE` and `NOTICE`.
+- **GA2: Security Hardening** (GA2.1-GA2.5) — API keys saved through settings go to the OS keychain (keys already in `settings.json` are not migrated, GA2.1), auto-redaction on all log output, and localhost-only binding is intended but not enforced (GA2.5, T-42). Two items in this epic did not hold: database encryption is not active (above), and the source licence headers were subsequently removed wholesale by a migration script. Attribution is via `LICENSE` and `NOTICE`.
 - **GA3: UX Alignment** (GA3.1-GA3.7) — Full accessibility overhaul with ARIA labels, graduated 4-level warning system, simple/advanced view toggle, pre-send cost estimation, cancel in-flight requests, feedback comments on thumbs-down, sensitivity explanation tooltips.

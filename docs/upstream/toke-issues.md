@@ -1699,6 +1699,26 @@ ids were `p-` followed by an address. **Worked around** by annotating the bindin
 `str.concat`. **Guarded** by `scripts/find_interp_abi_str.py`, in the quality gate. The guard
 flags direct interpolation and unannotated bindings for the fifteen measured names.
 
+## T-42 — no toke API can choose the address a server binds, so every server listens on all interfaces
+
+**Severity: a local-first product cannot keep its API off the network.**
+
+`std.http` exposes `serve(port)`, `serveworkers(port; workers)`, `servetls(...)` and
+`listen(addr; handler)`. None of them takes a bind address. `tk_web_glue.c` calls
+`http_serve_workers(NULL, NULL, port, workers)`. In `http.c`, `bind_listen` treats a NULL
+host as `INADDR_ANY`, even though it already supports a real host through `inet_pton`.
+`listen("localhost:8080"; …)` parses the port and discards the host.
+
+Measured 2026-09-24 with `lsof`: loke's server listens on `*:11430`, and its `ooke.toml`
+says `host = "127.0.0.1"`. The capability exists one layer down, in `http_serve_workers`'s
+`host` argument. It is simply not reachable from toke source.
+
+**The ask:** `http.serveworkershost(host:str; port:u64; workers:u64)`, or a `host` argument
+on `serveworkers`, passed through to `bind_listen`. ooke's `serverun` would then take the
+`host` it already parses from `ooke.toml`. Until then loke refuses requests per request
+(a foreign Origin, GA2.6; a non-loopback Host, GA2.7). That stops a browser and does not
+stop a client on the same network.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke
