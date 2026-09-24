@@ -121,7 +121,8 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| F3.1 | M | **Done** | Regex PII detector in toke (emails, phones, SSNs, credit cards, IPs, AU TFNs/ABNs — 10MB/s target, zero external deps) |
+| F3.1 | M | **Done** | Regex PII detector in toke (emails, phones, SSNs, credit cards, IPs, AU TFNs/ABNs — 10MB/s target, zero external deps) **Re-verified 2026-09-24 (RV1.5).** The detection half stands. Emails, phones, SSNs, cards, IPs, TFNs and ABNs each have assertions against the real module in `tests/unit/privacy/test_regex_detector.tk` (44 assertions), `test_regex.tk`, `test_regex_spans.tk` and `test_patterns.tk`. **The "10MB/s target" has never been measured.** No test, benchmark or file in `benchmarks/` times the detector, so this Done covers detection and not throughput. The measurement is filed as F3.1a, and no throughput figure may be quoted until it lands in `docs/metrics-baseline.md`. |
+| F3.1a | S |  | **Measure the regex detector's throughput against F3.1's 10MB/s target** — Filed 2026-09-24 by RV1.5. F3.1 has been **Done** with this target since it was written, and nothing has ever timed the detector. Run `core.privacy.regex` over a fixed synthetic corpus with a known PII density, at 1MB and 10MB, with the first run discarded as warm-up and N runs reported as a median and a range (VM1.3's method). Publish the result only in `docs/metrics-baseline.md`, labelled with the toke commit it was built against (X4.8). Either result is useful. Missing the target is a finding, not a failure of the story |
 | F3.2 | M | **Done** | NLP NER detector (names, places, organisations via local SLM — replaces compromise.js JS library with toke-native or Ollama-backed NER) |
 | F3.3 | L | **Done** | SLM-based NER detector (context-aware PII: "my boss John" vs "John Deere tractor" — via Ollama REST or ooke native inference) |
 | F3.4 | L | **Done** | Presidio integration (180+ entity types, Python sidecar via REST — unchanged: Presidio is language-agnostic) |
@@ -1054,7 +1055,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 68 | 62 | — | 5 | — | — | — | — | 1 |
+| FOUNDATION LAYER | 10 | 69 | 62 | — | 5 | — | — | — | — | 2 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
@@ -1070,7 +1071,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 41 | 37 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
 | VERIFICATION PROGRAMME | 14 | 121 | 69 | 12 | — | 6 | 3 | — | — | 31 |
-| **Total** | **88** | **676** | **506** | **27** | **19** | **28** | **3** | **1** | — | **92** |
+| **Total** | **88** | **677** | **506** | **27** | **19** | **28** | **3** | **1** | — | **93** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1078,7 +1079,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 |---|---|---|---|---|---|---|---|---|---|---|
 | F1 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | F2 | 1 | 9 | 9 | — | — | — | — | — | — | — |
-| F3 | 1 | 9 | 9 | — | — | — | — | — | — | — |
+| F3 | 1 | 10 | 9 | — | — | — | — | — | — | 1 |
 | F3b | 1 | 11 | 11 | — | — | — | — | — | — | — |
 | F4 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F5 | 1 | 8 | 6 | — | 1 | — | — | — | — | 1 |
@@ -1164,9 +1165,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 24 | 17 | 4 | — | — | — | — | — | 3 |
 | RV1 | 1 | 10 | 6 | — | — | — | — | — | — | 4 |
-| **Total** | **88** | **676** | **506** | **27** | **19** | **28** | **3** | **1** | — | **92** |
+| **Total** | **88** | **677** | **506** | **27** | **19** | **28** | **3** | **1** | — | **93** |
 
-Rows parsed: **676**, across **88** epics and **16** level-1 headings.
+Rows parsed: **677**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
@@ -1247,11 +1248,11 @@ rather than in dependency order.
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| F10.1 | M | **Done** | **Make the build fail loudly** — every compiler invocation in `build_loke.sh` ended `2>/dev/null \|\| true` and it linked with `-Wl,-undefined,dynamic_lookup`, so a build in which every module failed still printed "Done" and produced a binary, turning undefined symbols into runtime crashes. Now reports a per-module census to `build/break-report.txt` and refuses to link an incomplete build. |
+| F10.1 | M | **Done** | **Make the build fail loudly** — every compiler invocation in `build_loke.sh` ended `2>/dev/null \|\| true` and it linked with `-Wl,-undefined,dynamic_lookup`, so a build in which every module failed still printed "Done" and produced a binary, turning undefined symbols into runtime crashes. Now reports a per-module census to `build/break-report.txt` and refuses to link an incomplete build. **Re-verified 2026-09-24 (RV1.5).** Exercised by accident, which is the best kind of evidence. Built against toke main `444a55c`, 21 modules failed to type-check. The build printed the census, wrote `build/trees/loke/break-report.txt`, named the one unresolved symbol and ended "Refusing to link an incomplete build" with exit 1. It did not link. |
 | F10.2 | M | **Done** | **Path portability** — `run_tests.sh` and `build_test.sh` hardcoded an absolute home path with no environment override while CI exported `TOKE_DIR`, so **CI's test job could never have passed** regardless of code correctness, despite a badge in the README. Both now honour `TOKE_DIR` and fail fast when the compiler is absent instead of reporting every test as a compile error. |
 | F10.3 | M | **Done** | **Pin and gate the toolchain** — `TOOLCHAIN.lock` plus `scripts/check_toolchain.sh`, gating toke by commit ancestry and ooke by released version, per the criterion above. CI clones the pinned commits rather than chasing upstream HEAD, which previously meant CI could break on somebody else's commit at random with no local reproduction. |
 | F10.4 | S | **Done** | **Drift watch** — pinning alone would let loke drift silently again, which is how it fell four months behind. A scheduled job compares the lock against upstream HEAD weekly and warns without turning `main` red. |
-| F10.5 | M | **Done** | **Diagnostics-driven fixer** — `scripts/fix_diagnostics.py` applies mechanical fixes by byte offset from toke's own JSON diagnostics, so only spans the compiler itself flags are touched. This replaces the regex approach in the previous migration script, whose `^[ \t]*//.*\n` silently deleted the licence header from 520 files. 968 equality fixes applied; `packages/` type-check went 167 to 246 passing. |
+| F10.5 | M | **Done** | **Diagnostics-driven fixer** — `scripts/fix_diagnostics.py` applies mechanical fixes by byte offset from toke's own JSON diagnostics, so only spans the compiler itself flags are touched. This replaces the regex approach in the previous migration script, whose `^[ \t]*//.*\n` silently deleted the licence header from 520 files. 968 equality fixes applied; `packages/` type-check went 167 to 246 passing. **Re-verified 2026-09-24 (RV1.5).** `scripts/fix_diagnostics.py` exists and patches by byte offset from toke's JSON diagnostics, as stated. The "167 to 246 passing" figure is **historical** (2026-09-19, a different compiler and a different tree) and cannot be re-measured. It must not be quoted as a current figure. It is superseded by the 224-module, 0-error build. |
 | F10.6 | S | **Done** | **Remove the destructive migration scripts** — their job is finished and a repo-wide destructive rewriter is a standing hazard whether or not its regex is fixed. |
 | F10.7 | M | **Done** — 2026-09-22 | **The 209 ceiling was wrong and is withdrawn.** I reported that eight modules were unreachable because `std.tls` / `std.mdns` / `std.infer` / `std.mlx` declare identifiers containing underscores that toke rejects. They are not unreachable: the compiler carries those functions in its builtin table and resolves them regardless of the `.tki`. Their signatures had drifted, that is all, and all eight now compile. What is true instead is worse for the features and better for the build — **all four of those stdlib modules are stubs** that ignore their arguments and return `0` or a sentinel string (`"[infer: not available]"`, `"[mlx: not available]"`). See T-11 in [`docs/upstream/toke-issues.md`](upstream/toke-issues.md). The affected loke modules now report unavailability instead of treating a stub's return as a result — which mattered: `models/infer.tk` fed `privacy/ner_local.tk`, and a sentinel string reaching a PII detector reads as "no entities found".<br><br>Getting from compiling to **linking** was a second phase and larger than the first. Every module compiled while clang rejected the linked IR, with errors that name an LLVM label and no toke source file. Seven toke defects were isolated with minimal reproductions and are filed as T-1 to T-7; four sweeps in `scripts/` now find each class in source or IR, and all five are gate steps. The largest was **T-6: any `let` that shadows an enclosing `let` emits invalid IR** — which is also how a broken accumulator looks, so the same 52 sites were both a link failure and a silent logic bug.<br><br>**Status detail:** **Done** — **217 of 217 modules compile and `packages/browser/build/loke` links.** First green build of this repository. 308 errors → 0 *(Ladder note, settled 2026-09-23: 308 → 0 is the END STATE after every one of F10.14–F10.24 landed, not a rung in the same ladder as their individual steps. It is a summary figure and should not be read as a single story's delta.)* |
 | F10.8 | M |  | **Adopt ooke 3.x interfaces** — every shared interface but two had already drifted at 2.0.0 (`store` 40 changes, `template` 33, `router` 15), plus two new modules. A major version means more. Note `packages/browser/_serve_main.tk` is generated by a heredoc inside `build_loke.sh`, so the build script changes, not just source. |
