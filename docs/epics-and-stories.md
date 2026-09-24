@@ -1060,8 +1060,8 @@ hand-edit produced a set of numbers that disagreed with them.*
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 35 | 11 | 4 | — | — | — | — | — | 20 |
 | AUDIT-DRIVEN GAPS | 5 | 41 | 37 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
-| VERIFICATION PROGRAMME | 14 | 120 | 66 | 12 | — | 6 | 3 | — | — | 33 |
-| **Total** | **88** | **674** | **504** | **27** | **17** | **28** | **3** | **1** | — | **94** |
+| VERIFICATION PROGRAMME | 14 | 121 | 66 | 12 | — | 6 | 3 | — | — | 34 |
+| **Total** | **88** | **675** | **504** | **27** | **17** | **28** | **3** | **1** | — | **95** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1144,7 +1144,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VM1 | 1 | 8 | 5 | 2 | — | — | — | — | — | 1 |
 | CB1 | 1 | 7 | 2 | — | — | — | — | — | — | 5 |
 | AD1 | 1 | 8 | 2 | 2 | — | — | — | — | — | 4 |
-| GA5 | 1 | 24 | 16 | — | — | 1 | — | — | — | 7 |
+| GA5 | 1 | 25 | 16 | — | — | 1 | — | — | — | 8 |
 | RG1 | 1 | 6 | 3 | 2 | — | — | — | — | — | 1 |
 | RS | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | X6 | 1 | 5 | 5 | — | — | — | — | — | — | — |
@@ -1155,9 +1155,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 24 | 17 | 4 | — | — | — | — | — | 3 |
 | RV1 | 1 | 10 | 3 | — | — | — | — | — | — | 7 |
-| **Total** | **88** | **674** | **504** | **27** | **17** | **28** | **3** | **1** | — | **94** |
+| **Total** | **88** | **675** | **504** | **27** | **17** | **28** | **3** | **1** | — | **95** |
 
-Rows parsed: **674**, across **88** epics and **16** level-1 headings.
+Rows parsed: **675**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
@@ -1650,6 +1650,7 @@ never leaves, not even for categorisation.
 | GA5.23 | S |  | **Quota fails OPEN, unlike every other control in this codebase** — measured 2026-09-24: an unknown scope is UNLIMITED, and a rule whose limits are both zero is UNLIMITED — 999999 tokens against `limittokens:0` returns `exceeded=false, remaining=100%`. Both directions are now asserted in `tests/unit/governance/test_quota.tk` so the behaviour is explicit rather than incidental. That is the opposite of how this project treats an unknown state everywhere else: the kill switch treats an unreadable flag as ENGAGED, the privacy pipeline refuses with 503 when no detection layer completed (NC1.9), and `memory.decay` refuses to sweep a row whose age it cannot read. **Filed rather than flipped, because flipping it could lock a user out of their own tool** on a fresh installation with no rules configured — which is exactly the state a first run is in. The decision is whether a zero limit means "no limit" or "nothing allowed", and whether an unknown scope inherits a default rule. Neither is a defect with an obvious correct answer, and a governance default is not something to change in passing. |
 | GA5.24 | S | **Done** — 2026-09-24 | **`compliance_events` and `kv` were referenced and created nowhere** — found by `scripts/find_uncreated_tables.py`. `core.policy.feedback` inserts a row per policy evaluation and then counts violations over a window; with no table every insert failed and every count returned zero, so **a policy-violation rate computed from it was always 0%** — the most flattering possible number, reported as though measured. `kv` is `core.storage.db`'s own generic key/value pair at lines 309 and 317: a `SELECT value FROM kv` against a missing table returns nothing and the row accessors map that to `""`, so every read answered "no value set". Migrations 24-26. The sweep took three attempts to become usable and the failures are recorded in its docstring: raw text matched English prose in comments (76 hits, 71 of them words like "from another"); scanning only string literals still matched user-facing messages (33); requiring UPPERCASE SQL keywords and a SQL verb in the literal got it to 6, of which 3 were real. `tabs` is allowlisted — `browser/src/tabs.tk` is in the check-only `browser-app` target, blocked on `std.webview`, and inventing a schema for a tree nobody can exercise would be guessing. |
 | GA5.25 | M |  | **Consent is recorded by a module nothing calls, so no consent is ever captured** — Found 2026-09-24 while closing GA5.7. `core.governance.consent` is complete and works: `grant`, `revoke`, `check` and `loadprefs` over a `consent_records` table with a `UNIQUE(user_id, purpose)` constraint, and `tests/unit/governance/test_consent.tk` exercises it. **It has no caller anywhere in the product** — no route, no CLI command, no browser page invokes `grant`, so `consent_records` is empty on every installation and `compliance.checkconsentrecorded` correctly reports WARN for ever. That WARN is not a defect and must not be made to say PASS: it is an accurate report of an absent feature, and GA5.7's whole point is that a status must be derived rather than asserted. What is missing is the capture surface — where a user is asked, which purposes are offered, and what happens to a request whose purpose has no consent. The last of those is the part with teeth: `consent.check` exists and nothing on the request path consults it, so a purpose the user has explicitly REVOKED is not currently a reason to refuse anything. Needs a product decision on the purpose list and on whether a missing consent blocks or warns, then a surface and a gate. Blocks the consent clause of GA5.7 and nothing else. |
+| GA5.26 | M |  | **A policy decision requiring approval is forwarded with no approval surface** — Found 2026-09-24 while closing GA5.19. `core.governance.policy.evaluate` returns `$requireapproval` for exactly one input, HIGH risk over RESTRICTED data. `browser/pages/api/pipeline.tk` refused only on `$deny`, so the request was forwarded silently. Exposure is bounded: RESTRICTED data cannot take a cloud route (the pipeline and `core.router.router` both refuse one), so what proceeds is LOCAL processing. The silence is fixed on 2026-09-24: `isrequireapproval` now makes the request path log a warning naming GA5.26. The gate itself is still open. `core.governance.approval` exists and nothing imports it, and there is no UI where a user could grant approval. Refusing without that surface would block the work with no way to authorise it. Needs: an approval surface in the browser shell, a `policy_require_approval` audit write (see GA5.5 for the decision column), then a hold-until-approved path |
 
 ## Epic RG1: Regulatory Alignment — ANZ First
 
