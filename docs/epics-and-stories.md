@@ -216,8 +216,8 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 |-------|------|--------|---------|
 | F8.1 | L | **Reopened** | Companion device discovery and pairing (mDNS via ooke, confirmation codes, security checks) |
 | F8.2 | L | **Reopened** | Secure communication channel (TLS 1.3 mutual auth, certificate pinning, heartbeat — via ooke TLS primitives) |
-| F8.3 | XL | **Done** | Remote model execution (companion Ollama/Exo via REST, router integration, privacy pipeline applied) |
-| F8.4 | L | **Done** | Exo distributed inference integration (GPL-3.0 boundary maintained — REST API only, cluster monitoring) |
+| F8.3 | XL | **Reopened** — no importer, so no router integration and no privacy pipeline | Remote model execution (companion Ollama/Exo via REST, router integration, privacy pipeline applied) **Reopened 2026-09-24 (RV1.6).** `core.companion.executor` compiles and **nothing imports it**: a grep of `packages`, `src` and `tests` for an `i=…:core.companion` import finds none outside the companion directory itself. So the row's "router integration" and "privacy pipeline applied" are both false, because no request can reach this code. The exposure is nil for the same reason. It needs fixing before anything calls it: `executeconn` sends `req.prompt` as given, so a future caller that forgot to anonymise first would send raw text to the companion. `parseremoteresponse` also returns `ok:true` whatever it parses, so a malformed or error reply reads as success with empty text. No test exercises any of it. |
+| F8.4 | L | **Reopened** — no importer; no cluster monitoring surface exists | Exo distributed inference integration (GPL-3.0 boundary maintained — REST API only, cluster monitoring) **Reopened 2026-09-24 (RV1.6).** `core.companion.exo` has **no importers**, found by the same grep as F8.3, so nothing monitors a cluster and nothing routes to Exo. The GPL boundary claim does hold, trivially: the module speaks only REST, and nothing links Exo. That is the one part of this row that is true. No test exercises it. |
 
 ## Epic F9: Model Evaluation & Benchmarking
 
@@ -1054,7 +1054,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 68 | 64 | — | 3 | — | — | — | — | 1 |
+| FOUNDATION LAYER | 10 | 68 | 62 | — | 5 | — | — | — | — | 1 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
@@ -1069,8 +1069,8 @@ hand-edit produced a set of numbers that disagreed with them.*
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 35 | 11 | 4 | — | — | — | — | — | 20 |
 | AUDIT-DRIVEN GAPS | 5 | 41 | 37 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
-| VERIFICATION PROGRAMME | 14 | 121 | 68 | 12 | — | 6 | 3 | — | — | 32 |
-| **Total** | **88** | **676** | **507** | **27** | **17** | **28** | **3** | **1** | — | **93** |
+| VERIFICATION PROGRAMME | 14 | 121 | 69 | 12 | — | 6 | 3 | — | — | 31 |
+| **Total** | **88** | **676** | **506** | **27** | **19** | **28** | **3** | **1** | — | **92** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1084,7 +1084,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | F5 | 1 | 8 | 6 | — | 1 | — | — | — | — | 1 |
 | F6 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | F7 | 1 | 5 | 5 | — | — | — | — | — | — | — |
-| F8 | 1 | 4 | 2 | — | 2 | — | — | — | — | — |
+| F8 | 1 | 4 | — | — | 4 | — | — | — | — | — |
 | F9 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | P1 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | P2 | 1 | 8 | 8 | — | — | — | — | — | — | — |
@@ -1163,8 +1163,8 @@ hand-edit produced a set of numbers that disagreed with them.*
 | W2 | 1 | 4 | 3 | — | — | — | — | — | — | 1 |
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 24 | 17 | 4 | — | — | — | — | — | 3 |
-| RV1 | 1 | 10 | 5 | — | — | — | — | — | — | 5 |
-| **Total** | **88** | **676** | **507** | **27** | **17** | **28** | **3** | **1** | — | **93** |
+| RV1 | 1 | 10 | 6 | — | — | — | — | — | — | 4 |
+| **Total** | **88** | **676** | **506** | **27** | **19** | **28** | **3** | **1** | — | **92** |
 
 Rows parsed: **676**, across **88** epics and **16** level-1 headings.
 
@@ -1912,7 +1912,7 @@ through either.*
 | RV1.3 | M |  | **X4b.3–X4b.18 and T15.1–T15.10** — 13 test suites each claimed to compile independently and return 0, written under that epic's own blocker note that *"a standalone `--no-web-glue` compilation mode is needed in toke before any test binary can be produced"*. Plus the runner, the CI badge and `docs/test-coverage.md`'s assertion counts — F10.2 already established the badge was meaningless. T15.9 claims *"100% of existing tests passing"* and T15.10 *">80% of source modules have at least one test file"*. |
 | RV1.4 | M |  | **The governance and privacy runtime claims** — GA1.1–GA1.4 and GA1.8 (pipeline, restoration, kill switch, audit logging, policy evaluation wired into the browser handler; GA1.5–GA1.7 and GA1.9 are already reopened), GA2.1 (keychain-only keys *"never written to disk, never appear in logs"*), GA2.4 (*"no PII appears in any log, console output, or error message"*), GA2.5 (binds `127.0.0.1` only), GA3.1–GA3.7 (ARIA, graduated warnings, cost estimate, cancel in-flight, thumbs-down), NC1.4–NC1.6 (schema actually sent, no fabricated values rendered, per-card provenance — BG1.1 and BG1.3 exist to re-verify exactly this). |
 | RV1.5 | S |  | **The measurement claims** — F3.1 (*"10MB/s target"* regex detector), F3.9 (*"100% coverage"* privacy test harness, which AD1.8 records has never run because `run_tests.sh:25` skips it), F10.1 (the build refuses to link an incomplete build — confirm it fires at 141 failures rather than silently linking), F10.5 (*"type-check went 167 to 246 passing"*, re-measurable and contradicted by 58/199), X6.4 (the corrected coverage statement, honest only once tests run), VM1.5 (numbers out of CI, needs a CI run that gets past compilation). |
-| RV1.6 | S |  | **F8.1–F8.4** — mDNS pairing, TLS 1.3 mutual auth with certificate pinning, remote model execution and the Exo integration, all four Done under an epic notice that simultaneously said they *"still need a compiler"*. TLS mutual auth with pinning is a security claim; it does not get to stay Done on inspection. |
+| RV1.6 | S | **Done** — 2026-09-24 | **F8.1–F8.4** — mDNS pairing, TLS 1.3 mutual auth with certificate pinning, remote model execution and the Exo integration, all four Done under an epic notice that simultaneously said they *"still need a compiler"*. TLS mutual auth with pinning is a security claim; it does not get to stay Done on inspection. **Done 2026-09-24.** All four re-verified against the tree, and none stays Done. F8.1 and F8.2 were already **Reopened**. F8.3 and F8.4 are reopened now: `core.companion.executor` and `core.companion.exo` compile and have **zero importers**, so remote execution, router integration, the privacy pipeline on that path and cluster monitoring are all absent at runtime. Two latent defects are recorded in F8.3 for whoever wires it: the prompt is sent as given, and every parsed reply is `ok:true`. |
 | RV1.1a | S | **Done** — 2026-09-24 | **The inverse direction — open rows that are done** — RV1 as written only reopens Done rows. Confirmed cases: **LS1.1a** (11 of 13 landed), **GA5.1** and **GA5.2** (both fixed in `audit.tk`), **X8.5** (its hold cited NC1.9, which is Done), **MK21.3a** (`std.zip` exists now). Also **X4.2** claims delivery of a pre-push hook that `.git/hooks/` does not contain — a reopen in the other direction, found the same way **Done 2026-09-24.** Each case named here was re-checked against the tree rather than the row text. LS1.1a, GA5.1, GA5.2 and X8.5 all carry **Done** now. MK21.3a is no longer held, because `std.zip` and `std.xlsx` exist at the pin; the import itself is still not built, so the row is correctly open and unblocked, not Done. X4.2 is true now: `githooks/pre-push` exists and `scripts/install-hooks.sh` sets `core.hooksPath`. `quality-gate.sh` step checks fails when that setting is absent, so the claim can no longer go false silently. The same inverse sweep closed nine F10 rows on 2026-09-23 (F10.23a–g, F10.12a, F10.30), which were open only because nobody had marked them. Finding more cases like this is ongoing RV1 work and is not tracked under this row. |
 | RV1.7a | S | **Done** — 2026-09-23 | **Repair the table schema before anything is derived from it** — Every story row gets exactly 4 columns; the 38 rows in G1–G4 and AG1 gain a real status column instead of a `**[Done]**` buried in the description; no unescaped `\|` inside a cell; and status is drawn from a closed set — blank, `Spec done`, `Done`, `Reopened`, `⏸ On hold — <reason>`, `Blocked — <ID>`, `Queued behind <ID>`, `Partial — <reason>`. Rationale belongs in the description, not the status cell. **Nothing downstream is derivable until this holds**, which is why it is split out of RV1.7<br><br>**Status detail — done 2026-09-23.** All 629 story rows now carry four cells and a closing `\|`. The three-column tables were G1, G2, G3, G4, AG1, M1, M2 and X5 — 40 rows, not the 38 estimated, because M1 and M2 were missed; 39 of the 40 carried `**[Done]**` and M1.7 did not, so it is now blank. AG1.7 was the one row with genuinely unescaped `\|` (`instant\|patient\|background`), which is why the earlier parse thought it carried no `[Done]` when it does. F10.7, F10.11, RS1 and RS2 had no closing `\|` at all. 47 status cells held rationale too long for the column; every one was moved verbatim into the Summary after `**Status detail:**`, and the transformation was checked to lose no word. `Spec done` is removed from the legend rather than kept on zero rows, and `Superseded by <ID>` is added because one row needed it. |
 | RV1.7b | S | **Done** — 2026-09-23 | **Generate the SUMMARY and gate the schema** — [`scripts/check_backlog.py`](../scripts/check_backlog.py), wired into `scripts/quality-gate.sh`. Seven checks: the four-cell schema and the closed status vocabulary; the SUMMARY regenerated from the rows between the `SUMMARY:BEGIN` and `SUMMARY:END` sentinel comments and diffed (`--fix` rewrites it); legend closure both ways; one live census per denominator per unit; a hold on a story that is already Done; cross-reference liveness including cycles; and error/module ladders, which must not fork. It does **not** judge whether a Done marker is true — that is RV1's human work, and a script claiming to do it would be the fourth thing in this repository that cannot fail. Proven able to fail against a deliberately broken copy. |

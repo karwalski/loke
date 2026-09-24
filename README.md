@@ -417,4 +417,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
 
-**Note:** Exo (GPL-3.0), used for distributed inference, runs as a separate process communicating via network API to maintain the license boundary. It is never linked into loke.
+**Note:** Exo (GPL-3.0) is the intended engine for distributed inference, and it is not yet wired in: `core.companion.exo` exists and nothing calls it (F8.4). When it is wired, Exo runs as a separate process reached over its network API, which keeps the licence boundary. It is never linked into loke.
