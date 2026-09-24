@@ -78,6 +78,10 @@ if [ -d "$PROJECTDIR/build/trees/moke/obj" ]; then
   check_stale "moke" "$PROJECTDIR/build/trees/moke/obj" \
     "$PROJECTDIR/packages/moke" || STALE=1
 fi
+if [ -d "$PROJECTDIR/build/trees/loke-cli/obj" ]; then
+  check_stale "loke-cli" "$PROJECTDIR/build/trees/loke-cli/obj" \
+    "$PROJECTDIR/packages/mcp-broker" "$PROJECTDIR/packages/cli" || STALE=1
+fi
 if [ "$STALE" -ne 0 ]; then
   exit 2
 fi
@@ -165,6 +169,27 @@ if [ -d "$MOKE_OBJ_DIR" ]; then
   fi
 fi
 
+# T11.2 — the loke-cli tree's OWN modules (packages/mcp-broker and packages/cli), so a test
+# can import mcpbroker.* or cli.* instead of re-declaring them. Before this, no module under
+# packages/mcp-broker was reachable from any test: build_loke.sh does not compile that tree,
+# and a test importing it failed to compile for want of an interface.
+#
+# Only the tree's own prefixes are archived, and never an object that carries a main: the
+# core and shared objects in the same directory are the same modules libloke.a already
+# holds. Build it with: scripts/build_trees.sh loke-cli
+CLI_OBJ_DIR="$PROJECTDIR/build/trees/loke-cli/obj"
+CLI_IFACE_DIR="$PROJECTDIR/build/trees/loke-cli/interfaces"
+CLI_A="$BUILDDIR/libcli.a"
+if [ -d "$CLI_OBJ_DIR" ]; then
+  NEWEST_C=$(find "$CLI_OBJ_DIR" \( -name 'mcpbroker_*.o' -o -name 'cli_*.o' \) -newer "$CLI_A" 2>/dev/null | head -1)
+  if [ ! -f "$CLI_A" ] || [ -n "$NEWEST_C" ]; then
+    echo "Building $CLI_A (once) ..."
+    rm -f "$CLI_A"
+    find "$CLI_OBJ_DIR" \( -name 'mcpbroker_*.o' -o -name 'cli_*.o' \) ! -name '*_main.o' -print0 \
+      | xargs -0 ar rcs "$CLI_A" 2>/dev/null
+  fi
+fi
+
 # ooke's objects, for the page modules: they call ooke.template and ooke.serve.
 # Taken from build/ooke-objs, which build_tree.sh compiles from ooke's source with the
 # same toke as everything else. Not from $OOKE_DIR/src/ooke: that IR came from an older
@@ -241,7 +266,7 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   # packages/moke/tests/*. build/interfaces is listed FIRST so loke's own modules always win a
   # name collision — both trees emit shared.types.tki, and the moke tree's copy is only as fresh
   # as the last moke build.
-  if ! $TOKE $TKCONFIG -I "$IFACE_DIR" $([ -d "$MOKE_IFACE_DIR" ] && echo "-I $MOKE_IFACE_DIR") \
+  if ! $TOKE $TKCONFIG -I "$IFACE_DIR" $([ -d "$MOKE_IFACE_DIR" ] && echo "-I $MOKE_IFACE_DIR") $([ -d "$CLI_IFACE_DIR" ] && echo "-I $CLI_IFACE_DIR") \
        --emit-llvm --out "$BUILDDIR/$NAME.ll" "$SRC" 2>/dev/null; then
     echo "COMPILE_ERROR $SRC"
     FAIL=$((FAIL+1))
@@ -257,7 +282,7 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   # privacy unit test into a link against the whole application.
   if ! clang $CFLAGS -L/opt/homebrew/lib \
     -x ir "$BUILDDIR/$NAME.ll" -x none \
-    $([ -f "$LOKE_A" ] && echo "$LOKE_A") $([ -f "$MOKE_A" ] && echo "$MOKE_A") \
+    $([ -f "$LOKE_A" ] && echo "$LOKE_A") $([ -f "$MOKE_A" ] && echo "$MOKE_A") $([ -f "$CLI_A" ] && echo "$CLI_A") \
     $([ -f "$OOKE_A" ] && echo "$OOKE_A") "$STDLIB_A" \
     -o "$BUILDDIR/$NAME" -lm -lz -lsqlite3 -lssl -lcrypto \
     -framework Security -framework CoreFoundation -lobjc \

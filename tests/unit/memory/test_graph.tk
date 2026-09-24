@@ -1,0 +1,134 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.graph;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=g:core.memory.graph;
+
+(* T6.2 — core.memory.graph against the real memory_graph_entities and
+   memory_graph_relations tables of a migrated store.
+
+     row                                         current design
+     ------------------------------------------- -------------------------------------------
+     add_node increases node count               upsertentity adds a row; upserting the same
+                                                 id again does not add a second
+     add_relation creates edge between nodes     addrelation; neighbours returns the edge
+     query_facts, subject filter                 neighbours(entity) returns only the edges
+                                                 that touch that entity
+     query_facts, predicate filter               ABSENT — nothing selects relations by kind
+     detect_contradictions (both clauses)        ABSENT — relations have no valid_to and no
+                                                 function compares them
+     visualise_dot starts with "digraph"         ABSENT — the module renders nothing
+
+   The absent clauses are not asserted around; they are recorded in the backlog row. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-memory-graph")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=ent(id:str;name:str):$entity{
+  <$entity{id:id;name:name;kind:"person";summary:str.concat("summary of ";name);confidence:0.75 as f32;createdat:1700000000}
+};
+
+f=rel(from:str;to:str;kind:str):$relation{
+  <$relation{fromid:from;toid:to;kind:kind;weight:0.5 as f32;createdat:1700000000}
+};
+
+f=nodes():i64{
+  <sdb.countquery("SELECT id FROM memory_graph_entities";@())
+};
+
+f=hasrel(rs:@$relation;from:str;to:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$relation=rs.get(i);
+    if(str.eq(r.fromid;from) && str.eq(r.toid;to)){ found=true }el{}
+  };
+  <found
+};
+
+f=hasent(es:@$entity;id:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<es.len;i=i+1){
+    let e:$entity=es.get(i);
+    if(str.eq(e.id;id)){ found=true }el{}
+  };
+  <found
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(t.assert(openfreshstore()==1;"the store opened on a fresh file")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nodes()==0;"a fresh graph has no nodes")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Nodes ──────────────────────────────────────────────────────────────── *)
+  if(t.assert(g.upsertentity(0;ent("e-a";"Aria"));"upsertentity reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nodes()==1;"and adding a node increases the count to one")){pass=pass+1}el{fail=fail+1};
+  g.upsertentity(0;ent("e-b";"Bram"));
+  g.upsertentity(0;ent("e-c";"Cato"));
+  g.upsertentity(0;ent("e-d";"Dune"));
+  if(t.assert(nodes()==4;"four distinct nodes count as four")){pass=pass+1}el{fail=fail+1};
+  g.upsertentity(0;ent("e-a";"Aria Renamed"));
+  if(t.assert(nodes()==4;"upserting an existing id replaces it rather than adding a node")){pass=pass+1}el{fail=fail+1};
+
+  let found=g.searchentities(0;"Aria");
+  if(t.assert(found.len==1;"searchentities finds the node by name")){pass=pass+1}el{fail=fail+1};
+  if(found.len==1){
+    let fa:$entity=found.get(0);
+    if(t.asserteq(fa.name;"Aria Renamed";"with the replaced name")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(fa.kind;"person";"its kind")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(fa.createdat==1700000000;"and its created_at")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+3 };
+  if(t.assert(g.searchentities(0;"Nobody").len==0;"a name that matches nothing finds nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Edges ──────────────────────────────────────────────────────────────── *)
+  if(t.assert(g.addrelation(0;rel("e-a";"e-b";"works_with"));"addrelation reports success")){pass=pass+1}el{fail=fail+1};
+  g.addrelation(0;rel("e-c";"e-d";"manages"));
+  let na:$graphresult=g.neighbours(0;"e-a";1);
+  if(t.assert(na.relations.len==1;"the edge between the two nodes exists: one relation touches e-a")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasrel(na.relations;"e-a";"e-b");"and it runs from e-a to e-b")){pass=pass+1}el{fail=fail+1};
+  if(na.relations.len==1){
+    let r0:$relation=na.relations.get(0);
+    if(t.asserteq(r0.kind;"works_with";"with the kind it was given")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  if(t.assert(hasent(na.entities;"e-a") && hasent(na.entities;"e-b");"neighbours returns both endpoints")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Subject filter ─────────────────────────────────────────────────────── *)
+  if(t.assert(!hasrel(na.relations;"e-c";"e-d");"the subject filter excludes an edge that does not touch the subject")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasent(na.entities;"e-c") && !hasent(na.entities;"e-d");"and the nodes only that edge reaches")){pass=pass+1}el{fail=fail+1};
+  let nb:$graphresult=g.neighbours(0;"e-b";1);
+  if(t.assert(hasrel(nb.relations;"e-a";"e-b");"an edge is found from its OBJECT end too")){pass=pass+1}el{fail=fail+1};
+
+  (* Depth. With a -> b and b -> c, depth 1 from a stops at b and depth 2 reaches c. *)
+  g.addrelation(0;rel("e-b";"e-c";"knows"));
+  let d1:$graphresult=g.neighbours(0;"e-a";1);
+  let d2:$graphresult=g.neighbours(0;"e-a";2);
+  if(t.assert(!hasent(d1.entities;"e-c");"depth 1 does not reach a node two edges away")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasent(d2.entities;"e-c");"depth 2 does")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Delete ─────────────────────────────────────────────────────────────── *)
+  if(t.assert(g.deleteentity(0;"e-b");"deleteentity reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nodes()==3;"and the node is gone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT from_id FROM memory_graph_relations WHERE from_id='e-b' OR to_id='e-b'";@())==0;"with every edge that touched it, so no edge dangles")){pass=pass+1}el{fail=fail+1};
+  let nc:$graphresult=g.neighbours(0;"e-c";1);
+  if(t.assert(nc.relations.len==1;"while an edge that did not touch it survives")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

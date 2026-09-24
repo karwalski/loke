@@ -1,0 +1,1 @@
+Tests `core.models.hardware` (T7.3): `detect` returns a populated profile (it is a stub — see F2.8a), the unified-versus-split memory total read through `summary` because an f64 return is corrupted across a module boundary (T-20), the summary text, and `tojson`'s seven keys and validity. Depends on `std.test`, `std.str`, `std.json`, `core.models.hardware`.

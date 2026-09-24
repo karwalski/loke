@@ -12,6 +12,8 @@ i=bt:core.optimiser.budgettypes;
 i=bud:core.optimiser.budget;
 i=pt:core.providers.types;
 i=h:page.api.pipeline;
+i=pipe:core.privacy.pipeline;
+i=sh:shared.types;
 
 (* X7.2 — this file used to declare $pipelinerequest and $pipelineresponse and assert
    twelve times over them:
@@ -145,6 +147,49 @@ f=main():i64{
   if(t.assert(!str.contains(msg.content;"@");"the placeholder form carries no address, which is the whole point of sending it instead")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(req.systemprompt;"you are a guardian";"and the guardian system prompt is attached")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!req.stream;"the interactive endpoint does not ask for a stream it cannot restore placeholders in")){pass=pass+1}el{fail=fail+1};
+
+  (* ── T14.2: what one POST does to the text, through the real pipeline ──────────
+     The row was written against an HTTP round trip. The handler's `post` reads a live
+     request handle and opens the user's own ~/.loke store, so it is not callable from a test;
+     everything it does between reading the body and dispatching is, and in the same order:
+     pipe.runforward with the endpoint's own detection stack, then h.privacyfields (the
+     metadata every response body carries), then h.decide (the governance gate). The NER and
+     Presidio layers point at closed ports, as in tests/unit/browser/test_pipeline_handler.tk,
+     so the regex layer is the one that scans and the result does not depend on a sidecar. *)
+  let lconf=pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999");
+
+  let clean=pipe.runforward("the quarterly figures look fine";"";lconf);
+  let cleanres:$piidetectionresult=clean.result;
+  if(t.asserteq(cleanres.anonymised;"the quarterly figures look fine";"clean text is forwarded unchanged — there was nothing to replace")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pipe.issafetoforward(clean);"and a scanned clean run is safe to forward, so clean text is not refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.privacyfields(clean);"\"sensitivity\":\"public\"");"the response classifies clean text as public")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.isdeny(h.decide(clean))==false;"and policy does not deny it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.isrequireapproval(h.decide(clean))==false;"nor ask for approval")){pass=pass+1}el{fail=fail+1};
+
+  let withemail=pipe.runforward("contact alice@example.com about the invoice";"";lconf);
+  let emailres:$piidetectionresult=withemail.result;
+  if(t.assert(!str.contains(emailres.anonymised;"alice@example.com");"the prompt that goes forward does not carry the address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(emailres.anonymised;"@");"nor any fragment of it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(emailres.anonymised;"about the invoice");"while the rest of the prompt survives, so this is anonymisation and not deletion")){pass=pass+1}el{fail=fail+1};
+  let ereq:$completionrequest=h.completionfor("m";emailres.anonymised;"");
+  let emsg:$chatmessage=ereq.messages.get(0);
+  if(t.assert(!str.contains(emsg.content;"alice@example.com");"and the provider request built from the run carries the anonymised prompt, not the original")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.privacyfields(withemail);"\"sensitivity\":\"confidential\"");"the response classifies an email as confidential")){pass=pass+1}el{fail=fail+1};
+
+  let withcard=pipe.runforward("charge card 4111 1111 1111 1111 for the order";"";lconf);
+  let cardres:$piidetectionresult=withcard.result;
+  if(t.assert(str.contains(h.privacyfields(withcard);"\"sensitivity\":\"restricted\"");"a card number is classified RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(cardres.anonymised;"4111 1111 1111 1111");"and is not in the prompt that goes forward")){pass=pass+1}el{fail=fail+1};
+  let carddecision=h.decide(withcard);
+  if(t.assert(h.isrequireapproval(carddecision) || h.isdeny(carddecision);"RESTRICTED content is blocked or requires approval at the governance gate")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.isrequireapproval(carddecision);"specifically, it requires approval (high risk over restricted data) — and post() logs that and proceeds, which is GA5.26, not this row")){pass=pass+1}el{fail=fail+1};
+
+  (* session_id. The response carries `request_id`, minted per run by runforward: it is the
+     identifier a response is correlated by, and there is no separate session concept on
+     this endpoint. *)
+  if(t.assert(str.len(clean.requestid)==32;"every run carries a request id — 16 random bytes, hex")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(clean.requestid;withemail.requestid);"and two runs carry different ids, so it identifies the request rather than being a constant")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.privacyfields(withemail);str.concat("\"request_id\":\"";withemail.requestid));"and the response body carries it")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };
