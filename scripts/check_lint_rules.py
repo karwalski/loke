@@ -80,6 +80,8 @@ def main() -> int:
     ap.add_argument("roots", nargs="*",
                     default=["packages/core", "packages/shared", "packages/browser"])
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--baseline", action="store_true",
+                    help="record the current style-diagnostic count as the ratchet floor")
     args = ap.parse_args()
 
     if not TOKE.exists():
@@ -107,18 +109,66 @@ def main() -> int:
     for rel, line, msg in failures:
         print(f"  {rel}:{line}: {msg}")
 
+    # ── The ratchet ───────────────────────────────────────────────────────────────
+    #
+    # The style rules are not gated as failures — 866 `concat nested N deep` sites are real
+    # cleanup with no defect behind them, and failing the gate on them today would mean the gate
+    # is switched off. But they must not GROW, which is the same argument `build_census.py` makes
+    # for compile errors: a count that only ratchets down needs no campaign to be effective.
+    #
+    # `string-concat-chain` has **no fix span**, so there is no auto-migration to run — the 866
+    # are hand work. Measured, so nobody has to guess: interpolation itself is correct for
+    # ordinary strings (`"\(a) \(b)"` and the nested `str.concat` equivalent both produce 11
+    # characters for "hello world"), so the rule's advice is sound; T-21's truncation is specific
+    # to `std.homedir()` and is not a general hazard.
+    # baselines/ is committed; build/ is gitignored, so a baseline there never survives a
+    # clone and the ratchet cannot fail. See the note in build_census.py paths().
+    baseline_path = REPO / "baselines" / "lint.json"
+    total_other = sum(other.values())
+    baseline = None
+    if baseline_path.exists():
+        try:
+            baseline = json.loads(baseline_path.read_text())
+        except Exception:
+            baseline = None
+
     if other:
-        print(f"\n  {sum(other.values())} other lint diagnostic(s), not gated "
-              f"(LS1.2/LS1.3/LS1.4 own these):")
+        print(f"\n  {sum(other.values())} other lint diagnostic(s), not gated as failures "
+              f"(LS1.2/LS1.4 own these):")
         for msg, n in other.most_common(6):
             print(f"    {n:5}  {msg}")
 
-    if not failures:
+    regressed = False
+    if baseline is not None:
+        was = baseline.get("total", 0)
+        if total_other > was:
+            print(f"\n  RATCHET: style diagnostics went {was} -> {total_other}. They are not "
+                  f"gated as defects, but they must not grow.", file=sys.stderr)
+            for msg, n in other.most_common():
+                before = baseline.get("byrule", {}).get(msg, 0)
+                if n > before:
+                    print(f"    {msg}: {before} -> {n}", file=sys.stderr)
+            regressed = True
+        else:
+            print(f"\n  ratchet: {was} -> {total_other} "
+                  f"({'unchanged' if was == total_other else f'{was - total_other} fewer'})")
+    else:
+        print(f"\n  no lint baseline at {baseline_path.relative_to(REPO)} — "
+              f"run with --baseline to record one")
+
+    if args.baseline:
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(json.dumps(
+            {"total": total_other, "byrule": dict(other)}, indent=2, sort_keys=True))
+        print(f"  baseline recorded: {total_other} style diagnostic(s)")
+
+    if not failures and not regressed:
         print(f"\ncheck_lint_rules: OK — {len(files)} file(s), no defect-class lint rule fires.")
         return 0
-    print(f"\n{len(failures)} defect-class lint diagnostic(s). A bare `x.push(...)` never "
-          f"mutates — the collection stays as it was and nothing warns at runtime.",
-          file=sys.stderr)
+    if failures:
+        print(f"\n{len(failures)} defect-class lint diagnostic(s). A bare `x.push(...)` never "
+              f"mutates — the collection stays as it was and nothing warns at runtime.",
+              file=sys.stderr)
     return 1 if args.check else 0
 
 

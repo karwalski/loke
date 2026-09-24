@@ -238,12 +238,21 @@ def paths(tree: str | None) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     With no --tree the legacy locations are used unchanged: build/break-report.txt is
     where CI uploads the artifact from and where scripts/quality-gate.sh expects it.
     """
+    # The BASELINE lives under baselines/, which is committed. Everything else stays under
+    # build/, which is not.
+    #
+    # This was `build/trees/<tree>/census-baseline.json`, and `build/` is gitignored
+    # (.gitignore:7) — so the baseline was never committed, and on a fresh clone or in CI there
+    # was nothing to compare against. A ratchet whose floor does not survive a clone cannot
+    # fail, which is the fifth check in this repository found to be inert for a reason like
+    # this. Found 2026-09-24 while adding the lint ratchet, which would have had the same defect.
     if tree:
         d = REPO / "build" / "trees" / tree
-        return (d / "break-report.txt", d / "census-baseline.json",
+        return (d / "break-report.txt",
+                REPO / "baselines" / f"census-{tree}.json",
                 d / "symbol-census.json")
     return (REPO / "build" / "break-report.txt",
-            REPO / "build" / "census-baseline.json",
+            REPO / "baselines" / "census-loke.json",
             REPO / "build" / "trees" / "loke" / "symbol-census.json")
 
 

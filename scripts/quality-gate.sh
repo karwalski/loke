@@ -188,6 +188,8 @@ step_checks() {
       || { python3 ./scripts/check_lint_rules.py \
              packages/core packages/shared packages/browser >&2
            failed=1; }
+    # The style count also ratchets: it may fall, it must not rise. Floor in baselines/lint.json,
+    # which is committed — unlike build/, so it survives a clone and can therefore actually fail.
   fi
 
   if [[ -f ./scripts/find_uncreated_tables.py ]]; then
