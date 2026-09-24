@@ -8,6 +8,7 @@ i=str:std.str;
 i=file:std.file;
 i=std:std;
 i=sdb:core.storage.db;
+i=mig:core.storage.migrations;
 
 (* X7.2 — this file used to declare ten stand-ins for core.storage.db and assert against
    them. Two of the ten are the reason it had to be rewritten rather than extended:
@@ -122,6 +123,23 @@ f=main():i64{
   if(t.assert(sdb.tableexists("schema_migrations");"the migrations table exists after openstore ran them")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!sdb.tableexists("no_such_table_xyz");"and a table that does not exist is reported absent, not empty")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!sdb.triggerexists("no_such_trigger_xyz");"the same for triggers")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A failed migration is not recorded as applied ────────────────────────────
+     Each exec in the runner used to be a statement whose error was discarded, so a
+     migration with bad SQL was inserted into schema_migrations and never retried, and
+     every later migration ran on a schema missing its predecessor. Versions 9001-9003
+     are far above the real ones and exist only in this test. *)
+  let bad=@(
+    $migration{version:9001 as u32;description:"test: a migration whose SQL is invalid";sql:"CREATE TABLE ("};
+    $migration{version:9002 as u32;description:"test: valid, but after the failure";sql:"CREATE TABLE IF NOT EXISTS test_mig_after (x INTEGER)"}
+  );
+  if(t.asserteq(str.fromint(sdb.applymigrations(bad));"9001";"the runner answers the version that failed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(sdb.countquery("SELECT version FROM schema_migrations WHERE version=9001";@()));"0";"and the failed migration is NOT recorded as applied")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.tableexists("test_mig_after");"and nothing after the failure was attempted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(sdb.pendingmigrations(bad));"2";"so both remain pending, which openstore logs")){pass=pass+1}el{fail=fail+1};
+  let good=@($migration{version:9003 as u32;description:"test: a valid migration";sql:"CREATE TABLE IF NOT EXISTS test_mig_good (x INTEGER)"});
+  if(t.asserteq(str.fromint(sdb.applymigrations(good));"0";"a valid migration applies, and 0 means none failed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(sdb.pendingmigrations(good));"0";"and it is recorded")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

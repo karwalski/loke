@@ -196,6 +196,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | F6.5 | M | **Done** | Database backup and restore (consistent snapshot via SQLite VACUUM INTO, timestamped naming, configurable retention, restore with validation) `[R3.8, R8.5]` — *spec remains valid* |
 | F6.6 | M | **Done** | Persistent sync queue (enqueue/dequeue with retry and exponential backoff, survives restarts — implemented in toke) `[R3.4, R8.7]` — *spec remains valid* |
 | F6.7 | M | **Done** | Namespaced settings store (typed key-value: string, number, boolean, JSON; `loke.*` prefix + application prefix; get/set/list API — implemented in toke) `[R3.3]` — *spec remains valid* |
+| F6.8 | S | **Done** — 2026-09-24 | **A migration that failed was recorded as applied, and never retried** — Found 2026-09-24. A worker flagged it and it was confirmed by reading. In `core.storage.db.runmigrations`, each `mt db.exec(...) { $ok:v 1; $err:e $err(...) }` was a STATEMENT, so its value, the error included, was discarded. A migration whose SQL failed was then inserted into `schema_migrations` as applied. Every later migration ran against a schema missing its predecessor, and nothing reported it. The same applied to creating `schema_migrations` itself. **Fixed:** `applymigrations` stops at the first failure, does not record it, logs at ERROR naming the migration, and answers the failed version. `openstore` logs how many migrations are pending (`pendingmigrations`). That log line is the visible signal, because `runmigrations`'s own `$err` reaches a `!$lokeerr` match, which T-18 reads as `$ok` (LS1.1j). **Evidence:** six assertions in `tests/unit/storage/test_db.tk` using test-only versions 9001 to 9003: an invalid migration followed by a valid one. The failed version is reported, it is not recorded, nothing after it runs, both stay pending, and a valid one applies and is recorded. With the stop-on-failure branch disabled, 4 of them failed. |
 
 ## Epic F7: MCP Framework
 
@@ -1059,7 +1060,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 71 | 54 | 11 | 5 | — | — | — | — | 1 |
+| FOUNDATION LAYER | 10 | 72 | 55 | 11 | 5 | — | — | — | — | 1 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
@@ -1075,7 +1076,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 34 | 20 | 1 | — | — | — | — | — | 13 |
 | VERIFICATION PROGRAMME | 14 | 122 | 76 | 13 | — | 7 | 3 | — | — | 23 |
-| **Total** | **88** | **687** | **520** | **38** | **21** | **31** | **3** | **1** | — | **73** |
+| **Total** | **88** | **688** | **521** | **38** | **21** | **31** | **3** | **1** | — | **73** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1087,7 +1088,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | F3b | 1 | 11 | — | 11 | — | — | — | — | — | — |
 | F4 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F5 | 1 | 10 | 9 | — | 1 | — | — | — | — | — |
-| F6 | 1 | 7 | 7 | — | — | — | — | — | — | — |
+| F6 | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | F7 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F8 | 1 | 4 | — | — | 4 | — | — | — | — | — |
 | F9 | 1 | 3 | 3 | — | — | — | — | — | — | — |
@@ -1169,9 +1170,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 25 | 17 | 4 | — | — | — | — | — | 4 |
 | RV1 | 1 | 10 | 7 | 1 | — | — | — | — | — | 2 |
-| **Total** | **88** | **687** | **520** | **38** | **21** | **31** | **3** | **1** | — | **73** |
+| **Total** | **88** | **688** | **521** | **38** | **21** | **31** | **3** | **1** | — | **73** |
 
-Rows parsed: **687**, across **88** epics and **16** level-1 headings.
+Rows parsed: **688**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 

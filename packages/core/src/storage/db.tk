@@ -221,7 +221,12 @@ f=openstore(datadir:str):$store!$lokeerr{
   if(securedeleteon){}el{
     log.warn("db: PRAGMA secure_delete did not take effect; deleted rows may remain legible in freed pages";"db";"system")
   };
-  <mt runmigrations(conn) {
+  let migrated=runmigrations(conn);
+  let pending=pendingmigrations(m.allmigrations());
+  if(pending>0){
+    log.error("db: \(pending) migration(s) are not applied; the schema is incomplete and some features will read empty tables";"db";"system")
+  }el{};
+  <mt migrated {
     $ok:v2 $ok($store{conn:conn;datadir:datadir});
     $err:e $err(e)
   }
@@ -233,13 +238,38 @@ f=runmigrations(conn:$dbconn):i64!$lokeerr{
   applied_at TEXT NOT NULL,
   description TEXT NOT NULL
 )";
-  mt db.exec(createsql;@()) {
-    $ok:v 1;
-    $err:e $err($storageerr("failed to create schema_migrations table"))
+  let created=mt db.exec(createsql;@()) {
+    $ok:v true;
+    $err:e false
   };
-  let migrations=m.allmigrations();
+  if(!created){
+    log.error("db: could not create schema_migrations; no migration was applied";"db";"system");
+    <$err($storageerr("failed to create schema_migrations table"))
+  }el{};
+  let failedat=applymigrations(m.allmigrations());
+  if(failedat>0){
+    <$err($storageerr(str.concat("migration failed at version ";str.fromi64(failedat))))
+  }el{};
+  <$ok(1)
+};
+
+(* Applies each migration not yet recorded, in order, and answers the version that FAILED,
+   or 0 when every one applied.
+
+   What this replaced. Each `mt db.exec(...) { $ok:v 1; $err:e $err(...) }` was a
+   STATEMENT, so its value, the error included, was thrown away. A migration whose SQL
+   failed was then inserted into schema_migrations as applied, so it was never retried,
+   and every later migration ran against a schema missing its predecessor. Nothing
+   reported any of it.
+
+   It stops at the first failure. Later migrations may depend on the failed one, and a
+   recorded version has to mean "applied". It logs at ERROR, naming the migration.
+   runmigrations does return $err, but its only caller matches on a !$lokeerr result,
+   which T-18 reads as $ok whatever it holds (LS1.1j). So the log line and
+   pendingmigrations() are what actually make a failure visible today. *)
+f=applymigrations(migrations:@$migration):i64{
   lp(let mi=0;mi<migrations.len;mi=mi+1){
-  let mg=migrations.get(mi);
+    let mg=migrations.get(mi);
     let verstr=str.fromint(mg.version);
     let checksql=str.concat("SELECT version FROM schema_migrations WHERE version=";verstr);
     let exists=mt db.one(checksql;@()) {
@@ -247,22 +277,42 @@ f=runmigrations(conn:$dbconn):i64!$lokeerr{
       $err:v false
     };
     if(!exists){
-      mt db.exec(mg.sql;@()) {
-        $ok:v 1;
-        $err:e $err($storageerr(str.concat("migration failed: ";mg.description)))
+      let ran=mt db.exec(mg.sql;@()) {
+        $ok:v true;
+        $err:e false
       };
-      (* The literal string "now()", not a call: SQL functions are not evaluated inside a
-         bound parameter, so every migration row recorded applied_at as the seven
-         characters n-o-w-(-) — the same defect GA5.1 fixed in audit_log.created_at, still
-         live here. Nothing reads applied_at yet, which is why it survived. An ISO-8601
-         stamp, and nothing hashes this column so there is no digest to disturb. *)
-      mt db.exec("INSERT INTO schema_migrations (version,applied_at,description) VALUES (?,?,?)";@(verstr;str.nowiso8601();mg.description)) {
-        $ok:v 1;
-        $err:e $err($storageerr(str.concat("failed to record migration: ";mg.description)))
+      if(!ran){
+        log.error(str.concat("db: migration FAILED and was not recorded, so later migrations were not attempted: ";mg.description);"db";"system");
+        <mg.version as i64
+      }el{};
+      (* An ISO-8601 stamp, not the literal "now()". See GA5.1. *)
+      let recorded=mt db.exec("INSERT INTO schema_migrations (version,applied_at,description) VALUES (?,?,?)";@(verstr;str.nowiso8601();mg.description)) {
+        $ok:v true;
+        $err:e false
       };
-    };
+      if(!recorded){
+        log.error(str.concat("db: migration applied but could not be recorded: ";mg.description);"db";"system");
+        <mg.version as i64
+      }el{};
+    }el{};
   };
-  <$ok(1)
+  <0
+};
+
+(* How many of the given migrations are not recorded as applied. openstore logs it,
+   because T-18 hides runmigrations' own $err (see applymigrations). *)
+f=pendingmigrations(migrations:@$migration):i64{
+  let pending=mut.0;
+  lp(let mi=0;mi<migrations.len;mi=mi+1){
+    let mg=migrations.get(mi);
+    let checksql=str.concat("SELECT version FROM schema_migrations WHERE version=";str.fromint(mg.version));
+    let exists=mt db.one(checksql;@()) {
+      $ok:v true;
+      $err:v false
+    };
+    if(!exists){ pending=pending+1 }el{};
+  };
+  <pending
 };
 
 f=closestore(store:$store):void{

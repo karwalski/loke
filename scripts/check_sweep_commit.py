@@ -86,6 +86,20 @@ PROTECTED_THRESHOLD = 5
 # failure go away: that is the one use of this constant that defeats its purpose.
 CUTOVER = "531708a"
 
+# Deletions explained AFTER the fact, one commit and one path at a time, each with its
+# reason. For commits that are already inside a merge, where rewording the message would
+# mean rewriting history. This is not an allowlist of paths. An entry names ONE commit,
+# so the same file losing lines in any later commit is checked as usual. Every entry has
+# to say what was lost and why that was right.
+EXPLAINED = {
+    ("b02aaa6", "packages/core/src/privacy/ner_local.tk"):
+        "PL1.6: deleted whole. It had no importers, it sat on the std.infer stub, and it "
+        "duplicated core.privacy.ner. Recorded in the PL1.6 row.",
+    ("419027f", "tests/unit/router/test_escalation.tk"):
+        "F5.8/T2.4: rewritten against the policy-honouring ladder. The removed assertions "
+        "described the ladder that ignored its policy. Recorded in both rows.",
+}
+
 
 def git(*args: str) -> str:
     return subprocess.run(
@@ -146,6 +160,10 @@ def check(rows: list[tuple[int, int, str]], message: str, label: str,
         net = added - removed
         limit = threshold_for(path, default_threshold)
         if net > -limit:
+            continue
+        if any(label.startswith(c) and path == pth for (c, pth) in EXPLAINED):
+            if verbose:
+                print(f"  ok   {label}: {path} net {net:+d}, explained in EXPLAINED")
             continue
         if mentions(message, path):
             if verbose:
