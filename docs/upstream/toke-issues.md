@@ -1699,7 +1699,7 @@ ids were `p-` followed by an address. **Worked around** by annotating the bindin
 `str.concat`. **Guarded** by `scripts/find_interp_abi_str.py`, in the quality gate. The guard
 flags direct interpolation and unannotated bindings for the fifteen measured names.
 
-## T-42 — no toke API can choose the address a server binds, so every server listens on all interfaces
+## T-43 — no toke API can choose the address a server binds, so every server listens on all interfaces
 
 **Severity: a local-first product cannot keep its API off the network.**
 
