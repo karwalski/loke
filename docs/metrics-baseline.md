@@ -1,7 +1,7 @@
 # Metrics Baseline
 
 **Version:** 1.0
-**Last updated:** 2026-09-19
+**Last updated:** 2026-09-24
 
 This file is the **only** source from which this project publishes figures. Every number here carries
 its workload, its tokenizer (or says "bytes"), its sample size and its date. Where a figure is widely
@@ -240,13 +240,65 @@ python3 benchmarks/toon/run.py
 Harness and full method: [`benchmarks/toon/README.md`](../benchmarks/toon/README.md). Payload checksums
 are verified on every run.
 
+### Regex detector throughput, against F3.1's 10MB/s target — 2026-09-24
+
+**Result: the target is missed by more than an order of magnitude, and the detector never reaches
+10MB at all.** Throughput falls as the input grows, because time and memory both grow roughly with
+the square of the input size.
+
+| Input | Median throughput | Range, 5 runs | Median time | Median peak RSS |
+|---|---|---|---|---|
+| 0.25 MB (249 928 bytes) | **1.07 MB/s** | 0.97–1.13 | 234 ms | 141 MB |
+| 0.5 MB (499 932 bytes) | **0.83 MB/s** | 0.81–0.84 | 603 ms | 519 MB |
+| 1 MB (999 680 bytes) | **0.57 MB/s** | 0.56–0.58 | 1 750 ms | 1 972 MB |
+| 2 MB (1 999 332 bytes) | **0.32 MB/s** | 0.31–0.32 | 6 323 ms | 7 185 MB |
+| 10 MB | **not measurable** | — | — | killed by the OS (SIGKILL) |
+
+MB here means 10^6 bytes. **Arm:** `regex-layer-toke-compiled`, timing `core.privacy.regex.detect`,
+which is what the pipeline calls. That covers the ten patterns, span recovery, the PL1.10 filters,
+placeholder assignment and applying the placeholders to the text, so it is the layer's cost and not
+the regex engine's alone. **Toolchain:** toke `fedd48d` (built from that commit, not the
+`TOOLCHAIN.lock` value) and loke `c023b3b`. **Host:** one Apple M2 Pro (Mac14,10) with 16 GB, macOS.
+**Method (VM1.3):** 6 runs per size, each in a fresh process, with the first discarded as warm-up.
+Figures are the median and range of the 5 kept runs. The timer is std.time's millisecond wall clock,
+read inside the compiled program, so process start-up and reading the file are excluded. The
+percentile-bootstrap interval of the mean, which is in `benchmarks/results/`, sits inside the range
+in every row. **Workload:** the 74 cases of `tests/fixtures/pii-corpus` (seed 20260919), each
+followed by eight lines of PII-free prose and repeated to size. That is 1.31–1.38 labelled PII
+entities and 0.6 decoys per 1 000 bytes.
+
+**Caveats, which travel with the numbers:**
+
+- **One host, one density, one observation series.** The figures are not a rate for other hardware
+  or for sparser text, and the quadratic term means density matters a great deal.
+- **10 MB never completed.** It was tried three times: once in-process after eleven 1 MB runs, and
+  twice as a fresh single-run process on 9 999 870 bytes (13 100 labelled PII, 6 300 decoys). The OS
+  killed every attempt with SIGKILL. The two fresh processes died after 54 s and 92 s, before the
+  detector returned, and one had passed 5 GB resident when last sampled. Peak RSS grows about ×3.7
+  per doubling in the table above, which is the reason. No 10 MB figure is extrapolated from it.
+- **Fresh processes are needed.** In one process the times climbed from 1.9 s to 7.3 s over eleven
+  1 MB runs, because memory is not released between calls. That is why each run is a separate
+  process. The failure is also relevant to the long-running server, and it is filed with the
+  quadratic cost as F3.1b.
+- The "detections" count the harness prints is placeholder-deduplicated output. It is not a recall
+  figure. Recall is published only in the detection blocks above.
+
+Reproduce:
+
+```sh
+python3 tests/fixtures/pii-corpus/generate.py
+scripts/build_loke.sh && scripts/run_tests.sh tests/unit/browser/test_pipeline_handler.tk   # builds the archives
+TOKE_DIR=<toke at fedd48d> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2 --runs 6 --record --toke-commit fedd48d
+```
+
 ---
 
 ## Status: no *performance* figure is published
 
-Two measurements exist: detection recall for the regex layer, and the serialisation baselines above.
-**No figure for latency, throughput, cache hit rate or any compression technique has been measured**,
-so none is published. The serialisation entry is a baseline for future token claims, not a result for
+Three measurements exist: detection recall for the regex layer, the serialisation baselines, and the
+regex detector's standalone throughput above. That throughput figure is a **negative** result, and it
+covers one function on one host. **No figure for end-to-end latency, pipeline throughput, cache hit
+rate or any compression technique has been measured**, so none is published. The serialisation entry is a baseline for future token claims, not a result for
 any technique loke implements.
 
 The apparatus needed to change this is specified and tracked:
