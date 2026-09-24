@@ -239,6 +239,14 @@ step_checks() {
            failed=1; }
   fi
 
+  # F10.15a — one prefix for page modules, derived from the path, so the generated
+  # _handlers.tk cannot import two spellings of the same kind of module.
+  if [[ -f ./scripts/check_page_module_names.py ]]; then
+    echo "  every page module is named after its path"
+    python3 ./scripts/check_page_module_names.py --check >/dev/null \
+      || { python3 ./scripts/check_page_module_names.py >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/find_tilde_path.py ]]; then
     echo "  no unexpanded \`~/\` path literal"
     python3 ./scripts/find_tilde_path.py --check \

@@ -436,7 +436,7 @@ makes the Presidio layer's success test a constant.
    expects `max_tokens`, not `maxtokens`.
 
    It is on the live path: `core.providers.dispatcher:57-66` calls `ant.completeplain` and
-   `oai.completeplain`, and `browser.pages.api.pipeline.dispatch` calls the dispatcher. So this
+   `oai.completeplain`, and `page.api.pipeline.dispatch` calls the dispatcher. So this
    supersedes the token-count row below in severity — the counts are zero because the response is
    empty, and the response is empty because the request never carried the prompt. `intent.tk` has been
    fixed with `str.concat`; these two are reported and not fixed here, because they are not this
@@ -453,7 +453,7 @@ makes the Presidio layer's success test a constant.
    figure derived from them is zero while reading as a measurement. Invisible from inside the program,
    because `providerfailed()` legitimately writes `0;0`: a successful call and a failed one are
    indistinguishable in the trail. **This is the second spelling of the defect** — the first,
-   `browser.pages.api.pipeline.usagetokens`, read `json.i64` off the top-level object and was deleted
+   `page.api.pipeline.usagetokens`, read `json.i64` off the top-level object and was deleted
    by the dispatcher rewrite the same day, which reproduced the fault one module down. A test is what
    stops the third spelling.
 3. **`core.providers.openai:114` — every OpenAI completion returns empty text**, same class,
