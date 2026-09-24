@@ -477,7 +477,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | M1.7a | S | **Done** — 2026-09-24 | **Nothing inserts into `memory_scores`** — found 2026-09-23 while closing M1.7. Repo-wide the table has one `UPDATE` (`accessed_at`), several `SELECT`s and a `DELETE`, and **no `INSERT` anywhere**. So the table now exists and stays empty: `core.memory.privacy`'s `WHERE pii_flagged=1` can never match, and `core.memory.decay`'s sweep has nothing to sweep. The export joins were written to cope (`COALESCE(ms.score,1.0)`), which is why nothing looked broken. A score row should be created when a drawer is created — `core.memory.storage.adddrawer` is the natural place, in the same transaction, so a drawer can never exist without a score. Decide whether `pii_flagged` is set there from the pipeline's detection result or by a later pass; setting it late means a window in which PII-bearing memories are not flagged. **Closed 2026-09-24:** `core.memory.storage.storedrawer` (there is no `adddrawer`) now writes the drawer and its score row between `BEGIN` and `COMMIT`, rolling back if either INSERT fails. **Decision:** `pii_flagged` is set there from the caller's sensitivity (CONFIDENTIAL or RESTRICTED gives 1, INTERNAL and PUBLIC give 0), so there is no unflagged window. `created_at` is bound as epoch seconds because `decay.sweeprows` reads it with `rowi64` (see M1.7c). `tests/unit/memory/test_drawer_scores.tk` runs against a real migrated store: 6 of its 12 assertions failed before the change, including the atomicity case (a clashing score id left an orphan drawer), and all pass after. Premise note: `memory/export.tk`'s import path did have an INSERT. |
 | M1.7b | S | **Done** — 2026-09-24 | **A pre-existing `datadir/memory.db` is no longer read** — `core.memory.palace.open` opened its own `memory.db` until 2026-09-23, which was not merely untidy: `std.db` keeps ONE global connection (T-30), so opening it silently replaced the process's connection and `audit_log` and `settings` ceased to exist for every reader afterwards. The palace now uses `loke.db`, the same file `core.storage.db.openstore` opens, and the four `memory_*` tables are created by migrations 10-16. Anyone who ran an earlier build still has `memory.db` on disk with drawers in it; nothing deletes it and nothing migrates it. Decide: a one-shot migration that copies `memory_drawers`/`memory_closets`/`memory_index` across and renames the file, or a release note saying the old file is orphaned. Given that no release has shipped and the palace's write path was itself broken (M1.7a — no score rows), a release note is probably honest and sufficient; the point of this row is that the choice is recorded rather than assumed. **Closed 2026-09-24. Decision: no migration.** The orphaned file cannot hold drawers. Every committed `palace.open` that used `memory.db` (up to `3ead30d~1`) called `schema.createtables`, whose five statements were `db.exec(conn;"CREATE ...")`. That passes the connection as the SQL, and it segfaulted on the first statement (measured, recorded in `tests/unit/memory/test_palace_drawers.tk`). So no build created `memory_drawers` in `memory.db`. No release or tag exists. The decision and its reason are recorded at `core.memory.palace.open`. Nothing deletes a stray `memory.db`. It holds no memory tables, so it holds no memories. |
 | M1.7c | S |  | **The decay sweep reads a datetime TEXT `created_at` as the year** — found 2026-09-24 while closing M1.7a. `core.memory.decay.sweeprows` reads `memory_scores.created_at` with `db.rowi64`, which is `strtoll` underneath. The column's default is `datetime('now')`, and `strtoll("2026-09-24 10:00:00")` is **2026**, which is 1970 plus about half an hour. `agereadable` accepts it, so any such row is aged about 56 years and decays straight to `minscore`. The default config's `minscore` (0.1) is above its `prunebelow` (0.05), so it clamps rather than deletes, but any configuration with `prunebelow` at or above `minscore` would prune every such row. `storedrawer` now binds epoch seconds (M1.7a). The import in `memory/export.tk` (`INSERT OR IGNORE INTO memory_scores`) does not set `created_at`, so imported rows get the text default. Fix: make one representation authoritative, either by migrating the column to INTEGER epoch or by having decay parse the text, and have `agereadable` reject a value below a plausible epoch floor. |
-| M1.7d | S |  | **`core.memory.storage.listdrawers` always returns an empty list** — found 2026-09-24 while closing M1.7a. `parselistdrawerrows` builds a `$drawer` literal in the loop body as a bare expression and never pushes it: `drawers` is `@()` at the start and `<$ok(drawers)` at the end, and nothing in between assigns it (T-24: `x=x.push(y)`). Every listing of a palace location is empty whatever the table holds. Fix and assert with a real store, the way `test_drawer_scores.tk` does. |
+| M1.7d | S | **Done** — 2026-09-24 | **`core.memory.storage.listdrawers` always returns an empty list** — found 2026-09-24 while closing M1.7a. `parselistdrawerrows` builds a `$drawer` literal in the loop body as a bare expression and never pushes it: `drawers` is `@()` at the start and `<$ok(drawers)` at the end, and nothing in between assigns it (T-24: `x=x.push(y)`). Every listing of a palace location is empty whatever the table holds. Fix and assert with a real store, the way `test_drawer_scores.tk` does.<br><br>**Status detail — done 2026-09-24.** `parselistdrawerrows` now assigns `drawers=drawers.push(...)`, and `listdrawers` takes `location:$palacelocation` — it was declared `i64` and read `.wing`/`.hall`/`.room` off it, which toke accepted. Evidence: `tests/unit/memory/test_listdrawers.tk` stores three drawers through the real `storedrawer` into a migrated `loke.db` and asserts the per-room listing, its contents, the room filter and the `LIMIT`. **Seen red** against the unfixed module: 7 assertions failed (every listing empty), then 11 of 11 green after the fix. `listdrawers` still has no production caller. |
 
 ## Epic M2: AAAK Shorthand Integration
 
@@ -1063,7 +1063,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| MEMORY PALACE AND AAAK SHORTHAND | 2 | 17 | 14 | 1 | — | — | — | — | — | 2 |
+| MEMORY PALACE AND AAAK SHORTHAND | 2 | 17 | 15 | 1 | — | — | — | — | — | 1 |
 | CROSS-CUTTING | 9 | 83 | 79 | — | 2 | — | — | — | — | 2 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 25 | 6 | 12 | 22 | — | — | — | — |
@@ -1073,7 +1073,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 39 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
 | VERIFICATION PROGRAMME | 14 | 122 | 70 | 12 | — | 6 | 3 | — | — | 31 |
-| **Total** | **88** | **683** | **515** | **28** | **21** | **28** | **3** | **1** | — | **87** |
+| **Total** | **88** | **683** | **516** | **28** | **21** | **28** | **3** | **1** | — | **86** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1106,7 +1106,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | G3 | 1 | 2 | 2 | — | — | — | — | — | — | — |
 | G4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AG1 | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| M1 | 1 | 12 | 9 | 1 | — | — | — | — | — | 2 |
+| M1 | 1 | 12 | 10 | 1 | — | — | — | — | — | 1 |
 | M2 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | X1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X2 | 1 | 3 | 3 | — | — | — | — | — | — | — |
@@ -1167,7 +1167,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 25 | 17 | 4 | — | — | — | — | — | 4 |
 | RV1 | 1 | 10 | 7 | — | — | — | — | — | — | 3 |
-| **Total** | **88** | **683** | **515** | **28** | **21** | **28** | **3** | **1** | — | **87** |
+| **Total** | **88** | **683** | **516** | **28** | **21** | **28** | **3** | **1** | — | **86** |
 
 Rows parsed: **683**, across **88** epics and **16** level-1 headings.
 
