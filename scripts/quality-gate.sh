@@ -126,8 +126,7 @@ step_checks() {
   # (`VALUES (?,?,'now()')`), and assigned straight to a struct field. A bound parameter is a
   # value and is never evaluated; a quoted string in SQL is a string.
   #
-  # Gated on the built trees rather than all of packages/, because packages/moke carries ten
-  # more that cannot be verified while 42 of its files do not compile (MK21.13, Wave 4).
+  # packages/moke joined the roots when it compiled (F10.23h fixed its ten sites; MK21.13).
   #
   # Two of these did real damage rather than storing a useless column:
   # governance/monitoring filtered `created_at >= datetime('now','-N days')` against a column
@@ -137,9 +136,9 @@ step_checks() {
   if [[ -f ./scripts/find_sql_literal_now.py ]]; then
     echo "  no SQL time function is stored as text"
     python3 ./scripts/find_sql_literal_now.py --check \
-      packages/core packages/shared packages/browser >/dev/null \
+      packages/core packages/shared packages/browser packages/moke >/dev/null \
       || { python3 ./scripts/find_sql_literal_now.py \
-             packages/core packages/shared packages/browser >&2
+             packages/core packages/shared packages/browser packages/moke >&2
            failed=1; }
   fi
 
@@ -240,14 +239,22 @@ step_checks() {
            failed=1; }
   fi
 
+  # F10.15a — one prefix for page modules, derived from the path, so the generated
+  # _handlers.tk cannot import two spellings of the same kind of module.
+  if [[ -f ./scripts/check_page_module_names.py ]]; then
+    echo "  every page module is named after its path"
+    python3 ./scripts/check_page_module_names.py --check >/dev/null \
+      || { python3 ./scripts/check_page_module_names.py >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/find_tilde_path.py ]]; then
     echo "  no unexpanded \`~/\` path literal"
     python3 ./scripts/find_tilde_path.py --check \
       packages/core packages/shared packages/browser packages/cli \
-      packages/mcp-broker packages/mcp-toke >/dev/null \
+      packages/mcp-broker packages/mcp-toke packages/moke >/dev/null \
       || { python3 ./scripts/find_tilde_path.py \
              packages/core packages/shared packages/browser packages/cli \
-             packages/mcp-broker packages/mcp-toke >&2
+             packages/mcp-broker packages/mcp-toke packages/moke >&2
            failed=1; }
   fi
 

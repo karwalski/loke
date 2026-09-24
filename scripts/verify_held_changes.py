@@ -143,9 +143,26 @@ def check_licence_headers() -> list[str]:
 
 
 def check_forbidden_staged() -> list[str]:
+    """Refuse a staged FORBIDDEN file only if it has lost an import that HEAD has.
+
+    This used to refuse ANY staged copy of pipeline.tk. That kept the regressed working
+    copy out, but it also refused every legitimate edit to the file, including a
+    one-line module rename from a merge on 2026-09-24. So people committed around the
+    check, which is how a guard stops meaning anything. The regression it exists for
+    is specific: the bad copy dropped the core imports (privacy pipeline, restoration,
+    kill switch, policy, audit, keychain). So that is what is checked now. An import
+    present at HEAD and missing from the staged copy is refused, whatever else changed.
+    """
     staged = set(git("diff", "--cached", "--name-only").split())
-    return [f"{f}: STAGED, and must not be committed from the working tree"
-            for f in sorted(FORBIDDEN & staged)]
+    problems = []
+    for f in sorted(FORBIDDEN & staged):
+        head = {l for l in git("show", f"HEAD:{f}").splitlines() if l.startswith("i=")}
+        now = {l for l in git("show", f":{f}").splitlines() if l.startswith("i=")}
+        lost = sorted(head - now)
+        if lost:
+            problems.append(f"{f}: STAGED and drops {len(lost)} import(s) HEAD has: "
+                            + ", ".join(lost))
+    return problems
 
 
 def is_licence_header_addition(removed: list[str], added: list[str]) -> bool:
@@ -236,8 +253,8 @@ def main() -> int:
         print("\nFORBIDDEN FILE STAGED:", file=sys.stderr)
         for p in forbidden:
             print(f"  {p}", file=sys.stderr)
-        print("  The working copy of pipeline.tk drops all nine core imports and is a"
-              "\n  live privacy regression (NC1.9). Unstage it.", file=sys.stderr)
+        print("  A copy of pipeline.tk that drops core imports is a live privacy"
+              "\n  regression (NC1.9): it bypasses the pipeline. Unstage it.", file=sys.stderr)
 
     if equality:
         # Reported, not enforced. See the module docstring: the tree is mid-migration

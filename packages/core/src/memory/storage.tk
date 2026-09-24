@@ -34,14 +34,66 @@ f=storedrawer(palace:i64;drawer:$drawer):i64!$lokeerr{
     $confidential:v "CONFIDENTIAL";
     $restricted:v   "RESTRICTED"
   };
-  (* `datetime('now')`, not `'now()'` — GA5.1. Every drawer and every closet in the memory
-     palace recorded its creation time as five literal characters, which is why
-     core.memory.decay had nothing to age: decay selects by created_at, and every row's was
-     the same non-date string. *)
-  <mt db.exec("INSERT INTO memory_drawers (id,wing,hall,room,role,content,session_id,model_id,tokens,sensitivity,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))";@(drawer.id;drawer.location.wing;drawer.location.hall;drawer.location.room;drawer.role;drawer.content;drawer.sessionid;drawer.modelid;tokenss;sensitivitys)) {
-    $ok:v storedrawerok(drawer.id);
-    $err:e $err($storageerr(str.concat("failed to store drawer: ";drawer.id)))
+  (* M1.7a — the drawer and its `memory_scores` row are written in ONE transaction, so a
+     drawer can never exist without a score. Until 2026-09-24 nothing on the write path
+     inserted into memory_scores at all: core.memory.privacy.forgetpii (`WHERE pii_flagged=1`)
+     could never match and the decay sweep had nothing to sweep.
+
+     pii_flagged is set HERE, from the sensitivity the caller already classified, and not by a
+     later pass: a later pass is a window in which a PII-bearing memory is not flagged and
+     "forget my personal data" misses it. CONFIDENTIAL and RESTRICTED are flagged; INTERNAL is
+     organisational rather than personal and is not.
+
+     created_at is bound as epoch SECONDS, not left to the column default. decay.sweeprows reads
+     it with rowi64, and a datetime TEXT reads as its leading digits — 2026, i.e. 1970 plus
+     half an hour — so every row would be maximally aged the moment it was written. *)
+  let pii=mut."0";
+  if(str.eq(sensitivitys;"CONFIDENTIAL") | str.eq(sensitivitys;"RESTRICTED")){ pii="1" }el{};
+  if(execok("BEGIN";@())){
+    <storedrawertx(drawer;tokenss;sensitivitys;pii)
+  }el{
+    <drawerfail("failed to begin drawer transaction: ";drawer.id)
   }
+};
+
+(* `datetime('now')`, not `'now()'` — GA5.1. Every drawer and every closet in the memory
+   palace recorded its creation time as five literal characters, which is why
+   core.memory.decay had nothing to age: decay selects by created_at, and every row's was
+   the same non-date string. *)
+f=storedrawertx(drawer:$drawer;tokenss:str;sensitivitys:str;pii:str):i64!$lokeerr{
+  let drawerok=execok("INSERT INTO memory_drawers (id,wing,hall,room,role,content,session_id,model_id,tokens,sensitivity,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))";@(drawer.id;drawer.location.wing;drawer.location.hall;drawer.location.room;drawer.role;drawer.content;drawer.sessionid;drawer.modelid;tokenss;sensitivitys));
+  let scoreok=mut.false;
+  if(drawerok){
+    scoreok=execok("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES (?,1.0,'',?,?)";@(drawer.id;pii;nowsecs()))
+  }el{};
+  if(drawerok & scoreok){
+    if(execok("COMMIT";@())){
+      <storedrawerok(drawer.id)
+    }el{
+      execok("ROLLBACK";@());
+      <drawerfail("failed to commit drawer: ";drawer.id)
+    }
+  }el{
+    execok("ROLLBACK";@());
+    <drawerfail("failed to store drawer: ";drawer.id)
+  }
+};
+
+f=execok(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* Epoch seconds as a declared `str`. `str.fromint`, not `str.fromi64`: a `fromi64` result
+   bound as a non-first parameter made the INSERT fail (LS1.1s, measured). *)
+f=nowsecs():str{
+  <str.fromint(t.nowi64())
+};
+
+f=drawerfail(what:str;id:str):i64!$lokeerr{
+  <$err($storageerr(str.concat(what;id)))
 };
 
 
