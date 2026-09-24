@@ -1,0 +1,87 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.presidioparse;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=pr:core.privacy.presidio;
+
+(* PL1.8 -- the score Presidio reports is the score loke reads.
+
+   parseentityitem read `score` with json.i64 into an f64 field. Presidio's scores are
+   fractions, so every one of them arrived as zero. It went unnoticed because
+   topiientities assigns confidence from mapconfidence(entitytype) and nothing read
+   .score -- a field that exists, is populated, and is wrong is worse than no field,
+   because the first consumer to trust it (a per-layer threshold, AD1.3's marginal
+   value) gets zero for every detection.
+
+   PL1.11 -- the parse itself. Before this, analyzeparse could not read a top-level
+   array at all, and the first line of this test crashed with SIGSEGV.
+
+   The response here is the shape /analyze returns: a top-level array of recogniser
+   results. No sidecar is needed -- analyzeparse is the whole of the parse path, and
+   analyze only adds the HTTP call in front of it. *)
+
+f=within(got:f64;want:f64):bool{
+  <got>(want-0.0001) && got<(want+0.0001)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let raw="[{\"entity_type\":\"EMAIL_ADDRESS\",\"start\":8,\"end\":28,\"score\":0.92},{\"entity_type\":\"PERSON\",\"start\":0,\"end\":4,\"score\":0.55},{\"entity_type\":\"CREDIT_CARD\",\"start\":30,\"end\":49,\"score\":1.0}]";
+
+  let parsed=pr.analyzeparse(raw);
+  let entities:@$presidioentity=mt parsed {
+    $ok:v v;
+    $err:e @()
+  };
+
+  if(t.assert(entities.len==3;"analyzeparse returns all three recogniser results")){pass=pass+1}el{fail=fail+1};
+  if(entities.len==3){
+    let e0:$presidioentity=entities.get(0);
+    let e1:$presidioentity=entities.get(1);
+    let e2:$presidioentity=entities.get(2);
+
+    if(t.assert(str.eq(e0.entitytype;"EMAIL_ADDRESS");"entity 0 keeps its type")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(e0.start==8 as u32 && e0.end==28 as u32;"entity 0 keeps its span")){pass=pass+1}el{fail=fail+1};
+
+    (* RED BEFORE THE FIX: each of these read 0. *)
+    if(t.assert(within(e0.score;0.92);"a fractional score of 0.92 is read as 0.92, not 0")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(within(e1.score;0.55);"a fractional score of 0.55 is read as 0.55, not 0")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(within(e2.score;1.0);"a score written 1.0 is read as 1.0")){pass=pass+1}el{fail=fail+1};
+
+    (* Scores are distinct per result, not a per-type constant. *)
+    if(t.assert(within(e0.score;e1.score)==false;"two results carry two different scores")){pass=pass+1}el{fail=fail+1}
+  }el{
+    fail=fail+1
+  };
+
+  (* A response missing the field is not a crash and is not a confident detection. *)
+  let noscore=pr.analyzeparse("[{\"entity_type\":\"PERSON\",\"start\":0,\"end\":4}]");
+  let ns:@$presidioentity=mt noscore {
+    $ok:v v;
+    $err:e @()
+  };
+  if(t.assert(ns.len==1;"a result with no score still parses")){pass=pass+1}el{fail=fail+1};
+  if(ns.len==1){
+    let n0:$presidioentity=ns.get(0);
+    if(t.assert(within(n0.score;0.0);"a missing score reads as 0.0")){pass=pass+1}el{fail=fail+1}
+  }el{
+    fail=fail+1
+  };
+
+  (* PL1.11: Presidio's answer when it finds nothing. Must parse to zero entities,
+     not crash on a null array. *)
+  let none=pr.analyzeparse("[]");
+  let nn:@$presidioentity=mt none {
+    $ok:v v;
+    $err:e @()
+  };
+  if(t.assert(nn.len==0;"an empty /analyze answer parses to no entities")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
