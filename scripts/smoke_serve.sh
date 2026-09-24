@@ -39,7 +39,11 @@ for d in pages templates static; do [ -d "$SRC/$d" ] && cp -R "$SRC/$d" "$WORK/"
 cp "$BIN" "$WORK/loke"
 sed -E "s/^([[:space:]]*port[[:space:]]*=).*/\1 $PORT/" "$SRC/ooke.toml" > "$WORK/ooke.toml"
 
-( cd "$WORK" && exec ./loke > "$WORK/serve.log" 2>&1 ) &
+# A throwaway HOME. loke reads ~/.loke/settings.json for provider keys, so with the real
+# HOME a smoke POST to /api/pipeline could be routed to a cloud provider on the
+# developer's account. It also keeps the smoke run out of the real audit trail and log.
+mkdir -p "$WORK/home"
+( cd "$WORK" && HOME="$WORK/home" exec ./loke > "$WORK/serve.log" 2>&1 ) &
 PID=$!
 
 up=0
