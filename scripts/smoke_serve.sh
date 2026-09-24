@@ -96,6 +96,18 @@ for r in pipeline settings approve privacy savings tabs; do
 done
 xorigin /api/pipeline "http://127.0.0.1:$PORT" allowed
 
+# GA2.7: a DNS-rebound page reads GET routes as same-origin; its Host still names it.
+for r in settings health; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Host: rebind.example:$PORT" \
+           "http://127.0.0.1:$PORT/api/$r")
+  if [ "$code" != 403 ]; then
+    echo "  FAIL GET /api/$r with Host rebind.example: got [$code], must be refused (GA2.7)" >&2
+    fail=1
+  else
+    echo "  ok   GET /api/$r with Host rebind.example [$code]"
+  fi
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "smoke_serve: at least one route failed (F10.36, GA2.6)" >&2
   exit 1

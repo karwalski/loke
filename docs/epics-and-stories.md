@@ -1068,10 +1068,10 @@ hand-edit produced a set of numbers that disagreed with them.*
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | TOOLCHAIN | 1 | 48 | 25 | 4 | — | — | — | 1 | — | 18 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 35 | 11 | 4 | — | — | — | — | — | 20 |
-| AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 2 | — | — | — | — | 3 |
+| AUDIT-DRIVEN GAPS | 5 | 43 | 39 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
 | VERIFICATION PROGRAMME | 14 | 121 | 70 | 12 | — | 6 | 3 | — | — | 30 |
-| **Total** | **88** | **680** | **507** | **27** | **21** | **28** | **3** | **1** | — | **93** |
+| **Total** | **88** | **680** | **508** | **27** | **21** | **28** | **3** | **1** | — | **92** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1143,7 +1143,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | MK20 | 1 | 5 | 4 | 1 | — | — | — | — | — | — |
 | MK21 | 1 | 20 | 1 | 1 | — | — | — | — | — | 18 |
 | GA1 | 1 | 13 | 10 | — | 1 | — | — | — | — | 2 |
-| GA2 | 1 | 7 | 5 | — | 1 | — | — | — | — | 1 |
+| GA2 | 1 | 7 | 6 | — | 1 | — | — | — | — | — |
 | GA3 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | GA4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | T15 | 1 | 10 | 10 | — | — | — | — | — | — | — |
@@ -1165,7 +1165,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 24 | 17 | 4 | — | — | — | — | — | 3 |
 | RV1 | 1 | 10 | 7 | — | — | — | — | — | — | 3 |
-| **Total** | **88** | **680** | **507** | **27** | **21** | **28** | **3** | **1** | — | **93** |
+| **Total** | **88** | **680** | **508** | **27** | **21** | **28** | **3** | **1** | — | **92** |
 
 Rows parsed: **680**, across **88** epics and **16** level-1 headings.
 
@@ -1435,7 +1435,7 @@ never leaves, not even for categorisation.
 | GA2.4 | S | **Done** | **Auto-redact PII from all log output** — Implement log redaction filter per spec: "ALL log output passes through auto-redaction filter. Debug mode subject to same redaction rules as production." Ensure no PII appears in any log, console output, or error message. |
 | GA2.5 | S | **Done** | **Localhost-only HTTP binding enforcement** — Verify HTTP server binds to `127.0.0.1` only (not `0.0.0.0`). If external binding configured, log as warning per spec. Verify CORS restricted to localhost origins.  |
 | GA2.6 | M | **Done** — 2026-09-24 | **A hostile web page could drive loke's state-changing endpoints** — Found 2026-09-24 by RV1.2 while checking CORS. CORS was correct, and it is the wrong control for this. It stops a page READING a response, not SENDING a request, and a POST with `Content-Type: text/plain` needs no preflight. Measured: a POST to `/api/pipeline` with `Origin: https://evil.example` was parsed, scanned and forwarded to the provider, and failed only because none was running. So any site open in the user's browser could spend their API budget and write audit rows, and through `/api/settings` it could change what loke talks to. **Fixed:** `shared.origin` refuses any request whose Origin header is not http on a loopback host. That is enforced first in all six POST handlers: approve, pipeline, privacy, savings, settings and tabs. A request with NO Origin, which is curl, the CLI or a test, is allowed, and `null` is refused. **Evidence:** `tests/unit/shared/test_origin.tk` has 12 assertions, including three prefix tricks such as `http://127.0.0.1.evil.example`. With the refusal disabled, 7 of them failed. `scripts/smoke_serve.sh` asserts 403 for a hostile origin on all six routes and that a loopback origin still gets through, against the running server. **DNS rebinding:** a rebound POST is also refused, because its Origin names the attacker's host rather than a loopback one. **Not covered:** a rebound page can still READ GET routes as same-origin, such as `/api/settings`, which shows provider keys masked to four characters. A Host-header check would close that, and it is filed as GA2.7 |
-| GA2.7 | S |  | **Refuse requests whose Host header is not loopback, to close DNS-rebinding reads** — Filed 2026-09-24 from GA2.6. A page on an attacker's name that resolves to 127.0.0.1 is same-origin with loke as far as the browser knows, so it can READ any GET route: `/api/settings` (provider keys masked to four characters, and the provider URLs), `/api/savings` and `/api/health`. GA2.6 already refuses rebound POSTs by Origin. The fix is a Host check in front of every route, accepting only `127.0.0.1`, `localhost` and `[::1]`, with or without a port. It belongs in ooke's dispatch, or in a wrapper every handler calls. `scripts/smoke_serve.sh` should assert 403 for `Host: rebind.example` |
+| GA2.7 | S | **Done** — 2026-09-24 | **Refuse requests whose Host header is not loopback, to close DNS-rebinding reads** — Filed 2026-09-24 from GA2.6. A page on an attacker's name that resolves to 127.0.0.1 is same-origin with loke as far as the browser knows, so it can READ any GET route: `/api/settings` (provider keys masked to four characters, and the provider URLs), `/api/savings` and `/api/health`. GA2.6 already refuses rebound POSTs by Origin. The fix is a Host check in front of every route, accepting only `127.0.0.1`, `localhost` and `[::1]`, with or without a port. It belongs in ooke's dispatch, or in a wrapper every handler calls. `scripts/smoke_serve.sh` should assert 403 for `Host: rebind.example` **Done 2026-09-24.** `shared.origin.hostrefused` accepts a missing Host or `127.0.0.1`, `localhost` or `[::1]` with an optional port. `requestrefused` combines it with GA2.6's Origin rule and is the first statement of all 13 API handler functions, GET and POST, across eight files. HTML pages are not guarded: they carry no data of their own and fetch everything from these routes. **Evidence:** 8 Host assertions in `tests/unit/shared/test_origin.tk`, of which 3 failed with the rule disabled. `scripts/smoke_serve.sh` asserts that `GET /api/settings` and `/api/health` with `Host: rebind.example` get 403 from the running server. |
 
 ## Epic GA3: UX Alignment with Design Principles
 
