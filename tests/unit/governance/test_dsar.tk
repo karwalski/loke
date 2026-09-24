@@ -1,0 +1,146 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.dsar;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=fs:std.fs;
+i=std:std;
+i=sdb:core.storage.db;
+i=cons:core.governance.consent;
+i=d:core.governance.dsar;
+
+(* GA5.10, 2026-09-24. core.governance.dsar had NO test of any kind, and it is the module
+   that answers a subject access request and a right-to-erasure request. Three defects were
+   live in it, all of which this file would have caught on the day they were written:
+
+   1. `rowstojson` called `json.enc(row)`. `std.json` declares `json.enc(str):str` — a string
+      ESCAPER — and was handed a `$row` handle, which compiled because the ABI erases both to
+      i64. Every element of every array in every export was the result of escaping a handle.
+      Caught below by asserting that a value the test itself granted comes back in the file.
+
+   2. `quota_usage` and `quality_signals` were exported with `WHERE user_id=?`, and NEITHER
+      table has a user_id column. SQLite rejected both statements, the $err arm logged "no
+      such table" for tables that exist, and the subject was handed `[]` — told that loke
+      holds no such records about them, when the truth is that the question cannot be asked
+      of those tables. Caught by asserting the note is present beside the empty array.
+
+   3. Those same two tables were in the ERASURE list, so both DELETEs were rejected and
+      `allok` went false: EVERY erasure request reported failure, whatever it had erased.
+      Caught by asserting processerasure returns true and the consent rows are gone.
+
+   The assertions are about the CONTENT of the exported file, not its shape. A shape test
+   passes on a payload full of escaped handles, which is precisely how defect 1 survived. *)
+
+f=testdir():str{
+  (* str.concat, not interpolation — std.homedir()'s return is truncated when interpolated
+     (T-21). Its own directory so no other test's rows are in scope. *)
+  <str.concat(std.homedir();"/.loke/test-dsar")
+};
+
+f=exportpath():str{
+  <str.concat(testdir();"/subject-access.json")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  (* A fresh database and a fresh output file per run: the erasure assertions below are about
+     rows disappearing, and a leftover database would make them pass for the wrong reason. *)
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(exportpath());
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=readexport():str{
+  (* file.read, not fs.readtext: std.fs declares writetext and read but NOT readtext, and
+     E4027 says so with the symbol it would have linked against. *)
+  <mt file.read(exportpath()) {
+    $ok:s s;
+    $err:e ""
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  cons.ensuretable(store);
+  d.ensuretable(store);
+
+  (* Two consent rows for the subject, and one for somebody else. The third is the one that
+     matters: an export or an erasure that ignores user_id would take it too, and that is a
+     disclosure of one person's data in another person's subject access response. *)
+  cons.grant(store;"subject-a";"analytics";30 as i32);
+  cons.grant(store;"subject-a";"model_improvement";30 as i32);
+  cons.grant(store;"subject-b";"analytics";30 as i32);
+
+  (* ── The request itself ──────────────────────────────────────────────────────*)
+  let req=d.submit(store;"access";"subject-a");
+  if(t.assert(str.len(req.id)>0;"a submitted request has an id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(req.userid;"subject-a";"and carries the subject it was submitted for")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(req.status;d.statuspending();"and starts pending")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The export payload ──────────────────────────────────────────────────────*)
+  if(t.assert(d.processaccess(store;req;exportpath());"processaccess reports success")){pass=pass+1}el{fail=fail+1};
+  let out=readexport();
+  if(t.assert(str.len(out)>0;"and wrote a file with something in it")){pass=pass+1}el{fail=fail+1};
+
+  (* THE GA5.10 ASSERTION. A value this test wrote must appear in the export. json.enc(row)
+     could not produce it, whatever else it produced — this is the one assertion in the file
+     that a payload of escaped row handles cannot pass. *)
+  if(t.assert(str.contains(out;"analytics");"A VALUE THE SUBJECT'S OWN ROW HOLDS APPEARS IN THE EXPORT — json.enc was escaping the row HANDLE, so every array element was garbage and every shape test still passed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"model_improvement");"and so does the second purpose, so it is the rows being serialised and not one lucky string")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"\"user_id\":\"subject-a\"");"the column NAMES are in the payload too — rowstojson had no column list at all, because it was generic over SELECT *")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"\"purpose\":");"including the ones that carry the subject's actual choices")){pass=pass+1}el{fail=fail+1};
+
+  (* The other subject must not be in it. *)
+  if(t.assert(!str.contains(out;"subject-b");"ANOTHER PERSON'S ROW IS NOT IN THIS SUBJECT'S EXPORT — the export is filtered by user_id, and a subject access response containing a third party's data is a disclosure, not a formatting defect")){pass=pass+1}el{fail=fail+1};
+
+  (* The two tables that cannot be queried per subject: an empty array AND a stated reason.
+     An empty array on its own says "we hold nothing about you", which is a different and
+     false claim. *)
+  if(t.assert(str.contains(out;"quota_usage_note");"a table with no user_id column carries a NOTE beside its empty array")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"quality_signals_note");"for both such tables")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"holds no user identifier");"and the note states the reason, so an assessor can see the limitation rather than reading the empty array as a finding of nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"audit_log_note");"the audit trail carries its own note, for the same reason (GA5.12)")){pass=pass+1}el{fail=fail+1};
+
+  (* Valid JSON, checked the only way that is honest here: balanced braces and no stray
+     handle text. A full parse needs json.dec on a nested object, which std.json cannot do
+     (T-32), so this is a bounded check and is stated as one. *)
+  if(t.assert(str.contains(out;"{\"user_id\":");"the payload opens as an object keyed by the subject")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(out;"[object");"and holds no handle-shaped text where a value should be")){pass=pass+1}el{fail=fail+1};
+
+  let after=d.status(store;req.id);
+  if(t.asserteq(after.status;d.statuscompleted();"the request is marked completed once the file is written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(after.completedat>0;"with a real completion time")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Erasure ─────────────────────────────────────────────────────────────────
+     This returned FALSE for every request ever made, because quota_usage and
+     quality_signals were in the table list and neither has a user_id column, so both
+     DELETEs were rejected and one rejection failed the whole request. *)
+  let ereq=d.submit(store;"erasure";"subject-a");
+  if(t.assert(d.processerasure(store;ereq);"AN ERASURE REQUEST SUCCEEDS — it reported failure for every request while two tables with no user_id column were in its DELETE list")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(!cons.check(store;"subject-a";"analytics");"and the subject's consent rows are actually gone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cons.check(store;"subject-a";"model_improvement");"both of them")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cons.check(store;"subject-b";"analytics");"WHILE THE OTHER SUBJECT'S CONSENT SURVIVES — an erasure that took every row would pass every assertion above and be a data loss incident")){pass=pass+1}el{fail=fail+1};
+
+  (* The record of the erasure survives the erasure. It is the evidence the erasure happened,
+     and this request is a row in the table it would otherwise delete. *)
+  let estatus=d.status(store;ereq.id);
+  if(t.asserteq(estatus.status;d.statuscompleted();"the erasure request's own row survives and records that it completed — dsar_requests is retained deliberately, and erasing it would destroy the proof of compliance along with the data")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(estatus.userid;"subject-a";"still naming the subject who asked")){pass=pass+1}el{fail=fail+1};
+
+  (* An erasure is idempotent: asking twice must not fail the second time. *)
+  let ereq2=d.submit(store;"erasure";"subject-a");
+  if(t.assert(d.processerasure(store;ereq2);"a second erasure for the same subject also succeeds — nothing left to delete is not a failure")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

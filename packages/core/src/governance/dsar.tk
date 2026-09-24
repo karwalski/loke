@@ -84,17 +84,54 @@ f=setstatus(store:i64;id:str;newstatus:str;completedat:i64):bool{
   }
 };
 
-f=rowstojson(rows:@$row):str{
+(* GA5.10 — the export payload was garbage for every table it embedded.
+
+   `rowstojson` called `json.enc(row)`. `std.json` declares `json.enc(str):str` — it is a
+   STRING ESCAPER — and it was being handed a `$row`, which is a handle. It compiled because
+   the ABI erases both to i64, the same class as T-23 and T-36: the declared shape and the
+   argument disagree and nothing in the toolchain can say so. Every element of every array in
+   a subject access response was whatever escaping a row handle produces.
+
+   It is not an accessor swap, because serialising a row needs its COLUMN NAMES and the old
+   function was generic over an arbitrary `SELECT *`. So the column list is explicit per
+   table, and the `SELECT` names its columns too — `SELECT *` leaves the order to whatever
+   order the table was created in, which is not a thing a DSAR payload should depend on.
+
+   Every value is emitted as a JSON STRING, including the integer and REAL columns. That is
+   deliberate: `s.rowstr` is the one accessor that is correct for every column type, and a
+   subject access response is a document for a person to read, not a typed interchange. A
+   number rendered as "1758…" in quotes is honest; a number read with the wrong accessor is
+   a zero, and a zero in a compliance export is a claim. *)
+f=exportcolumns(table:str):@str{
+  if(str.eq(table;"consent_records")){
+    <@("id";"user_id";"purpose";"granted";"ts";"expiry_ts")
+  }el{};
+  if(str.eq(table;"dsar_requests")){
+    <@("id";"kind";"user_id";"submitted_at";"completed_at";"status")
+  }el{};
+  <@()
+};
+
+f=rowjson(row:$row;cols:@str):str{
+  let out=mut."{";
+  lp(let ci=0;ci<cols.len;ci=ci+1){
+    let col=cols.get(ci);
+    let sep=mut.",";
+    if(ci==0){ sep="" }el{};
+    out=str.concat(out;str.concat(sep;str.concat(json.enc(col);str.concat(":";json.enc(s.rowstr(row;col))))))
+  };
+  <str.concat(out;"}")
+};
+
+f=rowstojson(rows:@$row;cols:@str):str{
   if(rows.len==0){
     <"[]"
   }el{
     let out=mut."[";
-    let i=mut.0;
-    lp(let ii=0;ii<rows.len;ii=ii+1){ let row=rows.get(ii);
+    lp(let ii=0;ii<rows.len;ii=ii+1){ let row:$row=rows.get(ii);
       let sep=mut.",";
-      if(i==0){ sep="" }el{};
-      out=str.concat(out;str.concat(sep;json.enc(row)));
-      i=i+1
+      if(ii==0){ sep="" }el{};
+      out=str.concat(out;str.concat(sep;rowjson(row;cols)))
     };
     <str.concat(out;"]")
   };
@@ -109,16 +146,57 @@ f=exportmissing(table:str):str{
   <"[]"
 };
 
+(* GA5.10, and this is the part the story row did not name.
+
+   TWO of the four tables this module exported have no `user_id` column at all:
+
+     quota_usage      id, rule_id, scope, period_key, used_tokens, used_cost_usd
+     quality_signals  id, request_id, model_id, provider, use_case, thumbs_up,
+                      coherence_score, relevance_score, created_at
+
+   So `SELECT * FROM quota_usage WHERE user_id=?` is not a slow query or a wrong accessor —
+   it is a statement with no referent, and SQLite rejects it. The rejection landed on the
+   `$err` arm, which called `exportmissing`, which logged "no such table" — a false reason for
+   a table that exists — and returned `[]`. The data subject was told loke holds no quota or
+   quality records concerning them, which is not what the database says: it says the question
+   cannot be asked of those tables.
+
+   That is exactly the failure GA5.12's audit_log note was written to prevent, occurring twice
+   more in the same payload, and it is resolved the same way: the key stays, with an empty
+   array and an adjacent note that states why it is empty. A stated limitation can be assessed.
+   A bare `[]` cannot be distinguished from a finding of nothing.
+
+   `quality_signals` identifies a REQUEST (by request_id) and a model, and names no subject.
+   `quota_usage` is keyed by rule and period with a free-text `scope` — and
+   `core.governance.quota` has no importers anywhere in the tree, so nothing has ever written
+   a row to it and no convention for what `scope` holds has been established. Deciding that
+   `scope` means a user id would be inventing the mapping here, in the module that would then
+   depend on it; it is recorded instead. *)
+f=nosubjectcolumn(table:str):str{
+  log.warn(str.concat("DSAR export: table has no user_id column, so no rows can be attributed to a subject: ";table);"dsar";"system");
+  <"[]"
+};
+
+f=nosubjectnote(table:str):str{
+  <str.concat(
+    str.concat("loke's ";table);
+    " table holds no user identifier, so no part of it can be selected for one data subject. This is a limitation of the schema, not a withholding: there is no field to select on. Tracked as GA5.10.")
+};
+
 f=exporttable(store:i64;table:str;userid:str):str{
   if(s.tableexists(table)){}el{
     <exportmissing(table)
   };
+  let cols=exportcolumns(table);
+  if(cols.len==0){
+    <nosubjectcolumn(table)
+  };
   let sql=str.concat(
-    str.concat("SELECT * FROM ";table);
-    " WHERE user_id=?"
+    str.concat("SELECT ";str.join(",";cols));
+    str.concat(str.concat(" FROM ";table);" WHERE user_id=?")
   );
   <mt db.many(sql;@(userid)) {
-    $ok:rows rowstojson(rows);
+    $ok:rows rowstojson(rows;cols);
     $err:e exportmissing(table)
   }
 };
@@ -161,7 +239,7 @@ f=processaccess(store:i64;req:$dsarrequest;outpath:str):bool{
   let quality=exporttable(store;"quality_signals";req.userid);
   (* Was a nine-deep concat chain with unbalanced parentheses, so this file has
      never parsed. Interpolation is both the fix and the canonical form. *)
-  let payload="{\"user_id\":\(json.enc(req.userid)),\"exported_at\":\(time.nowunix()),\"consent_records\":\(consent),\"quota_usage\":\(quota),\"audit_log\":[],\"audit_log_note\":\(json.enc(auditexportnote())),\"dsar_requests\":\(dsars),\"quality_signals\":\(quality)}";
+  let payload="{\"user_id\":\(json.enc(req.userid)),\"exported_at\":\(time.nowunix()),\"consent_records\":\(consent),\"quota_usage\":\(quota),\"quota_usage_note\":\(json.enc(nosubjectnote("quota_usage"))),\"audit_log\":[],\"audit_log_note\":\(json.enc(auditexportnote())),\"dsar_requests\":\(dsars),\"quality_signals\":\(quality),\"quality_signals_note\":\(json.enc(nosubjectnote("quality_signals")))}";
   <mt fs.writetext(outpath;payload) {
     $ok:v processaccessok(store;req);
     $err:e processaccesserr(store;req)
@@ -188,12 +266,30 @@ f=processaccess(store:i64;req:$dsarrequest;outpath:str):bool{
    stated decision rather than a failed DELETE, which is why it is written here. *)
 f=processerasure(store:i64;req:$dsarrequest):bool{
   let s1=setstatus(store;req.id;statusprocessing();0);
+  (* GA5.10. This list held "quota_usage" and "quality_signals", NEITHER of which has a
+     user_id column — so both DELETEs were rejected by SQLite, `allok` went false, and EVERY
+     erasure request reported failure regardless of what was actually erased. That is the same
+     shape as the "audit_events" defect the comment above describes, two tables further on: a
+     statement with no referent, whose rejection was read as a failure of the request.
+
+     The two that have no such column are logged as retained, with the reason, rather than
+     attempted and failed.
+
+     `dsar_requests` is deliberately NOT here either, and it is the one table on this list
+     that could be erased. Two reasons, and the first is mechanical: this erasure is itself a
+     row in that table, so `DELETE FROM dsar_requests WHERE user_id=?` would delete the
+     in-flight request and the `setstatus` twenty lines below would then update nothing — the
+     request would complete and leave no record that it had. The second is the point of
+     keeping it: the log of who asked for erasure and when is the evidence that the erasure
+     happened, and destroying it as part of the erasure leaves nothing to demonstrate
+     compliance with. It is retained as a stated decision, which is the distinction this
+     module exists to make. *)
   let tables=@(
-    "consent_records";
-    "quota_usage";
-    "quality_signals"
+    "consent_records"
   );
   log.info("DSAR erasure: audit_log is retained — it is append-only and holds no user identifier (GA5.9, GA5.12)";"dsar";req.userid);
+  log.info("DSAR erasure: quota_usage and quality_signals are retained — neither has a user_id column, so no rows can be attributed to a subject (GA5.10)";"dsar";req.userid);
+  log.info("DSAR erasure: dsar_requests is retained — it is the record that this erasure took place, and this request is a row in it (GA5.10)";"dsar";req.userid);
   let allok=mut.true;
   lp(let ii=0;ii<tables.len;ii=ii+1){ let table=tables.get(ii);
     if(s.tableexists(table)){
