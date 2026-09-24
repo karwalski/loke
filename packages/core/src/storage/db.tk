@@ -436,14 +436,62 @@ f=nowms():i64{
    So: one predicate, here in the storage layer, for anything that wants to assert its
    schema rather than assume it. core.governance.compliance had a private copy; it now
    delegates. M1.7 should use these two rather than write a third. *)
+(* Counts ROWS RETURNED, not a value in them. Read the next paragraph before using it.
+
+   A plain i64, no result type. db.many is a STDLIB result so both arms are live (T-18 only kills
+   the error arm of a user-declared sum), and a failed query counting as zero is the safe
+   direction for a predicate that asks whether something exists. That is what its three callers
+   want: `tableexists`, `triggerexists` and `placeholder_store.hasrequest` all ask "is there a
+   row?".
+
+   **The trap, and it is a real one (GA5.20).** Handed an aggregate it answers **1**, for every
+   input, forever:
+
+       countquery("SELECT COUNT() AS n FROM audit_log")      -> 1, not the number of rows
+       countquery("SELECT SUM(cost_usd) AS c FROM audit_log") -> 1
+
+   because `COUNT()` returns ONE ROW containing the count, and this function measures the row
+   list. It is a plausible thing to reach for — the name contains "count" — and it caught this
+   session once, reporting every provider as having made exactly 1 request. Use `scalari64` below
+   for an aggregate. There is no live misuse in the tree today; this comment is here so there is
+   not one tomorrow.
+
+   (The aggregates above are written COUNT-open-close without the star, deliberately. Comments
+   NEST in toke, and an open-paren immediately followed by a star opens a nested one — so writing
+   an aggregate with a star inside a comment swallows the rest of the file. That is T-27, and
+   writing THIS comment walked into it twice: db.tk type-checked clean both times while its
+   emitted interface silently lost every export after this point, and fourteen call sites across
+   six modules failed with `core.storage.db has no exported member`. The second time was the
+   paragraph explaining the first. `placeholder_store.tk:68` uses the same star-free convention
+   for the same reason.) *)
 f=countquery(sql:str;params:@str):i64{
-  (* A plain i64, no result type. db.many is a STDLIB result so both arms are live
-     (T-18 only kills the error arm of a user-declared sum), and a failed query
-     counting as zero is the safe direction for a predicate that asks whether
-     something exists. *)
   <mt db.many(sql;params) {
     $ok:rows rows.len as i64;
     $err:e 0
+  }
+};
+
+(* The aggregate reader `countquery` is mistaken for.
+
+   Reads a NAMED COLUMN out of the first row, which is what `SELECT COUNT() AS n` and
+   `SELECT SUM(x) AS s` produce. The column name is explicit rather than positional because
+   `db.rowi64` takes a name, and because a positional reader would silently return the wrong
+   column the first time somebody adds a second aggregate to the same query.
+
+   `fallback` is the caller's, not a hardcoded zero: for a count, 0 is right; for "the highest
+   version applied", 0 and "no rows" mean different things, and only the caller knows which. *)
+f=scalari64(sql:str;params:@str;col:str;fallback:i64):i64{
+  <mt db.many(sql;params) {
+    $ok:rows firstrowi64(rows;col;fallback);
+    $err:e fallback
+  }
+};
+
+f=firstrowi64(rows:@$row;col:str;fallback:i64):i64{
+  if(rows.len==0){
+    <fallback
+  }el{
+    <rowi64(rows.get(0);col)
   }
 };
 

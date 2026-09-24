@@ -192,6 +192,24 @@ step_checks() {
     # which is committed — unlike build/, so it survives a clone and can therefore actually fail.
   fi
 
+  # T-27 — comments NEST, so one stray open-paren-star inside a comment swallows the rest of the
+  # file. The module still TYPE-CHECKS; what is lost is every declaration after the comment, and
+  # it surfaces somewhere else as "module X has no exported member Y".
+  #
+  # Documented as T-27 for weeks with nothing detecting it, and on 2026-09-24 it cost two build
+  # cycles in ten minutes: a comment in core/storage/db.tk containing a SQL aggregate written with
+  # a star broke fourteen call sites across six modules, and then the paragraph written to explain
+  # that contained the sequence twice while describing it.
+  #
+  # The check reports a file that ENDS at comment depth > 0. Balanced nesting is legal and is not
+  # flagged — several comments here quote defective code that itself contains a comment.
+  if [[ -f ./scripts/find_nested_comment_open.py ]]; then
+    echo "  every comment closes"
+    python3 ./scripts/find_nested_comment_open.py --check packages src >/dev/null \
+      || { python3 ./scripts/find_nested_comment_open.py packages src >&2
+           failed=1; }
+  fi
+
   if [[ -f ./scripts/find_uncreated_tables.py ]]; then
     echo "  every table referenced in SQL is created somewhere"
     python3 ./scripts/find_uncreated_tables.py --check \
