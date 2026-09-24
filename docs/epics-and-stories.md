@@ -171,6 +171,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | F5.6 | M | **Done** | Latency tolerance routing dimension (`instant` < 2s / `patient` < 30s / `background` minutes-hours; determined by request source, task type, AG1 agent declaration, or user flag; unlocks larger local models in Considered/Background tiers for non-urgent tasks; cost vs speed comparison shown when tolerance is `background`; logged in audit trail for explainability) |
 | F5.7 | M | **Done** | Model size escalation with user consent (non-blocking dismissible prompt when a larger model would improve quality but requires a slower tier: "This would benefit from Qwen-72B — ~30s instead of instant. [Use larger] [Stay fast] [Always for this task]"; preferences remembered per task type; capped at once per session per task type unless opted in; escalation acceptance rate feeds router learning via X5.3) |
 | F5.8 | M |  | **`core.router.escalation` ignores its policy and cannot be stopped from escalating to a cloud provider** — three defects found 2026-09-24 while writing T2.4's test, all **latent**: `grep -rn core.router.escalation` over `packages/`, `src/` and `tests/` finds no importer at all. (1) **`shouldescalate` never reads its `policy` parameter** (`escalation.tk:41`) — measured, `$escalationpolicy{minconfidence:0.9;maxretries:0;allowcloudescalation:false}` gives a byte-identical answer to the default on all ten probed inputs, and all three fields of `$escalationpolicy` are read by nothing anywhere in the repository, so a configured policy is decoration. (2) **`escalationtarget` takes no policy at all** (`escalation.tk:64`), so `allowcloudescalation:false` cannot stop it: `llama3.1:8b` → `claude-3-5-haiku`, and every unrecognised model → `claude-3-5-sonnet`. There is no local rung and no refusal in the fallback. This is the component that most directly contradicts `canusecloud($restricted) == false`. (3) **The fallback swallows the top of the ladder** (`escalation.tk:76-79`): `escalationtarget("claude-3-5-sonnet-20241022")` returns itself, so a retry loop never changes model once it reaches the top — and `escalationtarget("")` also answers sonnet, which matters because an empty `modelid` is exactly what `providers.types.nocompletion` carries, so a FAILED completion would escalate to a cloud provider. Fix before anything imports this module: thread the policy into `escalationtarget`, honour `allowcloudescalation`, and make the unrecognised-model fallback refuse rather than default to the largest cloud model. |
+| F5.9 | S | **Done** — 2026-09-24 | **The intent classifier's LLM path never used the model's answer** — Found 2026-09-24 (T2.5). `classifyfromobj` read Ollama's `message` with `json.str`, but `/api/chat` returns `message` as an **object**; `json.str` only accepts a quoted string, so the read failed and every reply fell back to the keyword result. Measured against the real module: a well-formed body whose content is `code_review` came back `chat`/`keyword` (**2 assertions red before the fix**). Invisible because the fallback is the keyword answer, so nothing looked wrong. Fixed with `json.getval`. Two more found while there: std.json turns an escaped `\n` into a bare `n` (T-42, filed upstream), so a reply ending in a newline was not recognised (**red with trim + equality**; now matched by prefix, safe because none of the eight names is a prefix of another); and a reply naming no task was labelled an `llm` classification of `chat`, a model opinion that was never given. It now falls back to the keyword result. `tests/unit/router/test_intent.tk` asserts all four. Not covered: a live Ollama round trip. |
 
 ## Epic F6: Storage & Audit Layer
 
@@ -900,7 +901,7 @@ loke is local-first and single-user by design. The companion device support (F8)
 | T2.2 | M | **Done** — exercised 2026-09-23 |  `tests/unit/router/test_selector.tk` — selection with `prefer_local=true` and RESTRICTED sensitivity picks local/Ollama model; selection with PUBLIC sensitivity and cloud allowed returns a model with cost > 0 or local fallback; selection criteria with `max_cost_per_1k=0.001` excludes expensive models; empty registry returns error variant; `$instant` tolerance prefers interactive tier; `$background` tolerance accepts background tier<br><br>**Verdict — holds (RV1.1, 2026-09-23):** `tests/unit/router/test_selector.tk` imports `core.models.registry`, `core.router.selector`, `shared.types` and passes. Command: `./scripts/run_tests.sh tests/unit/router`. |
 | T2.3 | M | **Done** — exercised 2026-09-23 |  `tests/unit/router/test_router.tk` — `new_config("http://127.0.0.1:11434")` sets `prefer_local=true`; `provider_from_str("anthropic")` → `$anthropic`; `provider_from_str("unknown")` → `$local`; `ctx_from_model("claude-3-5-sonnet-20241022")` → 200000; `ctx_from_model("gpt-4o-mini")` → 128000; `cost_in_from_model("gpt-4o-mini")` → 0.00015; `estimate_latency` for `$interactive` tier → 500 ms<br><br>**Verdict — holds (RV1.1, 2026-09-23):** `tests/unit/router/test_router.tk` imports `core.router.router`, `core.router.selector`, `core.router.strategy`, `shared.types` and passes. Command: `./scripts/run_tests.sh tests/unit/router`. |
 | T2.4 | S | **Partial** — the sensitivity half is feature-absent |  `tests/unit/router/test_escalation.tk` — escalation path selected when sensitivity is RESTRICTED; non-escalation path selected for PUBLIC; escalation message contains model name; escalation result includes reason field<br><br>**Verdict — untestable (RV1.1, 2026-09-23):** the file this row cites, `tests/unit/router/test_escalation.tk`, is not in the live tree; it is in `_archived-tests/`, which `scripts/run_tests.sh` excludes from discovery by an explicit `-not -path '*/_archived-tests/*'`. So no run has ever exercised the assertions listed here, in CI or locally, and the Done marker rests on a file the runner cannot see. Reopened for that reason and not because any assertion was disproved: what is missing is the test, and it is named.<br><br>**2026-09-24.** `tests/unit/router/test_escalation.tk` (new, 44 assertions, green) asserts the ladder by exact model id, the `reason` field, the message by equality, the four `shouldescalate` branches with the token floor at its exact boundary (9 escalates, 10 does not), and clock bounds on `triggeredat`. **Absent:** this row also specifies *"escalation path selected when sensitivity is RESTRICTED; non-escalation for PUBLIC"*, and `core.router.escalation` has **no sensitivity input of any kind** — `shouldescalate(response;policy)` decides on response quality and `escalationtarget` is a fixed string ladder. Not invented and not asserted around. The product's real gate is `core.router.sensitivity.canusecloud` plus the route-level refusal, covered by `test_sensitivity.tk` and `test_route_safety.tk`. Remains Partial until this row's sensitivity clause is either implemented in escalation or struck as belonging to the sensitivity module. |
-| T2.5 | S | **Reopened** — exercised 2026-09-23, an assertion is false |  `tests/unit/router/test_intent.tk` — intent classify on code-like text returns `$code_generation` or `$code_review` task; classify on "summarise this document" returns `$summarisation`; confidence is between 0.0 and 1.0 inclusive; result includes task and confidence fields<br><br>**Verdict — reopened (RV1.1, 2026-09-23):** `tests/unit/router/test_intent.tk` imports `core.router.intent`, `core.router.router`, `shared.types` and FAILS. and does not report MORE confidence than the keyword result it fell back from. Command: `./scripts/run_tests.sh tests/unit/router`. |
+| T2.5 | S | **Done** — 2026-09-24 |  `tests/unit/router/test_intent.tk` — intent classify on code-like text returns `$code_generation` or `$code_review` task; classify on "summarise this document" returns `$summarisation`; confidence is between 0.0 and 1.0 inclusive; result includes task and confidence fields<br><br>**Verdict — reopened (RV1.1, 2026-09-23):** `tests/unit/router/test_intent.tk` imports `core.router.intent`, `core.router.router`, `shared.types` and FAILS. and does not report MORE confidence than the keyword result it fell back from. Command: `./scripts/run_tests.sh tests/unit/router`.<br><br>**Done 2026-09-24.** The RV1.1 failure was `classify` binding its error arm first; that was fixed under GA1.5 (77219c5) and the file has been green since, but the row was never re-verified. Verified now, and one assertion was wrong in the passing direction: *"does not report MORE confidence than the keyword result"* was written `>=`, so a fallback that RAISED the confidence satisfied it. Now `==`. Added the row's own cases on `classify` (the function the router calls), not only `classifyfast`: `"summarise this document"` → `summarisation`, review text → `code_review`, confidence in [0,1] on both. **Mutation-checked:** with the unreachable-classifier arm returning confidence 0.95, the equality assertion goes red (the old `>=` passes it). Writing these found F5.9. |
 
 ## T3 — Optimiser
 
@@ -1046,7 +1047,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 68 | 64 | — | 3 | — | — | — | — | 1 |
+| FOUNDATION LAYER | 10 | 69 | 65 | — | 3 | — | — | — | — | 1 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
@@ -1055,14 +1056,14 @@ hand-edit produced a set of numbers that disagreed with them.*
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 15 | 12 | — | — | — | — | — | — | 3 |
 | CROSS-CUTTING | 9 | 83 | 81 | — | — | — | — | — | — | 2 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
-| Epic T: Test Suite | 14 | 65 | 25 | 6 | 12 | 22 | — | — | — | — |
+| Epic T: Test Suite | 14 | 65 | 26 | 6 | 11 | 22 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | TOOLCHAIN | 1 | 47 | 24 | 4 | — | — | — | 1 | — | 18 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 35 | 11 | 4 | — | — | — | — | — | 20 |
 | AUDIT-DRIVEN GAPS | 5 | 41 | 37 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 34 | 18 | 1 | — | — | — | — | — | 15 |
 | VERIFICATION PROGRAMME | 14 | 121 | 68 | 12 | — | 6 | 3 | — | — | 32 |
-| **Total** | **88** | **678** | **509** | **27** | **17** | **28** | **3** | **1** | — | **93** |
+| **Total** | **88** | **679** | **511** | **27** | **16** | **28** | **3** | **1** | — | **93** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1073,7 +1074,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | F3 | 1 | 9 | 9 | — | — | — | — | — | — | — |
 | F3b | 1 | 11 | 11 | — | — | — | — | — | — | — |
 | F4 | 1 | 5 | 5 | — | — | — | — | — | — | — |
-| F5 | 1 | 8 | 6 | — | 1 | — | — | — | — | 1 |
+| F5 | 1 | 9 | 7 | — | 1 | — | — | — | — | 1 |
 | F6 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | F7 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F8 | 1 | 4 | 2 | — | 2 | — | — | — | — | — |
@@ -1114,7 +1115,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | MK6 | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | MK7 | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | T1 | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| T2 | 1 | 5 | 3 | 1 | 1 | — | — | — | — | — |
+| T2 | 1 | 5 | 4 | 1 | — | — | — | — | — | — |
 | T3 | 1 | 3 | 2 | — | 1 | — | — | — | — | — |
 | T4 | 1 | 6 | 5 | 1 | — | — | — | — | — | — |
 | T5 | 1 | 4 | 3 | — | 1 | — | — | — | — | — |
@@ -1156,9 +1157,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 24 | 17 | 4 | — | — | — | — | — | 3 |
 | RV1 | 1 | 10 | 3 | — | — | — | — | — | — | 7 |
-| **Total** | **88** | **678** | **509** | **27** | **17** | **28** | **3** | **1** | — | **93** |
+| **Total** | **88** | **679** | **511** | **27** | **16** | **28** | **3** | **1** | — | **93** |
 
-Rows parsed: **678**, across **88** epics and **16** level-1 headings.
+Rows parsed: **679**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
