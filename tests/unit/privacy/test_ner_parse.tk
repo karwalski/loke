@@ -1,0 +1,62 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.nerparse;
+
+i=t:std.test;
+i=str:std.str;
+i=json:std.json;
+i=sh:shared.types;
+i=ner:core.privacy.ner;
+
+(* PL1.12 -- the Ollama NER layer recovers the entities the model returns.
+
+   RED BEFORE THE FIX, all four entity assertions: parsecontent read the top-level array
+   as an object key (PL1.11's defect, silent here only because the loop's length is
+   null-safe) and parseobj asked std.json for the dotted path "message.content", which it
+   does not support. So pipeline.run counted a completed NER stage that could not detect
+   anything. No Ollama is needed: these are the parse and request-building halves of
+   detectentities, which adds only the HTTP call. *)
+
+f=count(entities:@$piientity):i64{
+  <str.arraylen(entities)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let c=ner.parsecontent("[{\"type\":\"PERSON\",\"value\":\"Alice\"},{\"type\":\"LOCATION\",\"value\":\"Hobart\"}]");
+  let cv:@$piientity=mt c {$ok:v v;$err:e @()};
+  if(t.assert(count(cv)==2;"parsecontent recovers both entities of a model reply")){pass=pass+1}el{fail=fail+1};
+  if(count(cv)==2){
+    let e0:$piientity=cv.get(0);
+    let e1:$piientity=cv.get(1);
+    if(t.asserteq(e0.entitytype;"PERSON";"the first keeps its type")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(e1.entitytype;"LOCATION";"the second keeps its type")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(str.eq(e0.value;"Alice");"and the value it covers, so the pipeline can mask it")){pass=pass+1}el{fail=fail+1}
+  }el{
+    fail=fail+1
+  };
+
+  let raw="{\"model\":\"qwen2.5:7b\",\"message\":{\"role\":\"assistant\",\"content\":\"[{\\\"type\\\":\\\"PERSON\\\",\\\"value\\\":\\\"Alice\\\"}]\"},\"done\":true}";
+  let r=ner.parseresponse(raw);
+  let rv:@$piientity=mt r {$ok:v v;$err:e @()};
+  if(t.assert(count(rv)==1;"parseresponse reads message.content out of a real /api/chat body")){pass=pass+1}el{fail=fail+1};
+
+  let none=ner.parsecontent("[]");
+  let nv:@$piientity=mt none {$ok:v v;$err:e @()};
+  if(t.assert(count(nv)==0;"an empty reply is zero entities, not a crash")){pass=pass+1}el{fail=fail+1};
+
+  (* The request body is valid JSON whatever the prompt contains. RED BEFORE THE FIX: the
+     prompt was spliced in unescaped. *)
+  let body=ner.requestbody("qwen2.5:7b";"She said \"hi\"
+then left \\ quickly");
+  let ok=mt json.dec(body) {$ok:j true;$jsonerr:e false};
+  if(t.assert(ok;"a prompt with quotes, a newline and a backslash still makes a well-formed request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body;"She said \\\"hi\\\"\\nthen left \\\\ quickly");"and the prompt is carried escaped, not altered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body;"
+");"with no raw newline inside a JSON string")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

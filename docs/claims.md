@@ -42,8 +42,8 @@ file merely *existing* for a module is not proof and is not recorded as such.
 
 | Verdict | Count |
 |---|---|
-| `verified` | 32 |
-| `partial` | 25 |
+| `verified` | 31 |
+| `partial` | 26 |
 | `stub` | 16 |
 | `absent` | 24 |
 | **Total** | **97** |
@@ -52,7 +52,7 @@ By subsystem:
 
 | Subsystem | `verified` | `partial` | `stub` | `absent` | Rows |
 |---|---|---|---|---|---|
-| [A. Privacy detection and anonymisation](#a-privacy-detection-and-anonymisation) | 8 | 4 | 0 | 2 | 14 |
+| [A. Privacy detection and anonymisation](#a-privacy-detection-and-anonymisation) | 7 | 5 | 0 | 2 | 14 |
 | [B. Multi-layer composition — epic F3b](#b-multi-layer-composition--epic-f3b) | 0 | 0 | 1 | 9 | 10 |
 | [C. Token optimisation](#c-token-optimisation) | 2 | 2 | 1 | 1 | 6 |
 | [D. Routing](#d-routing) | 4 | 2 | 1 | 1 | 8 |
@@ -133,8 +133,8 @@ permanent zeros and the chain attests to them**. Any figure derived from audit h
 |---|---|---|---|---|---|---|
 | A1 | "Regex detector — 10 patterns (email, phone, credit card, TFN, SSN, IP, API key)" | `README.md:119`, `docs/features-loke.md:29` | `verified` | `packages/core/src/privacy/regex.tk:20-31` — `getpatterns()` returns exactly 10 `$patterndef` entries; the pattern strings themselves are in `packages/core/src/privacy/patterns.tk` | **Measured** — the regex-layer recall and precision figures in [metrics-baseline.md](metrics-baseline.md#measured), scored against `tests/fixtures/pii-corpus` (N=74 cases, seed 20260919). Note that measurement's own caveat: the pattern strings are read from the tree but evaluated with Python's regex engine, not toke's. No committed `.tk` test imports the module — `tests/unit/privacy/test_regex_detector.tk` re-declares the patterns. AD1.2, AD1.3 | The count of ten is correct. The measurement found what reading the code did not: four of the claimed entity types have **no detector at all**, two nine-digit patterns have no checksum and collide with each other, and the email pattern is case-sensitive. See metrics-baseline for the detail — this row is verified as a count, not as coverage |
 | A2 | Per-pattern confidence "0.60–0.99" | `docs/features-loke.md:29` | `verified` | `packages/core/src/privacy/regex.tk:21-30` — literal confidences from 0.60 (`url`) to 0.99 | No calibration test; the values are hand-assigned. AD1.4 | The range is accurately transcribed from the code. The numbers are declarations, not measured precisions — and the measurement in [metrics-baseline.md](metrics-baseline.md#measured) puts layer precision at well below the lowest declared confidence, so the declared values should not be read as precision estimates |
-| A3 | "Local NER — SLM-based entity recognition via Ollama" | `README.md:120`, `docs/features-loke.md:30` | `verified` | `packages/core/src/privacy/ner.tk`; imported by `packages/core/src/privacy/pipeline.tk:10` | No test — requires a running Ollama. AD1.1, AD1.3 | — |
-| A4 | "Presidio — 180+ entity types via optional Python sidecar" | `README.md:121`, `docs/features-loke.md:31` | `partial` | `packages/core/src/privacy/presidio.tk`; imported by `pipeline.tk:9` | No test — requires a sidecar loke neither bundles nor starts. AD1.3 | A REST client exists. loke does not bundle, start or detect Presidio (`docs/architecture.md:230` states this). "180+" is Presidio's own published count, not loke's measurement |
+| A3 | "Local NER — SLM-based entity recognition via Ollama" | `README.md:120`, `docs/features-loke.md:30` | `partial` | `packages/core/src/privacy/ner.tk`; imported by `packages/core/src/privacy/pipeline.tk:10` | No test of the round trip — requires a running Ollama. AD1.1, AD1.3, PL1.12 | Until 2026-09-24 the client recovered **no entities**: a probe against the real module parsed zero from a well-formed Ollama body (PL1.12). Fixed and asserted without a server in `tests/unit/privacy/test_ner_parse.tk`. Stays `partial` (it was `verified`): no test exercises the Ollama round trip, and detection depends on a model following the requested output format |
+| A4 | "Presidio — 180+ entity types via optional Python sidecar" | `README.md:121`, `docs/features-loke.md:31` | `partial` | `packages/core/src/privacy/presidio.tk`; imported by `pipeline.tk:9` | No test — requires a sidecar loke neither bundles nor starts. AD1.3 | A REST client exists; until 2026-09-24 it could not parse any non-error `/analyze` answer (a top-level array; it crashed on a null array handle, PL1.11) and read every score as zero (PL1.8). The parse is now tested without a sidecar in `tests/unit/privacy/test_presidio_parse.tk`; the HTTP round trip is still untested. loke does not bundle, start or detect Presidio (`docs/architecture.md:230` states this). "180+" is Presidio's own published count, not loke's measurement |
 | A5 | "Privacy Filter sidecar — OpenAI Privacy Filter model (1.5B params)" | `README.md:122` | `verified` | `packages/privacy-filter/server.py:31-36` loads `openai/privacy-filter` via `transformers.pipeline`; `/detect` and `/anonymise` at `:53`, `:98` | No test. AD1.3 | The sidecar is real and runs a real published model. Whether loke can *reach* it is a separate claim — see B9 |
 | A6 | "Generates `[ENTITY_TYPE_N]` tokens … Restores placeholders in LLM responses to original values" | `docs/features-loke.md:54` | `partial` | `packages/core/src/privacy/placeholder.tk:26` (`makeplaceholder`), `:42` (`restore`) | No test importing the module. PL1.2 | Restore works, but the loop bound at `placeholder.tk:46` is `i>len` where valid indices end at `len-1`, so it iterates one index past the end of the entry array. Live off-by-one, tracked as PL1.2 |
 | A7 | "guardian prompt injection" | `README.md:112`, `docs/features-loke.md:52` | `verified` | `packages/core/src/privacy/guardian.tk:10-27` (prompt text), `:29` (`buildsystemprompt`), `:38` (`isguardianpresent`); imported by `pipeline.tk:13` | No test importing the module. AD1.5 would measure whether the prompt resists anything | The prompt exists and is injected. Its effectiveness against injection has never been measured |
@@ -148,8 +148,8 @@ permanent zeros and the chain attests to them**. Any figure derived from audit h
 
 ## B. Multi-layer composition — epic F3b
 
-Epic F3b is marked **Done** across all eleven stories in
-[epics-and-stories.md](epics-and-stories.md) (Epic F3b, stories F3b.1–F3b.11). Ten of its modules have **zero importers**: they
+Epic F3b was marked **Done** across all eleven stories in
+[epics-and-stories.md](epics-and-stories.md) (Epic F3b, stories F3b.1–F3b.11); since AD1.7 (2026-09-24) every one is **Partial**, with what is missing named per row. Nine of its product modules have **zero importers** outside their own tests: they
 compile, they are documented as features, and no code path reaches them. The pipeline orchestrator
 uses its own de-duplication instead. Tracked as AD1.7 — wire them or withdraw the claim.
 
@@ -292,7 +292,7 @@ a code-reading claim at best.
 | L1 | "Module coverage 35.5%" | `docs/test-coverage.md:15` (corrected under X6.4) | `partial` | `docs/test-coverage.md` | Counted directly | 35.5% counts source modules that have a *file* named after them. Of 86 test files, 54 carry an explicit `(* --- stub … *)` marker and re-declare their subject; 12 import production code, reaching 22 distinct production modules — about **5%** of the 408 the document counts. See test-coverage.md, which now states both |
 | L2 | "120 test files" | `README.md:281,311`, and `docs/test-coverage.md:12` before correction | `absent` | `tests/` contains 86 `test_*.tk` files and 86 `.md` companions | Counted directly | The figure is stale by a wide margin and was never a coverage statement. Corrected in both files under X6.4 |
 | L3 | "52 test files covering privacy, memory, governance, storage, models, providers, agents, MCP, CLI, optimiser" | `docs/features-loke.md:240` | `absent` | 86 test files | Counted directly | Also stale, and in the opposite direction from L2. Corrected under X6.2 |
-| L4 | `scripts/run_tests.sh` "discovers `test_*.tk` files, compiles and runs each" | `docs/features-loke.md:240` | `partial` | `scripts/run_tests.sh:25` | — | Discovery excludes `*/test_harness*`, which silently removes `packages/core/src/privacy/test_harness.tk` — the only harness capable of scoring detection quality — from every run. AD1.8 |
+| L4 | `scripts/run_tests.sh` "discovers `test_*.tk` files, compiles and runs each" | `docs/features-loke.md:240` | `partial` | `scripts/run_tests.sh:228` | `tests/unit/privacy/test_harness_runner.tk` | Discovery excluded `*/test_harness*` until AD1.8, which silently removed `packages/core/src/privacy/test_harness.tk` from every run. The exclusion now names that one file (a library module with no `main`), and its driver `tests/unit/privacy/test_harness_runner.tk` is discovered and runs in CI; with the old glob, `find` returns no harness file at all (checked 2026-09-24). Still partial because `_archived-tests/` is excluded by design, so "each" does not include the archived files. AD1.8, X7.6 |
 | L5 | "CI: GitHub Actions workflow — builds toke/ooke from source, runs tests, produces structured JSON artefact" | `docs/features-loke.md:242` | `partial` | `.github/workflows/ci.yml` | — | CI publishes pass/fail counts only. It cannot carry a number, so no measurement can reach metrics-baseline through it. VM1.5 |
 | L6 | "compiles all toke modules … to a native binary" | `docs/features-loke.md:238` | `partial` | `scripts/build_loke.sh` | — | The toolchain is currently on hold and the build is red, so no claim about the compiled artefact can be verified at this commit. The binary size quoted alongside it is a file size, not a performance figure |
 

@@ -9,6 +9,7 @@ m=core.router.intent;
 i=str:std.str;
 i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=t:shared.types;
 
 t=$intentresult{
@@ -336,31 +337,59 @@ f=classifyfast(text:str):$intentresult{
    Every failure path now returns `fast` unchanged, so the method stays "keyword" and the
    confidence stays the keyword confidence. The provenance label is the only witness a caller
    has for whether a model was consulted, and it now tells the truth. *)
+(* F5.10. jx.escape, not json.enc: std.json's json.enc escapes only quote and backslash,
+   so a prompt containing a newline became a raw newline inside a JSON string and Ollama
+   rejected the request -- classify then fell back to the keyword result for every
+   multi-line prompt. *)
 f=classifybody(text:str):str{
   let sys="Classify the intent as one of: chat, code_generation, code_review, summarisation, classification, ner, embedding, data_analysis. Reply with just the category name.";
-  let head=str.concat("{\"model\":\"qwen2.5:7b\",\"stream\":false,\"messages\":[{\"role\":\"system\",\"content\":";json.enc(sys));
+  let head=str.concat("{\"model\":\"qwen2.5:7b\",\"stream\":false,\"messages\":[{\"role\":\"system\",\"content\":";jx.escape(sys));
   <str.concat(
     str.concat(head;"},{\"role\":\"user\",\"content\":");
-    str.concat(json.enc(text);"}]}")
+    str.concat(jx.escape(text);"}]}")
   )
 };
 
+(* F5.9. The wire name the reply STARTS with, or "" when it names none. Prefix rather
+   than equality because std.json's string reader turns an escaped newline into a bare
+   `n` (T-44), so a reply of "code_review\n" arrives as "code_reviewn"; none of the eight
+   names is a prefix of another, so this cannot pick the wrong one. *)
+f=replyname(content:str):str{
+  let names=@("chat";"code_generation";"code_review";"summarisation";"classification";"ner";"embedding";"data_analysis");
+  let found=mut."";
+  lp(let i=0;i<names.len;i=i+1){
+    if(str.startswith(content;names.get(i))){
+      found=names.get(i)
+    }el{}
+  };
+  <found
+};
+
 f=classifyfromcontent(content:str;fast:$intentresult):$intentresult{
-  if(str.len(content)==0){
+  let name=replyname(content);
+  (* A reply that names no task is not a classification. taskfromstr would default it
+     to chat, labelled "llm" -- a model's opinion it did not give. *)
+  if(str.len(name)==0){
     <fast
   }el{};
   (* The confidence is the LLM path's own 0.72, which is deliberately BELOW every keyword
      confidence that short-circuits above it: a model consulted because the keywords were
      unsure should not claim more certainty than they did. *)
-  <$intentresult{task:taskfromstr(content);confidence:0.72;method:"llm"}
+  <$intentresult{task:taskfromstr(name);confidence:0.72;method:"llm"}
 };
 
 f=classifyfrommessage(msgobj:$json;fast:$intentresult):$intentresult{
-  <classifyfromcontent(json.str(msgobj;"content");fast)
+  <classifyfromcontent(str.trim(json.str(msgobj;"content"));fast)
 };
 
+(* F5.9. Ollama's /api/chat answers `"message":{"role":..,"content":..}` -- an OBJECT.
+   This read it with json.str, which only accepts a quoted string value, so the read
+   failed, json.dec of the empty result failed, and every answer a model gave was
+   dropped in favour of `fast`. The LLM path had never once changed a classification.
+   json.getval returns the value's raw JSON text whatever its type. The content is
+   trimmed because a model's reply commonly ends in a newline, and taskfromstr is exact. *)
 f=classifyfromobj(obj:$json;fast:$intentresult):$intentresult{
-  <mt json.dec(json.str(obj;"message")) {
+  <mt json.dec(json.getval(obj;"message")) {
     $ok:msgobj classifyfrommessage(msgobj;fast);
     $jsonerr:e fast
   }

@@ -8,6 +8,7 @@ i=str:std.str;
 i=sh:shared.types;
 i=rtr:core.router.router;
 i=intent:core.router.intent;
+i=json:std.json;
 
 (* X7.2 — this file re-declared core.router.intent's keyword classifier as eight i64
    constants and a copy of classifyfast, then asserted against the copy:
@@ -147,7 +148,10 @@ f=main():i64{
   let lowcode:$intentresult=intent.classify("implement a sorting algorithm";deadurl());
   if(t.asserteq(rtr.tasktostr(lowcode.task);"code_generation";"with no classifier reachable, classify returns the KEYWORD task — a code-generation prompt must not be routed as chat")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(lowcode.method;"keyword";"and labels it keyword, because no LLM was consulted — reporting \"llm\" is a false provenance claim")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lowcode.confidence>=intent.classifyfast("implement a sorting algorithm").confidence;"and does not report MORE confidence than the keyword result it fell back from")){pass=pass+1}el{fail=fail+1};
+  (* T2.5. This was `>=` under a label saying "does not report MORE", so it passed on
+     exactly the defect it names: a fallback that raised the confidence satisfied it.
+     The contract is that the keyword result comes back unchanged, so it is equality. *)
+  if(t.assert(lowcode.confidence==intent.classifyfast("implement a sorting algorithm").confidence;"and reports the keyword confidence unchanged, neither more nor less")){pass=pass+1}el{fail=fail+1};
 
   let lowdata:$intentresult=intent.classify("load this csv and find trends";deadurl());
   if(t.asserteq(rtr.tasktostr(lowdata.task);"data_analysis";"the same for a data-analysis prompt")){pass=pass+1}el{fail=fail+1};
@@ -159,6 +163,37 @@ f=main():i64{
   let lowchat:$intentresult=intent.classify("hello how are you today";deadurl());
   if(t.asserteq(rtr.tasktostr(lowchat.task);"chat";"a chat prompt is chat on both paths, which is why the defect above is invisible without the method field")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(lowchat.method;"keyword";"and here the method is the only witness")){pass=pass+1}el{fail=fail+1};
+
+  (* T2.5's own cases, on classify -- the function the router calls -- and not only on
+     classifyfast. *)
+  let summ:$intentresult=intent.classify("summarise this document";deadurl());
+  if(t.asserteq(rtr.tasktostr(summ.task);"summarisation";"classify on \"summarise this document\" returns summarisation")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(summ.confidence>=0.0 && summ.confidence<=1.0;"and its confidence is within [0,1]")){pass=pass+1}el{fail=fail+1};
+  let rev:$intentresult=intent.classify("review this code for bugs";deadurl());
+  if(t.asserteq(rtr.tasktostr(rev.task);"code_review";"classify on code-like review text returns code_review")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rev.confidence>=0.0 && rev.confidence<=1.0;"and its confidence is within [0,1]")){pass=pass+1}el{fail=fail+1};
+
+  (* The LLM path, fed the body Ollama's /api/chat actually returns. `message` is an
+     OBJECT, not a string. *)
+  let fastchat:$intentresult=intent.classifyfast("hello how are you today");
+  let llm:$intentresult=intent.classifyfromjson("{\"model\":\"qwen2.5:7b\",\"message\":{\"role\":\"assistant\",\"content\":\"code_review\"},\"done\":true}";fastchat);
+  if(t.asserteq(rtr.tasktostr(llm.task);"code_review";"an Ollama answer of code_review is read as code_review")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(llm.method;"llm";"and labelled llm, because a model was consulted")){pass=pass+1}el{fail=fail+1};
+  let nl:$intentresult=intent.classifyfromjson("{\"message\":{\"role\":\"assistant\",\"content\":\"summarisation\\n\"}}";fastchat);
+  if(t.asserteq(rtr.tasktostr(nl.task);"summarisation";"a reply with a trailing newline is still read")){pass=pass+1}el{fail=fail+1};
+  let junk:$intentresult=intent.classifyfromjson("{\"message\":{\"role\":\"assistant\",\"content\":\"I think this is a greeting\"}}";fastchat);
+  if(t.asserteq(junk.method;"keyword";"a reply naming no task falls back to the keyword result rather than claiming the model chose chat")){pass=pass+1}el{fail=fail+1};
+  (* F5.10. A multi-line prompt still makes a well-formed request. RED BEFORE THE FIX:
+     the raw-newline assertion; json.enc left the newline raw. The json.dec assertion was
+     green even then, because std.json's own reader accepts a raw newline inside a string
+     (Ollama's does not), so it guards the quotes only. *)
+  let cb=intent.classifybody("line one
+line \"two\"");
+  if(t.assert(mt json.dec(cb) {$ok:j true;$jsonerr:e false};"the classifier request is valid JSON for a multi-line prompt with quotes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(cb;"
+");"and carries no raw newline")){pass=pass+1}el{fail=fail+1};
+  let nocontent:$intentresult=intent.classifyfromjson("{\"message\":{\"role\":\"assistant\"}}";fastchat);
+  if(t.asserteq(nocontent.method;"keyword";"a reply with no content falls back to the keyword result")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

@@ -1818,3 +1818,34 @@ loke had 14 call sites: config parsing, the Ollama response parsers, the dashboa
 preferences and the ephemeral placeholder map. `json.decode` is correct and is what we
 now use. Either alias `parse` to `dec` or remove the name.
 
+
+## T-44 — `json.str` unescapes `\n` to a bare `n`
+
+**Severity: wrong value, silently.**
+
+Read from the source at `fedd48d` (`src/stdlib/json.c`, `json_str`) and confirmed by a
+failing assertion 2026-09-24: the unescape loop is `if (*p == '\\') { p++; *w++ = *p++; }`,
+which copies the character after a backslash verbatim. `\"` and `\\` come out right by
+accident; `\n`, `\t`, `\r`, `\b`, `\f` become the letters `n`, `t`, `r`, `b`, `f`, and
+`\uXXXX` becomes `uXXXX`. With `str.trim` and an equality match, the reply
+`{"content":"summarisation\n"}` was not recognised
+(`tests/unit/router/test_intent.tk`, "a reply with a trailing newline is still read").
+
+**What it cost in loke.** Any model reply read through `json.str` that ends in a newline
+comes back with a trailing `n`, so an exact comparison fails. `core.router.intent` now
+matches the task name by prefix (F5.9). Any other exact comparison on a `json.str` result
+from an LLM is exposed to this in the same way. The ask: decode the JSON escapes as the
+spec defines them.
+
+## T-45 — `json.enc` escapes only `"` and `\`
+
+**Severity: malformed output, silently.**
+
+`json_enc` in `src/stdlib/json.c` at `fedd48d` escapes the quote and the backslash and copies
+every other byte through. A newline, tab or carriage return in the input is therefore a raw
+control character inside a JSON string, which RFC 8259 forbids. std.json's own reader accepts it,
+so a round trip inside toke looks fine; Go's `encoding/json`, which is what Ollama uses, rejects
+it. Found 2026-09-24: `core.router.intent.classifybody` (F5.10) sent every multi-line prompt to
+Ollama as invalid JSON. **Worked around** with `shared.jsonobj.escape`, which escapes newline,
+CR and tab as well. Other control characters below 0x20 are still not escaped by either.
+The ask: escape all control characters, as the spec requires.

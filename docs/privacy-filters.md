@@ -17,6 +17,12 @@ Two scoping notes, so the rest of the document is read correctly:
 
 ## Architecture Overview
 
+> **What runs today (AD1.7).** The design below is not wired. `pipeline.run` calls the regex layer,
+> Ollama NER and Presidio by name in a fixed order and de-duplicates overlaps itself. The consensus,
+> layer-config, layer-health, entity-routing, filter-registry, org-policy, per-layer-metrics, evaluation
+> and sidecar-client modules exist with unit tests and have no importer in the product; the four
+> consensus strategies are not implemented. See [claims.md](claims.md) §B.
+
 The privacy filter is a composable pipeline of detection layers. Each layer independently scans text for sensitive entities (PII, PHI, financial data, etc.) and produces detection results. A consensus strategy then merges all layer outputs into a final set of resolved entities, which are masked before the text leaves the device.
 
 ```
@@ -64,8 +70,7 @@ gracefully — if a layer is unavailable, remaining layers continue processing.
 | Module | File | Purpose |
 |--------|------|---------|
 | Regex patterns | `privacy/regex.tk` | Deterministic pattern matching for structured PII (emails, phone numbers, credit cards, etc.) |
-| NER (local) | `privacy/ner_local.tk` | On-device named entity recognition for contextual detection |
-| NER (remote) | `privacy/ner.tk` | Remote NER service integration |
+| NER | `privacy/ner.tk` | Entity recognition by a model served through Ollama (localhost by default). It recovers no entities today — PL1.12. An in-process layer, `ner_local.tk`, was removed under PL1.6: it sat on `std.infer`, which is a stub, and no request path reached it |
 | Presidio | `privacy/presidio.tk` | Microsoft Presidio integration via REST API |
 | Layer config | `privacy/layer_config.tk` | Layer definitions, priorities, and enable/disable |
 | Consensus | `privacy/consensus.tk` | Overlap resolution and multi-layer agreement |
