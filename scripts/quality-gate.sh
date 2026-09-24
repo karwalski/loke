@@ -163,6 +163,21 @@ step_checks() {
   #
   # No existing check covered this. find_field_matches.py sounds like it would and does not —
   # that one is a `mt` over a struct field with 3+ arms (T-2).
+  # A table named in SQL that nothing creates. Every read against one fails, and the row
+  # accessors map a failed read to 0 or "" (LS1.1i), so the data is silently always empty.
+  # Found five on 2026-09-24: memory_graph_entities, memory_graph_relations, memory_settings
+  # (M1.7's remaining three), metrics_raw (DA1.2 — so no metric event was ever stored) and
+  # compliance_events (so a policy-violation rate was always 0%, the most flattering possible
+  # number). scripts/known-tables.txt carries the two deliberate exceptions with their reasons.
+  if [[ -f ./scripts/find_uncreated_tables.py ]]; then
+    echo "  every table referenced in SQL is created somewhere"
+    python3 ./scripts/find_uncreated_tables.py --check \
+      packages/core packages/shared packages/browser >/dev/null \
+      || { python3 ./scripts/find_uncreated_tables.py \
+             packages/core packages/shared packages/browser >&2
+           failed=1; }
+  fi
+
   if [[ -f ./scripts/find_discarded_field_compare.py ]]; then
     echo "  no struct-field comparison used as a statement"
     python3 ./scripts/find_discarded_field_compare.py --check \

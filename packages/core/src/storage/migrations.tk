@@ -101,6 +101,133 @@ f=mempiiidxsql():str{
   <"CREATE INDEX IF NOT EXISTS idx_scores_pii ON memory_scores(pii_flagged)"
 };
 
+(* ── Four tables that no migration created ────────────────────────────────────────
+   Measured 2026-09-24 by collecting every table named in a `FROM`, `INTO`, `UPDATE` or `JOIN`
+   across `packages/core/src` and subtracting every `CREATE TABLE IF NOT EXISTS` anywhere in the
+   tree — not just here, because several modules create their own at runtime. Five tables came
+   back created NOWHERE. Four of them are here; the fifth, `audit_entries`, is a different
+   problem and is filed as GA5.12 rather than created, because creating it would give loke a
+   SECOND audit trail.
+
+   `memory_graph_entities`, `memory_graph_relations` and `memory_settings` are M1.7's remaining
+   three — `memory_scores` was the fourth and landed with the palace in versions 10-16. Until
+   now every read in `core.memory.graph` and `core.memory.privacy` failed against a table that
+   was not there, and the row accessors map a failed read to `0` or `""` (LS1.1i), so **every
+   field of every memory-graph entity and relation was empty or zero and nothing reported it**.
+
+   `metrics_raw` is DA1.2's subject, and `core.metrics.collector` is the only writer. Its
+   `record` built a 15-placeholder INSERT against a table that did not exist, so no metric event
+   this project ever emitted was stored — which is worth stating plainly next to `eval/bench.tk`
+   reporting 0 ms for every benchmark (LS1.1q): between them, nothing measurable was being
+   measured.
+
+   Types follow what the code actually writes, not what would be tidiest. `confidence` and
+   `weight` are REAL because `memory/graph.tk` reads them through `s.rowf64hundredths` and
+   divides by 100. The `metrics_raw` counters are INTEGER and the costs REAL, matching the
+   `str.fromint` / `str.fromfloat` in `collector.record`. `timestamp` is INTEGER because
+   `event.timestamp` is an i64 and the summary query does arithmetic on it — unlike `created_at`
+   elsewhere in this schema, which is TEXT from `datetime('now')`. That inconsistency is real and
+   is left alone deliberately: changing it would change what `collector.summarise` returns. *)
+f=memgraphentitiessql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_graph_entities (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 1.0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)"
+};
+
+f=memgraphrelationssql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_graph_relations (
+  from_id TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 1.0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (from_id, to_id, kind)
+)"
+};
+
+f=memsettingssql():str{
+  <"CREATE TABLE IF NOT EXISTS memory_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)"
+};
+
+f=metricsrawsql():str{
+  <"CREATE TABLE IF NOT EXISTS metrics_raw (
+  request_id TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  tokens_before INTEGER NOT NULL DEFAULT 0,
+  tokens_after INTEGER NOT NULL DEFAULT 0,
+  tokens_saved INTEGER NOT NULL DEFAULT 0,
+  cost_before REAL NOT NULL DEFAULT 0.0,
+  cost_after REAL NOT NULL DEFAULT 0.0,
+  cost_saved REAL NOT NULL DEFAULT 0.0,
+  pii_found INTEGER NOT NULL DEFAULT 0,
+  pii_blocked INTEGER NOT NULL DEFAULT 0,
+  routed_local INTEGER NOT NULL DEFAULT 0,
+  cache_hit INTEGER NOT NULL DEFAULT 0,
+  model_id TEXT NOT NULL DEFAULT '',
+  provider_id TEXT NOT NULL DEFAULT '',
+  savings_by_stage TEXT NOT NULL DEFAULT ''
+)"
+};
+
+f=memgraphfromidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_graph_rel_from ON memory_graph_relations(from_id)"
+};
+
+f=memgraphtoidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_graph_rel_to ON memory_graph_relations(to_id)"
+};
+
+f=metricsrawtsidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_metrics_raw_ts ON metrics_raw(timestamp)"
+};
+
+(* ── Two more tables that nothing created ─────────────────────────────────────────
+   Found 2026-09-24 by `scripts/find_uncreated_tables.py` once it was narrowed enough to be
+   readable. Both are written AND read by their modules, so both were silently empty:
+
+   `compliance_events` — `core.policy.feedback` inserts a row per policy evaluation and then
+   counts violations over a time window. With no table, every insert failed and every count
+   returned zero, so **a policy-violation rate computed from it was always 0%** — the most
+   flattering possible number, reported as though measured.
+
+   `kv` — `core.storage.db`'s own generic key/value helpers at lines 309 and 317. A `SELECT value
+   FROM kv` against a missing table returns nothing and the row accessors map that to `""`
+   (LS1.1i), so every read answered "no value set".
+
+   `timestamp` is INTEGER here because `policy/feedback.tk` compares it against `i64` bounds, the
+   same reason `metrics_raw.timestamp` is. `violated` and `user_override` are INTEGER because
+   toke has no boolean column type and the module writes 0/1. *)
+f=complianceeventssql():str{
+  <"CREATE TABLE IF NOT EXISTS compliance_events (
+  request_id TEXT NOT NULL,
+  policy_id TEXT NOT NULL,
+  regulation TEXT NOT NULL DEFAULT '',
+  violated INTEGER NOT NULL DEFAULT 0,
+  user_override INTEGER NOT NULL DEFAULT 0,
+  timestamp INTEGER NOT NULL
+)"
+};
+
+f=kvsql():str{
+  <"CREATE TABLE IF NOT EXISTS kv (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  component TEXT NOT NULL DEFAULT ''
+)"
+};
+
+f=complianceeventstsidxsql():str{
+  <"CREATE INDEX IF NOT EXISTS idx_compliance_events_ts ON compliance_events(timestamp)"
+};
+
 f=allmigrations():@$migration{
   <@(
     $migration{
@@ -318,6 +445,58 @@ END"
       version:16;
       description:"index memory_scores by pii_flagged";
       sql:mempiiidxsql()
+    };
+    (* Versions 17-23: four tables that no migration created and the indexes they need.
+       One statement per migration — see the note at the top of this file. *)
+    $migration{
+      version:17;
+      description:"create memory_graph_entities (M1.7)";
+      sql:memgraphentitiessql()
+    };
+    $migration{
+      version:18;
+      description:"create memory_graph_relations (M1.7)";
+      sql:memgraphrelationssql()
+    };
+    $migration{
+      version:19;
+      description:"create memory_settings (M1.7)";
+      sql:memsettingssql()
+    };
+    $migration{
+      version:20;
+      description:"create metrics_raw, which core.metrics.collector is the only writer to (DA1.2)";
+      sql:metricsrawsql()
+    };
+    $migration{
+      version:21;
+      description:"index memory_graph_relations by from_id";
+      sql:memgraphfromidxsql()
+    };
+    $migration{
+      version:22;
+      description:"index memory_graph_relations by to_id";
+      sql:memgraphtoidxsql()
+    };
+    $migration{
+      version:23;
+      description:"index metrics_raw by timestamp, which every summary query filters on";
+      sql:metricsrawtsidxsql()
+    };
+    $migration{
+      version:24;
+      description:"create compliance_events, so a violation rate is measured rather than always 0%";
+      sql:complianceeventssql()
+    };
+    $migration{
+      version:25;
+      description:"create kv, core.storage.db's own key/value helpers";
+      sql:kvsql()
+    };
+    $migration{
+      version:26;
+      description:"index compliance_events by timestamp, which both count queries filter on";
+      sql:complianceeventstsidxsql()
     }
   )
 };
