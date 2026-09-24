@@ -1681,6 +1681,8 @@ return a string are therefore formatted as integers, and the integer is the poin
 binding inherits the declared type, so `let s=str.fromi64(5); "\(s)"` fails the same way.
 `let s:str=str.fromi64(5)` retypes the binding and prints `5`. `str.concat` takes its
 arguments as strings and is also correct.
+**But see T-42:** the annotated binding is then dropped from any array literal it is
+written into, so it is not a safe workaround. Use `str.fromint` or `str.concat`.
 
 The affected set cannot be read off the interface. `tolower`, `toupper` and `substr` sit in
 the same block with the same declared return, and interpolate correctly. I probed each
@@ -1698,6 +1700,37 @@ person what the pipeline did, printed "4378090592 entities detected (4378090624 
 ids were `p-` followed by an address. **Worked around** by annotating the binding or using
 `str.concat`. **Guarded** by `scripts/find_interp_abi_str.py`, in the quality gate. The guard
 flags direct interpolation and unannotated bindings for the fifteen measured names.
+
+## T-42 — an annotated `let s:str=` binding of a T-41 function, used as an array element, is compiled as a spread
+
+**Severity: a value silently disappears from an array; for some functions, SIGBUS.**
+
+Measured 2026-09-24 at `fedd48d` (LS1.1s), against a scratch `(k TEXT, v TEXT)` table:
+
+    let g:str=str.fromi64(12345);
+    db.exec("INSERT INTO kv VALUES (?,?)";@("g";g))       -> k='g', v=NULL
+    db.exec("INSERT INTO kv VALUES (?,?)";@(g;"first"))   -> k='first', v=NULL
+    let u=str.fromi64(12345);   @("u";u)                  -> v='12345'
+    @("d";str.fromi64(12345))                             -> v='12345'
+    let h:str=str.fromint(12345);   @("h";h)              -> v='12345'
+    let r:str=str.randhex(4);   @("r";r)                  -> SIGBUS
+
+The IR shows why. For `@("g";g)` toke emits its **spread-array** path with `g` as the base:
+it loads a length from the word before `g`'s data, allocates `len + 1`, copies `len` words
+from `g` and stores `"g"` after them. For a `fromi64` string that length reads 0, so the
+element vanishes and the literal has one element. For `randhex` it reads garbage. Position
+does not matter, and `str.len(g)`, `str.concat` and interpolation of `g` are all correct.
+Seen: `trimws` (dropped), `randhex` (crash), `fromi64` (dropped); `tolower` and `concat` are
+not affected, which is the T-41 split again. A plain rebinding, `let e2=g`, inherits it.
+
+The annotation is **T-41's recommended workaround**, which is what makes this worth an
+entry: fixing the interpolation moves the defect into the next array literal. In loke it
+made `memory_scores`' INSERT bind NULL into a NOT NULL column and fail (M1.7a, where it was
+first misread as position-dependent). The form that is correct in both places is a function
+declared to return `str`: `str.fromint`, or `str.concat("";...)`.
+
+**Guarded** by the array-element check in `scripts/find_interp_abi_str.py`. The ask is T-36's:
+declare these functions with the type they return.
 
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 

@@ -22,7 +22,12 @@ looks plausible until somebody sorts or subtracts by it.
 The two correct forms, both already in the tree:
 
     "... VALUES (?,?,datetime('now'))"      -- the function in the STATEMENT text
-    @(key; value; str.fromi64(t.nowi64()))  -- a real timestamp from toke
+    @(key; value; str.fromint(t.nowi64()))  -- a real timestamp from toke
+
+`str.fromint`, not `str.fromi64`, which this docstring recommended until LS1.1s. `fromi64` is
+declared `(i64)->i64` (T-36): its result interpolates as an address (T-41), and a
+`let s:str=str.fromi64(...)` binding used as an array element is dropped from the literal
+(T-42), so the bound timestamp becomes NULL. `fromint` is declared to return `str`.
 
 What it flags
 -------------
@@ -141,7 +146,7 @@ def main() -> int:
         return 0
     print(f"\n{total} site(s). Put the function in the STATEMENT text "
           f"(`VALUES (?,?,datetime('now'))`) or bind a real timestamp "
-          f"(`str.fromi64(t.nowi64())`). See this script's docstring for the five that "
+          f"(`str.fromint(t.nowi64())` — not `fromi64`, see LS1.1s). See this script's docstring for the five that "
           f"motivated it.", file=sys.stderr)
     return 1 if args.check else 0
 
