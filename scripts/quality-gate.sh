@@ -433,7 +433,23 @@ step_checks() {
 
 step_build() {
   [[ -x ./scripts/build_loke.sh ]] || { echo "scripts/build_loke.sh missing or not executable" >&2; return 1; }
-  ./scripts/build_loke.sh
+  ./scripts/build_loke.sh || return 1
+
+  # F10.23g — loke-cli enters the gate.
+  #
+  # The tree has built clean and linked for a while (0 compile errors, 0 undefined symbols, a
+  # 2 MB binary), and none of that was checked by anything: the gate built only `loke`, so cli,
+  # mcp-broker and mcp-toke could regress to any depth without failing a run. That is the state
+  # every other tree was in before it was onboarded, and it is how 247 files came to have never
+  # been compiled once.
+  #
+  # `moke` is deliberately NOT here. It has 0 compile errors and 252 of 252 interfaces but six
+  # objects still fail IR assembly (MK21.16: T-35 truncation in four data modules, T-37 in
+  # compute and ml/engine), so adding it would fail every gate run on a known, filed condition —
+  # which trains people to ignore the gate. It joins when it links.
+  if [[ -x ./scripts/build_trees.sh ]]; then
+    ./scripts/build_trees.sh loke-cli || return 1
+  fi
 }
 
 step_test() {
