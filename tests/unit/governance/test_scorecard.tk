@@ -104,6 +104,25 @@ f=event(provider:str;durationms:u32;cost:f64;corrid:str):$auditevent{
   }
 };
 
+(* GA5.19. The request path writes five event types; `event` above is the success one.
+   The cost is an f64 PARAMETER, which crosses a module boundary intact — only an f64
+   RETURN is corrupted (T-20). *)
+f=outcome(eventtype:str;provider:str;durationms:u32;cost:f64;corrid:str):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:provider;
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:150;
+    tokensout:200;
+    costusd:cost;
+    durationms:durationms;
+    correlationid:corrid
+  }
+};
+
 f=hasprovider(card:$providerscorecard;name:str):bool{
   let found=mut.false;
   lp(let i=0;i<card.providers.len;i=i+1){
@@ -186,17 +205,17 @@ f=main():i64{
   if(t.assert(oll.totalcosthundredths==0;"a local provider costs nothing")){pass=pass+1}el{fail=fail+1};
   if(t.assert(oll.avgcostperreqhundredths==0;"and nothing per request")){pass=pass+1}el{fail=fail+1};
 
-  (* ── GA5.19: the figure the module REFUSES to produce ────────────────────────
-     audit_log records every request with event_type 'llm_request' and carries no
-     success/failure discriminator — the request path audits a provider failure with the
-     same event_type. So there is no source for an error rate, and reporting 0% would
-     state that no request has ever failed. `errorsrecorded` is false and the formatter
-     prints "n/r" rather than a number.
-
-     This is the highest-value assertion in the file: it is the difference between a
-     scorecard that says "not recorded" and one that publishes a figure nobody measured. *)
-  if(t.assert(!anth.errorsrecorded;"errors are NOT recorded, and the stats say so rather than implying a 0% failure rate")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!oll.errorsrecorded;"for every provider")){pass=pass+1}el{fail=fail+1};
+  (* ── GA5.19: the error rate, now that there is a source for it ───────────────
+     Until 2026-09-24 every outcome was written with event_type 'llm_request', so a
+     provider failure was indistinguishable from a success and this module had to report
+     NOT RECORDED. recordevent now takes the event type as a parameter. All four rows so
+     far are successes, so the honest rate is a measured ZERO — which is a different claim
+     from "not recorded", and the distinction is asserted in both directions here and
+     again at the end of this file. *)
+  if(t.assert(anth.errorsrecorded;"with dispatch rows in the trail the error rate IS derivable, so the stats say recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(anth.errors==0;"and no failures have been written, so the count is zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(anth.errorratebp==0;"which is a MEASURED zero rate, not an absent one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(oll.errorsrecorded;"for every provider with attempts")){pass=pass+1}el{fail=fail+1};
 
   (* ── The figures track the data ──────────────────────────────────────────────
      The inverse of what the old module did. Adding a row must change the card. *)
@@ -221,10 +240,46 @@ f=main():i64{
   if(t.assert(str.contains(out;"P99 ms");"and has a P99 column")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(out;"anthropic");"anthropic appears in it")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(out;"openai");"and openai")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(out;"n/r");"the error column reads n/r — NOT RECORDED, which cannot be mistaken for a measurement the way 0.0% or a dash could")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!str.contains(out;"0.0%");"and no 0.0% appears anywhere, because that would state no request has ever failed (GA5.19)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"0.0%");"the error column carries a MEASURED zero for providers whose every dispatch succeeded — not n/r, because the discriminator now exists")){pass=pass+1}el{fail=fail+1};
   (* Money formatted from exact hundredths: 1.25, not 1.25000001 and not 1.2. *)
   if(t.assert(str.contains(out;"1.25");"the cost is rendered from exact hundredths")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GA5.19, the part that needed a schema value rather than a schema change ──
+     A provider failure and a route refusal, both of which the old code wrote as
+     'llm_request'. The failure must raise the error rate; the refusal must not appear in
+     ANY figure, because the provider was never called. The refusal is given a 7000ms
+     duration on purpose: it is an outlier large enough that every latency figure below
+     names it if it leaks in. *)
+  audit.insertevent(store;outcome("llm_request_failed";"anthropic";500 as u32;0.0;"corr-sc-7"));
+  audit.insertevent(store;outcome("llm_request_refused";"anthropic";7000 as u32;0.0;"corr-sc-8"));
+
+  let mixed=scard.buildscorecard(store);
+  let anth3=statsfor(mixed;"anthropic");
+
+  if(t.assert(anth3.requests==5;"a FAILED dispatch is a dispatch: four successes plus one failure is five attempts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(anth3.errors==1;"exactly one of them failed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(anth3.errorratebp==2000;"so the error rate is 1 in 5 = 2000 basis points, in integers because a percentage as f64 is corrupted crossing a module boundary (T-20)")){pass=pass+1}el{fail=fail+1};
+
+  (* THE REFUSAL EXCLUSION, asserted through the figures it would distort. A refused route
+     carries a real provider name, a real model id and a real duration with no tokens and
+     no cost, so before this fix `unsupportedprovider` and `needsanthropickey` made a
+     provider this endpoint has no client for look like a provider that was serving
+     requests — quickly, and for free. *)
+  if(t.assert(anth3.avglatencyms==400;"the 7000ms refusal is NOT in the mean: (100+200+900+300+500)/5 = 400, where counting it would give 1583")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(anth3.p99latencyms==900;"nor in the P99, which is still the slowest real dispatch and not the refusal")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(anth3.avgcostperreqhundredths==25;"nor in the denominator of the per-request cost: 125/5 = 25, where counting it would give 20")){pass=pass+1}el{fail=fail+1};
+
+  (* And the rows that carry provider 'none' — budget stops, unroutable requests, policy
+     denies — must not make 'none' a provider in the scorecard. It reads as one, which is
+     the failure mode that survives review. *)
+  audit.insertevent(store;outcome("policy_deny";"none";0 as u32;0.0;"corr-sc-9"));
+  audit.insertevent(store;outcome("quota_exceeded";"none";0 as u32;0.0;"corr-sc-10"));
+  let withdenies=scard.buildscorecard(store);
+  if(t.assert(!hasprovider(withdenies;"none");"a denied or budget-stopped request does not make 'none' appear as a provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(withdenies.providers.len==3;"the provider count is unchanged by four non-dispatch rows")){pass=pass+1}el{fail=fail+1};
+
+  let mixedout=scard.formatscorecard(withdenies);
+  if(t.assert(str.contains(mixedout;"20.0%");"and the formatted table renders the rate from integer basis points: 2000bp is 20.0%, assembled digit by digit because str.fromfloat renders 20.0 as 20")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

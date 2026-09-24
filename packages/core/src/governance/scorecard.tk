@@ -23,14 +23,34 @@ i=s:core.storage.db;
    `audit.digestfields`); and a bare f64 crossing a module boundary is corrupted (T-20), which a
    scorecard field being read by a formatter in another module would hit.
 
-   `errorspresent` is false and `errorratepct` is gone, because there is NO SOURCE for it.
-   `audit_log` records every request with event_type 'llm_request' and carries no
-   success/failure discriminator — the request path does audit a provider failure, but writes
-   the same event_type for it. Reporting 0% would state that no request has ever failed.
-   Filed as GA5.19. *)
+   GA5.19, CLOSED 2026-09-24. There is now a source for the error rate. The request path
+   used to write event_type 'llm_request' for every outcome — a completed request, a 502
+   from the provider, a route it refuses, a budget stop, a policy deny — so nothing
+   downstream could tell a failure from a success and this module had to render NOT
+   RECORDED rather than 0%, which would have stated that no request has ever failed.
+   browser.pages.api.pipeline.recordevent now takes the event type as a parameter and
+   writes five distinct values.
+
+   Two consequences here, and the second one is a defect this row did not name:
+
+   1. `errors` and `errorratebp` are derived, and `errorsrecorded` now means "this provider
+      has dispatch attempts, so the rate below is a measurement" rather than "no source
+      exists". A provider with zero attempts still reports NOT RECORDED, because 0 errors
+      out of 0 attempts is not 0%.
+   2. EVERY per-provider figure is now restricted to dispatch rows. It was not before, and
+      the refusal paths write a real provider name and model id with a duration and no
+      tokens (`unsupportedprovider`, `needsanthropickey`) — so a provider this endpoint has
+      no client for was counted as having made requests, at a latency that dragged the mean
+      down and a cost of zero that dragged the per-request cost down with it. The refusals
+      that carry provider 'none' were worse: 'none' appeared in the scorecard as a provider.
+
+   The rate is in integer BASIS POINTS. A percentage as f64 would be corrupted crossing to
+   the formatter (T-20), and basis points divide exactly by construction. *)
 t=$providerstats{
   provider:str;
   requests:i64;
+  errors:i64;
+  errorratebp:i64;
   avglatencyms:i64;
   p99latencyms:i64;
   totalcosthundredths:i64;
@@ -43,10 +63,17 @@ t=$providerscorecard{
   generatedat:i64
 };
 
+(* The two event types that mean a provider was actually called. Spelled once: the whole
+   correctness of every per-provider figure below is that they all agree about which rows
+   count, and five copies of a string is five chances for one of them not to. *)
+f=dispatchclause():str{
+  <" AND event_type IN ('llm_request','llm_request_failed')"
+};
+
 f=providernames():@str{
   (* Read from the trail rather than hardcoded, so a provider that has never been used does
      not appear with zeroes and a new one appears without a code change. *)
-  <mt db.many("SELECT DISTINCT provider FROM audit_log WHERE provider<>'' ORDER BY provider";@()) {
+  <mt db.many(str.concat(str.concat("SELECT DISTINCT provider FROM audit_log WHERE provider<>''";dispatchclause());" ORDER BY provider");@()) {
     $ok:rows namesfromrows(rows);
     $err:e @("")
   }
@@ -65,7 +92,7 @@ f=namesfromrows(rows:@$row):@str{
 f=avgdurationms(provider:str):i64{
   (* AVG over an INTEGER column returns a REAL, so it is read as hundredths and divided back
      — the same reason rowf64hundredths exists. Rounds rather than truncating. *)
-  <mt db.one("SELECT CAST(ROUND(AVG(duration_ms)) AS INTEGER) AS v FROM audit_log WHERE provider=?";@(provider)) {
+  <mt db.one(str.concat("SELECT CAST(ROUND(AVG(duration_ms)) AS INTEGER) AS v FROM audit_log WHERE provider=?";dispatchclause());@(provider)) {
     $ok:r s.rowi64(r;"v");
     $err:e 0
   }
@@ -81,7 +108,7 @@ f=p99durationms(provider:str;n:i64):i64{
     let idx=mut.((n * 99) + 99) / 100 - 1;
     if(idx<0){idx=0}el{};
     if(idx>n-1){idx=n-1}el{};
-    <mt db.one(str.concat("SELECT duration_ms AS v FROM audit_log WHERE provider=? ORDER BY CAST(duration_ms AS INTEGER) ASC LIMIT 1 OFFSET ";str.fromi64(idx));@(provider)) {
+    <mt db.one(str.concat(str.concat("SELECT duration_ms AS v FROM audit_log WHERE provider=?";dispatchclause());str.concat(" ORDER BY CAST(duration_ms AS INTEGER) ASC LIMIT 1 OFFSET ";str.fromi64(idx)));@(provider)) {
       $ok:r s.rowi64(r;"v");
       $err:e 0
     }
@@ -89,9 +116,28 @@ f=p99durationms(provider:str;n:i64):i64{
 };
 
 f=totalcosthundredthsfor(provider:str):i64{
-  <mt db.one("SELECT SUM(cost_usd) AS v FROM audit_log WHERE provider=?";@(provider)) {
+  <mt db.one(str.concat("SELECT SUM(cost_usd) AS v FROM audit_log WHERE provider=?";dispatchclause());@(provider)) {
     $ok:r s.rowf64hundredths(r;"v");
     $err:e 0
+  }
+};
+
+f=errorsfor(provider:str):i64{
+  <mt db.one("SELECT COUNT(id) AS cnt FROM audit_log WHERE provider=? AND event_type='llm_request_failed'";@(provider)) {
+    $ok:r s.rowi64(r;"cnt");
+    $err:e 0
+  }
+};
+
+(* Basis points, rounded to nearest rather than truncated: 1 failure in 3 is 3333bp, and a
+   truncating divide would report 33.3% where the honest figure to one decimal is 33.3% as
+   well, but 1 in 8 is 1250bp and 2 in 3 is 6667bp — the difference shows up at the
+   boundary, and a rate that reads low is the wrong direction for a rate to be wrong in. *)
+f=errorratebpof(errors:i64;attempts:i64):i64{
+  if(attempts<1){
+    <0
+  }el{
+    <((errors * 20000) + attempts) / (attempts * 2)
   }
 };
 
@@ -101,21 +147,24 @@ f=statsfor(provider:str):$providerstats{
      as a scalar reader silently reports every provider as having exactly one request. Caught
      by the count-equals-rows-written assertion, which is the assertion that exists to catch a
      constant. *)
-  let n=mt db.one("SELECT COUNT(id) AS cnt FROM audit_log WHERE provider=?";@(provider)) {
+  let n=mt db.one(str.concat("SELECT COUNT(id) AS cnt FROM audit_log WHERE provider=?";dispatchclause());@(provider)) {
     $ok:r s.rowi64(r;"cnt");
     $err:e 0
   };
   let total=totalcosthundredthsfor(provider);
   let per=mut.0;
   if(n>0){per=total/n}el{};
+  let errs=errorsfor(provider);
   <$providerstats{
     provider:provider;
     requests:n;
+    errors:errs;
+    errorratebp:errorratebpof(errs;n);
     avglatencyms:avgdurationms(provider);
     p99latencyms:p99durationms(provider;n);
     totalcosthundredths:total;
     avgcostperreqhundredths:per;
-    errorsrecorded:false
+    errorsrecorded:n>0
   }
 };
 
@@ -136,6 +185,14 @@ f=buildscorecard(store:i64):$providerscorecard{
   }el{
     <$providerscorecard{providers:@($providerstats);generatedat:time.now()}
   }
+};
+
+(* Basis points to a one-decimal percentage, entirely in integers. 3333bp -> "33.3%".
+   str.fromfloat renders 5.0 as "5" and 33.3 as "33.299999", so the percentage is assembled
+   from the integer rather than converted to one. *)
+f=pctfrombp(bp:i64):str{
+  let tenths=(bp + 5) / 10;
+  <str.concat(str.fromi64(tenths / 10);str.concat(".";str.concat(str.fromi64(tenths % 10);"%")))
 };
 
 f=formatscorecard(card:$providerscorecard):str{
@@ -170,11 +227,11 @@ f=formatscorecard(card:$providerscorecard):str{
     let reqs=str.fromi64(p.requests);
     let avgs=str.fromi64(p.avglatencyms);
     let p99s=str.fromi64(p.p99latencyms);
-    (* "n/r" — NOT RECORDED, not 0%. audit_log has no success/failure discriminator, so a
-       figure here would state that no request has ever failed (GA5.19). A dash would read as
-       zero; an explicit marker cannot be mistaken for a measurement. *)
+    (* A real figure where there is one, and "n/r" - NOT RECORDED - where there is not.
+       A provider with no dispatch attempts prints n/r rather than 0.0%, because 0 failures
+       out of 0 calls is not a zero failure rate, and a dash there would read as one. *)
     let errs=mut."n/r";
-    if(p.errorsrecorded){errs="0.0%"}el{};
+    if(p.errorsrecorded){errs=pctfrombp(p.errorratebp)}el{};
     let costs=s.moneyfromhundredths(p.totalcosthundredths);
     let row=str.concat(
       t.strpad(p.provider;12);

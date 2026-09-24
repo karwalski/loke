@@ -219,6 +219,16 @@ step_checks() {
            failed=1; }
   fi
 
+  # GA5.18. std.db.exec discards prepare_v2's tail pointer, so a two-statement string applies
+  # statement one and reports success for both. Found when a migration created its table and
+  # silently skipped its index.
+  if [[ -f ./scripts/find_multistatement_exec.py ]]; then
+    echo "  every db.exec applies exactly one statement"
+    python3 ./scripts/find_multistatement_exec.py --check packages tests >/dev/null \
+      || { python3 ./scripts/find_multistatement_exec.py packages tests >&2
+           failed=1; }
+  fi
+
   if [[ -f ./scripts/find_discarded_field_compare.py ]]; then
     echo "  no struct-field comparison used as a statement"
     python3 ./scripts/find_discarded_field_compare.py --check \

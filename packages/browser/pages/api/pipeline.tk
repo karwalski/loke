@@ -156,13 +156,20 @@ f=risktierof(run:$pipelinerun):$risktier{
    result in $ok/$err of a user sum, and a caller matching THAT always takes the first arm
    (T-18) — so a failed insert would be read as a success and the hash chain would attest
    to a history with a hole in it. insertevent returns a plain bool. *)
-f=recordevent(store:i64;run:$pipelinerun;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64;decision:$policydecision):bool{
+(* GA5.19 - eventtype is a PARAMETER, not the constant "llm_request" it used to be.
+   Every outcome was written under one event type: a completed request, a provider that
+   returned 502, a route this endpoint refuses, a budget stop and a policy deny were all
+   indistinguishable in the trail. So no error rate was derivable, and the scorecard had to
+   render NOT RECORDED rather than state 0% - which would have claimed no request has ever
+   failed. The five values are eventtypes() below, and two of them are the names
+   core.governance.report was already querying for and never finding. *)
+f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64;decision:$policydecision):bool{
   if(store==0){
     <false
   }el{
     let res:$piidetectionresult=run.result;
     let ev=$auditevent{
-      eventtype:"llm_request";
+      eventtype:eventtype;
       usecase:"browser-chat";
       modelid:modelid;
       provider:provider;
@@ -195,7 +202,7 @@ f=restoretext(run:$pipelinerun;text:str):str{
    describes a system that never has an outage, which is worse than no trail. *)
 f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
   let elapsed=str.nowunix()-startms;
-  recordevent(store;run;provider;modelid;0;0;elapsed;decision);
+  recordevent(store;run;"llm_request_failed";provider;modelid;0;0;elapsed;decision);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
 };
 
@@ -470,7 +477,7 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
     log.warn("budget counters were not persisted, so the limit is not accumulating";"api.pipeline";run.requestid)
   };
 
-  let logged=recordevent(store;run;provstr;spec.id;tin;tout;elapsed;decision);
+  let logged=recordevent(store;run;"llm_request";provstr;spec.id;tin;tout;elapsed;decision);
   if(logged){}el{
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
   };
@@ -521,13 +528,13 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piif
    the router's sight, is exactly what GA1.7 removed. *)
 f=unsupportedprovider(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
-  recordevent(store;run;providerlabel(spec.provider);spec.id;0;0;str.nowunix()-startms;decision);
+  recordevent(store;run;"llm_request_refused";providerlabel(spec.provider);spec.id;0;0;str.nowunix()-startms;decision);
   <refusedroute(str.concat(str.concat("this endpoint has no client for provider ";providerlabel(spec.provider));str.concat(" (model ";str.concat(spec.id;")")));piifields)
 };
 
 f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
-  recordevent(store;run;"anthropic";spec.id;0;0;str.nowunix()-startms;decision);
+  recordevent(store;run;"llm_request_refused";"anthropic";spec.id;0;0;str.nowunix()-startms;decision);
   <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
 };
 
@@ -578,7 +585,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
      diagnostic lands on the READ rather than on the binding. *)
   let bcheck:$budgetcheck=budget.check(budgetmanager(store);0 as u32;0.0);
   if(bcheck.allowed){}el{
-    recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+    recordevent(store;run;"quota_exceeded";"none";"none";0;0;str.nowunix()-startms;decision);
     <refusedbudget(bcheck.reason;piifields)
   };
 
@@ -591,7 +598,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
     run.requestid
   );
   if(rtr.isrouted(route)){}el{
-    recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+    recordevent(store;run;"llm_request_refused";"none";"none";0;0;str.nowunix()-startms;decision);
     <refusedroute(route.reason;piifields)
   };
 
@@ -601,7 +608,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
      line that would leak. Two comparisons are the right price for it. *)
   if(t.senseq(res.sensitivity;t.restricted())){
     if(rtr.isclouddecision(route)){
-      recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+      recordevent(store;run;"llm_request_refused";"none";"none";0;0;str.nowunix()-startms;decision);
       <refusedroute("RESTRICTED data must not be sent to a cloud provider";piifields)
     }el{}
   }el{};
@@ -650,7 +657,7 @@ f=post(req:i64):i64{
     let decision=decide(run);
     if(isdeny(decision)){
       let why=policymessage(decision);
-      recordevent(store;run;"none";"none";0;0;str.nowunix()-startms;decision);
+      recordevent(store;run;"policy_deny";"none";"none";0;0;str.nowunix()-startms;decision);
       log.warn("pipeline denied by policy: \(why)";"api.pipeline";run.requestid);
       <http.res(403;"{\"ok\":false,\"error\":\(json.enc(why)),\"policy_denied\":true\(privacyfields(run))}")
     }el{};
