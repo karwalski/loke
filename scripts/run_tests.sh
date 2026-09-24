@@ -25,6 +25,63 @@ if [ ! -x "$TOKE" ]; then
   exit 1
 fi
 
+# ── X4.9: refuse to run against a stale build ────────────────────────────────
+#
+# This has produced a false product defect three times, and each time it cost the same
+# half hour: a test fails, the failure is read as a bug in the module under test, the
+# module is read carefully, and nothing is wrong with it — the objects in
+# packages/browser/build/ooke were older than the source they were built from, so the
+# test linked yesterday's code and asserted against today's expectations. Once in the
+# other direction too: a test PASSED against stale objects after the source had been
+# changed to break it.
+#
+# The archive rebuild below compares the archive against the OBJECTS, which is the wrong
+# end of the chain: nothing compared the objects against the .tk files. So this does.
+#
+# It refuses rather than rebuilding. Rebuilding silently would make a stale run
+# impossible and would also make this script the build system, with a second opinion
+# about link order, module order and which trees exist — and when that opinion drifts
+# from build_loke.sh's, the failure is a linker error nobody can place. One line saying
+# "your build is stale, run the build" cannot drift.
+#
+# `-newer` compares mtime, so touching a file without changing it trips this. That is the
+# right direction to be wrong in: a needless rebuild costs a minute, and a green suite
+# against code that is not the code costs a day.
+check_stale() {
+  # $1 = human name, $2 = object dir, $3.. = source roots
+  local name="$1" objdir="$2"; shift 2
+  [ -d "$objdir" ] || return 0
+  local newest_obj
+  newest_obj=$(ls -t "$objdir"/*.o 2>/dev/null | head -1)
+  [ -n "$newest_obj" ] || return 0
+  local stale
+  stale=$(find "$@" -name '*.tk' -not -path '*/build/*' -not -path '*/tests/*' \
+            -newer "$newest_obj" 2>/dev/null | head -3)
+  if [ -n "$stale" ]; then
+    echo "STALE BUILD: $name source is newer than its compiled objects." >&2
+    echo "  newest object: $newest_obj" >&2
+    echo "$stale" | sed 's/^/  newer source: /' >&2
+    echo "" >&2
+    echo "  Every test that links $name would run against the OLD code, and would" >&2
+    echo "  report a defect in whatever it happens to disagree with. Story X4.9." >&2
+    echo "  Run: scripts/build_loke.sh   (and scripts/build_tree.sh moke for moke)" >&2
+    return 1
+  fi
+  return 0
+}
+
+STALE=0
+check_stale "loke" "$PROJECTDIR/packages/browser/build/ooke" \
+  "$PROJECTDIR/packages/core" "$PROJECTDIR/packages/shared" \
+  "$PROJECTDIR/packages/browser" || STALE=1
+if [ -d "$PROJECTDIR/build/trees/moke/obj" ]; then
+  check_stale "moke" "$PROJECTDIR/build/trees/moke/obj" \
+    "$PROJECTDIR/packages/moke" || STALE=1
+fi
+if [ "$STALE" -ne 0 ]; then
+  exit 2
+fi
+
 # ── Build the support archives once ──────────────────────────────────────────
 #
 # This used to recompile the whole toke stdlib from C, plus cmark and tomlc99, for
