@@ -43,8 +43,8 @@ file merely *existing* for a module is not proof and is not recorded as such.
 | Verdict | Count |
 |---|---|
 | `verified` | 31 |
-| `partial` | 26 |
-| `stub` | 16 |
+| `partial` | 27 |
+| `stub` | 15 |
 | `absent` | 24 |
 | **Total** | **97** |
 
@@ -57,7 +57,7 @@ By subsystem:
 | [C. Token optimisation](#c-token-optimisation) | 2 | 2 | 1 | 1 | 6 |
 | [D. Routing](#d-routing) | 4 | 2 | 1 | 1 | 8 |
 | [E. Governance, audit and compliance](#e-governance-audit-and-compliance) | 5 | 3 | 5 | 1 | 14 |
-| [F. Metrics and savings](#f-metrics-and-savings) | 0 | 2 | 2 | 0 | 4 |
+| [F. Metrics and savings](#f-metrics-and-savings) | 0 | 3 | 1 | 0 | 4 |
 | [G. Agents](#g-agents) | 2 | 2 | 1 | 2 | 7 |
 | [H. Memory](#h-memory) | 4 | 1 | 1 | 2 | 8 |
 | [I. MCP](#i-mcp) | 3 | 0 | 0 | 1 | 4 |
@@ -216,8 +216,8 @@ in [metrics-baseline.md](metrics-baseline.md#withdrawn-figures) and are **not re
 
 | # | Claim as worded | Where | Verdict | Implementing code | Proof | What is actually true |
 |---|---|---|---|---|---|---|
-| F1 | `/api/savings` — "Token savings dashboard data" | `docs/features-loke.md:190` | `stub` | `packages/core/src/audit/metrics.tk:37` (`summary`), `:59` (`byprovider`), `:63` (`tokensavingsseries`), `:67` (`cachestats`), `:85` (`export`) | No test. DA1.6 | Every function returns a zero-filled struct or an empty array; `export()` returns `""`. The endpoint serves zeros |
-| F2 | Metrics collection per request | Implied by F1 and by the governance dashboard | `stub` | `packages/core/src/metrics/collector.tk:59` inserts into `metrics_raw`; `:96` selects from it | No test. DA1.2, DA1.3 | No migration creates `metrics_raw`, so both statements would fail. Nothing calls `collector.record` in any case |
+| F1 | `/api/savings` — "Token savings dashboard data" | `docs/features-loke.md:190` | `stub` | `packages/browser/pages/api/savings.tk` (`savingsjson`) | DA1.5 | The endpoint returns a fixed JSON string and reads nothing. The module it should read from, `packages/core/src/audit/metrics.tk`, is no longer a stub: since DA1.6 it aggregates `metrics_raw`, and `tests/integration/test_audit_metrics.tk` asserts that. But the endpoint does not call it, so the endpoint still serves zeros |
+| F2 | Metrics collection per request | Implied by F1 and by the governance dashboard | `partial` | `packages/browser/pages/api/pipeline.tk` (`recordmetric`, called from `completed`, `providerfailed` and `cachedreply`); `packages/core/src/metrics/collector.tk` (`insert`) | `tests/integration/test_metrics_dispatch.tk` (DA1.3) | One `metrics_raw` row is written per provider dispatch and per cache hit, carrying tokens, cost, entity count, model, provider and local/cloud. It is `partial` because it records no disclosure fields (bytes sent, custody, field names), which are DA1.7, and because only `/api/pipeline` writes it |
 | F3 | "Cost tracking — Pre-send token/cost estimation, session stats, savings vs cloud" | `README.md:207`, `docs/features-moke.md:24` | `partial` | `packages/moke/src/cost_comparison.tk:15,62,72,97`, `packages/moke/src/token_optimisation.tk:29,57-58` | No test. CB1.5, VM1.7 | moke computes its own per-session estimates and does not depend on F1/F2, so the UI shows real arithmetic. The "savings" are an estimate against a modelled cloud price using a character-derived token count (`token_optimisation.tk:57-58`), not a measured token saving. No figure from it is publishable — see metrics-baseline |
 | F4 | "Privacy score (% of requests with no violations)" | `docs/features-moke.md:287` | `partial` | `packages/moke/templates/governance.tkt`, `packages/moke/src/governance.tk` | No test. EM1 | Computed over in-session events held in the page, not over a persisted ledger. It resets on reload and is not evidence of anything over a period |
 

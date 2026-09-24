@@ -2,8 +2,34 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=core.audit.metrics;
+i=db:std.db;
+i=str:std.str;
 i=t:shared.types;
 
+(* DA1.6 - aggregates over metrics_raw, the table core.metrics.collector writes.
+
+   Every function here used to return zeros, ignore its `store` and `period` and, for
+   export, return "". Each one now reads metrics_raw, which page.api.pipeline writes once per
+   provider dispatch and once per cache hit (DA1.3). `store` is kept in the signatures and is
+   still unused, because std.db has one global connection (T-30): the store's open is what
+   selects the database, not a handle passed here.
+
+   What these can and cannot say:
+     - No figure here is an estimate. Every sum is over rows that were written when a real
+       request ended, so an empty table yields zeros that mean "nothing recorded", and a
+       caller showing them must say so.
+     - Cost is summed as integer micro-dollars in SQL and divided once here. A bare f64 return
+       is corrupted across a module boundary (T-20), so f64 values only ever leave this module
+       as struct fields, which cross intact.
+     - $cacheinfo used to carry `totalentries` and `avgsimilarity`. metrics_raw records
+       neither, and a stub that returned 0 for both was reporting an empty cache with zero
+       similarity as though measured. Those two fields are removed rather than faked.
+
+   A result-returning function here is still subject to T-18: a caller that matches one
+   always takes the first arm. So each has a plain twin (`summaryfrom`, `byproviderfrom`,
+   `seriesfrom`, `cachefrom`, `exportfrom`) that takes an already-resolved start time, and
+   `periodstart` returns -1 for a period it does not recognise, so a caller can test that
+   with an `if` instead of relying on the $err arm. *)
 
 t=$metricsummary{
   tokenssaved:u64;
@@ -29,21 +55,27 @@ t=$tokensavingspoint{
 };
 
 t=$cacheinfo{
-  totalentries:u64;
   hits:u64;
-  misses:u64;
-  avgsimilarity:f64
+  misses:u64
 };
 
-f=summary(store:i64;period:str):$metricsummary!$lokeerr{
-  <$ok($metricsummary{
-    tokenssaved:0;
-    costsavedusd:0.0;
-    cachehitrate:0.0;
-    entitiesredacted:0;
-    totalrequests:0;
-    localratio:0.0
-  })
+(* Seconds since the epoch at which `period` starts, or -1 if it is not one of the five
+   periods this module knows. "all" is 0, so it includes every row. *)
+f=periodstart(period:str;nowunix:i64):i64{
+  if(str.eq(period;"all")){ <0 }el{};
+  if(str.eq(period;"24h")){ <nowunix-86400 }el{};
+  if(str.eq(period;"7d")){ <nowunix-(7*86400) }el{};
+  if(str.eq(period;"30d")){ <nowunix-(30*86400) }el{};
+  if(str.eq(period;"90d")){ <nowunix-(90*86400) }el{};
+  <0-1
+};
+
+f=microtousd(micro:i64):f64{
+  <(micro as f64)/1000000.0
+};
+
+f=pct(part:i64;whole:i64):f64{
+  if(whole>0){ <((part as f64)/(whole as f64))*100.0 }el{ <0.0 }
 };
 
 f=emptysummary():$metricsummary{
@@ -57,32 +89,228 @@ f=emptysummary():$metricsummary{
   }
 };
 
+f=summaryrow(r:$row):$metricsummary{
+  let total=db.rowi64(r;"total");
+  <$metricsummary{
+    tokenssaved:db.rowi64(r;"saved") as u64;
+    costsavedusd:microtousd(db.rowi64(r;"costmicro"));
+    cachehitrate:pct(db.rowi64(r;"hits");total);
+    entitiesredacted:db.rowi64(r;"redacted") as u64;
+    totalrequests:total as u64;
+    localratio:pct(db.rowi64(r;"local");total)
+  }
+};
+
+f=summaryrows(rows:@$row):$metricsummary{
+  if(rows.len==0){ <emptysummary() }el{ <summaryrow(rows.get(0)) }
+};
+
+f=summaryfrom(since:i64):$metricsummary{
+  let sql="SELECT COUNT() AS total, COALESCE(SUM(tokens_saved),0) AS saved, CAST(ROUND(COALESCE(SUM(cost_saved),0)*1000000) AS INTEGER) AS costmicro, COALESCE(SUM(cache_hit),0) AS hits, COALESCE(SUM(pii_blocked),0) AS redacted, COALESCE(SUM(routed_local),0) AS local FROM metrics_raw WHERE timestamp >= CAST(? AS INTEGER)";
+  let sincestr:str=str.fromint(since);
+  <mt db.many(sql;@(sincestr)) {
+    $ok:rows summaryrows(rows);
+    $err:e emptysummary()
+  }
+};
+
+f=summary(store:i64;period:str):$metricsummary!$lokeerr{
+  let since=periodstart(period;str.nowunix());
+  if(since<0){ <$err($configerr(str.concat("unknown metrics period: ";period))) }el{};
+  <$ok(summaryfrom(since))
+};
+
+f=providerrow(r:$row):$providermetric{
+  <$providermetric{
+    provider:db.rowstr(r;"provider");
+    requests:db.rowi64(r;"n") as u64;
+    tokensin:db.rowi64(r;"tin") as u64;
+    tokensout:db.rowi64(r;"tout") as u64;
+    costusd:microtousd(db.rowi64(r;"costmicro"))
+  }
+};
+
+f=providerrows(rows:@$row):@$providermetric{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    out=out.push(providerrow(rows.get(i)))
+  };
+  <out
+};
+
+(* Cache hits are excluded: they reached no provider, and are counted by cachefrom. *)
+f=byproviderfrom(since:i64):@$providermetric{
+  let sql="SELECT provider_id AS provider, COUNT() AS n, COALESCE(SUM(tokens_after),0) AS tin, COALESCE(SUM(tokens_out),0) AS tout, CAST(ROUND(COALESCE(SUM(cost_after),0)*1000000) AS INTEGER) AS costmicro FROM metrics_raw WHERE cache_hit=0 AND timestamp >= CAST(? AS INTEGER) GROUP BY provider_id ORDER BY provider_id";
+  let sincestr:str=str.fromint(since);
+  <mt db.many(sql;@(sincestr)) {
+    $ok:rows providerrows(rows);
+    $err:e @()
+  }
+};
+
 f=byprovider(store:i64;period:str):@$providermetric!$lokeerr{
-  <$ok(@())
+  let since=periodstart(period;str.nowunix());
+  if(since<0){ <$err($configerr(str.concat("unknown metrics period: ";period))) }el{};
+  <$ok(byproviderfrom(since))
+};
+
+f=seriesrow(r:$row):$tokensavingspoint{
+  <$tokensavingspoint{
+    date:db.rowstr(r;"d");
+    tokenssaved:db.rowi64(r;"saved") as u64;
+    costsaved:microtousd(db.rowi64(r;"costmicro"))
+  }
+};
+
+f=seriesrows(rows:@$row):@$tokensavingspoint{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    out=out.push(seriesrow(rows.get(i)))
+  };
+  <out
+};
+
+(* One point per UTC day that has at least one row. A day with no rows has no point rather
+   than a zero point, so a gap in the series is visible as a gap. *)
+f=seriesfrom(since:i64):@$tokensavingspoint{
+  let sql="SELECT date(timestamp,'unixepoch') AS d, COALESCE(SUM(tokens_saved),0) AS saved, CAST(ROUND(COALESCE(SUM(cost_saved),0)*1000000) AS INTEGER) AS costmicro FROM metrics_raw WHERE timestamp >= CAST(? AS INTEGER) GROUP BY d ORDER BY d";
+  let sincestr:str=str.fromint(since);
+  <mt db.many(sql;@(sincestr)) {
+    $ok:rows seriesrows(rows);
+    $err:e @()
+  }
 };
 
 f=tokensavingsseries(store:i64;period:str):@$tokensavingspoint!$lokeerr{
-  <$ok(@())
-};
-
-f=cachestats(store:i64):$cacheinfo!$lokeerr{
-  <$ok($cacheinfo{
-    totalentries:0;
-    hits:0;
-    misses:0;
-    avgsimilarity:0.0
-  })
+  let since=periodstart(period;str.nowunix());
+  if(since<0){ <$err($configerr(str.concat("unknown metrics period: ";period))) }el{};
+  <$ok(seriesfrom(since))
 };
 
 f=emptycachestats():$cacheinfo{
   <$cacheinfo{
-    totalentries:0;
     hits:0;
-    misses:0;
-    avgsimilarity:0.0
+    misses:0
   }
 };
 
+f=cacherow(rows:@$row):$cacheinfo{
+  if(rows.len==0){ <emptycachestats() }el{
+    let r=rows.get(0);
+    let total=db.rowi64(r;"total");
+    let hits=db.rowi64(r;"hits");
+    <$cacheinfo{
+      hits:hits as u64;
+      misses:(total-hits) as u64
+    }
+  }
+};
+
+(* A miss is a request that was looked up and then dispatched, so every non-hit row is one.
+   That over-counts misses by the requests the cache never consulted (any request carrying
+   an entity is not eligible; see page.api.pipeline.cacheeligible), which is why this
+   reports hits and misses and not a hit rate over eligible requests. *)
+f=cachefrom(since:i64):$cacheinfo{
+  let sql="SELECT COUNT() AS total, COALESCE(SUM(cache_hit),0) AS hits FROM metrics_raw WHERE timestamp >= CAST(? AS INTEGER)";
+  let sincestr:str=str.fromint(since);
+  <mt db.many(sql;@(sincestr)) {
+    $ok:rows cacherow(rows);
+    $err:e emptycachestats()
+  }
+};
+
+f=cachestats(store:i64):$cacheinfo!$lokeerr{
+  <$ok(cachefrom(0))
+};
+
+(* CSV only escapes what these columns can contain. Every column is an identifier, a number
+   or a model or provider name. None of them is a value from a prompt, because metrics_raw
+   never holds one. A comma or quote in a model name is still quoted, rather than trusting
+   that it never occurs. *)
+f=csvfield(s:str):str{
+  if(str.contains(s;",") || str.contains(s;"\"")){
+    <str.concat("\"";str.concat(str.replace(s;"\"";"\"\"");"\""))
+  }el{
+    <s
+  }
+};
+
+f=jsonstr(s:str):str{
+  <str.concat("\"";str.concat(str.replace(str.replace(s;"\\";"\\\\");"\"";"\\\"");"\""))
+};
+
+f=exportcsvrow(r:$row):str{
+  let ts:str=str.fromint(db.rowi64(r;"timestamp"));
+  let tin:str=str.fromint(db.rowi64(r;"tokens_after"));
+  let tout:str=str.fromint(db.rowi64(r;"tokens_out"));
+  let pii:str=str.fromint(db.rowi64(r;"pii_blocked"));
+  let loc:str=str.fromint(db.rowi64(r;"routed_local"));
+  let hit:str=str.fromint(db.rowi64(r;"cache_hit"));
+  let parts=@(csvfield(db.rowstr(r;"request_id"));ts;csvfield(db.rowstr(r;"provider_id"));csvfield(db.rowstr(r;"model_id"));tin;tout;pii;loc;hit);
+  <str.join(",";parts)
+};
+
+f=exportjsonrow(r:$row):str{
+  let ts:str=str.fromint(db.rowi64(r;"timestamp"));
+  let tin:str=str.fromint(db.rowi64(r;"tokens_after"));
+  let tout:str=str.fromint(db.rowi64(r;"tokens_out"));
+  let pii:str=str.fromint(db.rowi64(r;"pii_blocked"));
+  let loc:str=str.fromint(db.rowi64(r;"routed_local"));
+  let hit:str=str.fromint(db.rowi64(r;"cache_hit"));
+  let parts=@(
+    str.concat("\"request_id\":";jsonstr(db.rowstr(r;"request_id")));
+    str.concat("\"timestamp\":";ts);
+    str.concat("\"provider\":";jsonstr(db.rowstr(r;"provider_id")));
+    str.concat("\"model\":";jsonstr(db.rowstr(r;"model_id")));
+    str.concat("\"tokens_in\":";tin);
+    str.concat("\"tokens_out\":";tout);
+    str.concat("\"entities_redacted\":";pii);
+    str.concat("\"routed_local\":";loc);
+    str.concat("\"cache_hit\":";hit)
+  );
+  <str.concat("{";str.concat(str.join(",";parts);"}"))
+};
+
+f=exportrows(rows:@$row;json:bool):str{
+  let lines=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    if(json){
+      lines=lines.push(exportjsonrow(rows.get(i)))
+    }el{
+      lines=lines.push(exportcsvrow(rows.get(i)))
+    }
+  };
+  if(json){
+    <str.concat("[";str.concat(str.join(",";lines);"]"))
+  }el{
+    let header="request_id,timestamp,provider,model,tokens_in,tokens_out,entities_redacted,routed_local,cache_hit";
+    if(lines.len==0){ <str.concat(header;"\n") }el{};
+    <str.concat(header;str.concat("\n";str.concat(str.join("\n";lines);"\n")))
+  }
+};
+
+(* `format` is "csv" or "json". Anything else is refused by `export`; exportfrom treats any
+   value other than "json" as csv and is for callers that have already checked. *)
+f=exportfrom(since:i64;format:str):str{
+  let sql="SELECT request_id, timestamp, provider_id, model_id, tokens_after, tokens_out, pii_blocked, routed_local, cache_hit FROM metrics_raw WHERE timestamp >= CAST(? AS INTEGER) ORDER BY timestamp, rowid";
+  let sincestr:str=str.fromint(since);
+  let json=str.eq(format;"json");
+  <mt db.many(sql;@(sincestr)) {
+    $ok:rows exportrows(rows;json);
+    $err:e ""
+  }
+};
+
+f=isexportformat(format:str):bool{
+  if(str.eq(format;"csv")){ <true }el{};
+  <str.eq(format;"json")
+};
+
 f=export(store:i64;period:str;format:str):str!$lokeerr{
-  <$ok("")
+  let since=periodstart(period;str.nowunix());
+  if(since<0){ <$err($configerr(str.concat("unknown metrics period: ";period))) }el{};
+  if(isexportformat(format)){}el{
+    <$err($configerr(str.concat("unknown export format: ";format)))
+  };
+  <$ok(exportfrom(since;format))
 };
