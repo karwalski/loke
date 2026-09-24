@@ -364,6 +364,40 @@ f=rowf64hundredths(r:$row;col:str):i64{
   }
 };
 
+(* GA5.15 — audit_log's cost is an exact INTEGER number of cents, in `cost_usd_cents`.
+
+   It was `cost_usd REAL`, so SQLite owned its rendering and the hash chain had to be
+   normalised through rowf64hundredths on both sides to survive "0" coming back as "0.0".
+   Migration 27 renames that column to `cost_usd_legacy_dollars` and migration 28 adds
+   `cost_usd_cents INTEGER`. The rename is deliberate: a reader still asking for `cost_usd`
+   now fails with "no such column" instead of silently reading dollars where cents are
+   meant, or cents where dollars are — a factor of 100 on a figure that feeds a spend view.
+
+   Rows written before migration 28 have `cost_usd_cents` NULL and their cost in the legacy
+   column. They are NOT rewritten: audit_log is append-only (GA5.9) and a table rebuild is
+   exactly the wholesale rewrite that control exists to prevent. Legacy rows are read
+   through the SAME rounding their digest was written with (rowf64hundredths of the legacy
+   text), so an untampered pre-migration chain still verifies, and the digest string is
+   identical in both eras because hundredths of a dollar and cents are the same integer.
+
+   Readers select auditcostcols() and read rowauditcostcents; SQL aggregates use
+   auditcostcentsexpr(). *)
+f=auditcostcols():str{
+  <"cost_usd_cents,cost_usd_legacy_dollars,(cost_usd_cents IS NULL) AS cost_is_legacy"
+};
+
+f=rowauditcostcents(r:$row):i64{
+  if(rowi64(r;"cost_is_legacy")==1){
+    <rowf64hundredths(r;"cost_usd_legacy_dollars")
+  }el{
+    <rowi64(r;"cost_usd_cents")
+  }
+};
+
+f=auditcostcentsexpr():str{
+  <"COALESCE(cost_usd_cents,CAST(ROUND(cost_usd_legacy_dollars*100) AS INTEGER))"
+};
+
 (* Money, formatted from the exact integer of hundredths and never through a float.
 
    This exists because the two obvious spellings are both wrong for currency.

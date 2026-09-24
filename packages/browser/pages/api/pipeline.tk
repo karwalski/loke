@@ -356,7 +356,20 @@ f=daynumber():i64{
   <str.nowunix()/86400
 };
 
+(* GA1.5b — every budget read and write below takes the day as a PARAMETER. The
+   clock-reading forms, budgetmanager and persistbudget, are thin wrappers kept for the one
+   caller that makes a single read (forward's check) and for tests.
+
+   What it replaced: `completed` built the manager with one daynumber() and persisted with
+   another. A request completing across 00:00 read day N-1 for the comparison, so it LOADED
+   yesterday's usage, added itself, and wrote the sum stamped with day N — the whole of
+   yesterday's spend carried into today, and a user near yesterday's limit was refused for
+   the next day. accumulatebudget reads the clock once and uses that one day for both. *)
 f=budgetmanager(store:i64):$budgetmanager{
+  <budgetmanagerat(store;daynumber())
+};
+
+f=budgetmanagerat(store:i64;day:i64):$budgetmanager{
   let base=budget.new(budget.defaultlimits());
   if(store==0){
     <base
@@ -364,7 +377,7 @@ f=budgetmanager(store:i64):$budgetmanager{
   (* getintor, not getint: getint returns i64!$lokeerr and toke takes the FIRST arm of a
      match on a result whose error side is a user sum whatever the value is (T-18). getintor
      answers with the default and cannot mislead. *)
-  if(settings.getintor(store;"budget.day";0)==daynumber()){}el{
+  if(settings.getintor(store;"budget.day";0)==day){}el{
     <base
   };
   <budget.withusage(
@@ -379,13 +392,26 @@ f=budgetmanager(store:i64):$budgetmanager{
    budget that silently fails to persist is a limit that does not exist, and the caller is
    told so rather than assuming. *)
 f=persistbudget(store:i64;tokens:i64;costmicrousd:i64):bool{
+  <persistbudgetat(store;tokens;costmicrousd;daynumber())
+};
+
+f=persistbudgetat(store:i64;tokens:i64;costmicrousd:i64;day:i64):bool{
   if(store==0){
     <false
   }el{};
-  settings.setint(store;"budget.day";daynumber();"budget");
+  settings.setint(store;"budget.day";day;"budget");
   settings.setint(store;"budget.tokens";tokens;"budget");
   settings.setint(store;"budget.microusd";costmicrousd;"budget");
   <settings.getintor(store;"budget.tokens";0-1)==tokens
+};
+
+(* Load, add and persist against ONE day, supplied by the caller. The cost arrives as an
+   f64 PARAMETER, which crosses a module boundary intact; only an f64 return is corrupted
+   (T-20). *)
+f=accumulatebudget(store:i64;tokens:i64;cost:f64;day:i64):bool{
+  let bm:$budgetmanager=budgetmanagerat(store;day);
+  let spent:$budgetmanager=budget.record(bm;tokens as u32;cost);
+  <persistbudgetat(store;budget.rowtokens(spent;0);budget.rowcostmicrousd(spent;0);day)
 };
 
 (* GA1.7 — the provider is chosen by core.router.router, not by the length of an API key.
@@ -526,9 +552,8 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
   (* Stored BEFORE restoration, so the cache holds only anonymised text. *)
   cachestore(run;res.anonymised;anonresponse);
 
-  let bm:$budgetmanager=budgetmanager(store);
-  let spent:$budgetmanager=budget.record(bm;(tin+tout) as u32;requestcost(spec;tin;tout));
-  let persisted=persistbudget(store;budget.rowtokens(spent;0);budget.rowcostmicrousd(spent;0));
+  (* One clock read, passed in, for both the load and the write (GA1.5b). *)
+  let persisted=accumulatebudget(store;tin+tout;requestcost(spec;tin;tout);daynumber());
   if(persisted){}el{
     log.warn("budget counters were not persisted, so the limit is not accumulating";"api.pipeline";run.requestid)
   };

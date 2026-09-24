@@ -1719,6 +1719,41 @@ on `serveworkers`, passed through to `bind_listen`. ooke's `serverun` would then
 (a foreign Origin, GA2.6; a non-loopback Host, GA2.7). That stops a browser and does not
 stop a client on the same network.
 
+## T-42 — a struct literal naming an UNDECLARED type is accepted, and read positionally
+
+**Severity: correctness, silent.** Same family as T-4 and T-7: a name that resolves to
+nothing is not checked.
+
+Measured 2026-09-24 against `fedd48d`. `--check` exits 0, the build succeeds, the binary runs:
+
+```toke
+m=t42;
+i=io:std.io;
+t=$real{label:str;value:str};
+t=$box{items:@$real};
+f=main():i64{
+  let xs=@($ghost{name:"a";value:"b";extra:"c"});   (* $ghost is declared nowhere *)
+  let b=$box{items:xs};
+  let r=b.items.get(0);
+  io.println(r.label);                              (* prints "a" *)
+  <0
+};
+```
+
+`$ghost` does not exist, its field names do not match `$real`'s, it has a field `$real` does
+not, and the array is assigned to a field typed `@$real`. None of that is reported. The read of
+`r.label` returns whatever sits at `label`'s offset, which is the literal's first field.
+
+**What it cost in loke (GA5.13).** `core.governance.dashboard.buildscorecard` built its five
+metric rows as `$dashboardmetric{name;value;status;detail}` literals and stored them in an
+`@$scorecardmetric{label;value;status}` field. It rendered correctly only because the first
+three fields happened to line up. `tests/unit/governance/test_dashboard.tk` demonstrates the
+hazard: with one literal's fields written in a different order, the loke build still succeeds
+with no diagnostic, and the row's label, value and detail come back as each other.
+
+**Suggested fix:** report an undeclared type name in a struct literal (E3011 or E4033), and
+check a literal's field names against the declared type it is assigned to.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

@@ -1,0 +1,116 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.dashboard;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=dash:core.governance.dashboard;
+
+(* GA5.13 — the governance scorecard's metric rows.
+
+   buildscorecard used to construct its five rows as literals of a struct type declared
+   NOWHERE in the tree, with fields name/value/status/detail, and store them in an array
+   declared as the three-field $scorecardmetric{label;value;status}. toke accepted that
+   with no diagnostic (T-42), and the rows rendered only because the first three fields
+   happened to sit at the offsets label/value/status read; `detail` was dropped. The type
+   now declares all four fields and the literals name it.
+
+   What is asserted here is the MAPPING — that each field a reader asks for holds the
+   thing the builder meant to put there, including `detail` — rather than that the card
+   merely renders. A positional coincidence renders; it does not survive a reorder, and
+   the reorder is exactly what the assertions below would catch. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-dashboard")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=event(provider:str;sensitivity:str;corrid:str):$auditevent{
+  <$auditevent{
+    eventtype:"llm_request";
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:provider;
+    sensitivity:sensitivity;
+    risktier:"MEDIUM";
+    tokensin:150;
+    tokensout:200;
+    costusd:0.25;
+    durationms:100 as u32;
+    correlationid:corrid
+  }
+};
+
+f=metricat(card:$governancescorecard;idx:i64):$scorecardmetric{
+  <card.metrics.get(idx)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  audit.insertevent(store;event("anthropic";"confidential";"corr-dash-1"));
+  audit.insertevent(store;event("ollama";"public";"corr-dash-2"));
+
+  (* buildscorecard has no error path today; a failed build yields an empty card, which
+     every assertion below then fails on, rather than a crash that reads as a pass. *)
+  let card=mt dash.buildscorecard(store;7 as u32) {
+    $ok:c c;
+    $err:e $governancescorecard{overall:$ragstatus{$red:0};metrics:@();perioddays:0 as u32;generatedat:""}
+  };
+
+  if(t.assert(card.metrics.len==5;"the scorecard carries five metric rows")){pass=pass+1}el{fail=fail+1};
+
+  let m0=metricat(card;0);
+  let m1=metricat(card;1);
+  let m2=metricat(card;2);
+  let m3=metricat(card;3);
+  let m4=metricat(card;4);
+
+  (* label is the field formatscorecard reads for the row name. *)
+  if(t.assert(str.eq(m0.label;"Privacy coverage");"row 0's label is its name, read through the declared field")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m1.label;"Local routing ratio");"row 1's label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m2.label;"Cost (period)");"row 2's label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m3.label;"Open incidents");"row 3's label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m4.label;"Audit trail integrity");"row 4's label")){pass=pass+1}el{fail=fail+1};
+
+  (* value holds the measurement, not the label or the description. One of two requests
+     was confidential and one went to ollama, so both ratios are exactly one half. It
+     renders as "50%", not "50.0%": shared.types.f64fixed truncates to N places but does
+     not pad, and str.fromfloat renders 50.0 as "50". Cosmetic, and asserted as it is. *)
+  if(t.assert(str.eq(m0.value;"50%");"privacy coverage's value is the measured ratio: 1 of 2 = 50%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m1.value;"50%");"local routing's value is the measured ratio: 1 of 2 = 50%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m2.value;"$0.50");"cost's value is the summed spend, 0.25 + 0.25")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m3.value;"0");"open incidents' value is a count")){pass=pass+1}el{fail=fail+1};
+
+  (* detail SURVIVES — the field the undeclared literal used to drop. *)
+  if(t.assert(str.eq(m0.detail;"% of requests where anonymisation was applied");"privacy coverage keeps its detail text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m1.detail;"% of requests routed to local models");"local routing keeps its detail text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m2.detail;"total USD spend from audit log");"cost keeps its detail text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m3.detail;"count of unresolved incidents");"open incidents keeps its detail text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(m4.detail;"hash chain");"audit integrity keeps its detail text")){pass=pass+1}el{fail=fail+1};
+
+  (* formatscorecard renders label and value in their places. *)
+  let out=dash.formatscorecard(card);
+  if(t.assert(str.contains(out;"Privacy coverage");"the formatted card names the privacy row by its label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"Audit trail integrity");"and the integrity row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(out;"50%");"and shows the measured value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(out;"anonymisation was applied");"detail is carried, not rendered: the formatter shows label and value only")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

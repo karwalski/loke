@@ -69,22 +69,49 @@ f=main():i64{
   if(t.assert(day>20000;"daynumber is a plausible count of days since the epoch, not 0")){pass=pass+1}el{fail=fail+1};
   if(t.assert(h.daynumber()==day;"and it does not move between two calls in the same request")){pass=pass+1}el{fail=fail+1};
 
-  (* ── Persistence, and the read-back that is its only guarantee ───────────────*)
-  if(t.assert(h.persistbudget(store;1234;5678);"persistbudget reports success, and it reports it by reading the value back rather than trusting setint")){pass=pass+1}el{fail=fail+1};
+  (* ── Persistence, and the read-back that is its only guarantee ───────────────
+     Written and read against the ONE day read above (GA1.5b). These four assertions used
+     the clock-reading wrappers, and failed once in a run that crossed midnight. *)
+  if(t.assert(h.persistbudgetat(store;1234;5678;day);"persistbudget reports success, and it reports it by reading the value back rather than trusting setint")){pass=pass+1}el{fail=fail+1};
 
   (* Read through core.optimiser.budget.rowtokens, not through m.usage.tokensused.
      `usage` is an ARRAY of per-period counters, one per limit, so the direct spelling
      reads an array header as a struct and yields a pointer value — measured at
      4387275664 where 1234 was expected. rowtokens is the module's own accessor and is
      also how it sidesteps T-20 on the cost figure. *)
-  let m:$budgetmanager=h.budgetmanager(store);
+  let m:$budgetmanager=h.budgetmanagerat(store;day);
   if(t.assert(bud.rowtokens(m;0)==1234;"a manager built after the write carries the persisted token count, so the limit binds across requests")){pass=pass+1}el{fail=fail+1};
 
   (* Overwrite, because a budget that only ever accumulates the first write is a budget
      that stops counting after one request. *)
-  if(t.assert(h.persistbudget(store;9999;1);"a second write persists")){pass=pass+1}el{fail=fail+1};
-  let m2:$budgetmanager=h.budgetmanager(store);
+  if(t.assert(h.persistbudgetat(store;9999;1;day);"a second write persists")){pass=pass+1}el{fail=fail+1};
+  let m2:$budgetmanager=h.budgetmanagerat(store;day);
   if(t.assert(bud.rowtokens(m2;0)==9999;"and replaces the earlier figure rather than being ignored")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GA1.5b: one day number per request, and a test that cannot straddle midnight ──
+     The assertions above read the clock twice (once in persistbudget, once in
+     budgetmanager) and failed once in a run that crossed 00:00. These take the day as a
+     parameter, so the boundary is placed exactly where the test wants it. The day is a
+     fixed number far from today so that no clock read can agree with it by accident. *)
+  let dstore=openfreshstore();
+  let d0=1000;
+  if(t.assert(h.persistbudgetat(dstore;500;0;d0);"usage of 500 tokens is recorded against day d0")){pass=pass+1}el{fail=fail+1};
+  let atd0:$budgetmanager=h.budgetmanagerat(dstore;d0);
+  if(t.assert(bud.rowtokens(atd0;0)==500;"a manager for the same day carries it")){pass=pass+1}el{fail=fail+1};
+  let atd1:$budgetmanager=h.budgetmanagerat(dstore;d0+1);
+  if(t.assert(bud.rowtokens(atd1;0)==0;"a manager for the next day starts from zero: the day change resets the counters")){pass=pass+1}el{fail=fail+1};
+
+  (* The straddle. A request completing on day d0+1 while the stored usage belongs to d0
+     must start the new day with ONLY its own tokens. The previous completed() compared the
+     stored day against one clock read and wrote with a second, so when the first read was
+     still d0 it loaded the 500, added 10, and stamped 510 with d0+1 — carrying yesterday's
+     entire spend into today. *)
+  if(t.assert(h.accumulatebudget(dstore;10;0.0;d0+1);"a request completing on the next day persists")){pass=pass+1}el{fail=fail+1};
+  let after:$budgetmanager=h.budgetmanagerat(dstore;d0+1);
+  if(t.assert(bud.rowtokens(after;0)==10;"and the new day holds that request's 10 tokens alone, not yesterday's 500 plus 10")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.accumulatebudget(dstore;15;0.0;d0+1);"a second request the same day persists")){pass=pass+1}el{fail=fail+1};
+  let after2:$budgetmanager=h.budgetmanagerat(dstore;d0+1);
+  if(t.assert(bud.rowtokens(after2;0)==25;"and accumulates on top of the first: 10 + 15 = 25")){pass=pass+1}el{fail=fail+1};
 
   (* ── No store means no budget, said out loud ────────────────────────────────
      A store of 0 is the unopenable case. Reporting success here would claim a limit is

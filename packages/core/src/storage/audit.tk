@@ -95,11 +95,13 @@ t=$chainresult{
    f64hundredths(costusd) and the verifier hashes rowf64hundredths of the stored column, so
    the digest is stable no matter how SQLite chooses to render a REAL.
 
-   The honest cost of that canonical form: the digest covers cost to the nearest hundredth,
-   so altering 0.005 to 0.009 would not break the chain. Sub-cent tampering on a cost field
-   is a small hole and it is recorded rather than hidden — GA5.15 changes the column to an
-   INTEGER number of hundredths, after which no float rendering is involved at all and the
-   full precision is covered again. *)
+   GA5.15 finished the job: the column is now `cost_usd_cents INTEGER`, the writer stores
+   the same integer it hashes, and the verifier reads that integer back with rowi64, so no
+   float rendering sits between what was hashed and what is stored. The precision is a
+   cent, and that is now a property of the STORED value rather than a gap between the
+   stored value and the digest: sub-cent amounts are rounded once, at the writer, and
+   nothing finer is kept to tamper with. Rows written before the migration keep the old
+   normalisation — see core.storage.db.auditcostcols. *)
 f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str):str{
   (* The separator keeps two different field splits from hashing alike. A pipe is enough
      here because no field is free text — the closest is the correlation id, which is
@@ -155,7 +157,7 @@ f=insertevent(store:i64;event:$auditevent):bool{
 
   let hash=eventdigest(prevhashval;id;event;created);
 
-  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";@(
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";@(
     id;
     event.eventtype;
     event.usecase;
@@ -165,7 +167,7 @@ f=insertevent(store:i64;event:$auditevent):bool{
     event.risktier;
     str.fromint(event.tokensin);
     str.fromint(event.tokensout);
-    str.fromfloat(event.costusd);
+    str.fromi64(t.f64hundredths(event.costusd));
     str.fromint(event.durationms);
     event.correlationid;
     prevhashval;
@@ -222,8 +224,10 @@ f=chainbad(n:i64;id:str;reason:str):$chainresult{
 };
 
 f=digestfromrow(r:$row):str{
-  (* Every column read as TEXT, which is what was hashed. cost_usd in particular must NOT
-     go through rowf64hundredths here — see digestfields above. *)
+  (* Every column read as TEXT, which is what was hashed — except cost, which is the exact
+     integer of cents (GA5.15), or for a row written before migration 28 the legacy REAL
+     read through the same rounding its digest was written with. See
+     core.storage.db.auditcostcols. *)
   <digestfields(
     s.rowstr(r;"prev_hash");
     s.rowstr(r;"id");
@@ -235,7 +239,7 @@ f=digestfromrow(r:$row):str{
     s.rowstr(r;"risk_tier");
     s.rowstr(r;"tokens_in");
     s.rowstr(r;"tokens_out");
-    str.fromi64(s.rowf64hundredths(r;"cost_usd"));
+    str.fromi64(s.rowauditcostcents(r));
     s.rowstr(r;"duration_ms");
     s.rowstr(r;"correlation_id");
     s.rowstr(r;"created_at"))
@@ -266,7 +270,7 @@ f=verifyrows(rows:@$row):$chainresult{
 (* The first row's prev_hash is "" — logevent writes the empty string when the table is
    empty — so an empty trail verifies trivially and says so through rowschecked. *)
 f=verifychain(store:i64):$chainresult{
-  <mt db.many("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id,prev_hash,hash,created_at FROM audit_log ORDER BY created_at ASC, rowid ASC";@()) {
+  <mt db.many(str.join("";@("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,";s.auditcostcols();",duration_ms,correlation_id,prev_hash,hash,created_at FROM audit_log ORDER BY created_at ASC, rowid ASC"));@()) {
     $ok:rows verifyrows(rows);
     $err:e chainbad(0;"";"the audit trail could not be read")
   }
@@ -298,7 +302,7 @@ f=eventsfromrows(rows:@$row):@$auditevent{
       risktier:s.rowstr(row;"risk_tier");
       tokensin:s.rowi64(row;"tokens_in") as u32;
       tokensout:s.rowi64(row;"tokens_out") as u32;
-      costusd:(s.rowf64hundredths(row;"cost_usd") as f64) / 100.0;
+      costusd:(s.rowauditcostcents(row) as f64) / 100.0;
       durationms:s.rowi64(row;"duration_ms") as u32;
       correlationid:s.rowstr(row;"correlation_id")
     })
@@ -307,7 +311,7 @@ f=eventsfromrows(rows:@$row):@$auditevent{
 };
 
 f=getrecent(store:i64;limit:u32):@$auditevent!$lokeerr{
-  let sql=str.concat("SELECT event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd,duration_ms,correlation_id FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT ";str.fromint(limit));
+  let sql=str.join("";@("SELECT event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,";s.auditcostcols();",duration_ms,correlation_id FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT ";str.fromint(limit)));
   <mt db.many(sql;@()) {
     $ok:rows $ok(eventsfromrows(rows));
     $err:e $err($storageerr("failed to query audit log"))
