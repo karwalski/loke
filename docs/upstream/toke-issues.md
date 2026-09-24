@@ -1622,6 +1622,48 @@ DECLARED TYPE, because E4034 reports field-offset ambiguity at the read rather t
 and annotating the intermediate is the documented remedy. Inlining those would reintroduce the
 ambiguity. The hint is fine; a fix for it would not be.
 
+## T-40 — `db.exec` applies only the FIRST statement of a multi-statement string, and reports success for all of them
+
+**Severity: a migration silently does not apply, and reports that it did.**
+
+`std.db.exec` is `sqlite3_prepare_v2` followed by step. `prepare_v2` compiles the first
+statement of the string it is given and writes a pointer to the remainder through its `pzTail`
+out-parameter; the binding discards that pointer. So statement one runs, statements two onward
+are never seen, and the result is `$ok`.
+
+Found while adding the append-only triggers to loke's audit table. The migration read, in
+effect:
+
+    CREATE TABLE x (...); CREATE INDEX ix_x ON x(...);
+
+The table was created. The index was not. `exec` returned `$ok`, the migration was recorded in
+`schema_migrations` as applied, and nothing anywhere reported a problem — the next run saw the
+version row and skipped it, so the index could never be created afterwards either.
+
+What makes this worth filing rather than documenting locally: the interface cannot express what
+the function does. `exec(sql:str;params:@str):i64!$dberr` accepts any string SQLite's parser
+accepts, and SQLite's parser accepts a statement list. A caller reading that signature has no
+way to know only a prefix of its argument will run, and the success return actively tells it
+otherwise. That is the same family as T-23 and T-36: a declared shape that the implementation
+does not honour, with nothing for the compiler to say.
+
+Three ways out, in our order of preference:
+
+1. **Loop on the tail pointer** until it reaches the end of the string, stepping each statement.
+   This is what `sqlite3_exec` does, and it makes the signature honest.
+2. **Reject a multi-statement string** with an error naming the trailing text. Less useful, but
+   it cannot mislead.
+3. **Document it and rename**, e.g. `execone`. The worst of the three, because every existing
+   call site keeps its current behaviour and the name is the only warning.
+
+Either of the first two is a strict improvement; the current behaviour has no reading under
+which it is correct.
+
+**Worked around in loke** by one statement per migration (`storage/migrations.tk`), and guarded
+by `scripts/find_multistatement_exec.py`, which resolves literals, `str.concat` nests, local
+`let` bindings, same-file helpers, pass-through wrappers and `sql:` field initialisers. The
+guard exists because the work-around lives in one file and the hazard does not.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke
