@@ -148,8 +148,8 @@ permanent zeros and the chain attests to them**. Any figure derived from audit h
 
 ## B. Multi-layer composition — epic F3b
 
-Epic F3b is marked **Done** across all eleven stories in
-[epics-and-stories.md](epics-and-stories.md) (Epic F3b, stories F3b.1–F3b.11). Ten of its modules have **zero importers**: they
+Epic F3b was marked **Done** across all eleven stories in
+[epics-and-stories.md](epics-and-stories.md) (Epic F3b, stories F3b.1–F3b.11); since AD1.7 (2026-09-24) every one is **Partial**, with what is missing named per row. Nine of its product modules have **zero importers** outside their own tests: they
 compile, they are documented as features, and no code path reaches them. The pipeline orchestrator
 uses its own de-duplication instead. Tracked as AD1.7 — wire them or withdraw the claim.
 
