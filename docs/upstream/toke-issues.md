@@ -1764,7 +1764,7 @@ preferences and the ephemeral placeholder map. `json.decode` is correct and is w
 now use. Either alias `parse` to `dec` or remove the name.
 
 
-## T-42 — `json.str` unescapes `\n` to a bare `n`
+## T-44 — `json.str` unescapes `\n` to a bare `n`
 
 **Severity: wrong value, silently.**
 
@@ -1782,7 +1782,7 @@ matches the task name by prefix (F5.9). Any other exact comparison on a `json.st
 from an LLM is exposed to this in the same way. The ask: decode the JSON escapes as the
 spec defines them.
 
-## T-43 — `json.enc` escapes only `"` and `\`
+## T-45 — `json.enc` escapes only `"` and `\`
 
 **Severity: malformed output, silently.**
 
