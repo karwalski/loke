@@ -485,7 +485,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| M1.8 | L | **Partial** — test green, not yet seen red against the old `palace.open` (needs a rebuild) | **The memory palace and the store are two databases, and `std.db` has one connection** — Found 2026-09-23 by a de-stubbed test. `core.storage.db.openstore` opens `datadir/loke.db`; `core.memory.palace.openpalace` opens `datadir/memory.db`. `std.db` keeps a **single global connection** (`g_db`, `src/stdlib/db.c:10`) and `conn_db` resolves only conn_id 0, so `db.open`'s returned handle selects nothing and **every query from both subsystems goes to whichever database was opened last** — filed upstream as T-30. `audit_log` does not exist in `memory.db` and `memory_drawers` does not exist in `loke.db`, so the loser's queries fail **silently**, because `rowi64`/`rowstr` map a failed read to `0`/`""`. It was invisible until `tests/unit/memory/test_palace_drawers.tk` was de-stubbed and started asserting the tables exist. Three routes, and the choice is architectural rather than mechanical: put the memory tables in `loke.db` and drop the second file (simplest, and a single file is one thing to encrypt and one thing to delete — see X8.2/X8.4); keep two files and re-open the right one before every operation (correct but fragile, and it serialises); or wait for T-30 and pass the handle. **Do not "fix" it by reordering the opens** — that makes the working case depend on call order, which is the defect. Sibling of M1.7, which is the four memory tables no migration creates at all **Update 2026-09-24:** the route was chosen and the code landed in `3ead30d` (M1.7). The palace opens `loke.db` and the memory tables come from migrations, so this is route one. `tests/unit/memory/test_palace_one_db.tk` opens the store, then `palace.open` on the same datadir. It asserts that `audit_log` and `settings` are still visible, that `memory_drawers` is in the same database, and that no `memory.db` is created. It passes, 7 of 7 memory tests. A probe confirmed the assertion discriminates: a second `db.open` on `memory.db` after `openstore` makes `tableexists("audit_log")` false. |
+| M1.8 | L | **Done** — 2026-09-24 | **The memory palace and the store are two databases, and `std.db` has one connection** — Found 2026-09-23 by a de-stubbed test. `core.storage.db.openstore` opens `datadir/loke.db`; `core.memory.palace.openpalace` opens `datadir/memory.db`. `std.db` keeps a **single global connection** (`g_db`, `src/stdlib/db.c:10`) and `conn_db` resolves only conn_id 0, so `db.open`'s returned handle selects nothing and **every query from both subsystems goes to whichever database was opened last** — filed upstream as T-30. `audit_log` does not exist in `memory.db` and `memory_drawers` does not exist in `loke.db`, so the loser's queries fail **silently**, because `rowi64`/`rowstr` map a failed read to `0`/`""`. It was invisible until `tests/unit/memory/test_palace_drawers.tk` was de-stubbed and started asserting the tables exist. Three routes, and the choice is architectural rather than mechanical: put the memory tables in `loke.db` and drop the second file (simplest, and a single file is one thing to encrypt and one thing to delete — see X8.2/X8.4); keep two files and re-open the right one before every operation (correct but fragile, and it serialises); or wait for T-30 and pass the handle. **Do not "fix" it by reordering the opens** — that makes the working case depend on call order, which is the defect. Sibling of M1.7, which is the four memory tables no migration creates at all **Update 2026-09-24:** the route was chosen and the code landed in `3ead30d` (M1.7). The palace opens `loke.db` and the memory tables come from migrations, so this is route one. `tests/unit/memory/test_palace_one_db.tk` opens the store, then `palace.open` on the same datadir. It asserts that `audit_log` and `settings` are still visible, that `memory_drawers` is in the same database, and that no `memory.db` is created. It passes, 7 of 7 memory tests. A probe confirmed the assertion discriminates: a second `db.open` on `memory.db` after `openstore` makes `tableexists("audit_log")` false.<br><br>**Status detail — done 2026-09-24.** Seen red against the old behaviour: with `palace.open` mutated back to `str.concat(datadir;"/memory.db")` and the tree rebuilt, `tests/unit/memory/test_palace_one_db.tk` failed 3 assertions (`audit_log` not visible after `palace.open`, `settings` not visible, a `memory.db` created). Restored, rebuilt, green. |
 | M2.1 | L | **Done** | AAAK encoder/decoder (encoder: natural language → AAAK; e.g. "Priya manages Driftwood: Kai backend 3yr, Soren frontend, Maya infra" → `TEAM: PRI(lead) \| KAI(backend,3yr) SOR(frontend) MAY(infra)`; decoder: AAAK → natural language for human review; 5–30x compression; lossless for structured facts; works with any LLM; configurable compression level; benchmark token savings; integrates with mcp-toke F7.4) |
 | M2.2 | L | **Done** | Layered context loading (L0 ~20 tokens: identity; L1 ~150 tokens: AAAK palace map; L2 ~500 tokens: AAAK active context for current task; L3 variable: deep memory via M1.3 semantic search; startup loads L0+L1 only; L2 on task identification; L3 on-demand; configurable layer sizes; total budget enforced; progressive disclosure of what's loaded) |
 | M2.3 | M | **Done** | AAAK prompt shorthand (users write shorthand: `refactor auth.module \| extract.jwt.validation → separate.util \| keep.backward.compat`; loke expands locally before pipeline; optional — natural language always works; dots/pipes/arrows syntax; user-defined abbreviations via `loke shorthand add`; expanded version shown in pre-send preview) |
@@ -1063,7 +1063,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| MEMORY PALACE AND AAAK SHORTHAND | 2 | 17 | 15 | 1 | — | — | — | — | — | 1 |
+| MEMORY PALACE AND AAAK SHORTHAND | 2 | 17 | 16 | — | — | — | — | — | — | 1 |
 | CROSS-CUTTING | 9 | 83 | 79 | — | 2 | — | — | — | — | 2 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 25 | 6 | 12 | 22 | — | — | — | — |
@@ -1073,7 +1073,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 39 | — | 2 | — | — | — | — | 2 |
 | NO-CUSTODY ARCHITECTURE | 4 | 32 | 16 | 1 | — | — | — | — | — | 15 |
 | VERIFICATION PROGRAMME | 14 | 122 | 70 | 12 | — | 6 | 3 | — | — | 31 |
-| **Total** | **88** | **683** | **516** | **28** | **21** | **28** | **3** | **1** | — | **86** |
+| **Total** | **88** | **683** | **517** | **27** | **21** | **28** | **3** | **1** | — | **86** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1106,7 +1106,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | G3 | 1 | 2 | 2 | — | — | — | — | — | — | — |
 | G4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AG1 | 1 | 8 | 8 | — | — | — | — | — | — | — |
-| M1 | 1 | 12 | 10 | 1 | — | — | — | — | — | 1 |
+| M1 | 1 | 12 | 11 | — | — | — | — | — | — | 1 |
 | M2 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | X1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X2 | 1 | 3 | 3 | — | — | — | — | — | — | — |
@@ -1167,7 +1167,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 25 | 17 | 4 | — | — | — | — | — | 4 |
 | RV1 | 1 | 10 | 7 | — | — | — | — | — | — | 3 |
-| **Total** | **88** | **683** | **516** | **28** | **21** | **28** | **3** | **1** | — | **86** |
+| **Total** | **88** | **683** | **517** | **27** | **21** | **28** | **3** | **1** | — | **86** |
 
 Rows parsed: **683**, across **88** epics and **16** level-1 headings.
 
