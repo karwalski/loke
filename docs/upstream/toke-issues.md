@@ -1579,6 +1579,49 @@ A reader has no way to connect the two sites, and it cost us a build cycle to fi
 name disagree, name **both** locations in the diagnostic — the way E4034 does for a field declared
 at two offsets, which is the same class of problem and is reported far better.
 
+## T-39 — the `unused-import` lint rule is unsound, and `--lint --fix` breaks the build
+
+**Severity: the auto-fix produces code that does not compile.**
+
+An import is reported unused when its ALIAS never appears. But a TYPE from an imported module is
+referred to **without** the alias — `$agentdef`, not `at.$agentdef` — so an import that exists
+solely to bring types into scope is always reported unused, and `--fix` deletes it.
+
+Measured on `packages/core/src/agents/executor.tk`:
+
+```
+$ toke --lint --fix executor.tk        # removes i=str:std.str, i=t:shared.types, i=at:core.agents.types
+$ toke --check executor.tk
+E3011 identifier 'sensitivitylevel' is not declared
+E3011 identifier 'agentdef' is not declared          ... 6 errors
+```
+
+`sensitivitylevel` comes from `shared.types` and `agentdef` from `core.agents.types`. Both are
+used; neither alias is.
+
+**Across `packages/core`: 189 `unused-import` diagnostics, of which 91 are type-only** — so
+`--lint --fix` would break the build in 91 places. A repo-wide `--fix` is not a cleanup, it is an
+outage.
+
+**There is a second, subtler case that a caller cannot screen for.** We tried to remove only the
+imports whose module declares no type appearing as `$name` in the file. 96 passed that test, and
+**5 still broke the build** — with `E4034 no struct in scope declares a field 'content'`. Those
+imports were needed for FIELD RESOLUTION on a value whose type is inferred, so the type name never
+appears in the source at all. There is no source-level test for that short of compiling. The
+survivors (89 removals across 68 files) were established by building, not by analysis.
+
+**Ask.** Count a type reference as a use of the import that supplies it. Until then the rule
+should be a hint with no fix span, because an auto-fix that breaks the build in half its
+applications is worse than no rule: it teaches people to distrust `--fix` generally, including for
+the rules where it is correct.
+
+**A related observation on the same output.** `single-use-let` ("binding is used once, inline it",
+47 sites here) is emitted as a `hint` with no fix span, which is the right treatment — and it is
+worth noting that several of this codebase's `let` bindings exist precisely to give a value a
+DECLARED TYPE, because E4034 reports field-offset ambiguity at the read rather than at the binding
+and annotating the intermediate is the documented remedy. Inlining those would reintroduce the
+ambiguity. The hint is fine; a fix for it would not be.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke
