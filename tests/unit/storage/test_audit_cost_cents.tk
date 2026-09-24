@@ -1,0 +1,160 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.storage.auditcostcents;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=scard:core.governance.scorecard;
+
+(* GA5.15 — audit_log's cost is an exact integer of cents, and the change is atomic.
+
+   The column was `cost_usd REAL`. SQLite owned its rendering, so the hash chain had to
+   normalise both sides through a float-to-hundredths round trip, and every reader summed a
+   REAL. The agreed design, all in one change: rename so a stale reader fails loudly, store
+   exact integer cents, verify with an integer read. Asserted here:
+
+     - the stored value IS an SQLite integer, and it is cents (150 for $1.50, not 1.5)
+     - a reader still asking for `cost_usd` gets an error, not a silently wrong number
+     - the chain verifies over rows with costs that are not zero (the old coincidence was
+       that every row the request path writes costs 0.0, and 0 is the same in any unit)
+     - a pre-migration row, with its cost only in the legacy dollars column, still verifies
+       and still counts in a spend total
+     - altering the cents value by ONE breaks the chain *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-audit-cost-cents")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=event(cost:f64;corrid:str):$auditevent{
+  <$auditevent{
+    eventtype:"llm_request";
+    usecase:"browser-chat";
+    modelid:"claude-3.5-sonnet";
+    provider:"anthropic";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:10;
+    tokensout:20;
+    costusd:cost;
+    durationms:5 as u32;
+    correlationid:corrid
+  }
+};
+
+f=execsql(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=readable(sql:str):bool{
+  <mt db.many(sql;@()) {
+    $ok:rows true;
+    $err:e false
+  }
+};
+
+f=firststr(sql:str;col:str):str{
+  <mt db.many(sql;@()) {
+    $ok:rows firstrowstr(rows;col);
+    $err:e ""
+  }
+};
+
+f=firstrowstr(rows:@$row;col:str):str{
+  if(rows.len==0){
+    <""
+  }el{
+    <sdb.rowstr(rows.get(0);col)
+  }
+};
+
+(* A row as a build from before migration 28 wrote it: cost in the legacy REAL column,
+   cost_usd_cents NULL, and a digest over the integer hundredths of that REAL — which is
+   what the old writer hashed. *)
+f=insertlegacy(dollars:str;hundredths:str;corrid:str):bool{
+  let prev=firststr("SELECT hash FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT 1";"hash");
+  let id="legacy0000000001";
+  let created="9999999999999";
+  let hash=audit.digestfields(prev;id;"llm_request";"browser-chat";"claude-3.5-sonnet";"anthropic";"confidential";"MEDIUM";"10";"20";hundredths;"5";corrid;created);
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_legacy_dollars,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,'llm_request','browser-chat','claude-3.5-sonnet','anthropic','confidential','MEDIUM',10,20,?,5,?,?,?,?)";@(
+    id;dollars;corrid;prev;hash;created)) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=anthropiccents(card:$providerscorecard):i64{
+  let total=mut.0-1;
+  lp(let i=0;i<card.providers.len;i=i+1){
+    let p:$providerstats=card.providers.get(i);
+    if(str.eq(p.provider;"anthropic")){
+      total=p.totalcosthundredths
+    }el{}
+  };
+  <total
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(audit.insertevent(store;event(0.0;"corr-cc-1"));"a zero-cost row is written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.insertevent(store;event(1.50;"corr-cc-2"));"a $1.50 row is written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.insertevent(store;event(0.29;"corr-cc-3"));"a $0.29 row is written")){pass=pass+1}el{fail=fail+1};
+
+  (* The stored value is an exact integer of cents. *)
+  if(t.asserteq(firststr("SELECT typeof(cost_usd_cents) AS ty FROM audit_log WHERE correlation_id='corr-cc-2'";"ty");"integer";"cost_usd_cents holds an SQLite INTEGER, so SQLite owns no rendering of it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(firststr("SELECT cost_usd_cents AS c FROM audit_log WHERE correlation_id='corr-cc-2'";"c");"150";"and $1.50 is stored as 150 cents, not 1.5")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(firststr("SELECT cost_usd_cents AS c FROM audit_log WHERE correlation_id='corr-cc-3'";"c");"29";"$0.29 is 29 cents, rounded rather than truncated to 28")){pass=pass+1}el{fail=fail+1};
+
+  (* A stale reader fails loudly. *)
+  if(t.assert(!readable("SELECT cost_usd FROM audit_log");"a query for the old cost_usd column is an ERROR, so no reader can silently take cents for dollars")){pass=pass+1}el{fail=fail+1};
+
+  (* The chain verifies over non-zero costs. *)
+  let c1=audit.verifychain(store);
+  if(t.assert(c1.ok;"an untampered chain with costs of 0, 150 and 29 cents verifies")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c1.rowschecked==3;"over all three rows")){pass=pass+1}el{fail=fail+1};
+
+  (* A row from before the migration. *)
+  if(t.assert(insertlegacy("0.25";"25";"corr-cc-legacy");"a pre-migration row, cost in the legacy dollars column only, is inserted")){pass=pass+1}el{fail=fail+1};
+  let c2=audit.verifychain(store);
+  if(t.assert(c2.ok;"the chain still verifies across the migration boundary: the legacy row is read with the rounding it was hashed with")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c2.rowschecked==4;"over all four rows")){pass=pass+1}el{fail=fail+1};
+
+  (* Spend totals read both eras. 0 + 150 + 29 + 25 = 204 cents. *)
+  let total=sdb.scalari64(str.join("";@("SELECT COALESCE(SUM(";sdb.auditcostcentsexpr();"),0) AS v FROM audit_log"));@();"v";0-1);
+  if(t.assert(total==204;"the spend total is 204 cents: 0 + 150 + 29 from cost_usd_cents, and 25 from the legacy column")){pass=pass+1}el{fail=fail+1};
+  let card=scard.buildscorecard(store);
+  if(t.assert(anthropiccents(card)==204;"and the provider scorecard, a real reader, reports the same 204")){pass=pass+1}el{fail=fail+1};
+
+  (* Tampering by one cent is detected. Dropping the append-only trigger first is the move
+     the threat model already grants such an attacker (see migrations.tk, GA5.9). *)
+  execsql("DROP TRIGGER IF EXISTS audit_log_append_only_update");
+  if(t.assert(execsql("UPDATE audit_log SET cost_usd_cents=151 WHERE correlation_id='corr-cc-2'");"with the trigger dropped the tamper is applied")){pass=pass+1}el{fail=fail+1};
+  let c3=audit.verifychain(store);
+  if(t.assert(!c3.ok;"and changing 150 cents to 151 BREAKS the chain")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c3.rowschecked==1;"at the tampered row, the second")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
