@@ -649,7 +649,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | X4b.6 | M | **Done** | **Storage tests** — `test_db.tk` (open/migrate/query), `test_settings.tk` (get/set string/int/bool/float), `test_audit.tk` (append/query/export), `test_keychain.tk` (store/retrieve/delete credentials), `test_ephemeral.tk` (store/get/wipe/expire). Target: 5 test files. |
 | X4b.7 | M | **Done** | **Model & router tests** — `test_model_registry.tk` (register/find/filter models), `test_model_tiers.tk` (tier config, selection, labels), `test_router.tk` (route request, model selection, cost estimation), `test_sensitivity.tk` (sensitivity levels, risk classification), `test_queue.tk` (enqueue/dequeue/priority). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** `test_model_registry` and `test_model_tiers` exist as `tests/unit/models/test_registry.tk` and `test_tiers.tk`, and both pass. The other three pass under their own names. |
 | X4b.8 | M | **Done** | **Provider tests** — `test_anthropic.tk` (request building, response parsing), `test_openai.tk` (request building, response parsing), `test_ollama.tk` (health check, chat completion parsing), `test_dispatcher.tk` (provider routing by type). Target: 4 test files. |
-| X4b.9 | M | **Reopened** — four of five named suites do not exist | **Agent & MCP tests** — `test_agent_types.tk` (type construction, defaults), `test_scheduler.tk` (check due, trigger types), `test_sandbox.tk` (permission checks, file/http access), `test_mcp_protocol.tk` (request/response encoding), `test_mcp_permissions.tk` (tool allow/deny, TOML parsing). Target: 5 test files. **Reopened 2026-09-25 (RV1.3).** `test_scheduler` passes, and the agent types suite exists as `agents/test_types.tk`. `test_mcp_permissions`, `test_mcp_protocol` and `test_sandbox` exist nowhere, and the sandbox has real defects (AG1.10). |
+| X4b.9 | M | **Partial** — protocol suite written, and it found and fixed an escaping defect; permissions and sandbox remain | **Agent & MCP tests** — `test_agent_types.tk` (type construction, defaults), `test_scheduler.tk` (check due, trigger types), `test_sandbox.tk` (permission checks, file/http access), `test_mcp_protocol.tk` (request/response encoding), `test_mcp_permissions.tk` (tool allow/deny, TOML parsing). Target: 5 test files. **Reopened 2026-09-25 (RV1.3).** `test_scheduler` passes, and the agent types suite exists as `agents/test_types.tk`. `test_mcp_permissions`, `test_mcp_protocol` and `test_sandbox` exist nowhere, and the sandbox has real defects (AG1.10). **Progress 2026-09-25.** `tests/unit/mcp/test_mcp_protocol.tk` was written against the real `core.mcp.protocol`, and every builder's output is decoded again. **It found a defect:** the tool-result, tools-list and initialise builders escaped only `"`. A backslash in tool output was read as an escape (`C:\\tmp\\x` came back as `C:tmpx`), and a newline went into the JSON string raw, which strict MCP clients reject. All four builders now use `jx.escape`. With the old module, 2 assertions failed. **Remaining:** `test_mcp_permissions`, and `test_sandbox`, which waits on AG1.10. |
 | X4b.10 | M | **Partial** — companion and init suites do not exist | **CLI & companion tests** — `test_commands.tk` (parse command-line args into command struct), `test_session.tk` (create/activate/find sessions), `test_init.tk` (environment checks), `test_companion_discovery.tk` (discover/confirm/reject devices), `test_exo.tk` (health check, model list). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** `test_commands` and `test_session` pass. `test_companion_discovery`, `test_exo` and `test_init` exist nowhere; the companion modules also have no importer (F8.3, F8.4). |
 | X4b.11 | M | **Done** | **Optimiser tests** — `test_toon.tk` (JSON→TOON encoding/decoding round-trip, savings measurement), `test_budget.tk` (limit checking, period matching), `test_profiler.tk` (column type inference, PII candidate detection). Target: 3 test files. |
 | X4b.12 | S | **Partial** — `test_mcp_roundtrip` does not exist | **Integration tests** — `test_pipeline_api.tk` (HTTP POST with JSON body → assert anonymised response, assert audit trail written), `test_health_api.tk` (health endpoint returns status/version), `test_mcp_roundtrip.tk` (tool discovery → invocation → response). These require a running loke instance; document setup in test file comments. Target: 3 test files. **Re-checked 2026-09-25 (RV1.3).** `test_pipeline_api` passes. `test_health_api` survives only in `_archived-tests`, and its subject is covered by `tests/unit/browser/test_health_handler.tk` and by `scripts/smoke_serve.sh` over real HTTP. `test_mcp_roundtrip` exists nowhere. |
@@ -1078,7 +1078,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 10 | 9 | — | — | — | — | — | — | 1 |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
-| CROSS-CUTTING | 9 | 83 | 77 | 4 | 1 | — | — | — | — | 1 |
+| CROSS-CUTTING | 9 | 83 | 77 | 5 | — | — | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 32 | 11 | — | 22 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
@@ -1087,7 +1087,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 36 | 23 | 2 | — | — | — | — | — | 11 |
 | VERIFICATION PROGRAMME | 14 | 126 | 86 | 12 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **708** | **549** | **49** | **9** | **31** | **3** | **1** | — | **66** |
+| **Total** | **88** | **708** | **549** | **50** | **8** | **31** | **3** | **1** | — | **66** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1127,7 +1127,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | X3 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X4 | 1 | 12 | 11 | — | — | — | — | — | — | 1 |
 | X4a | 1 | 21 | 21 | — | — | — | — | — | — | — |
-| X4b | 1 | 18 | 13 | 4 | 1 | — | — | — | — | — |
+| X4b | 1 | 18 | 13 | 5 | — | — | — | — | — | — |
 | X4c | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | X5 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | W1 | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1181,7 +1181,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 28 | 23 | 4 | — | — | — | — | — | 1 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **708** | **549** | **49** | **9** | **31** | **3** | **1** | — | **66** |
+| **Total** | **88** | **708** | **549** | **50** | **8** | **31** | **3** | **1** | — | **66** |
 
 Rows parsed: **708**, across **88** epics and **16** level-1 headings.
 

@@ -1,0 +1,1 @@
+Tests `core.mcp.protocol` against the real module (X4b.9): request parsing, and every response builder decoded again so escaping is checked, including newlines and backslashes in tool output. Depends on `std.test`, `std.str`, `std.json` and `core.mcp.protocol`.
