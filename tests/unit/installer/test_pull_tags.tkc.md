@@ -1,0 +1,1 @@
+Tests `core.installer.pull.handlemodeltagsresp` with responses built in the test. It returned false on every 200, because its match was a statement and fell through to the implicit `ret 0` (LS1.1t). Depends on `std.test`, `std.str` and `core.installer.pull`.
