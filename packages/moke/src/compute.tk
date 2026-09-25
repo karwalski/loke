@@ -344,6 +344,39 @@ f=daykey(raw:str):str{
   }
 };
 
+(* Time-series sums are accumulated in integer MICRO-units, not f64 (MK21.16). An `@f64`
+   accumulator here hit T-37: the array handle was stored through the scalar-f64 path, the
+   module's IR would not assemble, and so moke could not link at all. Integers also add
+   exactly, which a running f64 sum does not. Formatted as a decimal with integer
+   arithmetic only, so no f64 crosses a module boundary (T-20). *)
+f=microof(n:f64):i64{
+  if(n<0.0){ <0-(((0.0-n)*1000000.0+0.5) as i64) }el{};
+  <(n*1000000.0+0.5) as i64
+};
+
+f=fmtmicro(x:i64):str{
+  let neg=x<0;
+  let a=mut.x;
+  if(neg){ a=0-x }el{};
+  let whole=a/1000000;
+  let frac=mut.a%1000000;
+  let digits=mut.6;
+  lp(let z=0;z<6 && frac>0 && frac%10==0;z=z+1){
+    frac=frac/10;
+    digits=digits-1
+  };
+  let wholes:str=str.fromi64(whole);
+  let body=mut.wholes;
+  if(frac>0){
+    let fracs:str=str.fromi64(frac);
+    let padded=mut.fracs;
+    lp(let w=str.len(fracs) as i64;w<digits;w=w+1){ padded=str.concat("0";padded) };
+    body=str.concat(str.concat(wholes;".");padded)
+  }el{};
+  if(neg){ <str.concat("-";body) }el{};
+  <body
+};
+
 f=optimeseries(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let didx=colindex(working;q.groupby);
@@ -353,18 +386,18 @@ f=optimeseries(ds:$dataset;q:$query):$result{
   lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
     let row=working.rows.get(rowidx);
     let key=daykey(getcol(row;didx));
-    let n=parsefloat(getcol(row;vidx));
+    let n=microof(parsefloat(getcol(row;vidx)));
     let at=findstr(datekeys;key);
     if(at<0){
       datekeys=datekeys.push(key);
       datesums=datesums.push(n)
     }el{
-      datesums=setf64(datesums;at;datesums.get(at)+n)
+      datesums=seti64(datesums;at;datesums.get(at)+n)
     }
   };
   let sumstrs=mut.@();
   lp(let si=0;si<datesums.len;si=si+1){
-    sumstrs=sumstrs.push(str.fromfloat(datesums.get(si)))
+    sumstrs=sumstrs.push(fmtmicro(datesums.get(si)))
   };
   <$result{
     op:"timeseries";
@@ -460,21 +493,26 @@ f=opdistribution(ds:$dataset;q:$query):$result{
    loses the sign — the direction of a correlation is the half a user reads first. Only rows
    where BOTH cells parse are paired, so a blank in one column cannot shift the other column's
    values onto the wrong partner. *)
+(* One side of the rows where BOTH columns are numeric, so xs and ys stay paired. Built in
+   its own function because an `@f64` accumulated inline in opcorrelate hit T-37 and the
+   module would not assemble (MK21.16). numericcolumn has the same shape and assembles. *)
+f=pairedside(ds:$dataset;xidx:i64;yidx:i64;side:i64):@f64{
+  let out=mut.@();
+  lp(let rowidx=0;rowidx<ds.rows.len;rowidx=rowidx+1){
+    let row=ds.rows.get(rowidx);
+    if(isnumericcell(getcol(row;xidx)) && isnumericcell(getcol(row;yidx))){
+      out=out.push(parsefloat(getcol(row;side)))
+    }el{}
+  };
+  <out
+};
+
 f=opcorrelate(ds:$dataset;q:$query):$result{
   let working=applyfilter(ds;q.filtercol;q.filterval);
   let xidx=colindex(working;q.column);
   let yidx=colindex(working;q.groupby);
-  let xs=mut.@();
-  let ys=mut.@();
-  lp(let rowidx=0;rowidx<working.rows.len;rowidx=rowidx+1){
-    let row=working.rows.get(rowidx);
-    let xv=getcol(row;xidx);
-    let yv=getcol(row;yidx);
-    if(isnumericcell(xv) && isnumericcell(yv)){
-      xs=xs.push(parsefloat(xv));
-      ys=ys.push(parsefloat(yv))
-    }
-  };
+  let xs=pairedside(working;xidx;yidx;xidx);
+  let ys=pairedside(working;xidx;yidx;yidx);
   let n=xs.len;
   if(n<2){
     <emptyresult("correlate";q.column;"0.0000")

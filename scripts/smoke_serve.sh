@@ -76,7 +76,7 @@ probe() {  # $1 method, $2 path, $3 optional body
 
 for r in health models settings savings tabs privacy; do probe GET "/api/$r"; done
 probe POST /api/pipeline '{"text":"smoke test, no personal data"}'
-for p in / /privacy /savings /pipeline /chat /setup; do probe GET "$p"; done
+for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon; do probe GET "$p"; done
 
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.

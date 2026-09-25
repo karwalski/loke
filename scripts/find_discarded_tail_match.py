@@ -60,12 +60,36 @@ def braces(text: str):
         i += 1
 
 
+def statement_ends_function(text: str, events, end: int) -> bool:
+    """True when `mt {...};` at `end` is followed only by the brace that closes its function."""
+    k = end + 1
+    while k < len(text) and text[k] in " \t\r\n":
+        k += 1
+    if k >= len(text) or text[k] != ";":
+        return False
+    k += 1
+    while k < len(text) and text[k] in " \t\r\n":
+        k += 1
+    if k >= len(text) or text[k] != "}":
+        return False
+    # that `}` must be at function depth: the brace depth just after it is zero
+    depth = 0
+    for off, c in events:
+        if off > k:
+            break
+        depth += 1 if c == "{" else -1
+    return depth == 0
+
+
 def scan(path: pathlib.Path) -> list[tuple[int, str, str]]:
     text = path.read_text(errors="replace")
     lines = text.splitlines()
     events = list(braces(text))
     out = []
-    for m in re.finditer(r'(?m)^(\s*)mt\s', text):
+    # `mt` at the start of a line, or straight after the `{` of a one-line function
+    # (`f=get(req:i64):i64{ mt ... };`). The second form hid two moke pages that returned
+    # null to every request (MK21.16): the line-start pattern could not see them.
+    for m in re.finditer(r'(?m)(^\s*|(?<=\{)[ \t]*)mt\s', text):
         start = m.start(0) + len(m.group(1))
         # a `<` immediately before means the value is returned
         head = text[:start].rstrip()
@@ -97,7 +121,11 @@ def scan(path: pathlib.Path) -> list[tuple[int, str, str]]:
                 closers += 1
             j += 1
         if closers == 0 or tail[j:j + 1] != ";":
-            continue
+            # A match used as a statement is normally fine. It is NOT fine when the next
+            # brace after its `;` closes the FUNCTION: then it is the last thing the
+            # function does, and a non-void function returns nothing at all.
+            if not statement_ends_function(text, events, end):
+                continue
         # and the enclosing function does not return void
         fn = None
         for fm in FUNC.finditer(text):
@@ -128,7 +156,7 @@ def main() -> int:
             hits = scan(f)
             if not hits:
                 continue
-            print(f.relative_to(repo))
+            print(f.relative_to(repo) if f.is_relative_to(repo) else f)
             for ln, fn, txt in hits:
                 print(f"  L{ln} in f={fn}  |  {txt}")
                 total += 1

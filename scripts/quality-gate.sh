@@ -258,6 +258,12 @@ step_checks() {
            failed=1; }
   fi
 
+  if [[ -f ./scripts/find_wait_before_read.py ]]; then
+    echo "  no child process is waited for before its output is read"
+    python3 ./scripts/find_wait_before_read.py --check packages >/dev/null \
+      || { python3 ./scripts/find_wait_before_read.py packages >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/find_interp_abi_str.py ]]; then
     echo "  no std.str result interpolated as an address"
     python3 ./scripts/find_interp_abi_str.py --check packages tests >/dev/null \
@@ -436,7 +442,7 @@ step_checks() {
   # module and fail-OPEN in the other.
   for sweep in find_shadowed_lets find_typename_values find_field_matches \
                find_missing_return_semi find_offbyone_loops find_discarded_tail_expr \
-               find_err_arm_first; do
+               find_err_arm_first find_discarded_tail_match; do
     if [[ -f "scripts/$sweep.py" ]]; then
       echo "  toke codegen hazard: $sweep"
       python3 "scripts/$sweep.py" --check packages >/dev/null \
@@ -513,6 +519,10 @@ step_build() {
   # which trains people to ignore the gate. It joins when it links.
   if [[ -x ./scripts/build_trees.sh ]]; then
     ./scripts/build_trees.sh loke-cli || return 1
+    # MK21.16: moke links as of 2026-09-24. Its demo datasets moved out of source literals
+    # (T-35) and its @f64 accumulators were restructured (T-37), so it joins here as the
+    # comment above said it would.
+    ./scripts/build_trees.sh moke || return 1
   fi
 }
 

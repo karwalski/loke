@@ -9,6 +9,7 @@ i=http:std.http;
 i=json:std.json;
 i=str:std.str;
 i=t:shared.types;
+i=reach:shared.reachability;
 
 t=$ollamamodel{
   name:str;
@@ -49,25 +50,31 @@ f=new(baseurl:str):$ollamaclient{
   <client
 };
 
-f=healthcheck(client:$ollamaclient):i64{
+(* Every call here that uses http.get checks reachability FIRST. Against a closed port
+   http.get returns $ok carrying a NIL response (T-15). So this healthcheck answered 1,
+   "running", whenever Ollama was down, and listmodels and listrunning parsed the nil body
+   and crashed the process. That crash is what killed the /installer page's worker on
+   every request once the page returned its value. shared.reachability binds the port to
+   find out, which is honest for a local sidecar. *)
+f=healthcheck(client:$ollamaclient):$ollamastatus{
+  (* Declared `:i64` and returning 1 or 0 until 2026-09-24, while all five callers bound
+     the result as `$ollamastatus` and matched on it. Now it returns the sum they read. *)
+  if(!reach.localserviceup(client.baseurl)){ <$ollamastatus{$unreachable:0} }el{};
   let url=str.concat(client.baseurl;"/api/tags");
   let result=http.get(url);
-  let checkerr=mt result {
-    $ok:v "";
-    $httperr:e json.enc(e)
+  let answered=mt result {
+    $ok:v true;
+    $httperr:e false
   };
-  if(str.eq(checkerr;"")){
-    <1
-  }el{
-    if(str.contains(checkerr;"connect")){
-      <0
-    }el{
-      <0
-    }
-  }
+  if(answered){ <$ollamastatus{$running:0} }el{};
+  <$ollamastatus{$stopped:0}
 };
 
 f=listmodels(client:$ollamaclient):@$ollamamodel!$lokeerr{
+  (* Empty, not $err: every caller matches this result, and T-18 reads a returned $err
+     as $ok, so an error here would crash the caller. "No models" is also what a user
+     with Ollama stopped can act on; healthcheck reports why. *)
+  if(!reach.localserviceup(client.baseurl)){ <$ok(@()) }el{};
   let url=str.concat(client.baseurl;"/api/tags");
   let result=http.get(url);
   let body=mt result {
@@ -95,6 +102,10 @@ f=listmodels(client:$ollamaclient):@$ollamamodel!$lokeerr{
 };
 
 f=listrunning(client:$ollamaclient):@$ollamamodel!$lokeerr{
+  (* Empty, not $err: every caller matches this result, and T-18 reads a returned $err
+     as $ok, so an error here would crash the caller. "No models" is also what a user
+     with Ollama stopped can act on; healthcheck reports why. *)
+  if(!reach.localserviceup(client.baseurl)){ <$ok(@()) }el{};
   let url=str.concat(client.baseurl;"/api/ps");
   let result=http.get(url);
   let body=mt result {
