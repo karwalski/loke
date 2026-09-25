@@ -1819,6 +1819,36 @@ without every multi-line memory collapsing onto one line. **Worked around** in
 `shared.jsonobj.strvalue`, which takes the raw value with `json.getval` and decodes it.
 **Ask:** use the streaming parser's unescape in `json_str`.
 
+## T-48 — `http.postheaders` sends nothing, in the shape loke's cloud providers call it
+
+**Severity: an outbound request fails silently. Measured over http. https is unverified.**
+
+Measured 2026-09-25 against a local server that logs every request. `http.posturl(url;
+body)` arrives every time. `http.postheaders(http.client(url);"";bytes;headersjson)` never
+arrives, and the match takes its `$err` arm. That is the exact shape of
+`browser.pages.api.pipeline.toanthropic`. `http.client(base)` with a separate path fails the
+same way, with headers as a JSON string or as an array of `$httpheader`. The glue,
+`tk_http_postheaders_w(url, body, headers, extra)`, takes a URL first and ignores its fourth
+argument, while the interface declares `(i64, i64, i64, i64)` with no names. So the
+compiler's binding and the glue's parameter order cannot be checked against each other.
+loke could not measure https without spending a real provider key, so what this means for
+the Anthropic and OpenAI paths is recorded as F5.11 and not asserted here.
+
+## T-49 — `net.listen(port)` segfaults
+
+Measured 2026-09-25: `let fd=net.listen(59433);` in a test binary crashes (SIGSEGV).
+`std.net` declares it as `gen:"abi"` `(i64) -> i64`, so the compiler cannot check what it
+is given. loke's test opens a listener with `nc -l` instead.
+
+## T-50 — `process.wait` is a plain `i32`, and every `mt` on it inverts success
+
+`std.process` declares `process.wait(Handle) -> i32`, not a result. A `mt process.wait(h)
+{ $ok:c ...; $err:e ... }` therefore falls to T-33's "a zero word is the error" reading, so
+**exit code 0 takes the error arm**. loke had 17 such sites. The installer reported failure
+on every successful step, `uname` answered an "unknown" platform, and the CLI's `runcmd`
+reported 127 for commands that had succeeded. The ask is the same as T-33's: declare the
+error side, or reject a match on a non-result.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

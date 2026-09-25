@@ -12,6 +12,7 @@ i=json:std.json;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
+i=reach:shared.reachability;
 
 t=$routellmrequest{
   prompt:str;
@@ -38,19 +39,6 @@ f=routellmunavailable():$routellmresult{
   <$routellmresult{available:false;score:0.5;preferstrong:false}
 };
 
-f=routellmhandlecap(cap:$httpresp):$routellmresult{
-  if(http.iserror(cap)){
-    log.warn("routellm: HTTP error from /route";"routellm";"");
-    <$routellmresult{available:false;score:0.5;preferstrong:false}
-  }el{
-    let parsed=json.dec(cap.body);
-    <mt parsed {
-      $ok:rr routellmparsed(rr);
-      $lokeerr:e2 routellmparsefailed()
-    }
-  }
-};
-
 f=routellmparsefailed():$routellmresult{
   log.warn("routellm: failed to parse response";"routellm";"");
   <$routellmresult{available:false;score:0.5;preferstrong:false}
@@ -64,20 +52,25 @@ f=routellmparsed(rr:$routellmresponse):$routellmresult{
 f=query(prompt:str;threshold:f64):$routellmresult{
   let req=$routellmrequest{prompt:prompt;threshold:threshold};
   let body=json.enc(req);
-  let resp=http.post("http://localhost:11431/route";body);
-  <mt resp {
-    $ok:cap routellmhandlecap(cap);
-    $lokeerr:e routellmunavailable()
-  }
+  (* reach.localpost, not http.post, which REGISTERS A SERVER ROUTE in std.http (see
+     shared.reachability.localpost). The old call made this JSON body a route handler. *)
+  let raw=reach.localpost("http://localhost:11431";"/route";body);
+  if(str.len(raw)==0){ <routellmunavailable() }el{};
+  let obj=mt json.dec(raw) {
+    $ok:o o;
+    $jsonerr:e json.dec("{}")
+  };
+  let route=mt json.str(obj;"route") {$ok:v v; $jsonerr:e ""};
+  if(str.len(route)==0){ <routellmparsefailed() }el{};
+  let score=mt json.f64(obj;"score") {$ok:v v; $jsonerr:e 0.5};
+  <$routellmresult{available:true;score:score;preferstrong:str.eq(route;"strong")}
 };
 
 
 f=isavailable():bool{
-  let resp=http.get("http://localhost:11431/health");
-  <mt resp {
-    $ok:cap http.isok(cap);
-    $lokeerr:e false
-  }
+  (* reachability, not http.get: against a closed port http.get answers $ok (T-15), so
+     this reported the sidecar available whenever it was down. *)
+  <reach.localserviceup("http://localhost:11431")
 };
 
 

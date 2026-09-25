@@ -5,6 +5,8 @@ m=shared.reachability;
 
 i=str:std.str;
 i=net:std.net;
+i=http:std.http;
+i=process:std.process;
 
 (* Local sidecar reachability.
 
@@ -53,11 +55,51 @@ f=islocalurl(url:str):bool{
 (* True when a local service is listening on the URL's port. For a non-local URL this
    returns true, because binding a remote port is not something we can test and
    pretending otherwise would refuse every hosted provider. *)
+(* A TCP connect, through `nc -z`, which exits 0 when something accepts. std.net has no
+   connect call. The bind probe below is not enough on its own. Measured 2026-09-25:
+   net.portavailable(11430) answered "free" while loke was LISTENING on 11430, because
+   toke's server binds the wildcard address with SO_REUSEPORT, and a second bind on
+   loopback succeeds alongside it. Every toke and ooke server does this, loke and moke
+   included, so moke believed loke was down and never sent it a request. *)
+f=connects(port:i64):bool{
+  let h=mt process.spawn(@("nc";"-z";"-G";"1";"127.0.0.1";str.fromint(port))) {
+    $ok:h h;
+    $err:e @()
+  };
+  if(h == @()){ <false }el{};
+  let code=process.wait(h) as i64;
+  <code==0
+};
+
 f=localserviceup(url:str):bool{
   if(islocalurl(url)){
-    <net.portavailable(urlport(url) as i32)==0
+    let port=urlport(url);
+    (* The bind probe answers "in use" reliably, so trust that. Its "free" is confirmed by
+       connecting, which also sees SO_REUSEPORT listeners. *)
+    if(net.portavailable(port as i32)==0){ <true }el{};
+    <connects(port)
   }el{
     <true
   }
 };
 
+(* POST a JSON body to a LOCAL service and answer the response text, or "" when there is no
+   usable answer.
+
+   This exists because three call sites used `http.post(url;body)` to do this, and in std.http
+   `http.post` is not a client call. It REGISTERS A SERVER ROUTE, `(path, handler)`. So moke's
+   pipeline and stream handlers registered a route whose "handler" was the JSON request body.
+   The worker then crashed in strlen on the body's bytes read as a pointer (0x6f7270223a2272
+   is `r":"pro`). moke never reached loke at all. core.router.routellm did the same.
+
+   Reachability is checked first, because against a closed port the HTTP client answers
+   as if it had succeeded, with nothing in it (T-15). *)
+f=localpost(baseurl:str;path:str;body:str):str{
+  if(!localserviceup(baseurl)){ <"" }el{};
+  (* http.posturl, the call core's Ollama dispatch uses and the one measured to reach a
+     server. http.client + http.postheaders was measured on 2026-09-25 to send NOTHING from
+     a test binary or from moke: four targets, including the exact request that works
+     through posturl, and none arrived (T-48). *)
+  let raw:str=http.posturl(str.concat(baseurl;path);body);
+  <raw
+};

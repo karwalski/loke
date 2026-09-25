@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Copyright 2026 loke contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# smoke_e2e.sh — the whole request path, end to end: moke -> loke -> a model -> back.
+#
+# It runs a fake Ollama (scripts/lib/fake_ollama.py) that records every request, then loke,
+# then moke, each from a scratch copy with a throwaway HOME, so no real provider key and no
+# real audit trail is touched. It POSTs a prompt containing a synthetic email address to
+# moke's /api/pipeline and asserts three things:
+#
+#   1. the request succeeds end to end;
+#   2. the MODEL never received the email address, only a placeholder;
+#   3. the USER got the email address back, restored by loke.
+#
+# The first time this path ran at all was 2026-09-25. Before that, moke called `http.post`,
+# which registers a server route rather than making a request, and moke believed loke was
+# down whenever it was up (SO_REUSEPORT fooled the port probe, and process.wait read exit
+# code 0 as failure).
+#
+# The components talk to each other on fixed ports (loke 11430, moke 11432, Ollama 11434).
+# If any is taken, this script says so and exits 0 without running: it does not touch
+# something you have running. It reports that as SKIPPED, loudly, and not as a pass.
+
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOKE_BIN="$ROOT/packages/browser/build/loke"
+MOKE_BIN="$ROOT/build/trees/moke/moke"
+for b in "$LOKE_BIN" "$MOKE_BIN"; do
+  [ -x "$b" ] || { echo "smoke_e2e: $b not built" >&2; exit 1; }
+done
+for port in 11430 11432 11434; do
+  if nc -z -G 1 127.0.0.1 "$port" 2>/dev/null; then
+    echo "smoke_e2e: SKIPPED — port $port is in use, and this test must own it. Nothing was run." >&2
+    exit 0
+  fi
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/loke_e2e.XXXXXX")
+PIDS=""
+cleanup() {
+  for p in $PIDS; do kill "$p" 2>/dev/null; done
+  pkill -9 -f "$WORK/" 2>/dev/null
+  rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p "$WORK/lk/home" "$WORK/mk/home" "$WORK/mk/data"
+( cd "$ROOT/packages/browser" && cp -R pages templates static ooke.toml "$WORK/lk/" )
+cp "$LOKE_BIN" "$WORK/lk/loke"
+( cd "$ROOT/packages/moke" && cp -R pages templates static ooke.toml "$WORK/mk/" && cp -R data/csv "$WORK/mk/data/" )
+cp "$MOKE_BIN" "$WORK/mk/moke"
+
+SEEN="$WORK/model_saw.log"; : > "$SEEN"
+python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+( cd "$WORK/lk" && HOME="$WORK/lk/home" exec "$WORK/lk/loke" > "$WORK/lk.log" 2>&1 ) & PIDS="$PIDS $!"
+( cd "$WORK/mk" && HOME="$WORK/mk/home" exec "$WORK/mk/moke" > "$WORK/mk.log" 2>&1 ) & PIDS="$PIDS $!"
+
+for _ in $(seq 1 40); do
+  nc -z -G 1 127.0.0.1 11430 2>/dev/null && nc -z -G 1 127.0.0.1 11432 2>/dev/null \
+    && nc -z -G 1 127.0.0.1 11434 2>/dev/null && break
+  sleep 0.25
+done
+
+EMAIL="e2e.probe.$$@example.com"
+OUT=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"prompt\":\"summarise: contact $EMAIL\",\"session_id\":\"e2e\",\"dataset_name\":\"demo\"}" \
+        http://127.0.0.1:11432/api/pipeline)
+
+fail=0
+ok=$(printf '%s' "$OUT" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin); print("true" if d.get("ok") else "false"); print(d.get("response") or d.get("error") or "", file=sys.stderr)
+except Exception: print("unparseable")' 2>"$WORK/resp.txt")
+resp=$(cat "$WORK/resp.txt")
+
+if [ "$ok" = "true" ]; then echo "  ok   moke -> loke -> model -> moke succeeded"
+else echo "  FAIL the request did not succeed end to end: $resp" >&2; fail=1; fi
+
+if [ ! -s "$SEEN" ]; then
+  echo "  FAIL the model received no request at all" >&2; fail=1
+elif grep -q "$EMAIL" "$SEEN"; then
+  echo "  FAIL the MODEL received the email address in clear — the privacy filter did not run" >&2; fail=1
+else
+  echo "  ok   the model saw only: $(grep -o '\[EMAIL_[0-9a-f]*_[0-9]*\]' "$SEEN" | head -1)"
+fi
+
+case "$resp" in
+  *"$EMAIL"*) echo "  ok   the user got the email address back, restored" ;;
+  *) echo "  FAIL the response did not restore the placeholder: $resp" >&2; fail=1 ;;
+esac
+
+[ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
+echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"
