@@ -112,6 +112,8 @@ f=rowtojson(row:$row):str{
   let obj=str.concat(obj;str.concat("\"content\":";str.concat(jsonescape(content);",")));
   let obj=str.concat(obj;str.concat("\"tags\":";str.concat(jsonescape(tags);",")));
   let obj=str.concat(obj;str.concat("\"score\":";str.concat(str.fromfloat(score);",")));
+  (* M1.7f: the sensitivity travels with the memory, so an import can restore it. *)
+  let obj=str.concat(obj;"\"sensitivity\":\(jsonescape(db.rowstr(row;"sensitivity"))),");
   let obj=str.concat(obj;str.concat("\"created_at\":";str.concat(str.fromint(ts);"}")));
   <obj
 };
@@ -181,8 +183,13 @@ f=formatlabel(format:$exportformat):str{
 };
 
 
+(* M1.7e. memory_drawers.created_at holds two representations: epoch seconds (storedrawer,
+   M1.7a, and importjson) and older datetime TEXT. Both queries below normalise it to epoch
+   seconds, using the expression decay.sweepsql uses (M1.7c). Before this, every export
+   read the TEXT with db.rowi64, which is strtoll, so each drawer was exported as `2026`,
+   and exportrange compared TEXT against digits, so its window meant nothing. *)
 f=exportall(palace:i64;outpath:str;format:$exportformat;now:i64):$memoryexport{
-  let rows=mt db.many("SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,md.created_at, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id ORDER BY md.created_at ASC";@()) {
+  let rows=mt db.many("SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,CASE WHEN md.created_at<>'' AND md.created_at NOT GLOB '*[^0-9]*' THEN CAST(md.created_at AS INTEGER) ELSE CAST(strftime('%s',md.created_at) AS INTEGER) END AS created_at,md.sensitivity, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id ORDER BY 7 ASC";@()) {
     $ok:rows rows;
     $err:v @()
   };
@@ -207,7 +214,7 @@ f=exportall(palace:i64;outpath:str;format:$exportformat;now:i64):$memoryexport{
 f=exportrange(palace:i64;fromts:i64;tots:i64;outpath:str;format:$exportformat;now:i64):$memoryexport{
   let froms=str.fromint(fromts);
   let tos=str.fromint(tots);
-  let rows=mt db.many("SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,md.created_at, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id WHERE md.created_at >= ? AND md.created_at <= ? ORDER BY md.created_at ASC";@(froms;tos)) {
+  let rows=mt db.many("SELECT md.id,md.wing,md.hall,md.room,md.role,md.content,CASE WHEN md.created_at<>'' AND md.created_at NOT GLOB '*[^0-9]*' THEN CAST(md.created_at AS INTEGER) ELSE CAST(strftime('%s',md.created_at) AS INTEGER) END AS created_at,md.sensitivity, COALESCE(ms.tags,'') as tags, COALESCE(ms.score,1.0) as score FROM memory_drawers md LEFT JOIN memory_scores ms ON md.id=ms.id WHERE (CASE WHEN md.created_at<>'' AND md.created_at NOT GLOB '*[^0-9]*' THEN CAST(md.created_at AS INTEGER) ELSE CAST(strftime('%s',md.created_at) AS INTEGER) END) >= CAST(? AS INTEGER) AND (CASE WHEN md.created_at<>'' AND md.created_at NOT GLOB '*[^0-9]*' THEN CAST(md.created_at AS INTEGER) ELSE CAST(strftime('%s',md.created_at) AS INTEGER) END) <= CAST(? AS INTEGER) ORDER BY 7 ASC";@(froms;tos)) {
     $ok:rows rows;
     $err:v @()
   };
@@ -231,6 +238,19 @@ f=exportrange(palace:i64;fromts:i64;tots:i64;outpath:str;format:$exportformat;no
 
 
 
+(* M1.7f. The sensitivity an imported memory is stored with. An export written before this
+   carried none, and a value that is not one of the four levels cannot be trusted. Either way
+   the memory is treated as CONFIDENTIAL and flagged, never as PUBLIC. A RESTRICTED memory
+   that came back PUBLIC and unflagged was invisible to "forget my personal data"
+   (privacy.forgetpii selects pii_flagged=1). Flagging a harmless memory costs little.
+   Missing a personal one is the defect this fixes. *)
+f=importsensitivity(given:str):str{
+  if(str.eq(given;"PUBLIC") || str.eq(given;"INTERNAL") || str.eq(given;"CONFIDENTIAL") || str.eq(given;"RESTRICTED")){
+    <given
+  }el{};
+  <"CONFIDENTIAL"
+};
+
 f=importitem(item:$json):bool{
   let id=jx.strvalue(item;"id";"");
   if(str.len(id) == 0){
@@ -245,12 +265,15 @@ f=importitem(item:$json):bool{
   let tags=jx.strvalue(item;"tags";"");
   let scores=jx.numtext(item;"score";"1.0");
   let tss=jx.numtext(item;"created_at";str.fromint(ty.nowi64()));
-  let insertok=mt db.exec("INSERT INTO memory_drawers (id,wing,hall,room,role,content,created_at) VALUES (?,?,?,?,?,?,?)";@(id;wing;hall;room;role;content;tss)) {
+  let sens=importsensitivity(jx.strvalue(item;"sensitivity";""));
+  let pii=mut."0";
+  if(str.eq(sens;"CONFIDENTIAL") || str.eq(sens;"RESTRICTED")){ pii="1" }el{};
+  let insertok=mt db.exec("INSERT INTO memory_drawers (id,wing,hall,room,role,content,created_at,sensitivity) VALUES (?,?,?,?,?,?,?,?)";@(id;wing;hall;room;role;content;tss;sens)) {
     $ok:v true;
     $err:v false
   };
   if(insertok){
-    mt db.exec("INSERT OR IGNORE INTO memory_scores (id,tags,score,created_at,accessed_at) VALUES (?,?,?,?,?)";@(id;tags;scores;tss;tss)) {
+    mt db.exec("INSERT OR IGNORE INTO memory_scores (id,tags,score,created_at,accessed_at,pii_flagged) VALUES (?,?,?,?,?,?)";@(id;tags;scores;tss;tss;pii)) {
       $ok:v void;
       $err:v void
     };
