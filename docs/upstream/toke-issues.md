@@ -1849,6 +1849,14 @@ on every successful step, `uname` answered an "unknown" platform, and the CLI's 
 reported 127 for commands that had succeeded. The ask is the same as T-33's: declare the
 error side, or reject a match on a non-result.
 
+## T-51 — `json.dec` accepts `{not json`, and reading the result crashes
+
+Measured 2026-09-25: `mt json.dec("{not json") { $ok:o ...; $jsonerr:e ... }` takes the `$ok`
+arm, and `json.str(o;"method")` on that value then segfaults. So the decoder's own verdict
+cannot guard a server's input. The mcp-toke server was taken down by one malformed line from
+any client. loke now pre-checks structure (a single `{...}` with balanced braces outside
+strings) before decoding. The ask: `json.dec` should reject input that is not JSON.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke

@@ -1,0 +1,1 @@
+Tests the mcp-toke server end to end through `mcptoke.server.handlerequest`, one JSON-RPC line in and one response out (X4b.12): initialize, tools/list, tools/call, an unknown method and a parse error, each decoded again. Depends on `std.test`, `std.str`, `std.json` and `mcptoke.server`.

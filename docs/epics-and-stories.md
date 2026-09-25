@@ -652,7 +652,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | X4b.9 | M | Blocked — AG1.10: only the sandbox suite remains, and the sandbox cannot decide a permission yet | **Agent & MCP tests** — `test_agent_types.tk` (type construction, defaults), `test_scheduler.tk` (check due, trigger types), `test_sandbox.tk` (permission checks, file/http access), `test_mcp_protocol.tk` (request/response encoding), `test_mcp_permissions.tk` (tool allow/deny, TOML parsing). Target: 5 test files. **Reopened 2026-09-25 (RV1.3).** `test_scheduler` passes, and the agent types suite exists as `agents/test_types.tk`. `test_mcp_permissions`, `test_mcp_protocol` and `test_sandbox` exist nowhere, and the sandbox has real defects (AG1.10). **Progress 2026-09-25.** `tests/unit/mcp/test_mcp_protocol.tk` was written against the real `core.mcp.protocol`, and every builder's output is decoded again. **It found a defect:** the tool-result, tools-list and initialise builders escaped only `"`. A backslash in tool output was read as an escape (`C:\\tmp\\x` came back as `C:tmpx`), and a newline went into the JSON string raw, which strict MCP clients reject. All four builders now use `jx.escape`. With the old module, 2 assertions failed. **Remaining:** `test_mcp_permissions`, and `test_sandbox`, which waits on AG1.10. **Progress, later 2026-09-25.** `tests/unit/mcp_broker/test_permissions.tk` was written against the real `mcpbroker.permissions`. It checks TOML parsing of two server sections (allow list, deny list, rate limit, privacy flag) and the decision for server-prefixed tools: allow-listed allowed, unlisted refused, denied refused, no allow-list means undenied allowed. With the deny check disabled, it failed. Four of the five named suites now exist and pass. `test_sandbox` waits on AG1.10. |
 | X4b.10 | M | **Partial** — companion and init suites do not exist | **CLI & companion tests** — `test_commands.tk` (parse command-line args into command struct), `test_session.tk` (create/activate/find sessions), `test_init.tk` (environment checks), `test_companion_discovery.tk` (discover/confirm/reject devices), `test_exo.tk` (health check, model list). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** `test_commands` and `test_session` pass. `test_companion_discovery`, `test_exo` and `test_init` exist nowhere; the companion modules also have no importer (F8.3, F8.4). |
 | X4b.11 | M | **Done** | **Optimiser tests** — `test_toon.tk` (JSON→TOON encoding/decoding round-trip, savings measurement), `test_budget.tk` (limit checking, period matching), `test_profiler.tk` (column type inference, PII candidate detection). Target: 3 test files. |
-| X4b.12 | S | **Partial** — `test_mcp_roundtrip` does not exist | **Integration tests** — `test_pipeline_api.tk` (HTTP POST with JSON body → assert anonymised response, assert audit trail written), `test_health_api.tk` (health endpoint returns status/version), `test_mcp_roundtrip.tk` (tool discovery → invocation → response). These require a running loke instance; document setup in test file comments. Target: 3 test files. **Re-checked 2026-09-25 (RV1.3).** `test_pipeline_api` passes. `test_health_api` survives only in `_archived-tests`, and its subject is covered by `tests/unit/browser/test_health_handler.tk` and by `scripts/smoke_serve.sh` over real HTTP. `test_mcp_roundtrip` exists nowhere. |
+| X4b.12 | S | **Done** — 2026-09-25 | **Integration tests** — `test_pipeline_api.tk` (HTTP POST with JSON body → assert anonymised response, assert audit trail written), `test_health_api.tk` (health endpoint returns status/version), `test_mcp_roundtrip.tk` (tool discovery → invocation → response). These require a running loke instance; document setup in test file comments. Target: 3 test files. **Re-checked 2026-09-25 (RV1.3).** `test_pipeline_api` passes. `test_health_api` survives only in `_archived-tests`, and its subject is covered by `tests/unit/browser/test_health_handler.tk` and by `scripts/smoke_serve.sh` over real HTTP. `test_mcp_roundtrip` exists nowhere. **Done 2026-09-25.** `tests/unit/mcp_toke/test_mcp_roundtrip.tk` drives the mcp-toke server through `handlerequest`, the function its listener calls per line: initialize, tools/list, tools/call, an unknown method, and four malformed lines. **It found that ONE malformed line crashed the server** (SIGSEGV). `parserequest` reported the failure as a `!$lokeerr`, T-18 read it as `$ok`, and dispatch ran on garbage. Worse, `json.dec` accepts `{not json` and reading its result crashes (T-51), so the decoder's verdict could not be the guard. **Fixed:** `wellformed` checks bytes with `str.charat` (a single `{...}`, braces and brackets balanced outside strings, nothing after it), then `isrequest` requires a decodable object with a `method`. Anything else is answered `-32600 Invalid Request`. With the old `server.tk`, the test crashed. **Also found:** the moke tree compiles its own copy of mcp-toke, so a test linked moke's STALE mcptoke objects and the fix was not in the binary. `run_tests.sh`'s stale-build guard now checks every root the moke tree compiles. |
 
 ### Part 3: moke Test Suite
 
@@ -1078,7 +1078,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 10 | 9 | — | — | — | — | — | — | 1 |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
-| CROSS-CUTTING | 9 | 83 | 78 | 3 | — | 1 | — | — | — | 1 |
+| CROSS-CUTTING | 9 | 83 | 79 | 2 | — | 1 | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 32 | 11 | — | 22 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
@@ -1087,7 +1087,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 36 | 23 | 2 | — | — | — | — | — | 11 |
 | VERIFICATION PROGRAMME | 14 | 127 | 86 | 12 | — | 7 | 3 | — | — | 19 |
-| **Total** | **88** | **709** | **550** | **48** | **8** | **32** | **3** | **1** | — | **67** |
+| **Total** | **88** | **709** | **551** | **47** | **8** | **32** | **3** | **1** | — | **67** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1127,7 +1127,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | X3 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X4 | 1 | 12 | 11 | — | — | — | — | — | — | 1 |
 | X4a | 1 | 21 | 21 | — | — | — | — | — | — | — |
-| X4b | 1 | 18 | 14 | 3 | — | 1 | — | — | — | — |
+| X4b | 1 | 18 | 15 | 2 | — | 1 | — | — | — | — |
 | X4c | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | X5 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | W1 | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1181,7 +1181,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 29 | 23 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **709** | **550** | **48** | **8** | **32** | **3** | **1** | — | **67** |
+| **Total** | **88** | **709** | **551** | **47** | **8** | **32** | **3** | **1** | — | **67** |
 
 Rows parsed: **709**, across **88** epics and **16** level-1 headings.
 

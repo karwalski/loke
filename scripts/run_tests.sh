@@ -75,8 +75,13 @@ check_stale "loke" "$PROJECTDIR/packages/browser/build/ooke" \
   "$PROJECTDIR/packages/core" "$PROJECTDIR/packages/shared" \
   "$PROJECTDIR/packages/browser" || STALE=1
 if [ -d "$PROJECTDIR/build/trees/moke/obj" ]; then
+  # Every root the moke tree compiles, not only packages/moke. It also builds core, shared
+  # and mcp-toke, and libmoke.a carries its own copies of those objects. When mcp-toke
+  # changed and moke was not rebuilt, a test linked moke's STALE mcptoke objects, so a
+  # fix under test was not in the binary that ran (2026-09-25).
   check_stale "moke" "$PROJECTDIR/build/trees/moke/obj" \
-    "$PROJECTDIR/packages/moke" || STALE=1
+    "$PROJECTDIR/packages/moke" "$PROJECTDIR/packages/mcp-toke" \
+    "$PROJECTDIR/packages/core" "$PROJECTDIR/packages/shared" || STALE=1
 fi
 if [ -d "$PROJECTDIR/build/trees/loke-cli/obj" ]; then
   check_stale "loke-cli" "$PROJECTDIR/build/trees/loke-cli/obj" \
@@ -181,11 +186,11 @@ CLI_OBJ_DIR="$PROJECTDIR/build/trees/loke-cli/obj"
 CLI_IFACE_DIR="$PROJECTDIR/build/trees/loke-cli/interfaces"
 CLI_A="$BUILDDIR/libcli.a"
 if [ -d "$CLI_OBJ_DIR" ]; then
-  NEWEST_C=$(find "$CLI_OBJ_DIR" \( -name 'mcpbroker_*.o' -o -name 'cli_*.o' \) -newer "$CLI_A" 2>/dev/null | head -1)
+  NEWEST_C=$(find "$CLI_OBJ_DIR" \( -name 'mcpbroker_*.o' -o -name 'cli_*.o' -o -name 'mcptoke_*.o' \) -newer "$CLI_A" 2>/dev/null | head -1)
   if [ ! -f "$CLI_A" ] || [ -n "$NEWEST_C" ]; then
     echo "Building $CLI_A (once) ..."
     rm -f "$CLI_A"
-    find "$CLI_OBJ_DIR" \( -name 'mcpbroker_*.o' -o -name 'cli_*.o' \) ! -name '*_main.o' -print0 \
+    find "$CLI_OBJ_DIR" \( -name 'mcpbroker_*.o' -o -name 'cli_*.o' -o -name 'mcptoke_*.o' \) ! -name '*_main.o' -print0 \
       | xargs -0 ar rcs "$CLI_A" 2>/dev/null
   fi
 fi

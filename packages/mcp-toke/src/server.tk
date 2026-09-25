@@ -86,8 +86,70 @@ f=dispatchrequest(request:$jsonrpcrequest;config:$serverconfig;cid:str):str{
   }
 };
 
+(* X4b.12. Whether a line is a usable JSON-RPC request: it decodes, and it names a method.
+   Both are asked through STDLIB results, which do discriminate their arms ($ok first,
+   T-31). JSON alone is not enough, because std.json's decoder is lenient: measured, it
+   accepts `{not json`. *)
+f=methodof(o:$json):str{
+  <mt json.str(o;"method") {
+    $ok:m m;
+    $err:e ""
+  }
+};
+
+(* Structurally a single JSON object: starts with `{`, ends with `}`, and its braces and
+   brackets balance outside strings. This runs BEFORE json.dec, because std.json accepts
+   `{not json` and returns a value that crashes the accessor reading it (T-51). So the
+   decoder's own verdict cannot be the guard. Not a full validator: it catches the lines
+   that actually arrive broken, which are truncated or garbled ones. *)
+f=wellformed(raw:str):bool{
+  let s=str.trim(raw);
+  let n=str.len(s) as i64;
+  if(n<2){ <false }el{};
+  (* Bytes through str.charat, which returns a plain i64. str.slice returns a result. *)
+  if(str.charat(s;0)!=123 || str.charat(s;n-1)!=125){ <false }el{};
+  let depth=mut.0;
+  let instr=mut.false;
+  let esc=mut.false;
+  let ok=mut.true;
+  lp(let k=0;k<n && ok;k=k+1){
+    let c=str.charat(s;k);
+    if(instr){
+      if(esc){ esc=false }el{
+        if(c==92){ esc=true }el{
+          if(c==34){ instr=false }el{}
+        }
+      }
+    }el{
+      if(c==34){ instr=true }el{};
+      if(c==123 || c==91){ depth=depth+1 }el{};
+      if(c==125 || c==93){ depth=depth-1 }el{};
+      if(depth<0){ ok=false }el{};
+      (* The object closed before the end of the line: text follows it. *)
+      if(depth==0 && k<n-1){ ok=false }el{}
+    }
+  };
+  <ok && !instr && depth==0
+};
+
+f=isrequest(raw:str):bool{
+  if(!wellformed(raw)){ <false }el{};
+  <mt json.dec(raw) {
+    $ok:o str.len(methodof(o))>0;
+    $jsonerr:e false
+  }
+};
+
 f=handlerequest(raw:str;config:$serverconfig):str{
   let cid=log.newcorrelationid();
+  (* A line that is not a request used to CRASH the server. parserequest reports it as a
+     !$lokeerr, T-18 reads that as $ok whatever it holds, and dispatchrequest then ran on
+     garbage, so one malformed line from any client took the server down. It is refused
+     here, before parserequest is reached. *)
+  if(!isrequest(raw)){
+    log.warn("mcp request refused: not a JSON-RPC request with a method";"mcp-server";cid);
+    <proto.errorresponse(0;(0-32600) as i32;"Invalid Request")
+  }el{};
   <mt proto.parserequest(raw) {
     $ok:request dispatchrequest(request;config;cid);
     $lokeerr:e proto.errorresponse(0;(0-32700) as i32;"Parse error")
