@@ -1,0 +1,1 @@
+Tests `moke.consolelog` against the real module (X4b.13): appending entries, the typed disclosure fields as JSON (numbers when known, null when not), three-valued flags, stage display names and the formatted log. Depends on `std.test`, `std.str` and `moke.consolelog`.

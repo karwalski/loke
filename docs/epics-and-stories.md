@@ -660,9 +660,9 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
-| X4b.13 | M | **Partial** — `test_console_log` does not exist | **moke core tests** — `test_cost_comparison.tk` (estimate cloud cost, compute savings, accumulate session), `test_tier_visualiser.tk` (tier stats construction, JSON serialisation), `test_console_log.tk` (append log entry, session log structure), `test_profiler.tk` (column type inference, PII candidate, format profile output), `test_ddl.tk` (dashboard card construction, JSON serialisation, validation). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** Four of the five named suites pass. `test_console_log.tk` exists nowhere; moke's console log is exercised only through `scripts/smoke_e2e.sh`. |
+| X4b.13 | M | **Done** — 2026-09-25 | **moke core tests** — `test_cost_comparison.tk` (estimate cloud cost, compute savings, accumulate session), `test_tier_visualiser.tk` (tier stats construction, JSON serialisation), `test_console_log.tk` (append log entry, session log structure), `test_profiler.tk` (column type inference, PII candidate, format profile output), `test_ddl.tk` (dashboard card construction, JSON serialisation, validation). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** Four of the five named suites pass. `test_console_log.tk` exists nowhere; moke's console log is exercised only through `scripts/smoke_e2e.sh`. **Done 2026-09-25.** `packages/moke/tests/test_console_log.tk` was written against the real `moke.consolelog`. It checks append without mutating the input, known disclosure counts serialising as numbers and unknown ones as null, the three-valued flags, stage display names and the formatted line. With `withfieldcount` changed to ignore its argument, it failed. |
 | X4b.14 | M | **Partial** — `test_companion_simulator` does not exist | **moke feature tests** — `test_streaming.tk` (session event tracking, JSON output), `test_governance.tk` (regulatory preset lookup, risk classification), `test_companion_simulator.tk` (cluster status, model list), `test_routing_explainer.tk` (decision trace formatting), `test_agents_status.tk` (agent status construction, panel state). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** Four of the five named suites pass. `test_companion_simulator.tk` exists nowhere. |
-| X4b.15 | S | **Partial** — `test_emitter` and `test_history` do not exist | **moke pipeline panel tests** — `test_pipeline_stages.tk` (all 9 stages defined, labels, status symbols), `test_emitter.tk` (start/complete/skip/error stage events, finalise run with totals), `test_history.tk` (add run, recent, evict, last). Rewrite from archived `pipeline_panel_test.tk` companion spec. Target: 3 test files. **Re-checked 2026-09-25 (RV1.3).** `test_pipeline_stages` passes. `test_emitter.tk` and `test_history.tk` exist nowhere. |
+| X4b.15 | S | **Done** — 2026-09-25 | **moke pipeline panel tests** — `test_pipeline_stages.tk` (all 9 stages defined, labels, status symbols), `test_emitter.tk` (start/complete/skip/error stage events, finalise run with totals), `test_history.tk` (add run, recent, evict, last). Rewrite from archived `pipeline_panel_test.tk` companion spec. Target: 3 test files. **Re-checked 2026-09-25 (RV1.3).** `test_pipeline_stages` passes. `test_emitter.tk` and `test_history.tk` exist nowhere. **Done 2026-09-25.** `tests/unit/pipeline/test_emitter.tk` and `test_history.tk` were written against the real `core.pipeline.emitter` and `core.pipeline.history`. The emitter test checks start, complete, skip and error events; `finalise` totalling durations; and an errored stage making the run an error. The history test checks the bound, that the OLDEST run is the one evicted, `recent` and `last`. Mutated so that `finalise` ignored errors and `add` never evicted, they failed 1 and 2 assertions. |
 
 ### Part 4: Infrastructure
 
@@ -1078,7 +1078,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 10 | 9 | — | — | — | — | — | — | 1 |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
-| CROSS-CUTTING | 9 | 83 | 75 | 6 | 1 | — | — | — | — | 1 |
+| CROSS-CUTTING | 9 | 83 | 77 | 4 | 1 | — | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 32 | 11 | — | 22 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
@@ -1087,7 +1087,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 36 | 23 | 2 | — | — | — | — | — | 11 |
 | VERIFICATION PROGRAMME | 14 | 126 | 86 | 12 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **708** | **547** | **51** | **9** | **31** | **3** | **1** | — | **66** |
+| **Total** | **88** | **708** | **549** | **49** | **9** | **31** | **3** | **1** | — | **66** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1127,7 +1127,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | X3 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X4 | 1 | 12 | 11 | — | — | — | — | — | — | 1 |
 | X4a | 1 | 21 | 21 | — | — | — | — | — | — | — |
-| X4b | 1 | 18 | 11 | 6 | 1 | — | — | — | — | — |
+| X4b | 1 | 18 | 13 | 4 | 1 | — | — | — | — | — |
 | X4c | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | X5 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | W1 | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1181,7 +1181,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 28 | 23 | 4 | — | — | — | — | — | 1 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **708** | **547** | **51** | **9** | **31** | **3** | **1** | — | **66** |
+| **Total** | **88** | **708** | **549** | **49** | **9** | **31** | **3** | **1** | — | **66** |
 
 Rows parsed: **708**, across **88** epics and **16** level-1 headings.
 
