@@ -1,0 +1,120 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.e2e.mokeflow;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=up:moke.upload;
+i=compute:moke.compute;
+i=wsp:moke.workspace;
+i=hooks:moke.hooks;
+i=msens:moke.sensitivity;
+i=pipe:core.privacy.pipeline;
+i=h:page.api.pipeline;
+
+(* T14.3 — the moke data flow, stage by stage, through the real modules of each stage.
+
+   The row names five stages. The server side of each is a function this file calls; the
+   browser side of one of them is not:
+
+     row                                        current design
+     ------------------------------------------ ---------------------------------------------
+     dataset load stores headers and rows       moke.upload.parsecsv, then the dataset held
+       in session                               in the moke.workspace the UI keeps
+     privacy pipeline on a PII dataset          moke.hooks.applyschemafirst replaces the raw
+       returns an anonymised schema             rows with a schema profile, and
+                                                core.privacy.pipeline.runforward scans it
+     confirm page receives local_view and       local_view is the run's ORIGINAL text and
+       llm_view                                 llm_view its ANONYMISED text; both are
+                                                asserted. The hand-off itself is browser
+                                                JavaScript (templates/confirm.tkt reads them
+                                                from sessionStorage) and no toke test reaches it
+     restore after the LLM response             page.api.pipeline.restoretext
+     sensitivity flows through the stages       the pipeline's classification, as rendered in
+                                                the response, drives moke.sensitivity's cloud
+                                                decision
+
+   Everything is local: the NER and Presidio layers point at closed ports, so the regex layer
+   is the one that scans, which is also the degraded case the schema-first stage exists for. *)
+
+f=csvtext():str{
+  <"customer_id,full_name,email,region,spend
+1,Ada Quill,ada@example.com,north,120
+2,Bram Oake,bram@example.com,south,80
+3,Cato Vane,cato@example.com,north,95
+4,Dara Wren,dara@example.com,east,60
+5,Esme Holt,esme@example.com,west,150
+6,Finn Marr,finn@example.com,south,70"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── 1. Load ─────────────────────────────────────────────────────────────── *)
+  let pr:$parseresult=up.parsecsv(csvtext();up.defaultopts());
+  if(t.assert(pr.ok;"the CSV parses")){pass=pass+1}el{fail=fail+1};
+  let ds:$dataset=pr.dataset;
+  if(t.assert(ds.headers.len==5;"with its five headers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ds.rows.len==6;"and its six data rows")){pass=pass+1}el{fail=fail+1};
+
+  let ws0=wsp.addproject(wsp.newworkspace();wsp.newproject("demo";"e2e"));
+  let ws=wsp.adddataset(ws0;0 as i32;ds);
+  if(t.assert(wsp.hasactivedataset(ws);"the loaded dataset is the workspace's active dataset")){pass=pass+1}el{fail=fail+1};
+  let held:$dataset=wsp.activedataset(ws);
+  if(t.assert(held.headers.len==5 && held.rows.len==6;"and the workspace holds its headers and rows")){pass=pass+1}el{fail=fail+1};
+  if(held.headers.len==5){
+    if(t.asserteq(held.headers.get(2);"email";"header by header")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+
+  (* ── 2. Schema first ─────────────────────────────────────────────────────── *)
+  let hr:$hookresult=hooks.applyschemafirst(csvtext();"customers");
+  if(t.assert(hr.rawdatadetected;"raw tabular data in a prompt is detected")){pass=pass+1}el{fail=fail+1};
+  let schema=hr.transformed;
+  if(t.assert(str.contains(schema;"ROWS: 6") && str.contains(schema;"COLS: 5");"and replaced by a profile of its shape")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(schema;"full_name(") && str.contains(schema;"email(");"which names every column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(schema;"Ada Quill") && !str.contains(schema;"Bram Oake");"but carries no value of the name column — a name has no pattern for the regex layer to catch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(schema;"@example.com");"and no address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(schema;"sample=[SUPPRESSED]");"the personal columns are marked SUPPRESSED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(schema;"north");"while a non-personal column keeps its samples")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. The pipeline, and the two views ─────────────────────────────────── *)
+  let lconf=pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999");
+  let prompt=str.concat("Summarise spend by region and send it to ada@example.com
+";schema);
+  let run=pipe.runforward(prompt;"";lconf);
+  if(t.assert(pipe.issafetoforward(run);"the schema-first prompt is scanned and may be forwarded")){pass=pass+1}el{fail=fail+1};
+  let res:$piidetectionresult=run.result;
+  let localview=res.original;
+  let llmview=res.anonymised;
+  if(t.asserteq(localview;prompt;"local_view is the prompt as the user wrote it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(llmview;"ada@example.com");"llm_view does not carry the address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(llmview;"Summarise spend by region") && str.contains(llmview;"COLS: 5");"but carries the request and the schema")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(localview;llmview);"so the two views differ, which is what the confirm page shows side by side")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 4. Restore ─────────────────────────────────────────────────────────── *)
+  if(t.assert(res.entities.len>0;"the address was detected as an entity")){pass=pass+1}el{fail=fail+1};
+  if(res.entities.len>0){
+    let ent:$piientity=res.entities.get(0);
+    if(t.assert(str.contains(llmview;ent.placeholder);"and replaced by its placeholder in llm_view")){pass=pass+1}el{fail=fail+1};
+    let reply=str.concat("Done — the summary is on its way to ";ent.placeholder);
+    let restored=h.restoretext(run;reply);
+    if(t.asserteq(restored;"Done — the summary is on its way to ada@example.com";"restoring the model's reply puts the original value back")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(!str.contains(restored;ent.placeholder);"and leaves no placeholder behind")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+3 };
+
+  (* ── 5. Sensitivity through the stages ───────────────────────────────────── *)
+  if(t.assert(str.contains(h.privacyfields(run);"\"sensitivity\":\"confidential\"");"the pipeline classifies the address as confidential and says so in the response")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(msens.fromstring("confidential");"CONFIDENTIAL";"moke reads that label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!msens.allowscloud("confidential");"and does not allow a cloud route for it")){pass=pass+1}el{fail=fail+1};
+  let clean=pipe.runforward(schema;"";lconf);
+  if(t.assert(str.contains(h.privacyfields(clean);"\"sensitivity\":\"public\"");"the schema alone, with its personal columns suppressed, classifies as public")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(msens.allowscloud("public");"and moke allows a cloud route for public")){pass=pass+1}el{fail=fail+1};
+  let card=pipe.runforward("card 4111 1111 1111 1111 on file";"";lconf);
+  if(t.assert(str.contains(h.privacyfields(card);"\"sensitivity\":\"restricted\"");"a card number classifies as restricted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!msens.allowscloud("restricted");"which moke never routes to the cloud")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

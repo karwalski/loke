@@ -1,0 +1,150 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.palace;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=pal:core.memory.palace;
+i=mstor:core.memory.storage;
+i=mtypes:core.memory.types;
+i=ty:shared.types;
+
+(* T6.1 — the wing model of core.memory.palace, against a real migrated store.
+
+   The row was written for an in-memory palace with add_wing, get_wing and to_json. The
+   current palace has none of those: a wing is not an object that is added, it is the `wing`
+   column of the drawers stored in it, and listwings reports the DISTINCT wings of
+   memory_drawers merged with the four compiled-in defaults (core.memory.types.defaultwings).
+   So each clause is asserted in the form the design gives it:
+
+     row                              current design
+     -------------------------------- -----------------------------------------------------
+     new palace has zero wings        zero STORED wings; listwings reports the 4 defaults
+     add wing increases count         storing a drawer in a new wing adds exactly one
+     retrieve wing by name            listhalls / listrooms for that wing return its contents
+     unknown wing returns none        listhalls for an unknown wing is empty
+     wing has type and name           $wing carries name, description and hallnames
+     to_json contains wings array     walk renders every wing; there is no JSON form *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-palace-wings")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=mkdrawer(id:str;wing:str;hall:str;room:str):$drawer{
+  <$drawer{
+    id:id;
+    location:$palacelocation{wing:wing;hall:hall;room:room};
+    role:"user";
+    content:"a drawer written by test_palace";
+    sessionid:"s1";
+    modelid:"m1";
+    tokens:3 as u32;
+    sensitivity:$sensitivitylevel{$public:0};
+    createdat:""
+  }
+};
+
+f=haswing(wings:@str;name:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<wings.len;i=i+1){
+    if(str.eq(wings.get(i);name)){ found=true }el{}
+  };
+  <found
+};
+
+f=wingsof(p:$palace):@str{
+  <mt pal.listwings(p) {
+    $ok:w w;
+    $err:e @()
+  }
+};
+
+f=hallsof(p:$palace;wing:str):@str{
+  <mt pal.listhalls(p;wing) {
+    $ok:h h;
+    $err:e @()
+  }
+};
+
+f=roomsof(p:$palace;wing:str;hall:str):@str{
+  <mt pal.listrooms(p;wing;hall) {
+    $ok:r r;
+    $err:e @()
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the store opened on a fresh file")){pass=pass+1}el{fail=fail+1};
+  let p=mt pal.open(testdir()) {
+    $ok:v v;
+    $err:e $palace{conn:$dbconn{handle:0};datadir:""}
+  };
+  if(t.asserteq(p.datadir;testdir();"the palace opened on the same directory")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A new palace ───────────────────────────────────────────────────────── *)
+  if(t.assert(sdb.countquery("SELECT id FROM memory_drawers";@())==0;"a new palace stores zero wings: memory_drawers is empty")){pass=pass+1}el{fail=fail+1};
+  let w0=wingsof(p);
+  if(t.assert(w0.len==4;"and listwings reports exactly the four default wings")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haswing(w0;"work") && haswing(w0;"personal") && haswing(w0;"technical") && haswing(w0;"agent-diaries");"which are work, personal, technical and agent-diaries")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The wing type ──────────────────────────────────────────────────────── *)
+  let defs=mtypes.defaultwings();
+  let first:$wing=defs.get(0);
+  if(t.asserteq(first.name;"work";"a $wing carries its name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(first.description)>0;"and a description")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(first.hallnames.len==4;"and its hall names — four for the work wing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Adding a wing ──────────────────────────────────────────────────────── *)
+  mstor.storedrawer(0;mkdrawer("pw-1";"garden";"Plants";"roses"));
+  let w1=wingsof(p);
+  if(t.assert(w1.len==5;"storing a drawer in a new wing increases the wing count by exactly one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(haswing(w1;"garden");"and the new wing is the one the drawer named")){pass=pass+1}el{fail=fail+1};
+
+  mstor.storedrawer(0;mkdrawer("pw-2";"garden";"Plants";"tulips"));
+  mstor.storedrawer(0;mkdrawer("pw-3";"work";"Tasks";"general"));
+  if(t.assert(wingsof(p).len==5;"a second drawer in the same wing, or one in a default wing, adds no wing — wings are distinct")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Retrieval by name ──────────────────────────────────────────────────── *)
+  let gh=hallsof(p;"garden");
+  if(t.assert(gh.len==1;"the garden wing has one hall")){pass=pass+1}el{fail=fail+1};
+  if(gh.len==1){
+    if(t.asserteq(gh.get(0);"Plants";"and it is the hall its drawers were stored in")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  let gr=roomsof(p;"garden";"Plants");
+  if(t.assert(gr.len==2;"which holds the two rooms written to it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hallsof(p;"work").len==1;"and the work wing's halls are its own, not garden's")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Unknown wing ───────────────────────────────────────────────────────── *)
+  if(t.assert(hallsof(p;"no-such-wing").len==0;"an unknown wing has no halls")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(roomsof(p;"no-such-wing";"Plants").len==0;"and no rooms, even under a hall name that exists elsewhere")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The rendered palace ────────────────────────────────────────────────── *)
+  let walked=mt pal.walk(p) {
+    $ok:s s;
+    $err:e ""
+  };
+  if(t.assert(str.contains(walked;"Wing: garden");"walk renders the stored wing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(walked;"Wing: personal");"and the default wings")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(walked;"Hall: Plants (2 drawers)");"with the drawer count per hall")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(walked;"Room: roses (1 drawers)");"and per room")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

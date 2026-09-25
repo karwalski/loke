@@ -6,6 +6,13 @@ m=test.memory.decay;
 i=t:std.test;
 i=str:std.str;
 i=dec:core.memory.decay;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=mstor:core.memory.storage;
+i=mtypes:core.memory.types;
+i=ty:shared.types;
 
 (* X7.2 — this file used to declare its own decay curve and assert arithmetic against it:
 
@@ -52,6 +59,45 @@ i=dec:core.memory.decay;
    needs to be able to read off a test.
 
    `sweep` and `refresh` are not exercised: both need the memory_scores table. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-memory-decay")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=mkdrawer(id:str):$drawer{
+  <$drawer{
+    id:id;
+    location:$palacelocation{wing:"technical";hall:"Code";room:"general"};
+    role:"user";
+    content:"a drawer written by test_decay";
+    sessionid:"s1";
+    modelid:"m1";
+    tokens:3 as u32;
+    sensitivity:$sensitivitylevel{$public:0};
+    createdat:""
+  }
+};
+
+f=present(id:str):bool{
+  <sdb.countquery("SELECT id FROM memory_drawers WHERE id=?";@(id))==1
+};
+
+f=setscore(id:str;score:str;createdat:str):bool{
+  <mt db.exec("UPDATE memory_scores SET score=?, created_at=? WHERE id=?";@(score;createdat;id)) {
+    $ok:v true;
+    $err:e false
+  }
+};
 
 f=main():i64{
   let pass=mut.0;
@@ -119,6 +165,52 @@ f=main():i64{
   (* M1.7c — a datetime TEXT read through rowi64 is its year. Below the epoch floor it is a
      mis-read representation, not an age. test_decay_created_at.tk asserts the sweep itself. *)
   if(t.assert(!dec.agereadable(2026;1790000000);"a created_at of 2026 — a datetime TEXT read as an integer — is NOT a readable age")){pass=pass+1}el{fail=fail+1};
+
+  (* ── T6.3 against the real table: what the sweep evicts ─────────────────────
+     The row's should_evict is, in this design, the decision sweeprows makes for each row
+     of memory_scores: delete when the DECAYED score (applybp over the stored score and its
+     created_at) is below prunebelow. It is asserted by its effect — the drawer is gone or it
+     is not — on drawers written through core.memory.storage, whose score rows it creates. *)
+  if(t.assert(openfreshstore()==1;"the store opened on a fresh file")){pass=pass+1}el{fail=fail+1};
+  mstor.storedrawer(0;mkdrawer("dk-low"));
+  mstor.storedrawer(0;mkdrawer("dk-full"));
+  mstor.storedrawer(0;mkdrawer("dk-aged"));
+  let t0=1700000000;
+  if(t.assert(setscore("dk-low";"0.01";"1700000000") && setscore("dk-full";"1.0";"1700000000") && setscore("dk-aged";"1.0";"1700000000");"the three score rows are set to known scores and a known creation time")){pass=pass+1}el{fail=fail+1};
+
+  (* Under the DEFAULT policy nothing is ever evicted: applybp lifts every score to the
+     minscore floor (1000bp), which is above prunebelow (500bp). That is the design — "decay
+     alone never makes a row sweepable, only an explicit policy change can" — so should_evict
+     is asserted false under the default and true under a policy that sets prunebelow ABOVE
+     the floor, which is the explicit change the design names. *)
+  let untouched=dec.sweep(0;c;t0);
+  if(t.assert(present("dk-low") && (untouched as i64)==0;"under the default policy even a 0.01 score is not evicted: it is floored at minscore, above prunebelow")){pass=pass+1}el{fail=fail+1};
+
+  let strict=$decayconfig{halflifedays:30.0 as f32;minscore:0.1 as f32;prunebelow:0.2 as f32;sweepintervalhours:24 as i32};
+  let pruned=dec.sweep(0;strict;t0);
+  if(t.assert(!present("dk-low");"under a policy pruning below 0.2, a memory whose score is below it is evicted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(present("dk-full") && present("dk-aged");"one at a full score is not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((pruned as i64)==1;"and the sweep reports exactly the one it evicted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT id FROM memory_scores WHERE id='dk-low'";@())==0;"the evicted memory's score row goes with it")){pass=pass+1}el{fail=fail+1};
+
+  (* Age under that same policy: a full-score memory 30 days old has halved (5000bp), still
+     above 0.2; one 400 half-lives old is at the floor, 0.1, and below it — so age DOES evict
+     once the policy says so, and the younger memory survives the same sweep. *)
+  if(t.assert(setscore("dk-aged";"1.0";"1600000000");"the aged memory is backdated")){pass=pass+1}el{fail=fail+1};
+  let prunedaged=dec.sweep(0;strict;t0);
+  if(t.assert(!present("dk-aged");"a memory decayed below the policy threshold is evicted by age")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(present("dk-full") && (prunedaged as i64)==1;"while the recent one survives, and exactly one was evicted")){pass=pass+1}el{fail=fail+1};
+
+  (* Back to the default policy, four hundred months on. *)
+  let prunedlater=dec.sweep(0;c;t0+2592000*400);
+  if(t.assert(present("dk-full");"under the default policy an ancient memory decays to the floor and is NOT evicted by age alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((prunedlater as i64)==0;"so that sweep evicts nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* refresh records an access. It is the nearest thing to the row's access count, and what
+     it does NOT do is recorded in the backlog: the sweep ages by created_at and never reads
+     accessed_at, so an access does not raise relevance. *)
+  if(t.assert(dec.refresh(0;"dk-full";t0+100);"refresh reports success on an existing memory")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT id FROM memory_scores WHERE id='dk-full' AND accessed_at='1700000100'";@())==1;"and records the access time on its score row")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

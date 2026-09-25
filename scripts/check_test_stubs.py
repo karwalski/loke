@@ -68,6 +68,9 @@ ENFORCED = [
     "tests/unit/router",
     "tests/unit/shared",
     "tests/unit/storage",
+    "tests/e2e",
+    "tests/unit/mcp_broker",
+    "tests/unit/platform",
 ]
 
 LIVE_IMPORT = re.compile(r"^\s*i=([A-Za-z0-9_]+):([A-Za-z0-9_.]+)\s*;", re.M)
