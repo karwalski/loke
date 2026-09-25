@@ -645,7 +645,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 |-------|------|--------|---------|
 | X4b.3 | L | **Done** | **Privacy pipeline tests** — Write new test files for the privacy subsystem: `test_regex_detector.tk` (email, phone, SSN, credit card, IP, AU TFN/ABN patterns — assert detection and non-detection), `test_ner_detector.tk` (name/place/org detection via local SLM — assert entity extraction from sample texts), `test_placeholder_store.tk` (store placeholder, retrieve, reverse — assert round-trip fidelity), `test_pipeline_orchestrator.tk` (full pipeline: raw text → detect → anonymise → assert no PII in output, assert restoration produces original), `test_guardian.tk` (assert guardian prompt injected into every LLM call). Use `.tkc.md` companion files from archived tests as specifications. Target: 5 test files, each with 10+ assertions. **Re-checked 2026-09-25 (RV1.3).** Four of the five named suites exist and pass. `test_ner_detector` does not exist, and its subject was deleted under PL1.6, so the suite is moot. |
 | X4b.4 | L | **Done** | **Memory palace tests** — `test_palace_drawers.tk` (store/retrieve/search drawers in wings/halls/rooms), `test_decay.tk` (time-based decay scoring), `test_graph.tk` (entity/relation upsert, traversal), `test_search.tk` (keyword search, relevance scoring), `test_aaak.tk` (shorthand compression levels), `test_export.tk` (JSON/CSV/markdown export, import round-trip). Target: 6 test files. |
-| X4b.5 | L | **Partial** — `test_policy_loader` does not exist; the other eight pass | **Governance tests** — `test_gateway.tk` (submit request, assert policy decision), `test_rules_engine.tk` (evaluate conditions, AND/OR/NOT), `test_policy_loader.tk` (load from file/URL, merge), `test_incidents.tk` (create/resolve/list), `test_ownership.tk` (assign/get/missing roles), `test_consent.tk` (record/check consent), `test_dsar.tk` (access/erasure requests), `test_kill_switch.tk` (enable/disable/check blocked), `test_scorecard.tk` (compute governance score). Target: 9 test files. **Re-checked 2026-09-25 (RV1.3).** Eight of the nine named suites exist and pass. `test_policy_loader.tk` exists nowhere in the tree. |
+| X4b.5 | L | **Done** — 2026-09-25 | **Governance tests** — `test_gateway.tk` (submit request, assert policy decision), `test_rules_engine.tk` (evaluate conditions, AND/OR/NOT), `test_policy_loader.tk` (load from file/URL, merge), `test_incidents.tk` (create/resolve/list), `test_ownership.tk` (assign/get/missing roles), `test_consent.tk` (record/check consent), `test_dsar.tk` (access/erasure requests), `test_kill_switch.tk` (enable/disable/check blocked), `test_scorecard.tk` (compute governance score). Target: 9 test files. **Re-checked 2026-09-25 (RV1.3).** Eight of the nine named suites exist and pass. `test_policy_loader.tk` exists nowhere in the tree. **Done 2026-09-25.** `tests/unit/policy/test_policy_loader.tk` was written against the real `core.policy.loader`, and **it found two defects, both fixed.** (1) Every policy document loaded with its name and **no rules**: the regulations were read with `json.getregulations`, an untyped ABI name (T-32) that returned nothing. They are now read with `json.dec`/`json.arr`/`jx.strvalue`, for both files and URLs. (2) `sensitivityrank` matched only lowercase names, so RESTRICTED, CONFIDENTIAL and PUBLIC in capitals, as most of the codebase writes them, all ranked 0. It is now case-insensitive, and so is `severityrank`. Both assertions failed against the old module. The test also covers `evaluate` matching one rule, none and two. All nine named suites now exist and pass. |
 | X4b.6 | M | **Done** | **Storage tests** — `test_db.tk` (open/migrate/query), `test_settings.tk` (get/set string/int/bool/float), `test_audit.tk` (append/query/export), `test_keychain.tk` (store/retrieve/delete credentials), `test_ephemeral.tk` (store/get/wipe/expire). Target: 5 test files. |
 | X4b.7 | M | **Done** | **Model & router tests** — `test_model_registry.tk` (register/find/filter models), `test_model_tiers.tk` (tier config, selection, labels), `test_router.tk` (route request, model selection, cost estimation), `test_sensitivity.tk` (sensitivity levels, risk classification), `test_queue.tk` (enqueue/dequeue/priority). Target: 5 test files. **Re-checked 2026-09-25 (RV1.3).** `test_model_registry` and `test_model_tiers` exist as `tests/unit/models/test_registry.tk` and `test_tiers.tk`, and both pass. The other three pass under their own names. |
 | X4b.8 | M | **Done** | **Provider tests** — `test_anthropic.tk` (request building, response parsing), `test_openai.tk` (request building, response parsing), `test_ollama.tk` (health check, chat completion parsing), `test_dispatcher.tk` (provider routing by type). Target: 4 test files. |
@@ -1078,7 +1078,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | AGENTIC AI | 1 | 10 | 9 | — | — | — | — | — | — | 1 |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
-| CROSS-CUTTING | 9 | 83 | 77 | 4 | — | 1 | — | — | — | 1 |
+| CROSS-CUTTING | 9 | 83 | 78 | 3 | — | 1 | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 32 | 11 | — | 22 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
@@ -1087,7 +1087,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 36 | 23 | 2 | — | — | — | — | — | 11 |
 | VERIFICATION PROGRAMME | 14 | 126 | 86 | 12 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **708** | **549** | **49** | **8** | **32** | **3** | **1** | — | **66** |
+| **Total** | **88** | **708** | **550** | **48** | **8** | **32** | **3** | **1** | — | **66** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1127,7 +1127,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | X3 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | X4 | 1 | 12 | 11 | — | — | — | — | — | — | 1 |
 | X4a | 1 | 21 | 21 | — | — | — | — | — | — | — |
-| X4b | 1 | 18 | 13 | 4 | — | 1 | — | — | — | — |
+| X4b | 1 | 18 | 14 | 3 | — | 1 | — | — | — | — |
 | X4c | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | X5 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | W1 | 1 | 7 | 7 | — | — | — | — | — | — | — |
@@ -1181,7 +1181,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 28 | 23 | 4 | — | — | — | — | — | 1 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **708** | **549** | **49** | **8** | **32** | **3** | **1** | — | **66** |
+| **Total** | **88** | **708** | **550** | **48** | **8** | **32** | **3** | **1** | — | **66** |
 
 Rows parsed: **708**, across **88** epics and **16** level-1 headings.
 

@@ -1,0 +1,1 @@
+Tests `core.policy.loader` against the real module (X4b.5): rule matching in `evaluate`, the sensitivity and severity ranks, and reading a policy file. Depends on `std.test`, `std.str`, `core.policy.loader` and `core.policy.types`.

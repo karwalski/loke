@@ -9,6 +9,7 @@ i=str:std.str;
 i=time:std.time;
 i=t:core.policy.types;
 i=reg:core.policy.presets.registry;
+i=jx:shared.jsonobj;
 
 t=$loaderconfig{ policydir:str; enterpriseurl:str; hotreload:bool; reloadintervalseconds:i32 };
 
@@ -36,13 +37,40 @@ f=emptypolicyset(source:str;hash:str):$policyset{
   }
 };
 
+(* X4b.5. The regulations of a policy document, read with the typed accessors. This used
+   `json.getregulations`, one of std.json's untyped ABI names (T-32). It returned nothing,
+   so every policy loaded with its name and NO RULES, and nothing it declared could ever be
+   evaluated. Strings are read with jx.strvalue, which keeps escapes (T-44). *)
+f=rulesof(items:@$json):@$policyrule{
+  let rules=mut.@();
+  lp(let i=0;i<items.len;i=i+1){
+    let r=items.get(i);
+    rules=rules.push($policyrule{id:jx.strvalue(r;"id";"");description:jx.strvalue(r;"description";"");action:jx.strvalue(r;"action";"");severity:jx.strvalue(r;"severity";"")})
+  };
+  <rules
+};
+
+f=regulationof(o:$json):$regulation{
+  let rules=mt json.arr(o;"rules") {$ok:a rulesof(a); $err:e @()};
+  <$regulation{name:jx.strvalue(o;"name";"");jurisdiction:jx.strvalue(o;"jurisdiction";"");rules:rules;version:jx.strvalue(o;"version";"")}
+};
+
+f=regulationsof(doc:str):@$regulation{
+  let regs=mut.@();
+  let items=mt json.arr(json.dec(doc);"regulations") {$ok:a a; $err:e @()};
+  lp(let i=0;i<items.len;i=i+1){
+    regs=regs.push(regulationof(items.get(i)))
+  };
+  <regs
+};
+
 f=parsefilecontents(contents:str;path:str):i64{
   let parsed=json.decode(contents);
   <mt parsed {
     $ok:data $policyset{
         name:json.str(data;"name");
         source:path;
-        regulations:json.getregulations(data;"regulations");
+        regulations:regulationsof(contents);
         loadedat:time.nowms();
         hash:str.randhex(8)
       };
@@ -64,7 +92,7 @@ f=parseurlcontents(body:str;url:str):i64{
     $ok:data $policyset{
         name:json.str(data;"name");
         source:url;
-        regulations:json.getregulations(data;"regulations");
+        regulations:regulationsof(body);
         loadedat:time.nowms();
         hash:str.randhex(8)
       };
@@ -127,7 +155,10 @@ f=checkreloadneeded(cfg:$loaderconfig;lastloadedat:i64):bool{
    `sensitivityrank` exists so the two scales are at least named apart. It is not used by
    `evaluate` — see the comment there for why no comparison between the two is defensible
    with the fields `$policyrule` currently has. *)
-f=sensitivityrank(level:str):i32{
+f=sensitivityrank(given:str):i32{
+  (* Case-insensitive: most of this codebase writes the levels in capitals (RESTRICTED), and
+     an exact lowercase match ranked every one of those 0. *)
+  let level=str.tolower(given);
   if(str.eq(level;"restricted")){ <4 as i32 }el{
     if(str.eq(level;"confidential")){ <3 as i32 }el{
       if(str.eq(level;"internal")){ <2 as i32 }el{
@@ -139,7 +170,8 @@ f=sensitivityrank(level:str):i32{
   }
 };
 
-f=severityrank(sev:str):i32{
+f=severityrank(givensev:str):i32{
+  let sev=str.tolower(givensev);
   if(str.eq(sev;"critical")){ <4 as i32 }el{
     if(str.eq(sev;"high")){ <3 as i32 }el{
       if(str.eq(sev;"medium")){ <2 as i32 }el{
