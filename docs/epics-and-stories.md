@@ -187,7 +187,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | F5.9 | S | **Done** — 2026-09-24 | **The intent classifier's LLM path never used the model's answer** — Found 2026-09-24 (T2.5). `classifyfromobj` read Ollama's `message` with `json.str`, but `/api/chat` returns `message` as an **object**; `json.str` only accepts a quoted string, so the read failed and every reply fell back to the keyword result. Measured against the real module: a well-formed body whose content is `code_review` came back `chat`/`keyword` (**2 assertions red before the fix**). Invisible because the fallback is the keyword answer, so nothing looked wrong. Fixed with `json.getval`. Two more found while there: std.json turns an escaped `\n` into a bare `n` (T-44, filed upstream), so a reply ending in a newline was not recognised (**red with trim + equality**; now matched by prefix, safe because none of the eight names is a prefix of another); and a reply naming no task was labelled an `llm` classification of `chat`, a model opinion that was never given. It now falls back to the keyword result. `tests/unit/router/test_intent.tk` asserts all four. Not covered: a live Ollama round trip. |
 | F5.10 | S | **Done** — 2026-09-24 | **The intent classifier sent every multi-line prompt to Ollama as invalid JSON** — Found 2026-09-24 fixing PL1.12. `classifybody` escaped the prompt with std.json's `json.enc`, which escapes only quote and backslash (T-45), so a newline went into the request raw; Go's JSON reader rejects that, and `classify` fell back to the keyword result for every multi-line prompt. Now `shared.jsonobj.escape`. `tests/unit/router/test_intent.tk` asserts the body has no raw newline; **red against the old code** (the companion `json.dec` assertion stayed green because std.json's reader accepts a raw newline, and the test says so). |
 | F5.11 | M |  | **The Anthropic and OpenAI dispatch uses a call measured to send nothing** — Found 2026-09-25 (T-48). `toanthropic` calls `http.postheaders(http.client(url);"";bytes;headers)`, and `core.providers.anthropic` and `openai` use the same function. Measured over http against a local recorder, that exact shape sends NOTHING and takes the error arm, while `http.posturl` arrives. **Not measured over https,** because that needs a real provider key and would spend money; that is the user's call. It is consistent with what was seen on 2026-09-24: a cloud-routed probe under the developer's real HOME answered "provider request failed". If https behaves like http, no request has ever reached a cloud provider through loke. To close: verify against a TLS recorder, or with one real call the user authorises, then move to a client call that is measured to send, with headers. `http.posturl` carries no headers, so it cannot send an API key. |
-| F5.12 | S |  | **The router picks a local model that is not installed** — Found 2026-09-25 by the end-to-end test. With `llama3:latest` the only model Ollama listed, the router chose `qwen2.5:7b` ("local-only (sensitivity: CONFIDENTIAL…) => qwen2.5:7b"). The fake model answers anything; a real Ollama would answer 404, and the request would fail as a provider error. The route should be chosen from `ollama.listmodels`, which now answers honestly when Ollama is down (F2.10). |
+| F5.12 | S | **Partial** — refuses clearly now; the router still chooses from a catalogue, not from what is installed | **The router picks a local model that is not installed** — Found 2026-09-25 by the end-to-end test. With `llama3:latest` the only model Ollama listed, the router chose `qwen2.5:7b` ("local-only (sensitivity: CONFIDENTIAL…) => qwen2.5:7b"). The fake model answers anything; a real Ollama would answer 404, and the request would fail as a provider error. The route should be chosen from `ollama.listmodels`, which now answers honestly when Ollama is down (F2.10). **Partial 2026-09-25.** The local dispatch (`toollama`) now checks `ollama.listmodels` before sending. If the routed model is not installed, it refuses with 503 `model_not_installed`, names the installed models, and audits the refusal. It does not substitute another model, because a routing decision taken outside the router is what GA1.7 removed. **Evidence:** 3 assertions on `isinstalled` in `test_pipeline_handler.tk`, and a second phase of `scripts/smoke_e2e.sh` that lists only `llama3:latest`. With the check disabled, that phase FAILED: the request was sent for `qwen2.5:7b`. **Remaining:** the selector should choose among installed models, so this refusal becomes rare rather than the default for anyone without `qwen2.5:7b`. |
 
 ## Epic F6: Storage & Audit Layer
 
@@ -1070,7 +1070,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 78 | 58 | 11 | 5 | — | — | — | — | 4 |
+| FOUNDATION LAYER | 10 | 78 | 58 | 12 | 5 | — | — | — | — | 3 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
@@ -1086,7 +1086,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 31 | 6 | 4 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 36 | 23 | 2 | — | — | — | — | — | 11 |
 | VERIFICATION PROGRAMME | 14 | 126 | 82 | 13 | — | 7 | 3 | — | — | 21 |
-| **Total** | **88** | **707** | **540** | **50** | **9** | **31** | **3** | **1** | — | **73** |
+| **Total** | **88** | **707** | **540** | **51** | **9** | **31** | **3** | **1** | — | **72** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1097,7 +1097,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | F3 | 1 | 11 | 10 | — | — | — | — | — | — | 1 |
 | F3b | 1 | 11 | — | 11 | — | — | — | — | — | — |
 | F4 | 1 | 5 | 5 | — | — | — | — | — | — | — |
-| F5 | 1 | 12 | 9 | — | 1 | — | — | — | — | 2 |
+| F5 | 1 | 12 | 9 | 1 | 1 | — | — | — | — | 1 |
 | F6 | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | F7 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F8 | 1 | 4 | — | — | 4 | — | — | — | — | — |
@@ -1180,7 +1180,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 28 | 22 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 7 | 1 | — | — | — | — | — | 2 |
-| **Total** | **88** | **707** | **540** | **50** | **9** | **31** | **3** | **1** | — | **73** |
+| **Total** | **88** | **707** | **540** | **51** | **9** | **31** | **3** | **1** | — | **72** |
 
 Rows parsed: **707**, across **88** epics and **16** level-1 headings.
 

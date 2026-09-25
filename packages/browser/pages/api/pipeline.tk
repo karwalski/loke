@@ -23,6 +23,7 @@ i=bt:core.optimiser.budgettypes;
 i=inf:core.models.infer;
 i=pt:core.providers.types;
 i=kc:core.storage.keychain;
+i=ollama:core.models.ollama;
 i=org:shared.origin;
 i=mc:core.metrics.collector;
 
@@ -648,8 +649,40 @@ f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;s
    old body took that "" straight through json.str and answered 200 with an empty response,
    which reads to the user as the model having nothing to say. An empty body is now a 502,
    and it is audited like any other provider failure. *)
+(* F5.12. Whether `id` is one of the models Ollama reports as installed. Ollama names carry a
+   tag, and an untagged id means `:latest`. *)
+f=isinstalled(id:str;names:@str):bool{
+  let found=mut.false;
+  lp(let i=0;i<names.len;i=i+1){
+    let n=names.get(i);
+    if(str.eq(n;id) || str.eq(n;str.concat(id;":latest"))){ found=true }el{}
+  };
+  <found
+};
+
+f=installednames():@str{
+  let models=mt ollama.listmodels(ollama.new("http://127.0.0.1:11434")) {$ok:v v; $err:e @()};
+  let names=mut.@();
+  lp(let i=0;i<models.len;i=i+1){
+    let m:$ollamamodel=models.get(i);
+    names=names.push(m.name)
+  };
+  <names
+};
+
 f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
+  (* F5.12. The router chooses from a static catalogue, not from what is installed, so it
+     can route to a model Ollama does not have, and Ollama answers 404. This refuses with
+     the names the user can act on. It does not substitute another model: a second routing
+     decision taken here, out of the router's sight, is what GA1.7 removed. The routed model
+     not being installed is still the router's defect, and F5.12 stays open for it. *)
+  let installed=installednames();
+  if(installed.len>0 && !isinstalled(spec.id;installed)){
+    recordevent(store;run;"llm_request_refused";"ollama";spec.id;0;0;t.nowms()-startms;decision);
+    let msg="the router chose \(spec.id), which is not installed in Ollama. Installed: \(str.join(", ";installed))";
+    <http.res(503;"{\"ok\":false,\"error\":\(json.enc(msg)),\"model_not_installed\":true\(piifields)}")
+  }el{};
   let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
   let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
   if(str.len(raw)==0){

@@ -89,5 +89,21 @@ case "$resp" in
   *) echo "  FAIL the response did not restore the placeholder: $resp" >&2; fail=1 ;;
 esac
 
+# F5.12: when the routed model is not installed, loke must refuse and name what IS installed,
+# rather than send a request Ollama will reject. Restart the fake with a list that does
+# not contain the routed model.
+pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
+: > "$SEEN"
+FAKE_OLLAMA_MODELS="llama3:latest" python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
+OUT2=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"text\":\"summarise: contact $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+case "$OUT2" in
+  *model_not_installed*llama3:latest*|*llama3:latest*model_not_installed*)
+    echo "  ok   a routed model that is not installed is refused, naming what is installed" ;;
+  *) echo "  FAIL uninstalled routed model was not refused clearly: $(printf '%s' "$OUT2" | head -c 200)" >&2; fail=1 ;;
+esac
+if [ -s "$SEEN" ]; then echo "  FAIL a request was sent for a model that is not installed" >&2; fail=1; fi
+
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"
