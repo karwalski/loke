@@ -548,6 +548,11 @@ step_test() {
   if [[ -x ./scripts/smoke_e2e.sh ]]; then
     ./scripts/smoke_e2e.sh || return 1
   fi
+  # GA3: moke's chat page in headless Chrome against the whole stack. Skips, loudly, if
+  # node or Chrome is missing.
+  if [[ -x ./scripts/smoke_ui.sh ]]; then
+    ./scripts/smoke_ui.sh || return 1
+  fi
 }
 
 # --- Run -----------------------------------------------------------------
