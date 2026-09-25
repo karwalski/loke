@@ -245,10 +245,9 @@ the structure. Persisting it, and adding its fields to the audit record, is stor
 **Scorecard** (`core/governance/scorecard.tk`): Privacy %, compliance violations, risk tier breakdown, ownership coverage, open incidents. Trend charts (7d/30d/90d), drill-down.
 
 > **Every figure it produces is currently zero or empty.** Its inputs are the audit trail, which is never
-> written (above), and the metrics tables, which are stubbed — `core/audit/metrics.tk:37-88` returns
-> zero-filled structs from every function and `export()` returns `""`, while
-> `core/metrics/collector.tk:59,96` reads and writes a `metrics_raw` table that no migration creates and
-> that nothing calls `record` on. The compliance checks it surfaces are hardcoded: `core/governance/compliance.tk:42-56`
+> written (above), and the metrics tables. Those are no longer stubbed. `metrics_raw` has been
+> created since DA1.2, and `/api/pipeline` writes a row per dispatch since DA1.3. Since DA1.6,
+> `core/audit/metrics.tk` aggregates the table, but nothing on this page reads it yet (DA1.5). The compliance checks it surfaces are hardcoded: `core/governance/compliance.tk:42-56`
 > and `:82-90` assert `PASS` on the privacy and audit controls without querying the store — including
 > asserting that the audit trail is complete. Tracked as **DA1.2**, **DA1.3**, **DA1.6**, **GA5.7**;
 > recorded as E9, E12, F1 and F2 in [claims.md](claims.md).
@@ -325,11 +324,10 @@ Port 11430. Intended to be localhost-only; measured 2026-09-24, it listens on ev
 
 **Security**: CSP headers, HSTS, rate limiting, no stack traces leaked. CORS restricted to localhost origins.
 
-> **`/api/savings` returns zeros.** Every function in `core/audit/metrics.tk:37-88` returns a zero-filled
-> struct or an empty array and `export()` returns `""`. `core/metrics/collector.tk:59,96` reads and writes
-> a `metrics_raw` table that no migration creates, and nothing calls `collector.record`. Replacing the
-> stubbed module is **DA1.6**; creating the table and wiring the collector are **DA1.2** and **DA1.3**.
-> Recorded as F1 and F2 in [claims.md](claims.md).
+> **`/api/savings` returns zeros.** The endpoint returns a fixed string and reads nothing. The data now
+> exists: `/api/pipeline` writes a `metrics_raw` row per dispatch and per cache hit (DA1.3), and
+> `core/audit/metrics.tk` aggregates it (DA1.6). The endpoint does not call either. Wiring it is
+> **DA1.5**. Recorded as F1 and F2 in [claims.md](claims.md).
 >
 > **`/api/pipeline` does not use the core pipeline** — see the Pipeline Orchestrator note above (A13).
 

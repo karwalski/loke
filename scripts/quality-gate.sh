@@ -258,6 +258,12 @@ step_checks() {
            failed=1; }
   fi
 
+  if [[ -f ./scripts/find_nowunix_as_int.py ]]; then
+    echo "  no str.nowunix() used as a number"
+    python3 ./scripts/find_nowunix_as_int.py --check packages tests >/dev/null \
+      || { python3 ./scripts/find_nowunix_as_int.py packages tests >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/find_wait_before_read.py ]]; then
     echo "  no child process is waited for before its output is read"
     python3 ./scripts/find_wait_before_read.py --check packages >/dev/null \

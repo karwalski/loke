@@ -39,17 +39,89 @@ t=$logstage{
   $restore:i64
 };
 
+(* DA1.4 - the typed disclosure fields of docs/specifications/disclosure-accounting.md §6.2 S1.
+
+   `detail` is prose for a person, and nothing could compute on it. These fields sit beside it
+   and are emitted by `tojson` as JSON numbers, booleans and null, never as strings (S3).
+
+   toke has no null, so "not known at this stage" is a sentinel that `tojson` renders as
+   `null` (S5): -1 for a count, "" for a string, and -1 for the one tri-state flag, where 0 is
+   false and 1 is true. The distinction matters. A zero means "measured as none" and a null
+   means "not measured", and if the two were conflated a missing measurement would read as a
+   favourable one. `nodisclosure()` is all-null, and every plain `append` uses it. A stage sets
+   only what it actually measured. *)
+t=$disclosure{
+  custody:str;
+  bytesbody:i64;
+  bytesschemaprofile:i64;
+  tokensestimated:i64;
+  tokeniserid:str;
+  fieldsdisclosedcount:i64;
+  entitiestotal:i64;
+  realvaluesincluded:i64;
+  resultsreturnedcells:i64;
+  artifactverdict:str
+};
+
 t=$logentry{
   stage:str;
   status:str;
   detail:str;
   durationms:i32;
-  ts:i64
+  ts:i64;
+  disclosure:$disclosure
 };
 
 t=$sessionlog{
   entries:@$logentry;
   requestid:str
+};
+
+f=nodisclosure():$disclosure{
+  <$disclosure{
+    custody:"";
+    bytesbody:0-1;
+    bytesschemaprofile:0-1;
+    tokensestimated:0-1;
+    tokeniserid:"";
+    fieldsdisclosedcount:0-1;
+    entitiestotal:0-1;
+    realvaluesincluded:0-1;
+    resultsreturnedcells:0-1;
+    artifactverdict:""
+  }
+};
+
+(* Two helpers for the fields a stage in this tree can measure today. The others need
+   no-custody (NC1) or disclosure_log (DA1.7) to exist. *)
+f=withfieldcount(d:$disclosure;n:i64):$disclosure{
+  <$disclosure{
+    custody:d.custody;
+    bytesbody:d.bytesbody;
+    bytesschemaprofile:d.bytesschemaprofile;
+    tokensestimated:d.tokensestimated;
+    tokeniserid:d.tokeniserid;
+    fieldsdisclosedcount:n;
+    entitiestotal:d.entitiestotal;
+    realvaluesincluded:d.realvaluesincluded;
+    resultsreturnedcells:d.resultsreturnedcells;
+    artifactverdict:d.artifactverdict
+  }
+};
+
+f=withentities(d:$disclosure;n:i64):$disclosure{
+  <$disclosure{
+    custody:d.custody;
+    bytesbody:d.bytesbody;
+    bytesschemaprofile:d.bytesschemaprofile;
+    tokensestimated:d.tokensestimated;
+    tokeniserid:d.tokeniserid;
+    fieldsdisclosedcount:d.fieldsdisclosedcount;
+    entitiestotal:n;
+    realvaluesincluded:d.realvaluesincluded;
+    resultsreturnedcells:d.resultsreturnedcells;
+    artifactverdict:d.artifactverdict
+  }
 };
 
 f=newsession(requestid:str):$sessionlog{
@@ -60,12 +132,17 @@ f=newsession(requestid:str):$sessionlog{
 };
 
 f=append(log:$sessionlog;stage:str;status:str;detail:str;durationms:i32):$sessionlog{
+  <appendwith(log;stage;status;detail;durationms;nodisclosure())
+};
+
+f=appendwith(log:$sessionlog;stage:str;status:str;detail:str;durationms:i32;d:$disclosure):$sessionlog{
   let entry=$logentry{
     stage:stage;
     status:status;
     detail:detail;
     durationms:durationms;
-    ts:time.nowms()
+    ts:time.nowms();
+    disclosure:d
   };
   <$sessionlog{
     entries:log.entries.push(entry);
@@ -121,11 +198,48 @@ f=formatlog(log:$sessionlog):str{
   <str.join("\n";lines)
 };
 
+f=jsonint(n:i64):str{
+  if(n<0){ <"null" }el{};
+  let s:str=str.fromint(n);
+  <s
+};
+
+f=jsonstrornull(s:str):str{
+  if(str.len(s)==0){ <"null" }el{};
+  <jx.escape(s)
+};
+
+f=jsontri(n:i64):str{
+  if(n<0){ <"null" }el{};
+  if(n==0){ <"false" }el{};
+  <"true"
+};
+
+f=disclosurejson(d:$disclosure):str{
+  let parts=@(
+    str.concat("\"custody\":";jsonstrornull(d.custody));
+    str.concat("\"bytes_body\":";jsonint(d.bytesbody));
+    str.concat("\"bytes_schema_profile\":";jsonint(d.bytesschemaprofile));
+    str.concat("\"tokens_estimated\":";jsonint(d.tokensestimated));
+    str.concat("\"tokeniser_id\":";jsonstrornull(d.tokeniserid));
+    str.concat("\"fields_disclosed_count\":";jsonint(d.fieldsdisclosedcount));
+    str.concat("\"entities_total\":";jsonint(d.entitiestotal));
+    str.concat("\"real_values_included\":";jsontri(d.realvaluesincluded));
+    str.concat("\"results_returned_cells\":";jsonint(d.resultsreturnedcells));
+    str.concat("\"artifact_verdict\":";jsonstrornull(d.artifactverdict))
+  );
+  <str.concat("{";str.concat(str.join(",";parts);"}"))
+};
+
+(* shared.jsonobj.escape returns the string WITH its surrounding quotes. This function used to
+   wrap it in a second pair, so every stage, status and detail went on the wire as
+   `"stage":""schema_extract""`: invalid JSON in every pipeline response that carried a
+   console log. Found by DA1.4's test and filed as DA1.8. *)
 f=tojson(log:$sessionlog):str{
   let parts=mut.@();
   lp(let ii=0;ii<log.entries.len;ii=ii+1){
     let e:$logentry=log.entries.get(ii);
-    let obj="{\"stage\":\"\(jx.escape(e.stage))\",\"status\":\"\(jx.escape(e.status))\",\"detail\":\"\(jx.escape(e.detail))\",\"duration_ms\":\(str.fromint(e.durationms as i64)),\"ts\":\(str.fromint(e.ts))}";
+    let obj="{\"stage\":\(jx.escape(e.stage)),\"status\":\(jx.escape(e.status)),\"detail\":\(jx.escape(e.detail)),\"duration_ms\":\(str.fromint(e.durationms as i64)),\"ts\":\(str.fromint(e.ts)),\"disclosure\":\(disclosurejson(e.disclosure))}";
     parts=parts.push(obj)
   };
   <"[\(str.join(",";parts))]"

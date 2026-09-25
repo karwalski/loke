@@ -24,6 +24,7 @@ i=inf:core.models.infer;
 i=pt:core.providers.types;
 i=kc:core.storage.keychain;
 i=org:shared.origin;
+i=mc:core.metrics.collector;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -242,6 +243,58 @@ f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;
 };
 
 
+(* DA1.3 - one metrics_raw row per dispatch, written by core.metrics.collector.
+
+   Called from exactly two places, `completed` and `providerfailed`, which are the two ends a
+   request handed to a provider can reach. A cache hit, a budget stop, a policy deny and a
+   refused route are NOT dispatches - nothing left the process - so they write no row, as the
+   disclosure-accounting spec requires (§2.1, C7). A failed dispatch writes one, because the
+   bytes left whether or not an answer came back.
+
+   What the row carries is what this endpoint actually knows: the request id, the model and
+   provider the router chose, whether that provider is local, the provider-reported token
+   counts (0 on a failure), the router's cost for them, and the entity count - every entity
+   the pipeline detected was replaced by a placeholder before dispatch, so found and blocked
+   are the same number here. tokens_saved and cost_saved are 0 because nothing on this path
+   optimises the prompt; writing an estimate there would publish a saving nobody measured.
+   It never carries a value: no prompt, no response, no entity. *)
+f=metricevent(run:$pipelinerun;provider:str;modelid:str;routedlocal:bool;cachehit:bool;tin:i64;tout:i64;cost:f64):$metricevent{
+  let ts:str=str.fromint(t.nowi64());
+  let n=run.totalentities as i64;
+  <$metricevent{
+    requestid:run.requestid;
+    timestamp:ts;
+    tokensbefore:tin;
+    tokensafter:tin;
+    tokenssaved:0;
+    tokensout:tout;
+    costbeforeusd:cost;
+    costafterusd:cost;
+    costsavedusd:0.0;
+    piientitiesfound:n;
+    piientitiesblocked:n;
+    routedlocal:routedlocal;
+    cachehit:cachehit;
+    modelid:modelid;
+    providerid:provider;
+    savingsbystage:""
+  }
+};
+
+f=islocalprovider(provider:str):bool{
+  if(str.eq(provider;"ollama")){ <true }el{};
+  <str.eq(provider;"local")
+};
+
+f=recordmetric(run:$pipelinerun;provider:str;modelid:str;tin:i64;tout:i64;cost:f64):bool{
+  let ok=mc.insert(metricevent(run;provider;modelid;islocalprovider(provider);false;tin;tout;cost));
+  if(ok){}el{
+    log.warn("metrics row was not written for this dispatch";"api.pipeline";run.requestid)
+  };
+  <ok
+};
+
+
 (* GA1.2 — restoration. The user sees their own words back, not [PERSON_a3f1_1].
 
    The map is derived from the deduped entity list the pipeline already carries, via
@@ -257,8 +310,9 @@ f=restoretext(run:$pipelinerun;text:str):str{
 (* A failed provider call is audited too. An audit trail that records only successes
    describes a system that never has an outage, which is worse than no trail. *)
 f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
-  let elapsed=str.nowunix()-startms;
+  let elapsed=t.nowms()-startms;
   recordevent(store;run;"llm_request_failed";provider;modelid;0;0;elapsed;decision);
+  recordmetric(run;provider;modelid;0;0;0.0);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
 };
 
@@ -353,7 +407,7 @@ f=cachestore(run:$pipelinerun;prompt:str;response:str):bool{
    manager built fresh in a request handler and thrown away at the end of it is not a budget
    — every request would start from zero. A day change resets them. *)
 f=daynumber():i64{
-  <str.nowunix()/86400
+  <t.nowi64()/86400
 };
 
 (* GA1.5b — every budget read and write below takes the day as a PARAMETER. The
@@ -536,6 +590,12 @@ f=refusedbudget(reason:str;piifields:str):i64{
 
 f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
   log.info("pipeline: served from the semantic cache";"api.pipeline";run.requestid);
+  (* DA1.6 - a hit is not a dispatch and writes no disclosure record, but it IS a request the
+     savings ledger has to count, or the hit rate is 0% by construction. provider "cache",
+     no model, no tokens: nothing was sent and nothing was estimated. *)
+  if(mc.insert(metricevent(run;"cache";"";true;true;0;0;0.0))){}el{
+    log.warn("metrics row was not written for this cache hit";"api.pipeline";run.requestid)
+  };
   let restored=restoretext(run;hit.response);
   <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restored)),\"cached\":true,\"cache_age_seconds\":\(hit.ageseconds),\"audited\":false\(piifields)}")
 };
@@ -546,7 +606,7 @@ f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
 f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
   let provstr=providerlabel(spec.provider);
-  let elapsed=str.nowunix()-startms;
+  let elapsed=t.nowms()-startms;
   let res:$piidetectionresult=run.result;
 
   (* Stored BEFORE restoration, so the cache holds only anonymised text. *)
@@ -559,6 +619,7 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
   };
 
   let logged=recordevent(store;run;"llm_request";provstr;spec.id;tin;tout;elapsed;decision);
+  recordmetric(run;provstr;spec.id;tin;tout;requestcost(spec;tin;tout));
   if(logged){}el{
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
   };
@@ -609,13 +670,13 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piif
    the router's sight, is exactly what GA1.7 removed. *)
 f=unsupportedprovider(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
-  recordevent(store;run;"llm_request_refused";providerlabel(spec.provider);spec.id;0;0;str.nowunix()-startms;decision);
+  recordevent(store;run;"llm_request_refused";providerlabel(spec.provider);spec.id;0;0;t.nowms()-startms;decision);
   <refusedroute(str.concat(str.concat("this endpoint has no client for provider ";providerlabel(spec.provider));str.concat(" (model ";str.concat(spec.id;")")));piifields)
 };
 
 f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
-  recordevent(store;run;"llm_request_refused";"anthropic";spec.id;0;0;str.nowunix()-startms;decision);
+  recordevent(store;run;"llm_request_refused";"anthropic";spec.id;0;0;t.nowms()-startms;decision);
   <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
 };
 
@@ -666,7 +727,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
      diagnostic lands on the READ rather than on the binding. *)
   let bcheck:$budgetcheck=budget.check(budgetmanager(store);0 as u32;0.0);
   if(bcheck.allowed){}el{
-    recordevent(store;run;"quota_exceeded";"none";"none";0;0;str.nowunix()-startms;decision);
+    recordevent(store;run;"quota_exceeded";"none";"none";0;0;t.nowms()-startms;decision);
     <refusedbudget(bcheck.reason;piifields)
   };
 
@@ -679,7 +740,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
     run.requestid
   );
   if(rtr.isrouted(route)){}el{
-    recordevent(store;run;"llm_request_refused";"none";"none";0;0;str.nowunix()-startms;decision);
+    recordevent(store;run;"llm_request_refused";"none";"none";0;0;t.nowms()-startms;decision);
     <refusedroute(route.reason;piifields)
   };
 
@@ -689,7 +750,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
      line that would leak. Two comparisons are the right price for it. *)
   if(t.senseq(res.sensitivity;t.restricted())){
     if(rtr.isclouddecision(route)){
-      recordevent(store;run;"llm_request_refused";"none";"none";0;0;str.nowunix()-startms;decision);
+      recordevent(store;run;"llm_request_refused";"none";"none";0;0;t.nowms()-startms;decision);
       <refusedroute("RESTRICTED data must not be sent to a cloud provider";piifields)
     }el{}
   }el{};
@@ -712,7 +773,7 @@ f=killswitchengaged(store:i64):bool{
 f=post(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
-  let startms=str.nowunix();
+  let startms=t.nowms();
   let store=openstore();
   if(killswitchengaged(store)){
     <http.res(403;"{\"ok\":false,\"error\":\"kill switch engaged or unreadable\"}")
@@ -740,7 +801,7 @@ f=post(req:i64):i64{
     let decision=decide(run);
     if(isdeny(decision)){
       let why=policymessage(decision);
-      recordevent(store;run;"policy_deny";"none";"none";0;0;str.nowunix()-startms;decision);
+      recordevent(store;run;"policy_deny";"none";"none";0;0;t.nowms()-startms;decision);
       log.warn("pipeline denied by policy: \(why)";"api.pipeline";run.requestid);
       <http.res(403;"{\"ok\":false,\"error\":\(json.enc(why)),\"policy_denied\":true\(privacyfields(run))}")
     }el{};

@@ -1,0 +1,139 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testauditmetrics;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sh:shared.types;
+i=sdb:core.storage.db;
+i=mc:core.metrics.collector;
+i=am:core.audit.metrics;
+i=clk:shared.types;
+
+(* DA1.6 - core.audit.metrics reads metrics_raw.
+
+   Every function in the module used to return zeros or "", so every assertion below that
+   expects a non-zero value failed against it. Rows are written through the real collector,
+   with fixed timestamps, so the period arithmetic is checked as well as the sums. *)
+
+f=teststore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-audit-metrics");
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=resetstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-audit-metrics");
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <0
+};
+
+f=ev(rid:str;ts:i64;provider:str;local:bool;hit:bool;tin:i64;tout:i64;saved:i64;cost:f64;pii:i64):$metricevent{
+  let tss:str=str.fromint(ts);
+  <$metricevent{
+    requestid:rid;
+    timestamp:tss;
+    tokensbefore:tin+saved;
+    tokensafter:tin;
+    tokenssaved:saved;
+    tokensout:tout;
+    costbeforeusd:cost;
+    costafterusd:cost;
+    costsavedusd:0.0;
+    piientitiesfound:pii;
+    piientitiesblocked:pii;
+    routedlocal:local;
+    cachehit:hit;
+    modelid:"m";
+    providerid:provider;
+    savingsbystage:""
+  }
+};
+
+f=hundredths(x:f64):i64{
+  <((x*100.0)+0.5) as i64
+};
+
+f=main():i64{
+  resetstore();
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=teststore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let now=clk.nowi64();
+  (* Three rows inside the last day, one ten days old. *)
+  mc.insert(ev("r1";now-60;"anthropic";false;false;100;40;10;0.25;2));
+  mc.insert(ev("r2";now-120;"ollama";true;false;50;20;0;0.0;1));
+  mc.insert(ev("r3";now-180;"cache";true;true;0;0;0;0.0;0));
+  mc.insert(ev("r4";now-(10*86400);"anthropic";false;false;30;5;5;0.5;3));
+
+  (* periodstart *)
+  if(t.assert(am.periodstart("all";now)==0;"'all' starts at the epoch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(am.periodstart("7d";now)==now-604800;"'7d' starts seven days ago")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(am.periodstart("fortnight";now)<0;"an unknown period is -1, not silently 'all'")){pass=pass+1}el{fail=fail+1};
+
+  (* summary over everything *)
+  let all:$metricsummary=am.summaryfrom(0);
+  if(t.assert(all.totalrequests==4 as u64;"summary counts every row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(all.tokenssaved==15 as u64;"summary sums tokens_saved")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(all.entitiesredacted==6 as u64;"summary sums pii_blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hundredths(all.localratio)==5000;"two of four rows are local: 50%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hundredths(all.cachehitrate)==2500;"one of four rows is a cache hit: 25%")){pass=pass+1}el{fail=fail+1};
+
+  (* the period filter *)
+  let day:$metricsummary=am.summaryfrom(am.periodstart("24h";now));
+  if(t.assert(day.totalrequests==3 as u64;"'24h' excludes the ten-day-old row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(day.tokenssaved==10 as u64;"and its tokens")){pass=pass+1}el{fail=fail+1};
+
+  (* the result-returning wrapper, on a valid period (T-18: only the $ok arm is reliable) *)
+  let viawrapper=mt am.summary(store;"all") { $ok:s s.totalrequests as i64; $err:e 0-1 };
+  if(t.assert(viawrapper==4;"summary(store;period) reads the table, not a zero struct")){pass=pass+1}el{fail=fail+1};
+
+  (* per provider: cache hits are not a provider *)
+  let provs=am.byproviderfrom(0);
+  if(t.assert(provs.len==2;"two providers, and the cache is not one of them")){pass=pass+1}el{fail=fail+1};
+  if(provs.len==2){
+    let p0:$providermetric=provs.get(0);
+    if(t.asserteq(p0.provider;"anthropic";"providers are ordered by name")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(p0.requests==2 as u64;"anthropic has two requests")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(p0.tokensin==130 as u64;"tokens in are the tokens sent")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(p0.tokensout==45 as u64;"tokens out come from tokens_out")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(hundredths(p0.costusd)==75;"cost is summed: $0.75")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+5 };
+
+  (* series: one point per day with rows *)
+  let series=am.seriesfrom(0);
+  if(t.assert(series.len==2;"two days carry rows, so two points")){pass=pass+1}el{fail=fail+1};
+  if(series.len==2){
+    let s0:$tokensavingspoint=series.get(0);
+    if(t.assert(str.len(s0.date)==10;"a point's date is YYYY-MM-DD")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(s0.tokenssaved==5 as u64;"the older day carries its own saving")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+2 };
+
+  (* cache *)
+  let c:$cacheinfo=am.cachefrom(0);
+  if(t.assert(c.hits==1 as u64;"one cache hit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.misses==3 as u64;"three rows were not hits")){pass=pass+1}el{fail=fail+1};
+
+  (* export *)
+  let csv=am.exportfrom(0;"csv");
+  if(t.assert(str.startswith(csv;"request_id,timestamp,provider,model,tokens_in,tokens_out");"csv starts with its header")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(csv;"r4,");"csv carries the rows")){pass=pass+1}el{fail=fail+1};
+  let js=am.exportfrom(am.periodstart("24h";now);"json");
+  if(t.assert(str.startswith(js;"[{");"json is an array of objects")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;"\"provider\":\"ollama\"");"json carries provider names")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(js;"\"r4\"");"json respects the period")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!am.isexportformat("xml");"an unknown export format is refused")){pass=pass+1}el{fail=fail+1};
+
+  resetstore();
+  <fail
+};
