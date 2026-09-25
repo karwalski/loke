@@ -465,7 +465,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 | AG1.6 | L | **Done** | Agent-to-agent communication (output triggers another agent; governed structured data handoff; handoff logged; circular dependency detection; declarative pipeline YAML: A→B→C; pipeline-level cost/time/risk limits; user notification on pipeline completion) |
 | AG1.7 | M | **Done** | Agent latency tolerance and model tier selection (`latency_tolerance: instant\|patient\|background` field in agent YAML; `model_preference: largest-local` tells router to use most capable model achievable at declared tier even with heavy offloading; execution time budgeted with confirmation required for long-running agents; Background agents preferentially scheduled during low-usage windows; fallback to largest feasible model logged if preferred model unavailable) |
 | AG1.8 | L | **Done** | Overnight batch processing pipeline (`loke overnight start` enters low-power full-utilisation mode for Background queue; user-configurable overnight window (e.g. 11pm–7am); full RAM/GPU allocation to Background tier during window; morning digest of all agent activity — results, findings, errors, costs; `loke overnight status/plan`; laptop power management — requires AC; interactive session preempts Background jobs within 10 seconds) |
-| AG1.9 | S |  | **Agent lookup cannot say "not found", and duplicate ids are accepted** — Found 2026-09-24 closing T12.3. `core.agents.registry.find` returns an `$agentdef` through `i64!$lokeerr`, so its three callers — `scheduler.triggermanual`, `overnight` (job loop) and `agents.pipeline` (step loop) — take the first arm whatever happened (T-18): an unknown agent name is treated as found, and `find` itself loops `i>count` one past the end with `str.arrayget`. `get(reg;id)` (empty id when absent) and `has` now exist and are tested; move the three callers onto them. Separately, `register` accepts a second agent with an id already registered, and its `$err` arms (empty name, empty prompt) are unobservable for the same reason — return the registry unchanged plus a predicate, as `enable`/`disable` do. |
+| AG1.9 | S | **Done** — 2026-09-25 | **Agent lookup cannot say "not found", and duplicate ids are accepted** — Found 2026-09-24 closing T12.3. `core.agents.registry.find` returns an `$agentdef` through `i64!$lokeerr`, so its three callers — `scheduler.triggermanual`, `overnight` (job loop) and `agents.pipeline` (step loop) — take the first arm whatever happened (T-18): an unknown agent name is treated as found, and `find` itself loops `i>count` one past the end with `str.arrayget`. `get(reg;id)` (empty id when absent) and `has` now exist and are tested; move the three callers onto them. Separately, `register` accepts a second agent with an id already registered, and its `$err` arms (empty name, empty prompt) are unobservable for the same reason — return the registry unchanged plus a predicate, as `enable`/`disable` do. **Done 2026-09-25.** All three callers now ask `reg.has` first. `agents.pipeline` and `overnight` use it for the step and job check, and `scheduler.triggermanual` refuses an unknown id before it can run anything. `overnight.runbatch` and `pipeline.runpipeline` declared the registry as `i64`, a parameter that shadowed the module alias; both now take `$agentregistry`. Neither has a caller. `register` refuses a duplicate id, an empty name and an empty prompt by returning the registry UNCHANGED, which callers can observe, and logs why; two of its old error arms were not even wrapped in `$err`. Found on the way: `runpipeline` had never been called, and its first call died with RT005 nil dereference, because it read steps through the type-erasing `t.arrayget` (F10.22). It now uses a typed `.get`. **Evidence:** `tests/unit/agents/test_registry.tk` asserts that a duplicate is refused with the original untouched, that a nameless agent is refused, and that a two-step pipeline with an unknown agent is not ok, runs the known step and reports the unknown one as not found. With the old lookup and `register` restored, it failed. |
 
 ---
 
@@ -1075,7 +1075,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 11 | — | — | — | — | — | — | — |
 | VALUE AND GOVERNANCE METRICS | 1 | 6 | 6 | — | — | — | — | — | — | — |
-| AGENTIC AI | 1 | 9 | 8 | — | — | — | — | — | — | 1 |
+| AGENTIC AI | 1 | 9 | 9 | — | — | — | — | — | — | — |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | CROSS-CUTTING | 9 | 83 | 82 | — | — | — | — | — | — | 1 |
 | DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
@@ -1086,7 +1086,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 31 | 6 | 4 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 36 | 23 | 2 | — | — | — | — | — | 11 |
 | VERIFICATION PROGRAMME | 14 | 126 | 82 | 13 | — | 7 | 3 | — | — | 21 |
-| **Total** | **88** | **707** | **543** | **51** | **9** | **31** | **3** | **1** | — | **69** |
+| **Total** | **88** | **707** | **544** | **51** | **9** | **31** | **3** | **1** | — | **68** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1118,7 +1118,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | G2 | 1 | 3 | 3 | — | — | — | — | — | — | — |
 | G3 | 1 | 2 | 2 | — | — | — | — | — | — | — |
 | G4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
-| AG1 | 1 | 9 | 8 | — | — | — | — | — | — | 1 |
+| AG1 | 1 | 9 | 9 | — | — | — | — | — | — | — |
 | M1 | 1 | 15 | 15 | — | — | — | — | — | — | — |
 | M2 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | X1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
@@ -1180,7 +1180,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 28 | 22 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 7 | 1 | — | — | — | — | — | 2 |
-| **Total** | **88** | **707** | **543** | **51** | **9** | **31** | **3** | **1** | — | **69** |
+| **Total** | **88** | **707** | **544** | **51** | **9** | **31** | **3** | **1** | — | **68** |
 
 Rows parsed: **707**, across **88** epics and **16** level-1 headings.
 
