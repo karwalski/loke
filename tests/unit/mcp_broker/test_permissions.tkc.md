@@ -1,0 +1,1 @@
+Tests `mcpbroker.permissions` against the real module (X4b.9): TOML parsing of per-server allow and deny lists, rate limit and privacy flag, and the allow/deny decision with server-prefixed tool names. Depends on `std.test`, `std.str` and `mcpbroker.permissions`.
