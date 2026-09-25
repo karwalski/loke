@@ -7,7 +7,7 @@
 //   node scripts/lib/ui_check.mjs <url> <checks.json>
 //
 // checks.json is [{"name": "...", "js": "<expression, may be async, returning true>"}],
-// or {"reload": true} to reload the page between checks.
+// or {"reload": true} to reload the page, or {"key": "Tab"} to press a key for real.
 // Each check runs in the live page after load. Anything other than `true` fails it. The
 // DevTools protocol is driven directly over Node's built-in WebSocket, so there is no
 // dependency to install. It exists because the GA3 UI rows had been Done for months
@@ -69,6 +69,16 @@ try {
       for (let i = 0; i < 80 && !events.includes('Page.loadEventFired'); i++) await sleep(250);
       await sleep(500);
       console.log('  --   reloaded');
+      continue;
+    }
+    if (c.key) {
+      // A real key press, through the browser's input pipeline, so focus moves as it does
+      // for a keyboard user (programmatic .focus() does not trigger :focus-visible).
+      for (const type of ['keyDown', 'keyUp']) {
+        await send('Input.dispatchKeyEvent', { type, key: c.key, code: c.key,
+          windowsVirtualKeyCode: c.key === 'Tab' ? 9 : 0 });
+      }
+      await sleep(100);
       continue;
     }
     const r = await send('Runtime.evaluate', {
