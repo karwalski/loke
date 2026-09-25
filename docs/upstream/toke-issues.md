@@ -1742,6 +1742,8 @@ declare these functions with the type they return.
 
 ## T-47 — `json.str` unescapes by dropping the backslash, so `\n` reads back as the letter `n`
 
+**The same defect as T-44**, which a parallel branch filed the same day. Kept, because the measurements below go further than T-44's. Treat the two as one upstream ask.
+
 **Severity: data corruption on a round trip, silently.**
 
 Measured 2026-09-24 at `fedd48d` (LS1.1k). `json_str` in `src/stdlib/json.c` copies a string
