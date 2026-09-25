@@ -323,6 +323,15 @@ step_checks() {
                 "from it would be wrong" >&2; failed=1; }
   fi
 
+  # T15.8: the browser test runner for the nine MK9 JS utilities, run in headless Chrome.
+  # 106 assertions. It existed and nothing ran it.
+  if [[ -f packages/moke/static/js/tests/test-runner.html ]] && command -v node >/dev/null \
+     && [[ -x "${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}" ]]; then
+    echo "  MK9 JS utilities pass in a browser"
+    node scripts/lib/ui_check.mjs "file://$PWD/packages/moke/static/js/tests/test-runner.html" \
+      tests/ui/mk9_js_runner.json >/dev/null || { echo "  MK9 JS utility tests FAILED" >&2; failed=1; }
+  fi
+
   if [[ -f packages/moke/static/js/tests/test-moke-provenance.js ]] && command -v node >/dev/null; then
     echo "  card provenance vocabulary"
     node packages/moke/static/js/tests/test-moke-provenance.js >/dev/null \
