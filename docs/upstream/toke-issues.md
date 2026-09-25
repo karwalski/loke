@@ -1449,6 +1449,14 @@ crashing, and it silently truncates every loop written against it.
 so. A stdlib of 116 functions where 77 accept anything, and where six of those are aliases for
 a differently-typed function, cannot be used safely from source.
 
+**It is not only `std.str`.** `std.db` declares its row accessors (`db.rowstr`, `db.rowi64`)
+and `std.json` most of its helpers (`json.parsearray`, `json.getval`, `json.getstr`, ...) the
+same way. So a JSON value handed to a row accessor type-checks: `core.memory.export.importjson`
+read every element of an imported file with `db.rowstr(item;...)`, got nothing back for any
+field, and crashed (LS1.1k). It is the mirror of LS1.1i, a row read through a JSON accessor.
+Every call-site check is defeated by the signature, which is the root cause T-23 and T-24
+share with this one.
+
 **A correction to an assumption we carried for a while, in case it saves someone the same
 trip.** `arr.len()` is **not** a defect: `arr.len()` and `arr.len` emit the identical
 `getelementptr i64, i64* %p, i32 -1`, and the compiler labels it `; .len()`. Only
@@ -1681,6 +1689,8 @@ return a string are therefore formatted as integers, and the integer is the poin
 binding inherits the declared type, so `let s=str.fromi64(5); "\(s)"` fails the same way.
 `let s:str=str.fromi64(5)` retypes the binding and prints `5`. `str.concat` takes its
 arguments as strings and is also correct.
+**But see T-46:** the annotated binding is then dropped from any array literal it is
+written into, so it is not a safe workaround. Use `str.fromint` or `str.concat`.
 
 The affected set cannot be read off the interface. `tolower`, `toupper` and `substr` sit in
 the same block with the same declared return, and interpolate correctly. I probed each
@@ -1753,6 +1763,61 @@ with no diagnostic, and the row's label, value and detail come back as each othe
 
 **Suggested fix:** report an undeclared type name in a struct literal (E3011 or E4033), and
 check a literal's field names against the declared type it is assigned to.
+
+## T-46 — an annotated `let s:str=` binding of a T-41 function, used as an array element, is compiled as a spread
+
+**Severity: a value silently disappears from an array; for some functions, SIGBUS.**
+
+Measured 2026-09-24 at `fedd48d` (LS1.1s), against a scratch `(k TEXT, v TEXT)` table:
+
+    let g:str=str.fromi64(12345);
+    db.exec("INSERT INTO kv VALUES (?,?)";@("g";g))       -> k='g', v=NULL
+    db.exec("INSERT INTO kv VALUES (?,?)";@(g;"first"))   -> k='first', v=NULL
+    let u=str.fromi64(12345);   @("u";u)                  -> v='12345'
+    @("d";str.fromi64(12345))                             -> v='12345'
+    let h:str=str.fromint(12345);   @("h";h)              -> v='12345'
+    let r:str=str.randhex(4);   @("r";r)                  -> SIGBUS
+
+The IR shows why. For `@("g";g)` toke emits its **spread-array** path with `g` as the base:
+it loads a length from the word before `g`'s data, allocates `len + 1`, copies `len` words
+from `g` and stores `"g"` after them. For a `fromi64` string that length reads 0, so the
+element vanishes and the literal has one element. For `randhex` it reads garbage. Position
+does not matter, and `str.len(g)`, `str.concat` and interpolation of `g` are all correct.
+Seen: `trimws` (dropped), `randhex` (crash), `fromi64` (dropped); `tolower` and `concat` are
+not affected, which is the T-41 split again. A plain rebinding, `let e2=g`, inherits it.
+
+The annotation is **T-41's recommended workaround**, which is what makes this worth an
+entry: fixing the interpolation moves the defect into the next array literal. In loke it
+made `memory_scores`' INSERT bind NULL into a NOT NULL column and fail (M1.7a, where it was
+first misread as position-dependent). The form that is correct in both places is a function
+declared to return `str`: `str.fromint`, or `str.concat("";...)`.
+
+**Guarded** by the array-element check in `scripts/find_interp_abi_str.py`. The ask is T-36's:
+declare these functions with the type they return.
+
+## T-47 — `json.str` unescapes by dropping the backslash, so `\n` reads back as the letter `n`
+
+**The same defect as T-44**, which a parallel branch filed the same day. Kept, because the measurements below go further than T-44's. Treat the two as one upstream ask.
+
+**Severity: data corruption on a round trip, silently.**
+
+Measured 2026-09-24 at `fedd48d` (LS1.1k). `json_str` in `src/stdlib/json.c` copies a string
+value with a "basic unescape":
+
+```c
+if (*p == '\\') { p++; *w++ = *p++; }
+```
+
+so `\"` and `\\` come back right, and `\n`, `\t`, `\r`, `\b`, `\f` and `\uXXXX` come back
+as the letter after the backslash. `{"c":"he said \"hi\"\nthen"}` reads as
+`he said "hi"nthen`. `json.getstr`, `json.getstring` and `json.get` all route to it, and
+`json_keys` has the same loop. The streaming parser in the same file has a correct unescape
+(`case 'n': *wp++ = '\n'`) that this path does not use.
+
+In loke it meant a memory export, which escapes newlines correctly, could not be imported
+without every multi-line memory collapsing onto one line. **Worked around** in
+`shared.jsonobj.strvalue`, which takes the raw value with `json.getval` and decodes it.
+**Ask:** use the streaming parser's unescape in `json_str`.
 
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 

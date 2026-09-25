@@ -1,0 +1,109 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.decaycreatedat;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=db:std.db;
+i=std:std;
+i=sdb:core.storage.db;
+i=dec:core.memory.decay;
+i=ty:shared.types;
+
+(* M1.7c — the decay sweep ages a row by memory_scores.created_at, and that column holds two
+   representations: epoch seconds (what storedrawer binds since M1.7a) and the column default,
+   datetime('now') TEXT (what every other writer, including the JSON import, leaves).
+
+   The sweep read the column with db.rowi64, which is strtoll underneath, so the TEXT
+   "2026-09-24 10:00:00" read as 2026 — 1970 plus about half an hour — and a memory written a
+   second ago was aged 56 years. The default config clamps that at minscore, above prunebelow,
+   so nothing was deleted by default; but under any policy with prunebelow at or above
+   minscore — the config below — every such row was deleted on the first sweep.
+
+   Every outcome is read back from the database rather than from sweep's return. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-decay-created-at")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=exec(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=present(id:str):bool{
+  <sdb.countquery("SELECT id FROM memory_scores WHERE id=?";@(id))==1
+};
+
+(* A policy under which a maximally aged row IS deleted: prunebelow (0.5) above minscore
+   (0.1). A fresh row decays to about 1.0 and survives; a row 400 days old — thirteen
+   half-lives — floors at 0.1 and is pruned. *)
+f=strictconfig():$decayconfig{
+  <$decayconfig{
+    halflifedays:30.0;
+    minscore:0.1;
+    prunebelow:0.5;
+    sweepintervalhours:24
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the store opened on a fresh file and its migrations ran")){pass=pass+1}el{fail=fail+1};
+
+  let now=ty.nowi64();
+  let fresh:str=str.fromint(now);
+  let old:str=str.fromint(now - 400*86400);
+
+  (* The column default: datetime('now') TEXT. This is what the import path leaves. *)
+  let a=exec("INSERT INTO memory_scores (id,score,tags,pii_flagged) VALUES ('dt-fresh',1.0,'',0)";@());
+  let b=exec("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES ('dt-old',1.0,'',0,datetime('now','-400 days'))";@());
+  (* Epoch seconds, as storedrawer writes it. *)
+  let c=exec("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES ('ep-fresh',1.0,'',0,?)";@(fresh));
+  let d=exec("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES ('ep-old',1.0,'',0,?)";@(old));
+  (* A small integer: what a datetime TEXT reads as through strtoll. Not a plausible epoch. *)
+  let e=exec("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES ('yr-only',1.0,'',0,'2026')";@());
+  (* Neither representation. Its age is unknown, so it must not be swept. *)
+  let g=exec("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES ('garbage',1.0,'',0,'now()')";@());
+  if(t.assert(a;"seeded dt-fresh")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(b;"seeded dt-old")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c;"seeded ep-fresh")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(d;"seeded ep-old")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(e;"seeded yr-only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(g;"seeded garbage")){pass=pass+1}el{fail=fail+1};
+
+  dec.sweep(0;strictconfig();now);
+
+  (* ── The defect ──────────────────────────────────────────────────────────── *)
+  if(t.assert(present("dt-fresh");"a memory whose created_at is datetime TEXT from a second ago survives the sweep — it is not read as the year 2026 (M1.7c)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!present("dt-old");"a datetime TEXT 400 days old IS aged and pruned, so the text is parsed rather than skipped")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Epoch seconds still work ───────────────────────────────────────────── *)
+  if(t.assert(present("ep-fresh");"a fresh epoch-seconds row survives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!present("ep-old");"and a 400-day-old one is pruned")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An implausible age authorises nothing ──────────────────────────────── *)
+  if(t.assert(present("yr-only");"a created_at of 2026 is below any plausible epoch and is skipped, not swept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(present("garbage");"and an unparseable one is skipped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dec.agereadable(2026;now);"agereadable rejects a value below the epoch floor")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dec.agereadable(now - 86400;now);"and accepts yesterday")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

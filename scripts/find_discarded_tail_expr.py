@@ -37,7 +37,9 @@ Deliberately NOT flagged:
     `find_discarded_tail_match.py`'s job and flagging it twice is noise.
   - A function declared `:void` or `:i64` used as a procedure whose result no caller reads.
     That last one cannot be distinguished from a defect by looking at the definition, so
-    the check reports it and `scripts/known-defects.txt` carries the deliberate ones.
+    the check reports it, and the fix is `<0` (toke's convention for a procedure, W1020)
+    or the honest return type. The known-defects allowlist this used to read was emptied
+    and removed by LS1.1m: one of its "no live caller" entries was a live route.
 
     python3 scripts/find_discarded_tail_expr.py --check packages shared
     python3 scripts/find_discarded_tail_expr.py packages src tests
@@ -169,14 +171,6 @@ def main() -> int:
                     help="exit 1 if any site is found (for the gate)")
     args = ap.parse_args()
 
-    allow = set()
-    kd = REPO / "scripts" / "known-defects.txt"
-    if kd.exists():
-        for line in kd.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                allow.add(line.split()[0])
-
     total = 0
     for root in args.roots:
         base = REPO / root
@@ -187,8 +181,6 @@ def main() -> int:
                 continue
             rel = str(f.relative_to(REPO))
             for ln, decl, tail, ret in scan(f):
-                if rel in allow:
-                    continue
                 print(f"  {rel}:{ln}  {decl}")
                 print(f"      tail is a bare expression, so the `{ret}` is never returned: {tail}")
                 total += 1
@@ -197,8 +189,7 @@ def main() -> int:
         print("find_discarded_tail_expr: OK — no function ends in a discarded expression.")
         return 0
     print(f"\n{total} function(s) whose result is discarded. Add `<` before the tail "
-          f"expression, or list the file in scripts/known-defects.txt with a story ID if "
-          f"the value genuinely is not wanted.", file=sys.stderr)
+          f"expression; for a procedure whose value nobody wants, end it `<0`.", file=sys.stderr)
     return 1 if args.check else 0
 
 

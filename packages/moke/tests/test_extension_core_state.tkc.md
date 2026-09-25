@@ -1,0 +1,1 @@
+MK21.15 — the moke registry types (mokeruleregistry, mokepipelineregistry, mokeproviderstore) no longer collide with core's, so $corestate's fields carry their real types in a module that imports both sides.

@@ -56,3 +56,5 @@ a string value, an absent key, and an object nested one level deeper than the on
   `providers` does not, but an audit reader might.
 
 Every `mt` in this module writes `$ok` first, because arms bind by position (**T-31**).
+
+`strvalue`, `numtext` and `rawvalue` read a field of an object by its raw JSON text (`json.getval`). `strvalue` decodes the string itself, via `unescape`, because `json.str` drops the backslash of `\n`, `\t` and `\r` and keeps the letter (**T-47**); `numtext` returns a number as its JSON text, bypassing the numeric accessors that report a zero as an error (**T-33**). LS1.1k.

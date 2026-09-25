@@ -185,6 +185,59 @@ f=escape(s:str):str{
   <str.concat("\"";str.concat(tb;"\""))
 };
 
+(* ── Decoding a string value, because std.json's accessor loses characters (T-47) ────
+   `json.str` unescapes by dropping each backslash and keeping the character after it, so
+   `\n` comes back as the letter `n`, `\t` as `t`, and a multi-line memory drawer exported by
+   `escape` above is imported as one line with stray letters in it. Measured at `fedd48d`
+   (LS1.1k): `"he said \"hi\"\nthen"` read back as `he said "hi"nthen`.
+
+   So the RAW value is taken with `json.getval`, which finds the key with std.json's own
+   top-level scanner (a key-shaped string inside another value cannot match), and decoded
+   here. `unescape` is the inverse of `escape`: an escaped backslash is parked on \x01 first,
+   so `\\n` stays a backslash followed by `n` rather than becoming a newline. \x01 cannot
+   occur raw inside a JSON string — control characters must be escaped — so parking on it is
+   exact. `\uXXXX` is left as written; `escape` never produces it. *)
+f=unescape(body:str):str{
+  <str.replace(unescapecontrols(str.replace(str.replace(body;"\\\\";"\x01");"\\\"";"\""));"\x01";"\\")
+};
+
+f=unescapecontrols(s:str):str{
+  <str.replace(str.replace(str.replace(str.replace(s;"\\n";"\n");"\\r";"\r");"\\t";"\t");"\\/";"/")
+};
+
+(* The raw JSON text of the value at `key`, or "" when the key is absent. *)
+f=rawvalue(o:$json;key:str):str{
+  if(json.has(o;key)==0){ <"" }el{};
+  <str.concat("";json.getval(o;key))
+};
+
+(* A string field, decoded. `fallback` when absent or not a string. *)
+f=strvalue(o:$json;key:str;fallback:str):str{
+  let raw=rawvalue(o;key);
+  let n=str.len(raw) as i64;
+  if(n<2){ <fallback }el{};
+  if(str.charat(raw;0)==34){
+    if(str.charat(raw;n-1)==34){
+      <unescape(sliceor(raw;1;n-1))
+    }el{}
+  }el{};
+  <fallback
+};
+
+(* A number field as its JSON text — "0.75", "1790000000" — which is what a SQL parameter
+   wants, and which does not go through std.json's numeric accessors: those report a JSON
+   zero as an error (T-33). `fallback` when absent or not a number. *)
+f=numtext(o:$json;key:str;fallback:str):str{
+  let raw=rawvalue(o;key);
+  if(str.len(raw)==0){ <fallback }el{};
+  let c=str.charat(raw;0);
+  if(c==45){ <raw }el{};
+  if(c>=48){
+    if(c<=57){ <raw }el{}
+  }el{};
+  <fallback
+};
+
 (* ── The raw text of ANY value at a key, not just an object ───────────────────────
    `nested` above brace-matches `{...}`, which is right for a `usage` block and wrong for a
    JSON-RPC `params`, which may be an object, an array, or null.
