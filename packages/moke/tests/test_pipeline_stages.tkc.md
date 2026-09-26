@@ -1,1 +1,0 @@
-Tests moke's pipeline stage tracking system. Verifies stage construction with name, label, and initial status, status transitions (pending, running, completed, failed), error message assignment on failure, and correct stage sequence through the full anonymise/route/compute/restore pipeline. Depends on `std.test` and `std.str`.

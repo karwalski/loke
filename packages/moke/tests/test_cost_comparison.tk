@@ -2,134 +2,44 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=packages.moke.tests.testcostcomparison;
+
 i=t:std.test;
 i=str:std.str;
+i=cc:moke.costcomparison;
 
-(* Local types for self-contained testing *)
-t=$costcomparison{
-  model:str;
-  inputtokens:i64;
-  outputtokens:i64;
-  cloudcostusd:f64;
-  localcostusd:f64;
-  savedusd:f64;
-  islocal:bool
-};
+(* X7.2 - what a request would have cost in the cloud, through the real moke.costcomparison.
+   The file used to declare its own cost type and arithmetic. Costs are read from compute's
+   struct fields, never from estimatecloudcost's bare f64 return, which T-20 corrupts across a
+   module boundary. *)
 
-t=$sessionsavings{
-  totalcloudcost:f64;
-  totallocalcost:f64;
-  totalsaved:f64;
-  requestcount:i64;
-  localrequestcount:i64
-};
-
-(* Pricing per million tokens: input/output *)
-f=cloudcostpermillion(model:str):f64{
-  if(str.eq(model;"claude-3-5-sonnet")){<3.0}el{
-  if(str.eq(model;"gpt-4o-mini")){<0.15}el{
-  if(str.eq(model;"gpt-4o")){<2.5}el{
-  <1.0
-  }}}
-};
-
-f=outputcostpermillion(model:str):f64{
-  if(str.eq(model;"claude-3-5-sonnet")){<15.0}el{
-  if(str.eq(model;"gpt-4o-mini")){<0.6}el{
-  if(str.eq(model;"gpt-4o")){<10.0}el{
-  <2.0
-  }}}
-};
-
-f=estimatecloudcost(model:str;inputtokens:i64;outputtokens:i64):f64{
-  let inputcost=cloudcostpermillion(model) * (str.i64tof64(inputtokens) / 1000000.0);
-  let outputcost=outputcostpermillion(model) * (str.i64tof64(outputtokens) / 1000000.0);
-  <inputcost + outputcost
-};
-
-f=compute(model:str;inputtokens:i64;outputtokens:i64;islocal:bool):$costcomparison{
-  let cloud=estimatecloudcost(model;inputtokens;outputtokens);
-  let local=0.0;
-  let saved=mut.0.0;
-  if(islocal){ saved=cloud }el{};
-  <$costcomparison{
-    model:model;
-    inputtokens:inputtokens;
-    outputtokens:outputtokens;
-    cloudcostusd:cloud;
-    localcostusd:local;
-    savedusd:saved;
-    islocal:islocal
-  }
-};
-
-f=newsessionsavings():$sessionsavings{
-  <$sessionsavings{
-    totalcloudcost:0.0;
-    totallocalcost:0.0;
-    totalsaved:0.0;
-    requestcount:0;
-    localrequestcount:0
-  }
-};
-
-f=accumulate(s:$sessionsavings;c:$costcomparison):$sessionsavings{
-  let localinc=mut.0;
-  if(c.islocal){ localinc=1 }el{};
-  <$sessionsavings{
-    totalcloudcost:s.totalcloudcost + c.cloudcostusd;
-    totallocalcost:s.totallocalcost + c.localcostusd;
-    totalsaved:s.totalsaved + c.savedusd;
-    requestcount:s.requestcount + 1;
-    localrequestcount:s.localrequestcount + localinc
-  }
+f=near(a:f64;b:f64):bool{
+  let d=a-b;
+  <d<0.0000001 && d>(0.0-0.0000001)
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test: claude-3-5-sonnet cloud cost is positive *)
-  let sonnetcost=estimatecloudcost("claude-3-5-sonnet";1000;500);
-  if(sonnetcost > 0.0){pass=pass+1}el{fail=fail+1};
+  let s:$costcomparison=cc.compute("claude-3-5-sonnet-20241022";1000 as i32;1000 as i32;true);
+  if(t.assert(near(s.cloudcostusd;0.018);"1 000 tokens each way on Sonnet is $0.003 + $0.015")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(s.localcostusd;0.0);"a local run costs nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(s.savedusd;0.018);"so running it locally saves the cloud cost")){pass=pass+1}el{fail=fail+1};
+  let r:$costcomparison=cc.compute("claude-3-5-sonnet-20241022";1000 as i32;1000 as i32;false);
+  if(t.assert(near(r.savedusd;0.0);"a cloud run saves nothing")){pass=pass+1}el{fail=fail+1};
+  let small:$costcomparison=cc.compute("gpt-4o";999 as i32;0 as i32;false);
+  if(t.assert(small.cloudcostusd>0.0049 && small.cloudcostusd<0.0050;"999 tokens is costed, not rounded to zero by an integer divide")){pass=pass+1}el{fail=fail+1};
+  let mini:$costcomparison=cc.compute("gpt-4o-mini";1000 as i32;1000 as i32;false);
+  if(t.assert(near(mini.cloudcostusd;0.00075);"gpt-4o-mini is priced as itself, not as gpt-4o")){pass=pass+1}el{fail=fail+1};
 
-  (* test: gpt-4o-mini is cheaper than claude-3-5-sonnet *)
-  let minicost=estimatecloudcost("gpt-4o-mini";1000;500);
-  if(minicost < sonnetcost){pass=pass+1}el{fail=fail+1};
+  let acc=cc.accumulate(cc.accumulate(cc.newsessionsavings();s);r);
+  if(t.assert(acc.requestcount==(2 as i32) && acc.localrequestcount==(1 as i32);"the session counts requests, and local ones")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(acc.totalsaved;0.018) && near(acc.totalcloudcost;0.036);"and sums what was saved and what the cloud would have cost")){pass=pass+1}el{fail=fail+1};
 
-  (* test: gpt-4o-mini cloud cost is positive *)
-  if(minicost > 0.0){pass=pass+1}el{fail=fail+1};
-
-  (* test: local cost is always zero *)
-  let c1=compute("claude-3-5-sonnet";1000;500;true);
-  if(c1.localcostusd == 0.0){pass=pass+1}el{fail=fail+1};
-
-  (* test: savings equals cloud cost when local *)
-  if(c1.savedusd == c1.cloudcostusd){pass=pass+1}el{fail=fail+1};
-
-  (* test: savings is zero when not local *)
-  let c2=compute("claude-3-5-sonnet";1000;500;false);
-  if(c2.savedusd == 0.0){pass=pass+1}el{fail=fail+1};
-
-  (* test: cloud cost same regardless of local flag *)
-  if(c1.cloudcostusd == c2.cloudcostusd){pass=pass+1}el{fail=fail+1};
-
-  (* test: new session savings starts at zero *)
-  let s=newsessionsavings();
-  if(s.totalcloudcost == 0.0){pass=pass+1}el{fail=fail+1};
-  if(s.requestcount == 0){pass=pass+1}el{fail=fail+1};
-
-  (* test: accumulate sums correctly *)
-  let s2=accumulate(s;c1);
-  if(s2.requestcount == 1){pass=pass+1}el{fail=fail+1};
-  if(s2.localrequestcount == 1){pass=pass+1}el{fail=fail+1};
-  if(s2.totalcloudcost > 0.0){pass=pass+1}el{fail=fail+1};
-
-  (* test: multiple accumulations sum correctly *)
-  let s3=accumulate(s2;c2);
-  if(s3.requestcount == 2){pass=pass+1}el{fail=fail+1};
-  if(s3.localrequestcount == 1){pass=pass+1}el{fail=fail+1};
-  if(s3.totalcloudcost > s2.totalcloudcost){pass=pass+1}el{fail=fail+1};
+  let j=cc.comparisontojson(s);
+  if(t.assert(str.contains(j;"\"model_id\":\"claude-3-5-sonnet-20241022\"") && !str.contains(j;"\"\"");"the comparison serialises its model quoted once")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"is_local\":true") && str.contains(j;"\"tokens_in\":1000");"with its locality and token counts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cc.savingstojson(acc);"\"request_count\":2");"and the session totals serialise")){pass=pass+1}el{fail=fail+1};
 
   <fail
-};
+}

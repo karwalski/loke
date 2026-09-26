@@ -79,6 +79,7 @@ ENFORCED = [
     "tests/unit/monitoring",
     "tests/unit/pipeline",
     "tests/unit/cli",
+    "packages/moke/tests",
 ]
 
 LIVE_IMPORT = re.compile(r"^\s*i=([A-Za-z0-9_]+):([A-Za-z0-9_.]+)\s*;", re.M)

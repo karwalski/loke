@@ -2,137 +2,45 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=packages.moke.tests.teststreaming;
+
 i=t:std.test;
 i=str:std.str;
+i=ms:moke.streaming;
 
-(* Local types for self-contained testing *)
-t=$streamevent{
-  eventtype:str;
-  data:str;
-  timestamp:i64
-};
-
-t=$streamstate{
-  label:str;
-  code:i64
-};
-
-t=$streamsession{
-  requestid:str;
-  modelid:str;
-  state:$streamstate;
-  tokensreceived:i64;
-  events:@$streamevent;
-  activestage:str
-};
-
-f=statenew(label:str;code:i64):$streamstate{
-  <$streamstate{label:label;code:code}
-};
-
-f=stateidle():$streamstate{<statenew("idle";0)};
-f=stateconnecting():$streamstate{<statenew("connecting";1)};
-f=statestreaming():$streamstate{<statenew("streaming";2)};
-f=statecomplete():$streamstate{<statenew("complete";3)};
-f=stateerror():$streamstate{<statenew("error";4)};
-
-f=newsession(reqid:str;model:str):$streamsession{
-  <$streamsession{
-    requestid:reqid;
-    modelid:model;
-    state:stateidle();
-    tokensreceived:0;
-    events:@();
-    activestage:""
-  }
-};
-
-f=appendevent(s:$streamsession;e:$streamevent):$streamsession{
-  <$streamsession{
-    requestid:s.requestid;
-    modelid:s.modelid;
-    state:s.state;
-    tokensreceived:s.tokensreceived;
-    events:str.arraypush(s.events;e);
-    activestage:s.activestage
-  }
-};
-
-f=setstate(s:$streamsession;st:$streamstate):$streamsession{
-  <$streamsession{
-    requestid:s.requestid;
-    modelid:s.modelid;
-    state:st;
-    tokensreceived:s.tokensreceived;
-    events:s.events;
-    activestage:s.activestage
-  }
-};
-
-f=addtoken(s:$streamsession;token:str):$streamsession{
-  let e=$streamevent{eventtype:"token";data:token;timestamp:0};
-  <$streamsession{
-    requestid:s.requestid;
-    modelid:s.modelid;
-    state:statestreaming();
-    tokensreceived:s.tokensreceived + 1;
-    events:str.arraypush(s.events;e);
-    activestage:s.activestage
-  }
-};
-
-f=sessiontojson(s:$streamsession):str{
-  let json=str.concat("{\"request_id\":\"";str.concat(s.requestid;str.concat("\",\"model_id\":\"";str.concat(s.modelid;str.concat("\",\"state\":\"";str.concat(s.state.label;str.concat("\",\"tokens_received\":";str.concat(str.fromi64(s.tokensreceived);str.concat(",\"events_count\":";str.concat(str.fromi64(str.arraylen(s.events));"}"))))))))));
-  <json
-};
+(* X4b.14 / X7.2 - session event tracking and JSON output, through the real moke.streaming.
+   The file used to declare its own session type and assert it against itself. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test: new session has zero events *)
-  let s=newsession("req-001";"llama3.2:3b");
-  if(str.arraylen(s.events) == 0){pass=pass+1}el{fail=fail+1};
+  let s0=ms.newsession("req-9";"qwen2.5:7b");
+  if(t.asserteq(ms.statelabel(s0.state);"idle";"a new stream session is idle")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s0.events.len==0 && s0.tokensreceived==(0 as i32);"with no events and no tokens")){pass=pass+1}el{fail=fail+1};
 
-  (* test: new session starts idle *)
-  if(str.eq(s.state.label;"idle")){pass=pass+1}el{fail=fail+1};
+  let s1=ms.setstate(s0;1);
+  if(t.asserteq(ms.statelabel(s1.state);"connecting";"then connecting")){pass=pass+1}el{fail=fail+1};
+  let s2=ms.setstage(s1;"privacy_scan");
+  if(t.asserteq(s2.activestage;"privacy_scan";"a stage becomes the active stage")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s2.events.len==1;"and is recorded as an event")){pass=pass+1}el{fail=fail+1};
+  let s3=ms.addtoken(ms.addtoken(s2;"Hello");" world");
+  if(t.asserteq(ms.statelabel(s3.state);"streaming";"a token moves the session to streaming")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s3.tokensreceived==(2 as i32);"tokens are counted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s3.events.len==3;"and each is an event")){pass=pass+1}el{fail=fail+1};
+  let e1:$streamevent=s3.events.get(1);
+  if(t.asserteq(e1.eventtype;"token";"a token event is typed token")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(e1.data;"Hello";"and carries the token")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ms.statelabel(ms.setstate(s3;3).state);"complete";"the session can complete")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ms.statelabel(9);"error";"and an unknown state reads as error")){pass=pass+1}el{fail=fail+1};
 
-  (* test: new session has correct request id *)
-  if(str.eq(s.requestid;"req-001")){pass=pass+1}el{fail=fail+1};
+  let quoted=$streamevent{eventtype:"token";data:"say \"hi\"";timestamp:5};
+  if(t.asserteq(ms.eventtojson(quoted);"{\"event_type\":\"token\",\"data\":\"say \\\"hi\\\"\",\"timestamp\":5}";"an event serialises with its data escaped")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ms.tosse(quoted);"event: token\ndata: \"say \\\"hi\\\"\"\n\n";"and as an SSE frame ending in a blank line")){pass=pass+1}el{fail=fail+1};
 
-  (* test: new session has correct model *)
-  if(str.eq(s.modelid;"llama3.2:3b")){pass=pass+1}el{fail=fail+1};
-
-  (* test: append event increases count *)
-  let e1=$streamevent{eventtype:"stage";data:"anonymise";timestamp:100};
-  let s2=appendevent(s;e1);
-  if(str.arraylen(s2.events) == 1){pass=pass+1}el{fail=fail+1};
-
-  (* test: append multiple events *)
-  let e2=$streamevent{eventtype:"stage";data:"llm_call";timestamp:200};
-  let s3=appendevent(s2;e2);
-  if(str.arraylen(s3.events) == 2){pass=pass+1}el{fail=fail+1};
-
-  (* test: add token increments count *)
-  let s4=addtoken(s;"Hello");
-  if(s4.tokensreceived == 1){pass=pass+1}el{fail=fail+1};
-
-  (* test: add token transitions to streaming *)
-  if(str.eq(s4.state.label;"streaming")){pass=pass+1}el{fail=fail+1};
-
-  (* test: set state changes state label *)
-  let s5=setstate(s;statecomplete());
-  if(str.eq(s5.state.label;"complete")){pass=pass+1}el{fail=fail+1};
-
-  (* test: session JSON serialisation contains request_id *)
-  let json=sessiontojson(s4);
-  if(str.contains(json;"\"request_id\":\"req-001\"")){pass=pass+1}el{fail=fail+1};
-
-  (* test: session JSON contains tokens_received *)
-  if(str.contains(json;"\"tokens_received\":1")){pass=pass+1}el{fail=fail+1};
-
-  (* test: session JSON contains state *)
-  if(str.contains(json;"\"state\":\"streaming\"")){pass=pass+1}el{fail=fail+1};
+  let j=ms.sessiontojson(s3);
+  if(t.assert(str.startswith(j;"{\"state\":\"streaming\",\"request_id\":\"req-9\"");"the session serialises its state and request id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"tokens_received\":2") && str.contains(j;"\"active_stage\":\"llm_call\"");"its token count and active stage")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(j;"\"\"req-9") && !str.contains(j;"\"\"qwen");"with no value doubly quoted")){pass=pass+1}el{fail=fail+1};
 
   <fail
-};
+}

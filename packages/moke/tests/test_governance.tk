@@ -2,105 +2,41 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=packages.moke.tests.testgovernance;
+
 i=t:std.test;
 i=str:std.str;
+i=gv:moke.governance;
 
-(* Local types for self-contained testing *)
-t=$regulatorypreset{
-  id:str;
-  name:str;
-  jurisdiction:str;
-  dataresidency:str;
-  retentiondays:i64;
-  requiresconsent:bool;
-  allowscrossboarder:bool
-};
-
-t=$riskclassification{
-  level:str;
-  score:i64;
-  reason:str
-};
-
-f=makepreset(id:str;name:str;jurisdiction:str;residency:str;retention:i64;consent:bool;crossborder:bool):$regulatorypreset{
-  <$regulatorypreset{
-    id:id;
-    name:name;
-    jurisdiction:jurisdiction;
-    dataresidency:residency;
-    retentiondays:retention;
-    requiresconsent:consent;
-    allowscrossboarder:crossborder
-  }
-};
-
-f=findpresetbyid(id:str):$regulatorypreset{
-  if(str.eq(id;"gdpr")){
-    <makepreset("gdpr";"GDPR (EU)";"EU";"EU";30;true;false)
-  }el{
-  if(str.eq(id;"hipaa")){
-    <makepreset("hipaa";"HIPAA (US)";"US";"US";365;true;false)
-  }el{
-  if(str.eq(id;"apra")){
-    <makepreset("apra";"APRA CPS 234 (AU)";"AU";"AU";90;false;true)
-  }el{
-    <makepreset("unknown";"Unknown";"";"";0;false;false)
-  }}}
-};
-
-f=classifyrisk(sensitivity:str;haspi:bool;crossborder:bool):$riskclassification{
-  if(str.eq(sensitivity;"critical")){
-    <$riskclassification{level:"high";score:90;reason:"critical sensitivity data"}
-  }el{
-  if(haspi){
-    if(crossborder){
-      <$riskclassification{level:"high";score:80;reason:"PI with cross-border transfer"}
-    }el{
-      <$riskclassification{level:"medium";score:50;reason:"contains personal information"}
-    }
-  }el{
-    <$riskclassification{level:"low";score:10;reason:"no sensitive data detected"}
-  }}
-};
+(* X4b.14 / X7.2 - regulatory preset lookup and risk classification, through the real
+   moke.governance. The file used to declare its own presets and classifier. The ids and
+   sensitivities below are built at run time as well as written as literals, so a lookup that
+   compares string handles rather than contents cannot pass by accident. *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* test: find gdpr preset by id *)
-  let gdpr=findpresetbyid("gdpr");
-  if(str.eq(gdpr.id;"gdpr")){pass=pass+1}el{fail=fail+1};
-  if(str.eq(gdpr.name;"GDPR (EU)")){pass=pass+1}el{fail=fail+1};
-  if(str.eq(gdpr.jurisdiction;"EU")){pass=pass+1}el{fail=fail+1};
-  if(gdpr.requiresconsent){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gv.getpresets().len>=2;"there are regulatory presets")){pass=pass+1}el{fail=fail+1};
+  let gdpr:$regulatorypreset=gv.findpreset("eu-gdpr");
+  if(t.asserteq(gdpr.name;"EU GDPR";"a preset is found by its id")){pass=pass+1}el{fail=fail+1};
+  let built=str.concat("au-";"privacy");
+  let au:$regulatorypreset=gv.findpreset(built);
+  if(t.asserteq(au.name;"AU Privacy Act";"including by an id built at run time")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!gdpr.crossborderallowed;"GDPR does not allow cross-border transfer by default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gv.haspreset("eu-gdpr") && !gv.haspreset("mars-code");"haspreset answers for known and unknown ids")){pass=pass+1}el{fail=fail+1};
+  let none:$regulatorypreset=gv.findpreset("mars-code");
+  if(t.asserteq(none.classificationdefault;"restricted";"an unknown preset falls back to the strictest classification")){pass=pass+1}el{fail=fail+1};
 
-  (* test: find hipaa preset by id *)
-  let hipaa=findpresetbyid("hipaa");
-  if(str.eq(hipaa.id;"hipaa")){pass=pass+1}el{fail=fail+1};
-  if(hipaa.retentiondays == 365){pass=pass+1}el{fail=fail+1};
-
-  (* test: unknown preset returns error marker *)
-  let unknown=findpresetbyid("nonexistent");
-  if(str.eq(unknown.id;"unknown")){pass=pass+1}el{fail=fail+1};
-
-  (* test: risk classification - critical is high *)
-  let r1=classifyrisk("critical";false;false);
-  if(str.eq(r1.level;"high")){pass=pass+1}el{fail=fail+1};
-  if(r1.score == 90){pass=pass+1}el{fail=fail+1};
-
-  (* test: risk classification - PI with crossborder is high *)
-  let r2=classifyrisk("normal";true;true);
-  if(str.eq(r2.level;"high")){pass=pass+1}el{fail=fail+1};
-  if(r2.score == 80){pass=pass+1}el{fail=fail+1};
-
-  (* test: risk classification - PI without crossborder is medium *)
-  let r3=classifyrisk("normal";true;false);
-  if(str.eq(r3.level;"medium")){pass=pass+1}el{fail=fail+1};
-
-  (* test: risk classification - no sensitive data is low *)
-  let r4=classifyrisk("normal";false;false);
-  if(str.eq(r4.level;"low")){pass=pass+1}el{fail=fail+1};
-  if(r4.score == 10){pass=pass+1}el{fail=fail+1};
+  let low:$riskassessment=gv.classifyrisk("PUBLIC";0 as i32;false;false);
+  if(t.asserteq(low.tier;"Low";"public data with no entities is low risk")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(low.score==(0 as i32);"with a score of zero")){pass=pass+1}el{fail=fail+1};
+  let rs=str.concat("RESTR";"ICTED");
+  let high:$riskassessment=gv.classifyrisk(rs;12 as i32;true;true);
+  if(t.asserteq(high.tier;"High";"restricted data, many entities, cross-border and blocked types is high risk")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(high.score==(105 as i32);"scored 40 + 30 + 15 + 20")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(high.reasons.len==4;"with a reason for each")){pass=pass+1}el{fail=fail+1};
+  let med:$riskassessment=gv.classifyrisk("CONFIDENTIAL";2 as i32;false;false);
+  if(t.asserteq(med.tier;"Medium";"confidential with a few entities is medium")){pass=pass+1}el{fail=fail+1};
 
   <fail
-};
+}
