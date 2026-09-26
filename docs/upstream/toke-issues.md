@@ -1986,6 +1986,22 @@ result: the runtime limit they set is not the array bound codegen uses.
 declaration with too many fields at the declaration and name the limit, or size the table from
 the configured limit.
 
+## T-54 — a 65th struct type in scope silently displaces another, and the error blames a field name
+
+**Severity: blocks, with a misleading diagnostic.**
+
+Measured 2026-09-26 at `0b0bc4e`. `src/tkc_limits.h` caps the struct types a compilation unit
+sees at 64 (`TKC_MAX_STRUCT_TYPES`). `page.api.pipeline` already saw 64 through its imports.
+Importing `core.audit.disclosure`, which declared one more record type, did not report the
+cap. Instead, `std.http`'s `$httpresp` stopped being a known type, and the parameter
+`r:$httpresp` failed at its first field read with `E4034: field 'body' is declared at different
+offsets by more than one struct, and the type of this value is not established`. Nothing in
+the file had changed near that line, and renaming a local called `body` elsewhere did not help.
+
+**What it cost in loke.** DA1.7's `reserve` takes its fourteen facts as parameters rather
+than a record, so importing it adds no struct type. **The ask:** reject the 65th type where it
+is declared or imported and name the limit, or grow the table.
+
 ## T-47 — `str.nowunix()` returns the time as a STRING and is declared `i64`
 
 **Severity: wrong value, silently. It reached a budget, a kill switch and an audit trail.**

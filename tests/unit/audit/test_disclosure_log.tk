@@ -1,0 +1,113 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.audit.testdisclosurelog;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+
+(* DA1.7 - core.audit.disclosure against the real migration.
+
+   Before DA1.7 no migration created disclosure_log and nothing wrote it, so every assertion
+   here that reads a row fails. The lifecycle assertions are spec section 4: reserve writes
+   state = dispatched with the reserve fields, complete moves it to completed or failed once,
+   and a second completion changes nothing. The CHECK is acceptance A8. *)
+
+f=storedir():str{
+  <str.concat(std.homedir();"/.loke/test-disclosure-log")
+};
+
+f=openfresh():i64{
+  let dir=storedir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=firststr(rs:@$row;col:str):str{
+  if(rs.len==0){ <"<no row>" }el{ <db.rowstr(rs.get(0);col) }
+};
+
+(* Every column read as text, NULL as "NULL", so a test can tell a stored 0 from no value. *)
+f=col(cid:str;c:str):str{
+  <mt db.many(str.concat("SELECT COALESCE(CAST(";str.concat(c;" AS TEXT),'NULL') AS v FROM disclosure_log WHERE correlation_id=?"));@(cid)) {
+    $ok:rs firststr(rs;"v");
+    $err:e "<error>"
+  }
+};
+
+f=count():i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM disclosure_log WHERE record_id<>?";@("");"n";0-1)
+};
+
+f=facts(cid:str;body:i64;question:i64):bool{
+  <dl.reserve(cid;cid;"none";"ollama";"local";"llama3.2";"127.0.0.1:11434";body;question;"email:1";1;"scanned=regex;skipped=ner,presidio";"redacted-data";"not_run")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=openfresh();
+  if(t.assert(store!=0;"a fresh store opens and migrates")){pass=pass+1}el{fail=fail+1};
+
+  (* ── reserve ─────────────────────────────────────────────────────────────── *)
+  if(t.assert(facts("cid-one";120;45);"reserve writes a row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(count()==1;"exactly one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"state");"dispatched";"in state dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"dispatch_kind");"initial";"as an initial dispatch")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"bytes_body");"120";"bytes_body is the octet count given")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"bytes_question");"45";"bytes_question likewise")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"bytes_other");"75";"and bytes_other is the body less the question")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"custody");"redacted-data";"custody is recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"custody_check");"not_run";"with the check that was not run")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"real_values_included");"1";"redacted-data carries values drawn from the data")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"retention_class");"unknown";"retention is unknown, not assumed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"tokens_estimated");"NULL";"no token estimate is invented")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"tokens_source");"NULL";"and no token source claimed before a response")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"entity_types");"email:1";"entity types and counts are recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"provider_class");"local";"and the provider class")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(col("cid-one";"record_id"))==32;"record_id is 32 hex characters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(col("cid-one";"occurred_at"))>=19;"occurred_at is a real timestamp")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"outcome");"NULL";"and no outcome is written before the response")){pass=pass+1}el{fail=fail+1};
+
+  (* One row per dispatch: a second reserve for the same correlation id is refused. *)
+  if(t.assert(!facts("cid-one";10;5);"a second reserve on one correlation id is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(count()==1;"and adds no row")){pass=pass+1}el{fail=fail+1};
+
+  (* ── complete ────────────────────────────────────────────────────────────── *)
+  if(t.assert(dl.complete("cid-one";true;300;42;17;250);"complete updates the reserved row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"state");"completed";"to completed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"outcome");"ok";"with outcome ok")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"response_bytes");"300";"the response size")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"tokens_in_reported");"42";"the reported tokens")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"tokens_source");"provider_reported";"labelled as provider-reported")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"bytes_body");"120";"and leaves the reserve fields alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.complete("cid-one";false;0;0;0;1);"a second completion changes nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-one";"state");"completed";"so the outcome is written once")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.complete("cid-none";true;1;1;1;1);"completing a dispatch never reserved is refused")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(facts("cid-two";50;50);"a second dispatch reserves its own row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.complete("cid-two";false;0;0;0;9);"and a failure completes it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-two";"state");"failed";"as failed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-two";"outcome");"provider_error";"with a provider error")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("cid-two";"tokens_source");"NULL";"and no token count the provider did not give")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A8: an estimate needs its tokeniser ───────────────────────────────────── *)
+  let bad=mt db.exec("UPDATE disclosure_log SET tokens_estimated=10 WHERE correlation_id=?";@("cid-two")) {
+    $ok:v true;
+    $err:e false
+  };
+  if(t.assert(!bad;"a token estimate without a tokeniser is rejected by the table")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+}

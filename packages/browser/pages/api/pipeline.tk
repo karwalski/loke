@@ -28,6 +28,7 @@ i=org:shared.origin;
 i=mc:core.metrics.collector;
 i=tr:core.governance.trace;
 i=ptypes:core.privacy.pipelinetypes;
+i=dl:core.audit.disclosure;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -438,6 +439,10 @@ f=restoretext(run:$pipelinerun;text:str):str{
    describes a system that never has an outage, which is worse than no trail. *)
 f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
   let elapsed=t.nowms()-startms;
+  (* DA1.7 - the reserved disclosure row is completed as failed. *)
+  if(dl.complete(run.requestid;false;0;0;0;elapsed)){}el{
+    log.warn("disclosure record was not completed for this failed dispatch";"api.pipeline";run.requestid)
+  };
   recordevent(store;run;"llm_request_failed";provider;modelid;0;0;elapsed;decision);
   recordmetric(run;provider;modelid;0;0;0.0);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
@@ -734,11 +739,16 @@ f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
 (* One place for everything that happens AFTER a provider has answered: the cache is written
    with the anonymised response, the budget is accumulated and persisted, the audit row is
    inserted, and only then is the text restored for the user. *)
-f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision):i64{
+f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision;rawbytes:i64):i64{
   let spec:$modelspec=route.model;
   let provstr=providerlabel(spec.provider);
   let elapsed=t.nowms()-startms;
   let res:$piidetectionresult=run.result;
+
+  (* DA1.7 - the reserved disclosure row is completed with what came back. *)
+  if(dl.complete(run.requestid;true;rawbytes;tin;tout;elapsed)){}el{
+    log.warn("disclosure record was not completed for this dispatch";"api.pipeline";run.requestid)
+  };
 
   (* Stored BEFORE restoration, so the cache holds only anonymised text. *)
   cachestore(run;res.anonymised;anonresponse);
@@ -762,13 +772,36 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
 f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;r:$httpresp;piifields:str;startms:i64;decision:$policydecision):i64{
   let raw=str.frombytes(r.body);
   let anonresponse=anthropictext(raw);
-  <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision)
+  <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision;str.len(raw))
+};
+
+(* ── DA1.7: the disclosure record ─────────────────────────────────────────────────
+   Reserved immediately before the body is handed to transport, from the body itself:
+   bytes_body is str.len of the exact string passed to the transport, which counts octets,
+   not characters. bytes_question is the anonymised question as it appears in the body,
+   JSON-escaped, less its two quotes. Custody is redacted-data with the check not run: that is
+   what this path sends, and it is passed rather than observed until NC1.2's sentinel check
+   exists (spec C1-C3). The correlation id is the request id, which is also audit_log's, so
+   the two rows join one-to-one. *)
+f=reservedispatch(run:$pipelinerun;provider:str;providerclass:str;modelid:str;host:str;sent:str;anonymised:str):bool{
+  <dl.reserve(run.requestid;run.requestid;"none";provider;providerclass;modelid;host;str.len(sent);str.len(json.enc(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run")
+};
+
+(* A dispatch that cannot be recorded does not happen (spec section 4). It is refused and
+   audited as refused, and nothing is sent. *)
+f=unrecorded(store:i64;run:$pipelinerun;provider:str;modelid:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  log.warn("pipeline: the disclosure record could not be written, so nothing was sent";"api.pipeline";run.requestid);
+  recordevent(store;run;"llm_request_refused";provider;modelid;0;0;t.nowms()-startms;decision);
+  <http.res(503;"{\"ok\":false,\"error\":\"the disclosure record could not be written, so the request was not sent\",\"disclosure_unrecorded\":true\(piifields)}")
 };
 
 f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
   let abody="{\"model\":\(json.enc(spec.id)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
   let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
+  if(reservedispatch(run;"anthropic";"cloud";spec.id;"api.anthropic.com";abody;anonymised)){}el{
+    <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
+  };
   <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
     $ok:r anthropicreply(store;run;route;r;piifields;startms;decision);
     $err:e providerfailed(store;run;"anthropic";spec.id;startms;decision)
@@ -814,6 +847,9 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piif
     <http.res(503;"{\"ok\":false,\"error\":\(json.enc(msg)),\"model_not_installed\":true\(piifields)}")
   }el{};
   let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
+  if(reservedispatch(run;"ollama";"local";spec.id;"127.0.0.1:11434";payload;anonymised)){}el{
+    <unrecorded(store;run;"ollama";spec.id;piifields;startms;decision)
+  };
   let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
   if(str.len(raw)==0){
     log.warn("pipeline: ollama returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
@@ -825,7 +861,7 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piif
     <providerfailed(store;run;"ollama";spec.id;startms;decision)
   }el{};
   (* Ollama's /api/generate reports prompt_eval_count and eval_count, not the OpenAI names. *)
-  <completed(store;run;route;anonresponse;usagetokens(raw;"prompt_eval_count");usagetokens(raw;"eval_count");piifields;startms;decision)
+  <completed(store;run;route;anonresponse;usagetokens(raw;"prompt_eval_count");usagetokens(raw;"eval_count");piifields;startms;decision;str.len(raw))
 };
 
 (* A cloud provider the router can name but this endpoint has no client for. It refuses

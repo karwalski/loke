@@ -89,6 +89,25 @@ case "$resp" in
   *) echo "  FAIL the response did not restore the placeholder: $resp" >&2; fail=1 ;;
 esac
 
+# DA1.7: one disclosure_log row for the dispatch, completed, whose bytes_body is the exact
+# octet count of the body the model received (spec acceptance A7), and which holds the
+# address in no column (A10).
+DB="$WORK/lk/home/.loke/loke.db"
+dl() { sqlite3 "$DB" "$1" 2>/dev/null; }
+sent_bytes=$(python3 -c 'import sys
+for line in open(sys.argv[1],encoding="utf-8"):
+    if line.startswith("/api/generate "): print(len(line[len("/api/generate "):].rstrip("\n").encode("utf-8"))); break' "$SEEN")
+rows=$(dl "SELECT COUNT() FROM disclosure_log")
+if [ "$rows" = "1" ]; then echo "  ok   the dispatch wrote one disclosure record"
+else echo "  FAIL expected one disclosure_log row, found '${rows}'" >&2; fail=1; fi
+rec=$(dl "SELECT state||' '||bytes_body||' '||custody||' '||custody_check FROM disclosure_log")
+if [ -n "$sent_bytes" ] && [ "$rec" = "completed $sent_bytes redacted-data not_run" ]; then
+  echo "  ok   its bytes_body ($sent_bytes) is what the model received, and it is completed"
+else echo "  FAIL disclosure record '$rec' does not match the $sent_bytes octets the model received" >&2; fail=1; fi
+leaked=$(dl "SELECT COUNT() FROM disclosure_log WHERE instr(record_id||correlation_id||request_id||session_id||provider||model_id||endpoint_host||custody||entity_types||detection_layers||fields_disclosed, '$EMAIL')>0")
+if [ "$leaked" = "0" ]; then echo "  ok   and it holds the address in no column"
+else echo "  FAIL the disclosure record holds the address" >&2; fail=1; fi
+
 # F5.12: when the routed model is not installed, loke must refuse and name what IS installed,
 # rather than send a request Ollama will reject. Restart the fake with a list that does
 # not contain the routed model.
@@ -104,6 +123,10 @@ case "$OUT2" in
   *) echo "  FAIL uninstalled routed model was not refused clearly: $(printf '%s' "$OUT2" | head -c 200)" >&2; fail=1 ;;
 esac
 if [ -s "$SEEN" ]; then echo "  FAIL a request was sent for a model that is not installed" >&2; fail=1; fi
+rows_after=$(dl "SELECT COUNT() FROM disclosure_log")
+if [ -n "$rows" ] && [ "$rows_after" = "$rows" ]; then
+  echo "  ok   and the refusal, which sent nothing, wrote no disclosure record"
+else echo "  FAIL disclosure_log went from '${rows}' to '${rows_after}' rows across a refused request" >&2; fail=1; fi
 
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"
