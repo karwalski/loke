@@ -2002,6 +2002,20 @@ the file had changed near that line, and renaming a local called `body` elsewher
 than a record, so importing it adds no struct type. **The ask:** reject the 65th type where it
 is declared or imported and name the limit, or grow the table.
 
+## T-55 — `str.charat` measures the whole string on every call, so a byte loop is quadratic
+
+**Severity: performance, silently. It turns a linear scan into a quadratic one.**
+
+Measured 2026-09-27 at `0b0bc4e`. `tk_str_charat_w` in `src/stdlib/str_glue.c` calls
+`strlen(p)` to bounds-check the index before reading `p[i]`, so reading one byte costs the length
+of the string. A loop that reads every byte of an n-byte string is O(n²). In loke's regex span
+search, an in-place byte comparison written with `str.charat` took **192 s** on 1 MB, where the
+copying version it replaced took 1.4 s. `str.substr`, `str.slice` and `str.indexof` measure the
+string too, but once per call rather than once per byte.
+
+**What it cost in loke.** F3.1b searches a growing window with `str.indexof` over `str.substr`
+instead. **The ask:** bounds-check against a stored length, or add `str.byteat` without the check.
+
 ## T-47 — `str.nowunix()` returns the time as a STRING and is declared `i64`
 
 **Severity: wrong value, silently. It reached a budget, a kill switch and an audit trail.**
