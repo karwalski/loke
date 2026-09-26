@@ -340,12 +340,25 @@ NMODULES=$(echo "$MODULE_SRCS" | grep -c . || true)
 NIFACE_SRCS=$(echo "$IFACE_SRCS" | grep -c . || true)
 echo "[$NAME] emitting interfaces for $NIFACE_SRCS module(s) in dependency order"
 echo "[$NAME]   ($NMODULES of them are this tree's own; the rest are --iface-root)"
+# F10.32: a module that does not compile is expected here and stays silent, but a
+# module that CRASHES THE COMPILER is a different fact, and it used to be
+# indistinguishable: the only trace was the shell printing "Segmentation fault: 11".
+# An exit status above 128 is a signal. It is counted, named in the break report, and
+# printed.
+NCRASH=0
 for tkfile in $IFACE_SRCS; do
+  _rc=0
   "$TOKE" $TKCONFIG -I "$IFACE_DIR" --emit-interface --emit-llvm \
-    --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
+    --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || _rc=$?
+  if [ "$_rc" -gt 128 ]; then
+    NCRASH=$((NCRASH+1))
+    echo "COMPILER_CRASH signal $((_rc-128)) during the interface pass: $tkfile" >> "$REPORT"
+    echo "[$NAME]   the compiler CRASHED (signal $((_rc-128))) on $tkfile" >&2
+  fi
 done
 NIFACE=$(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ')
 echo "[$NAME]   $NIFACE of $NIFACE_SRCS interface(s) emitted"
+[ "$NCRASH" -gt 0 ] && echo "[$NAME]   $NCRASH module(s) crashed the compiler, not merely failed to compile: see $REPORT"
 
 # F10.31: iterate to a fixpoint. The pass above runs once in dependency order, so a module
 # that fails, even transiently, blinds every module above it, which then report `E2030

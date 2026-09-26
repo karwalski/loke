@@ -1857,6 +1857,22 @@ cannot guard a server's input. The mcp-toke server was taken down by one malform
 any client. loke now pre-checks structure (a single `{...}` with balanced braces outside
 strings) before decoding. The ask: `json.dec` should reject input that is not JSON.
 
+## T-52 — a struct holding an array of its own type crashes the compiler
+
+Measured 2026-09-26 at `fedd48d`: this whole program makes `toke --emit-interface` exit
+with SIGSEGV.
+
+    m=rb;
+    t=$n{v:i32;c:@$n};
+    f=mk():$n{
+      <$n{v:1 as i32;c:@()}
+    };
+
+A struct field of type `@$self` is how a tree is written (loke's navigation items carry their
+`children`). The same struct without the self-referential field compiles. loke has no working
+use of the shape; `packages/browser/src/nav.tk` is the file that hit it, and it has no
+importer.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke
