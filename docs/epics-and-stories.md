@@ -886,6 +886,7 @@ loke is local-first and single-user by design. The companion device support (F8)
 | MK6.2 | M | **Done** | Multi-provider LLM routing (Claude Sonnet/Haiku via loke's Anthropic provider; GPT-4o-mini via loke's OpenAI provider; model selector in chat panel; local Ollama models when available; API keys from loke keychain (F1.5) — no re-entry in moke settings) |
 | MK6.3 | S | **Done** | moke settings page (session memory toggle — clear on close or persist; pipeline console verbosity; default sensitivity level; preferred model; about/version) |
 | MK6.4 | M | **Done** | Presentation mode (full-screen dashboard view for demos; hide sidebar; auto-cycle through cards; keyboard arrows to navigate; ESC to exit; timer overlay showing time in presentation; `?` overlay for keyboard shortcuts; used in user research sessions) |
+| MK6.5 | S |  | **Nine moke API handlers can never be reached** — Found 2026-09-27 by X7.2, probing the running moke. ooke's `scripts/gen_handlers.sh` registers exactly one `get` and one `post` per page file, which is its documented convention, and moke's handler registry is generated from it. So `pages/api/ml.tk`'s `postrun` and `postpropose`, `pages/api/mcp.tk`'s `gettools`, `postinvoke`, `getbroker`, `getmemory` and `postmemory`, and `pages/api/agents.tk`'s `postscan`, `postschema` and `getdiary` compile but have no route: a request answers 404 or 405. Nothing in the moke UI calls them today, so nothing visible breaks. The Insight Lab's run and propose paths, and the MCP panel's tool invocation, are among them. Either give each its own page file (for example `pages/api/ml/run.tk` exporting `post`), or delete the ones nothing will call. |
 
 ## Epic MK7: Demo Readiness
 
@@ -1079,7 +1080,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AGENTIC AI | 1 | 10 | 10 | — | — | — | — | — | — | — |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | CROSS-CUTTING | 9 | 83 | 83 | — | — | — | — | — | — | — |
-| DEMO LAYER — moke | 7 | 65 | 65 | — | — | — | — | — | — | — |
+| DEMO LAYER — moke | 7 | 66 | 65 | — | — | — | — | — | — | 1 |
 | Epic T: Test Suite | 14 | 65 | 41 | 1 | — | 23 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | TOOLCHAIN | 1 | 49 | 37 | 2 | — | 4 | — | 1 | — | 5 |
@@ -1087,7 +1088,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 37 | 25 | 2 | — | — | — | — | — | 10 |
 | VERIFICATION PROGRAMME | 14 | 128 | 90 | 10 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **711** | **581** | **32** | **8** | **36** | **3** | **1** | — | **50** |
+| **Total** | **88** | **712** | **581** | **32** | **8** | **36** | **3** | **1** | — | **51** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1136,7 +1137,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | MK3 | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | MK4 | 1 | 37 | 37 | — | — | — | — | — | — | — |
 | MK5 | 1 | 4 | 4 | — | — | — | — | — | — | — |
-| MK6 | 1 | 4 | 4 | — | — | — | — | — | — | — |
+| MK6 | 1 | 5 | 4 | — | — | — | — | — | — | 1 |
 | MK7 | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | T1 | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | T2 | 1 | 5 | 5 | — | — | — | — | — | — | — |
@@ -1181,9 +1182,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 29 | 23 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **711** | **581** | **32** | **8** | **36** | **3** | **1** | — | **50** |
+| **Total** | **88** | **712** | **581** | **32** | **8** | **36** | **3** | **1** | — | **51** |
 
-Rows parsed: **711**, across **88** epics and **16** level-1 headings.
+Rows parsed: **712**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 
