@@ -1,0 +1,120 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testdecisiontrace;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sdb:core.storage.db;
+i=ks:core.governance.killswitch;
+i=tr:core.governance.trace;
+i=h:page.api.pipeline;
+
+(* GA5.5 - the decision trace is persisted, with the assessor's fields, and without content.
+
+   Before GA5.5 core.governance.trace had no caller, no table and no insert, so every count
+   below was zero. Driven through the route's own functions: recordevent is what every
+   audited outcome calls, and killswitchtrace is what post() calls when the switch is engaged.
+
+   The content assertion matters as much as the count. The trace struct can hold the user's
+   original text, and the database is plaintext on disk (X8). The test puts a sentinel value
+   in the prompt and asserts that it appears in NO column of the persisted row. *)
+
+f=teststore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-decision-trace");
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=resetstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-decision-trace");
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <0
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=rows(where:str;arg:str):i64{
+  <sdb.scalari64(str.concat("SELECT COUNT() AS n FROM decision_trace WHERE ";where);@(arg);"n";0-1)
+};
+
+f=firststr(rs:@$row;col:str):str{
+  if(rs.len==0){ <"" }el{ <db.rowstr(rs.get(0);col) }
+};
+
+f=colstr(rid:str;col:str):str{
+  <mt db.many(str.concat("SELECT ";str.concat(col;" AS v FROM decision_trace WHERE request_id=?"));@(rid)) {
+    $ok:rs firststr(rs;"v");
+    $err:e ""
+  }
+};
+
+(* Every column of the row, concatenated, so a value stored anywhere is found. *)
+f=wholerow(rid:str):str{
+  <colstr(rid;"request_id||'|'||correlation_id||'|'||created_at_ms||'|'||outcome||'|'||policy_decision||'|'||risk_classification||'|'||entities_detected||'|'||detection_layers||'|'||anonymisation_applied||'|'||compression_applied||'|'||model_selected||'|'||provider||'|'||deanonymisation_applied||'|'||approval_outcome||'|'||kill_switch_state||'|'||duration_ms||'|'||step_count")
+};
+
+f=main():i64{
+  resetstore();
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=teststore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.tableexists("decision_trace");"migration 30 creates decision_trace")){pass=pass+1}el{fail=fail+1};
+
+  let run=pipe.runforward("Please email jo.sentinel.7731@example.com about invoice 4111 1111 1111 1111.";"";localonly());
+  let rid=run.requestid;
+  let decision=h.decide(run);
+  if(t.assert(rows("request_id=?";rid)==0;"no trace exists before the outcome is recorded")){pass=pass+1}el{fail=fail+1};
+
+  h.recordevent(store;run;"llm_request";"ollama";"qwen2.5:3b";12;7;42;decision);
+  if(t.assert(rows("request_id=?";rid)==1;"one audited outcome persists exactly one decision trace")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"outcome");"llm_request";"the trace records the outcome")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"policy_decision");h.decisionlabel(decision);"the trace records the policy decision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(colstr(rid;"policy_decision");"unknown");"and the decision is not the placeholder 'unknown'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"risk_classification");h.risklabel(h.risktierof(run));"the trace records the risk tier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(colstr(rid;"entities_detected");"email:1");"entities detected are recorded as type and count")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(colstr(rid;"detection_layers");"scanned=regex");"the layers that scanned are recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(colstr(rid;"detection_layers");"skipped=");"and the layers that were skipped")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"approval_outcome");h.approvaloutcome(decision);"the approval outcome is recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"kill_switch_state");"disengaged";"the kill-switch state is recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"model_selected");"qwen2.5:3b";"the model is recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"anonymisation_applied");"1";"anonymisation is recorded as applied")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(colstr(rid;"duration_ms");"42";"the duration is recorded")){pass=pass+1}el{fail=fail+1};
+
+  (* No content, anywhere in the row. *)
+  let whole=wholerow(rid);
+  if(t.assert(str.len(whole)>0;"the whole row can be read back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(whole;"sentinel");"the email address appears in no column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(whole;"4111");"the card number appears in no column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(whole;"invoice");"no prompt text appears in any column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(whole;"[EMAIL");"no placeholder appears either")){pass=pass+1}el{fail=fail+1};
+
+  (* The persist function refuses to be a content store even when handed content. *)
+  let raw=tr.newtrace("rid-content";"rid-content";"secret original jo.sentinel.7731@example.com");
+  let raw2=tr.recordresponse(raw;"secret response jo.sentinel.7731@example.com");
+  let okp=tr.persist(raw2;$assessorfields{outcome:"test";detectionlayers:"none";approvaloutcome:"not_required";killswitchstate:"disengaged"});
+  if(t.assert(okp;"persist reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(wholerow("rid-content");"sentinel");"a trace holding the original input and response persists neither")){pass=pass+1}el{fail=fail+1};
+
+  (* The kill-switch refusal, which was recorded nowhere before. *)
+  let before=rows("outcome=?";"kill_switch_refused");
+  h.killswitchtrace(store);
+  if(t.assert(rows("outcome=?";"kill_switch_refused")==before+1;"a kill-switch refusal persists a trace")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("kill_switch_state=?";"engaged")==1;"and records the switch as engaged")){pass=pass+1}el{fail=fail+1};
+
+  resetstore();
+  <fail
+};

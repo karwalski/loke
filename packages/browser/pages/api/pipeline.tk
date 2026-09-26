@@ -26,6 +26,8 @@ i=kc:core.storage.keychain;
 i=ollama:core.models.ollama;
 i=org:shared.origin;
 i=mc:core.metrics.collector;
+i=tr:core.governance.trace;
+i=ptypes:core.privacy.pipelinetypes;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -239,8 +241,132 @@ f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;
       durationms:durationms as u32;
       correlationid:run.requestid
     };
-    <audit.insertevent(store;ev)
+    let ok=audit.insertevent(store;ev);
+    (* GA5.5 - every audited outcome also persists its decision trace. The kill switch was
+       read as disengaged at the top of `post`, because an engaged one returns before any
+       event is recorded; killswitchtrace records that case itself. *)
+    let traced=persisttrace(store;run;eventtype;provider;modelid;durationms;decisionlabel(decision);approvaloutcome(decision);"disengaged");
+    if(traced){}el{
+      log.warn("decision trace was not persisted for this request";"api.pipeline";run.requestid)
+    };
+    <ok
   }
+};
+
+(* ── GA5.5: the decision trace ────────────────────────────────────────────────────
+   core.governance.trace had seventeen fields and no caller. These build one per audited
+   outcome from what this endpoint already knows, and persist it through trace.persist,
+   which stores the decision and never the text (see the comment there). *)
+f=decisionlabel(d:$policydecision):str{
+  <mt d {
+    $allow:m "allow";
+    $allowwithwarning:m "allow_with_warning";
+    $requireapproval:m "require_approval";
+    $deny:m "deny"
+  }
+};
+
+(* There is no approval surface anywhere in the product (GA5.26), so a decision that requires
+   approval is recorded as required and not sought, rather than as approved or as not
+   applicable. *)
+f=approvaloutcome(d:$policydecision):str{
+  <mt d {
+    $allow:m "not_required";
+    $allowwithwarning:m "not_required";
+    $requireapproval:m "required_not_sought";
+    $deny:m "not_applicable"
+  }
+};
+
+f=stagelabel(st:$pipelinestage):str{
+  <mt st {
+    $regexscan:v "regex";
+    $nerscan:v "ner";
+    $presidioscan:v "presidio";
+    $dedup:v "dedup";
+    $anonymise:v "anonymise";
+    $guardianinject:v "guardian"
+  }
+};
+
+f=isdetectionstage(label:str):bool{
+  if(str.eq(label;"regex")){ <true }el{};
+  if(str.eq(label;"ner")){ <true }el{};
+  <str.eq(label;"presidio")
+};
+
+(* "scanned=regex;skipped=ner,presidio". A detection stage that ran is scanned, and one that
+   was skipped (sidecar down, or disabled) is skipped. Assessors need this: "no entities" means
+   something different after one layer than after three. *)
+f=detectionlayers(run:$pipelinerun):str{
+  let scanned=mut.@();
+  let skipped=mut.@();
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    let label=stagelabel(sr.stage);
+    if(isdetectionstage(label)){
+      if(sr.skipped){ skipped=skipped.push(label) }el{ scanned=scanned.push(label) }
+    }el{}
+  };
+  <str.concat("scanned=";str.concat(str.join(",";scanned);str.concat(";skipped=";str.join(",";skipped))))
+};
+
+f=containsstr(xs:@str;x:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<xs.len;i=i+1){
+    if(str.eq(xs.get(i);x)){ found=true }el{}
+  };
+  <found
+};
+
+(* Types and counts, in first-seen order: "email:1,credit_card:2". Never a value. *)
+f=entitysummary(run:$pipelinerun):str{
+  let res:$piidetectionresult=run.result;
+  let types=mut.@();
+  lp(let i=0;i<res.entities.len;i=i+1){
+    let e:$piientity=res.entities.get(i);
+    if(containsstr(types;e.entitytype)){}el{ types=types.push(e.entitytype) }
+  };
+  if(types.len==0){ <"none" }el{};
+  let parts=mut.@();
+  lp(let j=0;j<types.len;j=j+1){
+    let ty:str=types.get(j);
+    let n=mut.0;
+    lp(let k=0;k<res.entities.len;k=k+1){
+      let e2:$piientity=res.entities.get(k);
+      if(str.eq(e2.entitytype;ty)){ n=n+1 }el{}
+    };
+    let ns:str=str.fromint(n);
+    parts=parts.push(str.concat(ty;str.concat(":";ns)))
+  };
+  <str.join(",";parts)
+};
+
+f=persisttrace(store:i64;run:$pipelinerun;outcome:str;provider:str;modelid:str;durationms:i64;policylabel:str;approval:str;killswitch:str):bool{
+  if(store==0){ <false }el{};
+  (* The original input is NOT put in the trace, even in memory: "" is passed where newtrace
+     takes it, so no later change to persist can store it by accident. *)
+  let t0=tr.newtrace(run.requestid;run.requestid;"");
+  let t1=mut.t0;
+  if(run.totalentities>0 as u32){ t1=tr.recordpii(t0;entitysummary(run)) }el{};
+  let t2=tr.recordpolicy(t1;policylabel;risklabel(risktierof(run)));
+  let t3=tr.recordrouting(t2;modelid;provider);
+  let t4=tr.complete(t3;durationms as u32);
+  <tr.persist(t4;$assessorfields{outcome:outcome;detectionlayers:detectionlayers(run);approvaloutcome:approval;killswitchstate:killswitch})
+};
+
+(* The two refusals that happen before a policy decision exists. Neither was recorded
+   anywhere before GA5.5, and both are exactly what an assessor asks about. *)
+f=killswitchtrace(store:i64):bool{
+  if(store==0){ <false }el{};
+  let rid:str=str.randhex(16);
+  let t0=tr.newtrace(rid;rid;"");
+  let t1=tr.recordpolicy(t0;"not_evaluated";"unknown");
+  <tr.persist(t1;$assessorfields{outcome:"kill_switch_refused";detectionlayers:"not_scanned";approvaloutcome:"not_applicable";killswitchstate:"engaged"})
+};
+
+f=privacyrefusedtrace(store:i64;run:$pipelinerun;durationms:i64):bool{
+  <persisttrace(store;run;"privacy_refused";"none";"none";durationms;"not_evaluated";"not_applicable";"disengaged")
 };
 
 
@@ -407,6 +533,10 @@ f=cachestore(run:$pipelinerun;prompt:str;response:str):bool{
    The counters are persisted in the settings store, keyed by the day number, because a
    manager built fresh in a request handler and thrown away at the end of it is not a budget
    — every request would start from zero. A day change resets them. *)
+(* GA5.28: t.nowi64() is epoch seconds as a number. This read str.nowunix(), which returns
+   the time as a STRING declared i64, so the "day" was a heap address divided by 86400. It
+   differed from one allocation to the next, and a daily budget keyed on it did not
+   accumulate across requests. *)
 f=daynumber():i64{
   <t.nowi64()/86400
 };
@@ -806,9 +936,13 @@ f=killswitchengaged(store:i64):bool{
 f=post(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
+  (* GA5.28: t.nowms(), not str.nowunix(). str.nowunix() returns the time as a STRING, and
+     its declared type is i64, so arithmetic on it is arithmetic on a heap address: every
+     duration this endpoint recorded was the distance between two allocations. *)
   let startms=t.nowms();
   let store=openstore();
   if(killswitchengaged(store)){
+    killswitchtrace(store);
     <http.res(403;"{\"ok\":false,\"error\":\"kill switch engaged or unreadable\"}")
   }el{};
 
@@ -843,6 +977,7 @@ f=post(req:i64):i64{
     }el{};
     <forward(store;run;sysprompt;startms;decision)
   }el{
+    privacyrefusedtrace(store;run;t.nowms()-startms);
     <refused("no privacy detection layer is available")
   }
 };

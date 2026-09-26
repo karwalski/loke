@@ -7,6 +7,8 @@ m=core.governance.trace;
 
 
 i=str:std.str;
+i=db:std.db;
+i=time:std.time;
 i=log:shared.log;
 
 t=$traceentry{
@@ -32,6 +34,25 @@ t=$decisiontrace{
   finaloutput:str;
   steps:@$traceentry;
   durationms:u32
+};
+
+(* GA5.5 - the four fields an assessor needs that exist nowhere in $auditevent. They are a
+   separate record passed to `persist`, not four more fields on $decisiontrace: toke's codegen
+   caps a struct at SIXTEEN fields (TKC_MAX_PARAMS, which --max-params does not raise), and
+   $decisiontrace already has sixteen. Past the cap, every read fails as "struct has no
+   field". Filed upstream as T-53.
+
+   `outcome` is the audit event type the request ended in (llm_request, policy_deny,
+   kill_switch_refused, ...). `detectionlayers` names the layers that actually scanned the text
+   ("scanned=regex;skipped=ner,presidio"), so "no entities" after one layer can be told apart
+   from "no entities" after three. `approvaloutcome` is not_required, required_not_sought
+   (GA5.26: no approval surface exists yet, and that is recorded rather than implied) or
+   not_applicable. `killswitchstate` is the state that was read for this request. *)
+t=$assessorfields{
+  outcome:str;
+  detectionlayers:str;
+  approvaloutcome:str;
+  killswitchstate:str
 };
 
 f=newtrace(requestid:str;correlationid:str;input:str):$decisiontrace{
@@ -196,6 +217,58 @@ f=complete(trace:$decisiontrace;durationms:u32):$decisiontrace{
   }
 };
 
+
+(* GA5.5 - policy decision and risk tier. Both fields were declared and nothing set them, so a
+   trace always said "unknown" for the two things an assessor asks first. *)
+f=recordpolicy(trace:$decisiontrace;policydecision:str;riskclassification:str):$decisiontrace{
+  <$decisiontrace{
+    requestid:trace.requestid;
+    correlationid:trace.correlationid;
+    originalinput:trace.originalinput;
+    piidetected:trace.piidetected;
+    anonymisationapplied:trace.anonymisationapplied;
+    compressionapplied:trace.compressionapplied;
+    riskclassification:riskclassification;
+    policydecision:policydecision;
+    modelselected:trace.modelselected;
+    provider:trace.provider;
+    promptsent:trace.promptsent;
+    responsereceived:trace.responsereceived;
+    deanonymisationapplied:trace.deanonymisationapplied;
+    finaloutput:trace.finaloutput;
+    steps:trace.steps;
+    durationms:trace.durationms
+  }
+};
+
+f=boolint(b:bool):str{
+  if(b){ <"1" }el{ <"0" }
+};
+
+(* GA5.5 - persistence. One row per decision, in decision_trace (migration 30).
+
+   What is written is the DECISION, not the conversation. originalinput, promptsent,
+   responsereceived and finaloutput are deliberately NOT columns. The first and last are the
+   user's text with its PII in place. The middle two are provider traffic. The database is
+   plaintext on disk (X8), so storing any of them would put the data this product exists to
+   protect into a second store with weaker handling than the placeholder map. Their lengths are
+   not stored either, because a length is a figure about content that nobody asked for.
+   `steps` is stored as a count. Its `detail` strings are free text from callers, and nothing
+   guarantees they carry no value.
+
+   Returns a bool, not a result: a caller matching a user-sum result always takes the first arm
+   (T-18), so a failed write would read as a stored one. std.db has one global connection
+   (T-30), so the store open is what selects the database. *)
+f=persist(trace:$decisiontrace;a:$assessorfields):bool{
+  let sql="INSERT INTO decision_trace (request_id,correlation_id,created_at_ms,outcome,policy_decision,risk_classification,entities_detected,detection_layers,anonymisation_applied,compression_applied,model_selected,provider,deanonymisation_applied,approval_outcome,kill_switch_state,duration_ms,step_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+  let now:str=str.fromint(time.nowms());
+  let dur:str=str.fromint(trace.durationms as i64);
+  let steps:str=str.fromint(trace.steps.len as i64);
+  <mt db.exec(sql;@(trace.requestid;trace.correlationid;now;a.outcome;trace.policydecision;trace.riskclassification;trace.piidetected;a.detectionlayers;boolint(trace.anonymisationapplied);boolint(trace.compressionapplied);trace.modelselected;trace.provider;boolint(trace.deanonymisationapplied);a.approvaloutcome;a.killswitchstate;dur;steps)) {
+    $ok:v true;
+    $err:e false
+  }
+};
 
 f=truncate(s:str;maxlen:i64):str{
   if(str.len(s)>maxlen){

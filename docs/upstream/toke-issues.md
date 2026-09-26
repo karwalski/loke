@@ -1968,3 +1968,40 @@ it. Found 2026-09-24: `core.router.intent.classifybody` (F5.10) sent every multi
 Ollama as invalid JSON. **Worked around** with `shared.jsonobj.escape`, which escapes newline,
 CR and tab as well. Other control characters below 0x20 are still not escaped by either.
 The ask: escape all control characters, as the spec requires.
+
+## T-53 — a struct is capped at sixteen fields, `--max-params` does not raise it, and the error names neither
+
+**Severity: blocks, with a misleading diagnostic.**
+
+Measured 2026-09-24 at `fedd48d`. `src/llvm.c` sizes `StructInfo.field_names` as
+`[TKC_MAX_PARAMS]`, and `src/tkc_limits.h` defines `TKC_MAX_PARAMS` as 16 at compile time.
+`core.governance.trace`'s `$decisiontrace` had exactly sixteen fields. Adding four more
+compiled the declaration without complaint, and then every read of a field past the sixteenth
+failed with `struct 'decisiontrace' has no field 'outcome'`. `--max-params=24` on the command
+line and `max_params = 24` in the config file were both accepted, and neither changed the
+result: the runtime limit they set is not the array bound codegen uses.
+
+**What it cost in loke.** GA5.5 carries the four assessor fields as a separate
+`$assessorfields` record passed to `persist`, not on the trace. **The ask:** reject a
+declaration with too many fields at the declaration and name the limit, or size the table from
+the configured limit.
+
+## T-47 — `str.nowunix()` returns the time as a STRING and is declared `i64`
+
+**Severity: wrong value, silently. It reached a budget, a kill switch and an audit trail.**
+
+Measured 2026-09-24 at `fedd48d`. `tk_str_nowunix_w` in `src/stdlib/str_glue.c` returns
+`tk_str_fromi64_w(secs)`, a string handle. `str.tki` declares it `(i64) -> i64` in the
+`gen:"abi"` block. The name reads as "the unix time", and the declared type is a number, so
+every arithmetic use compiles clean and computes on a heap address. Two consecutive calls
+printed `30647791264` and `30647791296`, 32 bytes apart, while `time.now()/1000` printed
+`1790252367`.
+
+**What it cost in loke.** `page.api.pipeline` used it for request timing, so every audited
+duration was the distance between two allocations. Its budget day number was an address
+divided by 86400, which changes from allocation to allocation, so the daily budget did not
+accumulate across requests. `metrics_raw.timestamp` held a pointer, and a test asserting
+`timestamp > 1700000000` passed on it. `core.governance.killswitch` still uses it for
+`engaged_at` and auto-release (GA5.28). **Worked around** with `shared.types.nowi64()` and
+`nowms()`, which read `std.time`. **The ask** is the T-36 one: declare it `str`, or make it
+return the number its name promises.
