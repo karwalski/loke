@@ -242,7 +242,8 @@ are verified on every run.
 
 ### Regex detector throughput, against F3.1's 10MB/s target — 2026-09-24
 
-**Result: the target is missed by more than an order of magnitude, and the detector never reaches
+**Superseded for memory by the 2026-09-27 section below (F3.1b); kept as the record of the
+defect.** **Result: the target is missed by more than an order of magnitude, and the detector never reaches
 10MB at all.** Throughput falls as the input grows, because time and memory both grow roughly with
 the square of the input size.
 
@@ -291,13 +292,58 @@ scripts/build_loke.sh && scripts/run_tests.sh tests/unit/browser/test_pipeline_h
 TOKE_DIR=<toke at fedd48d> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2 --runs 6 --record --toke-commit fedd48d
 ```
 
+### Regex detector throughput after F3.1b — 2026-09-27
+
+**Result: memory now grows linearly and a 10 MB input completes. Throughput is still far below the
+10MB/s target, and time still grows faster than the input.** F3.1b removed two allocations that grew
+with matches × text length: the span search copied the rest of the text for every match, and
+placeholder application copied the whole text once per entity, including every repeat of a value
+already replaced.
+
+| Input | Median throughput | Range, 5 runs | Median time | Median peak RSS |
+|---|---|---|---|---|
+| 0.25 MB (249 928 bytes) | **1.84 MB/s** | 1.77–1.88 | 136 ms | 40 MB |
+| 0.5 MB (499 932 bytes) | **1.76 MB/s** | 1.74–1.78 | 284 ms | 72 MB |
+| 1 MB (999 680 bytes) | **1.61 MB/s** | 1.60–1.61 | 622 ms | 138 MB |
+| 2 MB (1 999 332 bytes) | **1.38 MB/s** | 1.38–1.38 | 1 451 ms | 276 MB |
+| 10 MB (9 999 870 bytes) | **0.63 MB/s** | 0.62–0.63 | 15 900 ms | 1 670 MB |
+
+**Arm:** `regex-layer-toke-compiled`, timing `core.privacy.regex.detect`, as above. **Toolchain:** toke
+`0b0bc4e` (the `TOOLCHAIN.lock` commit, a clean checkout) and loke `0d29b5e`. **Host:** the same Apple
+M2 Pro (Mac14,10) with 16 GB. **Method (VM1.3):** 6 runs per size, each in a fresh process, the first
+discarded; median and range of the 5 kept. **Workload:** the same corpus construction; 1.31–1.38
+labelled PII entities and 0.6 decoys per 1 000 bytes. The detection count is identical to the
+pre-fix build at every size measured on both (248, 512, 1 000, 1 988), so the fix changed the cost
+and not the output.
+
+**Caveats:**
+
+- **The comparison with the 2026-09-24 table crosses a toolchain change** (`fedd48d` there, `0b0bc4e`
+  here). Before changing the code, the old build was re-measured on `0b0bc4e` (3 runs, first
+  discarded): 141, 519 and 1 971 MB peak at 0.25, 0.5 and 1 MB, the same growth as the table above.
+- **Peak RSS grows about ×1.8–2.0 per doubling from 0.25 to 2 MB.** From 2 to 10 MB it is ×6.1 for
+  ×5 the input, so it is not perfectly linear at the top.
+- **Time is still superlinear.** 10 MB takes about 11 times as long as 2 MB. Each per-match call
+  (`str.indexof`, `str.substr`) still measures the whole string (T-55), so a term in matches × length
+  remains in time, although no longer in memory.
+- One host, one density, one observation series, as before.
+
+Reproduce:
+
+```sh
+python3 tests/fixtures/pii-corpus/generate.py
+scripts/build_loke.sh && scripts/run_tests.sh tests/unit/privacy   # builds the archives
+TOKE_DIR=<toke at 0b0bc4e> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2,10 --runs 6 --record --toke-commit 0b0bc4e
+```
+
 ---
 
 ## Status: no *performance* figure is published
 
 Three measurements exist: detection recall for the regex layer, the serialisation baselines, and the
-regex detector's standalone throughput above. That throughput figure is a **negative** result, and it
-covers one function on one host. **No figure for end-to-end latency, pipeline throughput, cache hit
+regex detector's standalone throughput above. That throughput figure is still a **negative** result
+against its target (F3.1b made memory linear and 10 MB completes, but throughput is under 2 MB/s),
+and it covers one function on one host. **No figure for end-to-end latency, pipeline throughput, cache hit
 rate or any compression technique has been measured**, so none is published. The serialisation entry is a baseline for future token claims, not a result for
 any technique loke implements.
 

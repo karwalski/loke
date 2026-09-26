@@ -126,7 +126,7 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 |-------|------|--------|---------|
 | F3.1 | M | **Done** | Regex PII detector in toke (emails, phones, SSNs, credit cards, IPs, AU TFNs/ABNs — 10MB/s target, zero external deps) **Re-verified 2026-09-24 (RV1.5).** The detection half stands. Emails, phones, SSNs, cards, IPs, TFNs and ABNs each have assertions against the real module in `tests/unit/privacy/test_regex_detector.tk` (44 assertions), `test_regex.tk`, `test_regex_spans.tk` and `test_patterns.tk`. **The "10MB/s target" is measured and missed (F3.1a, 2026-09-24).** This Done covers detection, not throughput. See `docs/metrics-baseline.md` for the figure, and F3.1b for the quadratic cost behind it. |
 | F3.1a | S | **Done** — 2026-09-24 | **Measure the regex detector's throughput against F3.1's 10MB/s target** — Filed 2026-09-24 by RV1.5. F3.1 has been **Done** with this target since it was written, and nothing has ever timed the detector. Run `core.privacy.regex` over a fixed synthetic corpus with a known PII density, at 1MB and 10MB, with the first run discarded as warm-up and N runs reported as a median and a range (VM1.3's method). Publish the result only in `docs/metrics-baseline.md`, labelled with the toke commit it was built against (X4.8). Either result is useful. Missing the target is a finding, not a failure of the story<br><br>**Done 2026-09-24. The target is missed.** Measured with `benchmarks/regex/run.py` (a new harness around `benchmarks/regex/bench.tk`, which times `core.privacy.regex.detect`) at toke `fedd48d`, 6 fresh-process runs per size with the first discarded. At 1 MB the median is roughly a twentieth of the target, and throughput falls as input grows. 10 MB never completes: all three attempts were killed by the OS. The figures, host, density and caveats are published only in `docs/metrics-baseline.md` ("Regex detector throughput"), and are not restated here. The cause is filed as F3.1b. |
-| F3.1b | M |  | **The regex detector's time and memory grow with the square of the input, so a large prompt kills the process** — Filed 2026-09-24 by F3.1a. `docs/metrics-baseline.md` records peak RSS rising about ×3.7 for each doubling of input (141 MB at 0.25 MB, over 7 GB at 2 MB), and a 10 MB input is killed by the OS. In a single process, repeated 1 MB calls slow from 1.9 s to 7.3 s, because memory is not released between calls. The server is one long-lived process, so this reaches it. That is an availability failure and not a fail-open: a killed worker forwards nothing. The suspected cause is not yet verified. In `rundetection`, every match runs `str.substr(text;cursor;textlen)` to locate its span, which copies the rest of the text once per match, and `ph.applytotext` may repeat the pattern. Fix it and re-measure with `benchmarks/regex/run.py`. Acceptance: peak RSS grows linearly across 0.25 to 2 MB, and a 10 MB run completes. |
+| F3.1b | M | **Done** — 2026-09-27 | **The regex detector's time and memory grow with the square of the input, so a large prompt kills the process** — Filed 2026-09-24 by F3.1a. `docs/metrics-baseline.md` records peak RSS rising about ×3.7 for each doubling of input (141 MB at 0.25 MB, over 7 GB at 2 MB), and a 10 MB input is killed by the OS. In a single process, repeated 1 MB calls slow from 1.9 s to 7.3 s, because memory is not released between calls. The server is one long-lived process, so this reaches it. That is an availability failure and not a fail-open: a killed worker forwards nothing. The suspected cause is not yet verified. In `rundetection`, every match runs `str.substr(text;cursor;textlen)` to locate its span, which copies the rest of the text once per match, and `ph.applytotext` may repeat the pattern. Fix it and re-measure with `benchmarks/regex/run.py`. Acceptance: peak RSS grows linearly across 0.25 to 2 MB, and a 10 MB run completes.<br><br>**Done 2026-09-27.** The suspected cause was half the story. There were two allocations growing with matches × text length, neither ever freed. (1) The span search copied the remainder of the text per match; it now searches a window that grows fourfold. (2) `ph.applytotext` ran a global `str.replace` per ENTITY, so each repeat of a value copied the whole text and replaced nothing. Each distinct value is now replaced once, still globally, so no occurrence is missed. Fixing (1) alone halved memory and left it quadratic (82, 288 and 1 052 MB). A first attempt, an in-place byte search, was correct and 130× slower, because `str.charat` calls `strlen` per read (filed as T-55). **Measured** (`docs/metrics-baseline.md`, 2026-09-27, toke `0b0bc4e`, loke `0d29b5e`, VM1.3 method): peak RSS 40, 72, 138 and 276 MB at 0.25, 0.5, 1 and 2 MB, down from 141, 519, 1 971 and 7 185, so linear across that range. 10 MB completes in 15.9 s at 1.67 GB. Detections are identical to the old build at every size. **Both acceptance criteria are met.** **Still true:** time is superlinear (T-55), and 0.63 to 1.84 MB/s is far below F3.1's 10MB/s. `tests/unit/privacy` gains assertions that a repeated value is replaced at every occurrence, and that the window search finds a match past its first window. With the dedupe guard broken, six privacy suites fail. |
 | F3.2 | M | **Done** | NLP NER detector (names, places, organisations via local SLM — replaces compromise.js JS library with toke-native or Ollama-backed NER) |
 | F3.3 | L | **Done** | SLM-based NER detector (context-aware PII: "my boss John" vs "John Deere tractor" — via Ollama REST or ooke native inference) |
 | F3.4 | L | **Done** | Presidio integration (180+ entity types, Python sidecar via REST — unchanged: Presidio is language-agnostic) |
@@ -1071,7 +1071,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 78 | 59 | 12 | 5 | — | — | — | — | 2 |
+| FOUNDATION LAYER | 10 | 78 | 60 | 12 | 5 | — | — | — | — | 1 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 10 | 1 | — | — | — | — | — | — |
@@ -1087,7 +1087,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 37 | 25 | 2 | — | — | — | — | — | 10 |
 | VERIFICATION PROGRAMME | 14 | 128 | 88 | 12 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **711** | **574** | **35** | **8** | **36** | **3** | **1** | — | **54** |
+| **Total** | **88** | **711** | **575** | **35** | **8** | **36** | **3** | **1** | — | **53** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1095,7 +1095,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 |---|---|---|---|---|---|---|---|---|---|---|
 | F1 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | F2 | 1 | 12 | 12 | — | — | — | — | — | — | — |
-| F3 | 1 | 11 | 9 | 1 | — | — | — | — | — | 1 |
+| F3 | 1 | 11 | 10 | 1 | — | — | — | — | — | — |
 | F3b | 1 | 11 | — | 11 | — | — | — | — | — | — |
 | F4 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F5 | 1 | 12 | 10 | — | 1 | — | — | — | — | 1 |
@@ -1181,7 +1181,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 29 | 23 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **711** | **574** | **35** | **8** | **36** | **3** | **1** | — | **54** |
+| **Total** | **88** | **711** | **575** | **35** | **8** | **36** | **3** | **1** | — | **53** |
 
 Rows parsed: **711**, across **88** epics and **16** level-1 headings.
 
