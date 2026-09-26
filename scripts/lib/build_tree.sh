@@ -347,6 +347,26 @@ done
 NIFACE=$(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ')
 echo "[$NAME]   $NIFACE of $NIFACE_SRCS interface(s) emitted"
 
+# F10.31: iterate to a fixpoint. The pass above runs once in dependency order, so a module
+# that fails, even transiently, blinds every module above it, which then report `E2030
+# module not found` although nothing is wrong with them. Measured once: a transient break in
+# core.privacy.regex took 126 of 210 interfaces with it. Retry only the modules whose
+# interface is still missing, until a pass adds none. The cap bounds a genuinely broken
+# module, which stays missing and is reported by the census as before.
+IFACE_PASS=1
+while [ "$IFACE_PASS" -lt 8 ]; do
+  IFACE_PASS=$((IFACE_PASS+1))
+  BEFORE=$NIFACE
+  for tkfile in $IFACE_SRCS; do
+    [ -f "$IFACE_DIR/$(modpath_of "$tkfile").tki" ] && continue
+    "$TOKE" $TKCONFIG -I "$IFACE_DIR" --emit-interface --emit-llvm \
+      --out "$IFACE_DIR" "$tkfile" >/dev/null 2>&1 || true
+  done
+  NIFACE=$(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ')
+  [ "$NIFACE" -eq "$BEFORE" ] && break
+  echo "[$NAME]   pass $IFACE_PASS: $NIFACE of $NIFACE_SRCS interface(s) after retrying the missing ones"
+done
+
 # Publish the complete set with one atomic rename. A real directory left by an older build is
 # replaced once; after that the path is always a link.
 IFACE_OLD=$(readlink "$IFACE_PUBLIC" 2>/dev/null || true)
