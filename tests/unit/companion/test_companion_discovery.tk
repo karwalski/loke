@@ -1,0 +1,90 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.companion.testcompaniondiscovery;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=ct:core.companion.types;
+i=disc:core.companion.discovery;
+
+(* X4b.10 - companion discovery: discover, confirm and reject a device.
+
+   Discovery on the network is std.mdns, which is a stub on this toolchain: browse finds
+   nothing and advertise reports failure. That is asserted as what it is. Pairing is the
+   part loke owns: the confirmation code, and what is remembered after the user confirms or
+   rejects. The code used to be the same for every device (the first six characters of a
+   PEM, which always begin `-----BEGIN`). *)
+
+f=dev(id:str):$companion{
+  <$companion{id:id;name:str.concat("device ";id);host:"192.168.1.20";port:11440 as i32;certpem:"-----BEGIN CERTIFICATE-----";paired:false;pairedat:0;lastseen:0}
+};
+
+f=hasdev(cs:@$companion;id:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<cs.len;i=i+1){
+    let c:$companion=cs.get(i);
+    if(str.eq(c.id;id)){ found=true }el{}
+  };
+  <found
+};
+
+f=isdigits(s:str):bool{
+  let ok=mut.true;
+  lp(let i=0;i<str.len(s);i=i+1){
+    let c=str.charat(s;i);
+    if(c<48 || c>57){ ok=false }el{}
+  };
+  <ok
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── discovery ─────────────────────────────────────────────────────────── *)
+  if(t.asserteq(disc.servicetype();"_loke-companion._tcp";"companions advertise one service type")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.browse().len==0;"browse finds nothing, because std.mdns is a stub, and says so rather than inventing devices")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the confirmation code ─────────────────────────────────────────────── *)
+  let c1:$pairingcode=disc.generatepairingcode();
+  let c2:$pairingcode=disc.generatepairingcode();
+  let c3:$pairingcode=disc.generatepairingcode();
+  if(t.assert(str.len(c1.code)==6 && isdigits(c1.code);"a pairing code is six digits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!(str.eq(c1.code;c2.code) && str.eq(c2.code;c3.code));"and codes differ from one pairing to the next")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(disc.codefromhex("00000000");"000000";"a small value is zero-padded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(disc.codefromhex("ffffffff");"967295";"and a large one keeps its last six digits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c1.expiresat>0;"a code expires")){pass=pass+1}el{fail=fail+1};
+
+  (* ── confirm and reject ────────────────────────────────────────────────── *)
+  let dir=str.concat(std.homedir();"/.loke/test-companion-discovery");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  let store=mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  };
+  if(t.assert(store!=0;"a store opens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.loadcompanions(store).len==0;"no companion is known at first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.savecompanion(store;dev("seen"));"a discovered device can be saved unpaired")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasdev(disc.loadcompanions(store);"seen");"and is not a companion until it is confirmed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.confirm(store;dev("seen");1790000000);"confirming it succeeds")){pass=pass+1}el{fail=fail+1};
+  let after=disc.loadcompanions(store);
+  if(t.assert(hasdev(after;"seen");"and it is then a paired companion")){pass=pass+1}el{fail=fail+1};
+  if(after.len==1){
+    let c:$companion=after.get(0);
+    if(t.assert(c.paired && c.pairedat==1790000000;"recorded as paired, with when")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(c.host;"192.168.1.20";"and where to reach it")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+2 };
+  if(t.assert(disc.savecompanion(store;dev("other"));"a second device is seen")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.reject(store;"other");"and rejected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT id FROM companions WHERE id='other'";@())==0;"nothing about a rejected device is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.reject(store;"seen");"a paired companion can be rejected too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disc.loadcompanions(store).len==0;"and is then forgotten")){pass=pass+1}el{fail=fail+1};
+  file.delete(str.concat(dir;"/loke.db"));
+
+  <fail
+}

@@ -7,6 +7,7 @@ i=http:std.http;
 i=json:std.json;
 i=sh:shared.types;
 i=str:std.str;
+i=reach:shared.reachability;
 
 t=$exoconfig{
   host:str;
@@ -29,48 +30,84 @@ f=defaultconfig():$exoconfig{
   <$exoconfig{ host:"localhost"; port:52415 }
 };
 
+f=baseurl(cfg:$exoconfig):str{
+  <str.concat("http://";str.concat(cfg.host;str.concat(":";str.fromint(cfg.port as i64))))
+};
+
+(* X4b.10. http.get against a closed port returns $ok with a nil response (T-15), so the
+   status read that followed dereferenced nil whenever Exo was not running, which is the
+   usual case. The port is probed first, as core.models.ollama does. *)
 f=isavailable(cfg:$exoconfig):bool{
-  let url=str.concat("http://";str.concat(cfg.host;str.concat(":";str.concat(str.fromint(cfg.port);"/v1/health"))));
-  let resp=http.get(url);
+  if(!reach.localserviceup(baseurl(cfg))){ <false }el{};
+  let resp=http.get(str.concat(baseurl(cfg);"/v1/health"));
   <mt resp {
     $ok:r r.status==200;
     $err:e false
   }
 };
 
+(* X4b.10. The body is parsed by its own function, so the node and model list can be tested
+   without a running Exo. *)
+f=typednodes(bodytext:str):@$json{
+  <mt json.dec(bodytext) {
+    $ok:obj nodesof(obj);
+    $err:e @()
+  }
+};
+
+f=nodesof(obj:$json):@$json{
+  <mt json.arr(obj;"nodes") {
+    $ok:a a;
+    $err:e @()
+  }
+};
+
+(* memory_gb through the TYPED accessor. json.getf32 answers a value that is not an f32
+   this code can do arithmetic on: measured, a cluster of 192 GB and 64 GB summed to 9.3e18,
+   and reading it back through the struct crashed the process. *)
+f=memoryof(nodes:@$json;i:i64):f64{
+  if(i>=(nodes.len as i64)){ <0.0 }el{};
+  <mt json.f64(nodes.get(i);"memory_gb") {
+    $ok:v v;
+    $err:e 0.0
+  }
+};
+
+(* A body that is not even shaped like an object is refused before any JSON accessor sees it:
+   json.decode and json.getarray crashed on `{not json` (LS1.1w), and json.dec accepts it
+   (T-51). This is a shape check, not a validator. *)
+f=objectshaped(bodytext:str):bool{
+  let b=str.trim(bodytext);
+  <str.startswith(b;"{") && str.endswith(b;"}") && str.contains(b;"\"nodes\"")
+};
+
+f=parsecluster(bodytext:str):$exocluster{
+  if(!objectshaped(bodytext)){ <$exocluster{ nodes:@(); totalmemorygb:0.0 } }el{};
+  let parsed=json.decode(bodytext);
+  let rawnodes=json.getarray(parsed;"nodes");
+  if(rawnodes.len==0){ <$exocluster{ nodes:@(); totalmemorygb:0.0 } }el{};
+  (* Only once a node list was found: json.dec accepts `{not json` (T-51), and json.arr on
+     what it returns crashed. *)
+  let typed=typednodes(bodytext);
+  let nodes=mut.@();
+  let total=mut.0.0;
+  lp(let i=0;i<rawnodes.len;i=i+1){
+    let n=str.arrayget(rawnodes;i);
+    let mem=memoryof(typed;i as i64);
+    nodes=nodes.push($exonode{ id:json.str(n;"id"); device:json.str(n;"device"); memorygb:mem as f32; models:sh.jsonstrarray(n;"models") });
+    total=total+mem
+  };
+  <$exocluster{ nodes:nodes; totalmemorygb:total as f32 }
+};
+
 f=parseclusterresp(r:$httpresp):$exocluster{
-  let rstatus=mut.$exocluster{ nodes:@(); totalmemorygb:0.0 };
-  if(r.status>199){
-    if(r.status<300){
-      let parsed=json.decode(r.body);
-      let rawnodes=json.getarray(parsed;"nodes");
-      let nodes=mut.@();
-      let total=mut.0.0;
-      let i=mut.0;
-      let count=rawnodes.len;
-      lp(let lv=0;true;lv=lv){
-        if(i>=count){
-          br
-        }el{
-          let n=str.arrayget(rawnodes;i);
-          let id=json.str(n;"id");
-          let device=json.str(n;"device");
-          let memorygb=json.getf32(n;"memory_gb");
-          let models=sh.jsonstrarray(n;"models");
-          nodes=nodes.push($exonode{ id:id; device:device; memorygb:memorygb; models:models });
-          total=total+memorygb;
-          i=i+1
-        }
-      };
-      rstatus=$exocluster{ nodes:nodes; totalmemorygb:total }
-    }el{}
-  }el{};
-  <rstatus
+  if(r.status>199 && r.status<300){ <parsecluster(r.body) }el{};
+  <$exocluster{ nodes:@(); totalmemorygb:0.0 }
 };
 
 f=clusterstatus(cfg:$exoconfig):$exocluster{
-  let url=str.concat("http://";str.concat(cfg.host;str.concat(":";str.concat(str.fromint(cfg.port);"/v1/nodes"))));
-  let resp=http.get(url);
+  if(!reach.localserviceup(baseurl(cfg))){ <$exocluster{ nodes:@(); totalmemorygb:0.0 } }el{};
+  let resp=http.get(str.concat(baseurl(cfg);"/v1/nodes"));
   <mt resp {
     $ok:r parseclusterresp(r);
     $err:e $exocluster{ nodes:@(); totalmemorygb:0.0 }

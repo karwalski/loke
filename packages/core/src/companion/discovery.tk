@@ -50,27 +50,65 @@ f=stop():bool{
   <mdns.stopadvertise(servicetype())!=0
 };
 
-f=generatepairingcode(certpem:str):$pairingcode{
-  let prefix=str.slice(certpem;0;6);
+(* X4b.10. The code was the first six characters of the certificate PEM read as digits, and
+   every PEM begins `-----BEGIN`, so every device was offered the same code: a confirmation
+   code an attacker knew in advance. It also read the result of str.slice as a string. It is
+   now six decimal digits from 32 random bits (str.randhex forwards to arc4random). *)
+f=hexval(c:i64):i64{
+  if(c>=48 && c<=57){ <c-48 }el{};
+  if(c>=97 && c<=102){ <c-87 }el{};
+  if(c>=65 && c<=70){ <c-55 }el{};
+  <0
+};
+
+f=codefromhex(h:str):str{
   let n=mut.0;
-  (* `i>5` read a seventh character from a six-character slice. *)
-  lp(let i=0;i<str.len(prefix);i=i+1){
-    n=n*10+(str.charat(prefix;i)-48)
+  lp(let i=0;i<str.len(h);i=i+1){
+    n=n*16+hexval(str.charat(h;i))
   };
+  let digits=mut.str.fromint(n-((n/1000000)*1000000));
+  (* By hand: str.padleft is a gen:"abi" entry declared i64 -> i64, and its result is not a
+     string this code can use (the T-41 family). *)
+  lp(let k=0;str.len(digits)<6;k=k+1){ digits=str.concat("0";digits) };
+  <digits
+};
+
+f=generatepairingcode():$pairingcode{
+  let h:str=str.randhex(4);
   <$pairingcode{
-    code:str.padleft(str.fromint(n-((n/1000000)*1000000));6;"0");
+    code:codefromhex(h);
     expiresat:db.nowms()+300000
   }
 };
 
-f=savecompanion(store:$store;companion:$companion):bool{
-  mt db.exec(store;"CREATE TABLE IF NOT EXISTS companions (id TEXT PRIMARY KEY, name TEXT, host TEXT, port INT, cert_pem TEXT, paired INT, paired_at INT, last_seen INT)") {
-    $ok:v v;
-    $err:e 0
-  };
-  <mt db.execparams(store;
-    "INSERT OR REPLACE INTO companions (id, name, host, port, cert_pem, paired, paired_at, last_seen) VALUES (?,?,?,?,?,?,?,?)";
-    @(companion.id;companion.name;companion.host;str.fromint(companion.port);companion.certpem;db.boolval(companion.paired);str.fromint64(companion.pairedat);str.fromint64(companion.lastseen))) {
+(* X4b.10. Saving and loading went through core.storage.db's result-returning wrappers,
+   whose arms a caller cannot tell apart (T-18), so savecompanion returned true whatever
+   happened. std.db directly, with bools. *)
+f=ensurecompanions():bool{
+  <mt sdb.exec("CREATE TABLE IF NOT EXISTS companions (id TEXT PRIMARY KEY, name TEXT, host TEXT, port INT, cert_pem TEXT, paired INT, paired_at INT, last_seen INT)";@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=savecompanion(store:i64;companion:$companion):bool{
+  if(!ensurecompanions()){ <false }el{};
+  <mt sdb.exec("INSERT OR REPLACE INTO companions (id, name, host, port, cert_pem, paired, paired_at, last_seen) VALUES (?,?,?,?,?,?,?,?)";
+    @(companion.id;companion.name;companion.host;str.fromint(companion.port as i64);companion.certpem;db.boolval(companion.paired);str.fromint(companion.pairedat);str.fromint(companion.lastseen))) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* The user confirmed the code on both devices: the companion is remembered as paired. *)
+f=confirm(store:i64;companion:$companion;now:i64):bool{
+  <savecompanion(store;$companion{id:companion.id;name:companion.name;host:companion.host;port:companion.port;certpem:companion.certpem;paired:true;pairedat:now;lastseen:now})
+};
+
+(* The user rejected it: nothing about the device is kept. *)
+f=reject(store:i64;id:str):bool{
+  if(!ensurecompanions()){ <false }el{};
+  <mt sdb.exec("DELETE FROM companions WHERE id=?";@(id)) {
     $ok:v true;
     $err:e false
   }
@@ -97,8 +135,9 @@ f=companionsfromrows(rows:@$row):@$companion{
   <result
 };
 
-f=loadcompanions(store:$store):@$companion{
-  <mt db.query(store;"SELECT id, name, host, port, cert_pem, paired, paired_at, last_seen FROM companions WHERE paired=1") {
+f=loadcompanions(store:i64):@$companion{
+  if(!ensurecompanions()){ <@() }el{};
+  <mt sdb.many("SELECT id, name, host, port, cert_pem, paired, paired_at, last_seen FROM companions WHERE paired=?";@("1")) {
     $ok:rows companionsfromrows(rows);
     $err:e @()
   }

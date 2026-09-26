@@ -10,6 +10,7 @@ i=file:std.file;
 i=str:std.str;
 i=http:std.http;
 i=env:std.env;
+i=reach:shared.reachability;
 
 t=$initresult{
   shellprofileupdated:bool;
@@ -60,6 +61,20 @@ f=lokeshellsnippet():str{
   )
 };
 
+(* X4b.10. The snippet is added to a profile that exists and does not already set up loke.
+   An empty or missing profile is left alone, as before: init does not create one. *)
+f=needssnippet(existing:str):bool{
+  <str.len(existing)>0 && !str.contains(existing;"LOKE_HOME")
+};
+
+f=ollamarunning(baseurl:str):bool{
+  if(!reach.localserviceup(baseurl)){ <false }el{};
+  <mt http.get(str.concat(baseurl;"/api/tags")) {
+    $ok:resp resp.status==200;
+    $err:e false
+  }
+};
+
 f=run(datadir:str):$initresult{
   let errors=mut.@();
   let configdircreated=mut.false;
@@ -69,55 +84,43 @@ f=run(datadir:str):$initresult{
   let lokedir=t.lokedir();
   let lokebindir=t.lokefile("bin");
 
-  mt file.mkdir(lokedir) {
+  (* X4b.10. Both results were matched and dropped, and the errors were pushed inside the
+     arms and thrown away (T-24), so configdircreated was false on every run and no error
+     was ever reported. *)
+  configdircreated=mt file.mkdir(lokedir) {
     $ok:v true;
-    $err:e errors.push(str.concat("could not create config dir: ";e))
+    $err:e false
   };
-
-  mt file.mkdir(lokebindir) {
-    $ok:v 0;
-    $err:e errors.push(str.concat("could not create bin dir: ";e))
+  if(configdircreated){}el{ errors=errors.push("could not create config dir") };
+  let bindirok=mt file.mkdir(lokebindir) {
+    $ok:v true;
+    $err:e false
   };
+  if(bindirok){}el{ errors=errors.push("could not create bin dir") };
 
   let shell=detectshell();
   let prof=profilepath(shell);
   let snippet=lokeshellsnippet();
 
-  let profread=file.read(prof);
-  mt profread {
-    $ok:existing 0;
-    $err:e errors.push(str.concat("could not read shell profile: ";e))
-  };
-  let existing=mt profread {
-    $ok:existing existing;
+  let existing=mt file.read(prof) {
+    $ok:text text;
     $err:e ""
   };
-  if(str.len(existing) > 0){
-    if(!str.contains(existing;"LOKE_HOME")){
-      let appendok=mt file.append(prof;snippet) {
-        $ok:v true;
-        $err:e false
-      };
-      if(appendok){
-        shellprofileupdated=true
-      }el{
-        errors=str.arraypush(errors;"could not update shell profile")
-      }
-    }el{}
+  if(needssnippet(existing)){
+    let appendok=mt file.append(prof;snippet) {
+      $ok:v true;
+      $err:e false
+    };
+    if(appendok){
+      shellprofileupdated=true
+    }el{
+      errors=errors.push("could not update shell profile")
+    }
   }el{};
 
-  let tagsresp=http.get("http://localhost:11434/api/tags");
-  mt tagsresp {
-    $ok:resp 0;
-    $err:e 0
-  };
-  let tagsok=mt tagsresp {
-    $ok:resp resp;
-    $err:e 0
-  };
-  if(!(tagsok == 0)){
-    if(tagsok.status == 200){ ollamafound=true }el{}
-  }el{};
+  (* http.get against a closed port returns $ok with a nil response (T-15), and the
+     status read that followed dereferenced it whenever Ollama was not running. *)
+  ollamafound=ollamarunning("http://localhost:11434");
 
   let tick="+";
   let cross="x";
