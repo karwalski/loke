@@ -1,0 +1,99 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.agents.testsandbox;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=at:core.agents.types;
+i=sb:core.agents.sandbox;
+
+(* AG1.10 - the agent sandbox decides a permission correctly, and a refusal is recorded.
+
+   Before AG1.10 checkpermission took and returned an i64, was asked about bare sum variants
+   (T-13), and matched grants with str.contains, so a grant for a directory granted any path
+   containing it, including one that climbs out with `..`. A refusal was logged and never
+   recorded. *)
+
+f=agentwith(perms:@$agentpermission):$agentdef{
+  let base=at.newagent("test-agent";"test";"sandbox test";"");
+  <$agentdef{
+    id:base.id;
+    name:base.name;
+    description:base.description;
+    schedule:base.schedule;
+    trigger:base.trigger;
+    modelpreference:base.modelpreference;
+    latencytolerance:base.latencytolerance;
+    risklevel:base.risklevel;
+    permissions:perms;
+    maxcostperrun:base.maxcostperrun;
+    requiresapproval:base.requiresapproval;
+    owner:base.owner;
+    enabled:base.enabled;
+    prompttemplate:base.prompttemplate
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let root=str.concat(std.homedir();"/.loke/test-sandbox");
+  let granted=str.concat(root;"/granted");
+  let outside=str.concat(root;"/outside");
+  file.mkdir(root);
+  file.mkdir(granted);
+  file.mkdir(outside);
+  let inpath=str.concat(granted;"/notes.txt");
+  let outpath=str.concat(outside;"/secret.txt");
+  let wrote1=file.write(inpath;"granted content");
+  let wrote2=file.write(outpath;"secret content");
+
+  let box=sb.newsandbox(agentwith(@(sb.readpermission(granted);sb.getpermission("https://api.example.com");sb.modelpermission("qwen2.5:7b"))));
+
+  (* ── decisions ─────────────────────────────────────────────────────────── *)
+  if(t.assert(sb.checkpermission(box;sb.readpermission(inpath));"a file under the granted directory may be read")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sb.checkpermission(box;sb.readpermission(granted));"and so may the directory itself")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.readpermission(outpath));"a file outside it may not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.readpermission(str.concat(granted;"/../outside/secret.txt")));"nor one that climbs out of it with ..")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.readpermission(str.concat(granted;"-evil/x.txt")));"nor a sibling whose name starts the same")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.readpermission(str.concat("/elsewhere";granted)));"nor a path that merely contains the grant")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.writepermission(inpath));"a read grant does not grant a write")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(sb.checkpermission(box;sb.getpermission("https://api.example.com/v1/items?q=1"));"a URL under the granted one may be fetched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.getpermission("https://api.example.com.evil.net/v1"));"a host that starts with the granted host may not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.getpermission("https://evil.net/?u=https://api.example.com"));"nor one that merely contains it")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(sb.checkpermission(box;sb.modelpermission("qwen2.5:7b"));"the granted model is permitted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(box;sb.modelpermission("qwen2.5:72b"));"and no other")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.checkpermission(sb.newsandbox(agentwith(@()));sb.readpermission(inpath));"an agent with no grants may do nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── operations ────────────────────────────────────────────────────────── *)
+  let r1:$sandboxstep=sb.readfile(box;inpath);
+  if(t.assert(r1.ok;"a granted read succeeds")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r1.output;"granted content";"and returns the file")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sb.hasviolations(r1.sandbox);"with no violation recorded")){pass=pass+1}el{fail=fail+1};
+
+  let r2:$sandboxstep=sb.readfile(r1.sandbox;outpath);
+  if(t.assert(!r2.ok;"a refused read fails")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(r2.output;"secret");"without reading the file")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sb.hasviolations(r2.sandbox);"and the violation reaches the caller")){pass=pass+1}el{fail=fail+1};
+  let rs:$sandbox=r2.sandbox;
+  if(t.assert(rs.violations.len==1;"once")){pass=pass+1}el{fail=fail+1};
+
+  let r3:$sandboxstep=sb.readfile(r2.sandbox;str.concat(granted;"/../outside/secret.txt"));
+  if(t.assert(!r3.ok && !str.contains(r3.output;"secret");"a traversal read is refused too")){pass=pass+1}el{fail=fail+1};
+  let rs3:$sandbox=r3.sandbox;
+  if(t.assert(rs3.violations.len==2;"and recorded as a second violation")){pass=pass+1}el{fail=fail+1};
+
+  let r4:$sandboxstep=sb.httpget(r3.sandbox;"https://api.example.com.evil.net/x");
+  if(t.assert(!r4.ok;"a refused fetch fails before any request is made")){pass=pass+1}el{fail=fail+1};
+  let rs4:$sandbox=r4.sandbox;
+  if(t.assert(rs4.violations.len==3;"and is recorded")){pass=pass+1}el{fail=fail+1};
+
+  file.delete(inpath);
+  file.delete(outpath);
+  <fail
+}

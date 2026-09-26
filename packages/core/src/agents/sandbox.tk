@@ -29,6 +29,15 @@ t=$sandbox{
 };
 
 
+(* AG1.10. What a sandboxed operation returns: the sandbox travels with the result, so a
+   refusal's violation reaches the caller. *)
+t=$sandboxstep{
+  sandbox:$sandbox;
+  ok:bool;
+  output:str;
+  error:str
+};
+
 f=newsandbox(agent:$agentdef):$sandbox{
   <$sandbox{
     agent:agent;
@@ -40,40 +49,74 @@ f=newsandbox(agent:$agentdef):$sandbox{
 
 
 
+(* ── AG1.10: permission decisions ────────────────────────────────────────────────
+   Everything below was rewritten 2026-09-26. The old checkpermission took and returned an
+   i64 while both callers used it as a bool, read the grants through str.arrayget (which
+   erases the element type), and was asked about permissions built as bare sum variants
+   (`$readfile(path)`), which crash in a value position (T-13). And it answered the wrong
+   question when it did run: a grant matched by str.contains, so a grant for /tmp/work also
+   granted /tmp/work/../../etc/passwd and /home/x/tmp/work, and a grant for
+   https://api.example.com also granted https://api.example.com.evil.net. *)
+
+(* Permissions are built here, never as bare variants. *)
+f=readpermission(path:str):$agentpermission{ <$agentpermission{$readfile:path} };
+f=writepermission(path:str):$agentpermission{ <$agentpermission{$writefile:path} };
+f=toolpermission(name:str):$agentpermission{ <$agentpermission{$mcptool:name} };
+f=getpermission(url:str):$agentpermission{ <$agentpermission{$httpget:url} };
+f=modelpermission(model:str):$agentpermission{ <$agentpermission{$model:model} };
+
+(* A `..` segment anywhere is refused outright rather than resolved: the sandbox answers
+   about the path it was given, and a path that climbs is not one it will reason about. *)
+f=hastraversal(p:str):bool{
+  if(str.eq(p;"..")){ <true }el{};
+  if(str.startswith(p;"../")){ <true }el{};
+  if(str.endswith(p;"/..")){ <true }el{};
+  <str.contains(p;"/../")
+};
+
+f=withoutslash(p:str):str{
+  if(str.len(p)>1 && str.endswith(p;"/")){
+    <mt str.slice(p;0;str.len(p)-1) {
+      $ok:v v;
+      $err:e p
+    }
+  }el{};
+  <p
+};
+
+(* The request is the granted path itself, or lies under it at a directory boundary. *)
 f=pathmatches(allowedpath:str;reqpath:str):bool{
-  let matched=mut.false;
-  if(str.eq(allowedpath;reqpath)){
-    matched=true
-  }el{
-    if(str.contains(reqpath;allowedpath)){
-      matched=true
-    }el{}
-  };
-  <matched
+  if(str.len(allowedpath)==0){ <false }el{};
+  if(hastraversal(reqpath)){ <false }el{};
+  let base=withoutslash(allowedpath);
+  if(str.eq(reqpath;base)){ <true }el{};
+  if(str.eq(base;"/")){ <str.startswith(reqpath;"/") }el{};
+  <str.startswith(reqpath;str.concat(base;"/"))
+};
+
+(* The request is the granted URL itself, or continues it at a path, query or fragment
+   boundary, so a grant never extends to another host whose name starts the same way. *)
+f=urlmatches(allowedurl:str;requrl:str):bool{
+  if(str.len(allowedurl)==0){ <false }el{};
+  if(str.eq(allowedurl;requrl)){ <true }el{};
+  if(!str.startswith(requrl;allowedurl)){ <false }el{};
+  if(str.endswith(allowedurl;"/")){ <!hastraversal(requrl) }el{};
+  let next=str.charat(requrl;str.len(allowedurl));
+  if(next==47){ <!hastraversal(requrl) }el{};
+  <next==63 || next==35
 };
 
 f=namematches(allowedname:str;reqname:str):bool{
-  <str.eq(allowedname;reqname)
+  <str.len(allowedname)>0 && str.eq(allowedname;reqname)
 };
 
-f=checkpermission(sandbox:$sandbox;permission:i64):i64{
-  let perms=sandbox.agent.permissions;
-  let count=perms.len;
-  let i=mut.0;
+f=checkpermission(sandbox:$sandbox;permission:$agentpermission):bool{
+  let ag:$agentdef=sandbox.agent;
+  let perms:@$agentpermission=ag.permissions;
   let granted=mut.false;
-  lp(let lv=0;true;lv=lv){
-    if(i>=count){
-      br
-    }el{
-      let p=str.arrayget(perms;i);
-      let matched=checkoneperm(permission;p);
-      if(matched){
-        granted=true;
-        i=count
-      }el{
-        i=i+1
-      }
-    }
+  lp(let i=0;i<perms.len;i=i+1){
+    let p:$agentpermission=perms.get(i);
+    if(checkoneperm(permission;p)){ granted=true }el{}
   };
   <granted
 };
@@ -114,7 +157,7 @@ f=grantstool(p:$agentpermission;reqname:str):bool{
 
 f=grantsget(p:$agentpermission;requrl:str):bool{
   <mt p {
-    $httpget:allowedurl pathmatches(allowedurl;requrl);
+    $httpget:allowedurl urlmatches(allowedurl;requrl);
     $readfile:rpath false;
     $writefile:wpath false;
     $mcptool:mname false;
@@ -142,58 +185,44 @@ f=checkoneperm(permission:$agentpermission;p:$agentpermission):bool{
   }
 };
 
+(* ── AG1.10: sandboxed operations ─────────────────────────────────────────────────
+   Each returns the sandbox with it, so a refusal's violation reaches the caller. The old
+   forms returned str!$lokeerr, which a caller cannot discriminate (T-18), and could not
+   record a violation at all: toke cannot mutate the caller's struct. *)
+f=step(sandbox:$sandbox;ok:bool;output:str;error:str):$sandboxstep{
+  <$sandboxstep{sandbox:sandbox;ok:ok;output:output;error:error}
+};
 
-
-
-f=sandboxreadfile(sandbox:$sandbox;path:str):str!$lokeerr{
+f=refused(sandbox:$sandbox;msg:str):$sandboxstep{
   let ag:$agentdef=sandbox.agent;
-  let perm=$readfile(path);
-  let allowed=checkpermission(sandbox;perm);
-  if(allowed){
-    let result=file.read(path);
-    (* LS1.1t: returned, as in sandboxhttpget. *)
-    <mt result {
-      $ok:content $ok(content);
-      $fileerr:e $err($configerr(str.concat("file read error: ";path)))
-    }
-  }el{
-    let msg=str.concat("permission denied: readfile ";path);
-    (* LS1.1a: the violation cannot be appended here — toke cannot mutate the
-       caller's struct, so this was a no-op comparison and no violation was ever
-       recorded. Logged for now; recording needs recordviolation() to return an
-       updated $sandbox and every caller to thread it. *)
-    log.warn(str.concat("sandbox violation: ";msg);"sandbox";ag.id);
-    <$err($configerr(msg))
+  log.warn(str.concat("sandbox violation: ";msg);"sandbox";ag.id);
+  <step(recordviolation(sandbox;msg);false;"";msg)
+};
+
+f=readfile(sandbox:$sandbox;path:str):$sandboxstep{
+  if(checkpermission(sandbox;readpermission(path))){}el{
+    <refused(sandbox;str.concat("permission denied: readfile ";path))
+  };
+  <mt file.read(path) {
+    $ok:content step(sandbox;true;content;"");
+    $fileerr:e step(sandbox;false;"";str.concat("file read error: ";path))
   }
 };
 
-
-
-f=sandboxhttpget(sandbox:$sandbox;url:str):str!$lokeerr{
-  let ag:$agentdef=sandbox.agent;
-  let perm=$httpget(url);
-  let allowed=checkpermission(sandbox;perm);
-  if(allowed){
-    let result=http.get(url);
-    (* LS1.1t: returned. The match was a statement, so the ALLOWED path fell through to
-       toke's implicit `ret 0` and a permitted read returned nothing. *)
-    <mt result {
-      $ok:body $ok(body);
-      $err:e $err($networkerr(str.concat("http get failed: ";url)))
-    }
-  }el{
-    let msg=str.concat("permission denied: httpget ";url);
-    (* LS1.1a: the violation cannot be appended here — toke cannot mutate the
-       caller's struct, so this was a no-op comparison and no violation was ever
-       recorded. Logged for now; recording needs recordviolation() to return an
-       updated $sandbox and every caller to thread it. *)
-    log.warn(str.concat("sandbox violation: ";msg);"sandbox";ag.id);
-    <$err($configerr(msg))
+(* http.get against a closed port returns $ok with a nil body (T-15), so a granted fetch of
+   a dead endpoint is not safe to read yet. The permission decision is what this module
+   owns; the fetch is the stdlib's. *)
+f=httpget(sandbox:$sandbox;url:str):$sandboxstep{
+  if(checkpermission(sandbox;getpermission(url))){}el{
+    <refused(sandbox;str.concat("permission denied: httpget ";url))
+  };
+  <mt http.get(url) {
+    $ok:body step(sandbox;true;body;"");
+    $httperr:e step(sandbox;false;"";str.concat("http get failed: ";url))
   }
 };
 
-
-f=checkcostlimit(sandbox:$sandbox;additionalcost:f64):i64{
+f=checkcostlimit(sandbox:$sandbox;additionalcost:f64):bool{
   <!((sandbox.costusd+additionalcost)>sandbox.agent.maxcostperrun)
 };
 
