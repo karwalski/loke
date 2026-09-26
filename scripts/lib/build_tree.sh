@@ -141,6 +141,15 @@ case "$LINK" in none|binary) ;; *) die "--link must be none or binary" ;; esac
 
 TREEDIR="$PROJECTDIR/build/trees/$NAME"
 : "${IFACE_DIR:=$TREEDIR/interfaces}"
+# F10.35: the public interface path is a SYMLINK to a per-build staging directory, swapped
+# atomically once the pass is complete. The pass reads its own output as it goes, so it
+# cannot write to a temp dir and rename: it must see a partial set. Before this, every reader
+# (`toke -I build/interfaces` type-checks, run_tests.sh) took no lock and could see a
+# half-written directory, measured at 48 interfaces of about 200 mid-build. That showed up as
+# phantom `E2030 module not found` failures. A reader now follows the link to the old
+# complete set or the new one, never a partial one.
+IFACE_PUBLIC="$IFACE_DIR"
+IFACE_DIR="$IFACE_PUBLIC.stage.$$"
 : "${OBJDIR:=$TREEDIR/obj}"
 : "${REPORT:=$TREEDIR/break-report.txt}"
 OBJROOT=$(dirname "$OBJDIR")
@@ -337,6 +346,20 @@ for tkfile in $IFACE_SRCS; do
 done
 NIFACE=$(ls "$IFACE_DIR"/*.tki 2>/dev/null | wc -l | tr -d ' ')
 echo "[$NAME]   $NIFACE of $NIFACE_SRCS interface(s) emitted"
+
+# Publish the complete set with one atomic rename. A real directory left by an older build is
+# replaced once; after that the path is always a link.
+IFACE_OLD=$(readlink "$IFACE_PUBLIC" 2>/dev/null || true)
+if [ -d "$IFACE_PUBLIC" ] && [ ! -L "$IFACE_PUBLIC" ]; then rm -rf "$IFACE_PUBLIC"; fi
+# mv must replace the LINK, not move into the directory it points at: -h on BSD (macOS), -T on
+# GNU. Both are one rename(2), which is what makes the swap atomic.
+ln -sfn "$(basename "$IFACE_DIR")" "$IFACE_PUBLIC.tmp.$$"
+if mv -fh "$IFACE_PUBLIC.tmp.$$" "$IFACE_PUBLIC" 2>/dev/null; then :;
+elif mv -fT "$IFACE_PUBLIC.tmp.$$" "$IFACE_PUBLIC" 2>/dev/null; then :;
+else die "could not publish interfaces atomically at $IFACE_PUBLIC"; fi
+if [ -n "$IFACE_OLD" ] && [ "$IFACE_OLD" != "$(basename "$IFACE_DIR")" ]; then
+  rm -rf "$(dirname "$IFACE_PUBLIC")/$IFACE_OLD"
+fi
 
 # Page handlers get a second interface emission into the object dir. Kept because
 # build_loke.sh has always done it and its census count includes these compiles.
