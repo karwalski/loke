@@ -1,0 +1,72 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.router.testrouteinstalled;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=reg:core.models.registry;
+i=strat:core.router.strategy;
+i=rtr:core.router.router;
+
+(* F5.12 - the router chooses among the local models that are installed, and knowing what is
+   installed never sends a request to the cloud that would not have gone there anyway.
+
+   The default router, local-first, with the Ollama URL on a closed port. The text has no
+   intent keyword, so the classifier tries that port, fails, and falls back to chat: an
+   interactive chat request has two local candidates that meet its speed floor, qwen2.5:7b
+   (the default) and gemma3:4b, so there is a choice to make. *)
+
+f=router():$router{
+  <rtr.new(rtr.newconfig("http://127.0.0.1:59996"))
+};
+
+f=routedid(installed:@str;sens:$sensitivitylevel):str{
+  let d=rtr.routepreferinstalled(router();installed;"hello there, how are you";sens;0 as u32;$latencytolerance{$instant:0};"test-installed");
+  if(rtr.isrouted(d)){
+    let spec:$modelspec=d.model;
+    <spec.id
+  }el{
+    <""
+  }
+};
+
+f=routedcloud(installed:@str;sens:$sensitivitylevel):bool{
+  let d=rtr.routepreferinstalled(router();installed;"hello there, how are you";sens;0 as u32;$latencytolerance{$instant:0};"test-installed");
+  <rtr.isclouddecision(d)
+};
+
+f=entrycount(r:$registry):i64{
+  <r.entries.len as i64
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let conf=$sensitivitylevel{$confidential:0};
+
+  (* ── the registry filter ───────────────────────────────────────────────── *)
+  let full=reg.newregistry();
+  let only72=reg.installedonly(full;@("qwen2.5:72b"));
+  if(t.assert(reg.iscapability(reg.capabilitybyid(only72;"qwen2.5:72b"));"an installed local model is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.iscapability(reg.capabilitybyid(only72;"qwen2.5:7b"));"an uninstalled one is removed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reg.iscapability(reg.capabilitybyid(only72;"claude-3-5-sonnet-20241022"));"and cloud entries are untouched")){pass=pass+1}el{fail=fail+1};
+  let tagged=reg.installedonly(full;@("nomic-embed-text:latest"));
+  if(t.assert(reg.iscapability(reg.capabilitybyid(tagged;"nomic-embed-text"));"an untagged catalogue id matches its :latest install")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(entrycount(only72)<entrycount(full);"so the filtered catalogue is smaller")){pass=pass+1}el{fail=fail+1};
+
+  (* ── routing ───────────────────────────────────────────────────────────── *)
+  if(t.asserteq(routedid(@();conf);"qwen2.5:7b";"CONTROL: with the install state unknown, the catalogue default is chosen")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routedid(@("gemma3:4b");conf);"gemma3:4b";"with only gemma3:4b installed, the router chooses it instead")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!routedcloud(@("gemma3:4b");conf);"which is local")){pass=pass+1}el{fail=fail+1};
+
+  (* With nothing in the catalogue installed, the route is the one taken today: the local
+     default, which the dispatch then refuses as not installed. NOT the cloud. *)
+  if(t.asserteq(routedid(@("llama3:latest");conf);"qwen2.5:7b";"with no catalogue model installed, the route is unchanged")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!routedcloud(@("llama3:latest");conf);"and a CONFIDENTIAL request is not pushed to the cloud by it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!routedcloud(@("nomic-embed-text");conf);"nor when the installed model does not fit the task")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!routedcloud(@("gemma3:4b");$sensitivitylevel{$restricted:0});"and RESTRICTED stays local")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+}

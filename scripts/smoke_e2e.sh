@@ -124,6 +124,22 @@ case "$OUT2" in
 esac
 if [ -s "$SEEN" ]; then echo "  FAIL a request was sent for a model that is not installed" >&2; fail=1; fi
 rows_after=$(dl "SELECT COUNT() FROM disclosure_log")
+
+# F5.12: when an installed catalogue model fits, the router chooses IT rather than a
+# catalogue default that is not installed. A chat request has two local candidates,
+# qwen2.5:7b (the default) and gemma3:4b; only gemma3:4b is listed.
+pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
+: > "$SEEN"
+FAKE_OLLAMA_MODELS="gemma3:4b" python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
+OUT3=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+case "$OUT3" in
+  *'"ok":true'*'"model":"gemma3:4b"'*) echo "  ok   the router chose the installed gemma3:4b, and the request was answered" ;;
+  *) echo "  FAIL the installed model was not chosen: $(printf '%s' "$OUT3" | head -c 200)" >&2; fail=1 ;;
+esac
+if grep -q '^/api/generate .*"model": *"gemma3:4b"' "$SEEN"; then echo "  ok   and the model received the request under that name"
+else echo "  FAIL the model did not receive a request for gemma3:4b" >&2; fail=1; fi
 if [ -n "$rows" ] && [ "$rows_after" = "$rows" ]; then
   echo "  ok   and the refusal, which sent nothing, wrote no disclosure record"
 else echo "  FAIL disclosure_log went from '${rows}' to '${rows_after}' rows across a refused request" >&2; fail=1; fi
