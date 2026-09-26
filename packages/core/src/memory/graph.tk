@@ -25,7 +25,8 @@ t=$relation{
   toid:str;
   kind:str;
   weight:f32;
-  createdat:i64
+  createdat:i64;
+  validto:str
 };
 
 t=$graphresult{
@@ -53,7 +54,7 @@ f=upsertentity(palace:i64;e:$entity):bool{
 f=addrelation(palace:i64;r:$relation):bool{
   let weights=str.fromfloat(r.weight);
   let tss=str.fromint(r.createdat);
-  let ok=mt db.exec("INSERT INTO memory_graph_relations (from_id,to_id,kind,weight,created_at) VALUES (?,?,?,?,?)";@(r.fromid;r.toid;r.kind;weights;tss)) {
+  let ok=mt db.exec("INSERT INTO memory_graph_relations (from_id,to_id,kind,weight,created_at,valid_to) VALUES (?,?,?,?,?,?)";@(r.fromid;r.toid;r.kind;weights;tss;r.validto)) {
     $ok:v true;
     $err:v false
   };
@@ -118,7 +119,8 @@ f=relationfromrow(row:$row):$relation{
     toid:s.rowstr(row;"to_id");
     kind:s.rowstr(row;"kind");
     weight:((s.rowf64hundredths(row;"weight") as f64) / 100.0) as f32;
-    createdat:s.rowi64(row;"created_at")
+    createdat:s.rowi64(row;"created_at");
+    validto:s.rowstr(row;"valid_to")
   }
 };
 
@@ -150,7 +152,7 @@ f=neighbours(palace:i64;entityid:str;depth:i32):$graphresult{
       lp(let ii148=0;ii148<frontier.len;ii148=ii148+1){
         let fid=frontier.get(ii148);
 
-        let relrows=mt db.many("SELECT from_id,to_id,kind,weight,created_at FROM memory_graph_relations WHERE from_id=?";@(fid)) {
+        let relrows=mt db.many("SELECT from_id,to_id,kind,weight,created_at,valid_to FROM memory_graph_relations WHERE from_id=?";@(fid)) {
           $ok:relrows relrows;
           $err:v @()
         };
@@ -175,7 +177,7 @@ f=neighbours(palace:i64;entityid:str;depth:i32):$graphresult{
           }
         };
 
-        let relrows2=mt db.many("SELECT from_id,to_id,kind,weight,created_at FROM memory_graph_relations WHERE to_id=?";@(fid)) {
+        let relrows2=mt db.many("SELECT from_id,to_id,kind,weight,created_at,valid_to FROM memory_graph_relations WHERE to_id=?";@(fid)) {
           $ok:relrows relrows;
           $err:v @()
         };
@@ -209,6 +211,54 @@ f=neighbours(palace:i64;entityid:str;depth:i32):$graphresult{
   <$graphresult{entities:entities;relations:relations}
 };
 
+
+(* ── T6.2: filter by relation kind, contradictions, DOT ─────────────────────────── *)
+f=relationsfrom(sqltext:str;params:@str):@$relation{
+  let rows=mt db.many(sqltext;params) {
+    $ok:rs rs;
+    $err:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let row:$row=rows.get(i);
+    out=out.push(relationfromrow(row))
+  };
+  <out
+};
+
+(* The relations of one kind that touch an entity, from either end. *)
+f=relationsofkind(palace:i64;entityid:str;kind:str):@$relation{
+  <relationsfrom("SELECT from_id,to_id,kind,weight,created_at,valid_to FROM memory_graph_relations WHERE kind=? AND (from_id=? OR to_id=?) ORDER BY rowid";@(kind;entityid;entityid))
+};
+
+(* For a relation kind that holds towards one target at a time (employed_by, lives_in), the
+   relations of that kind whose subject has MORE THAN ONE target still holding ('' valid_to):
+   the graph says both are true at once. A relation that has ended does not conflict with
+   its successor. The caller names the kind, because only it knows which kinds are
+   single-valued: `knows` towards many people is not a contradiction. The table's primary key
+   is (from, to, kind), so the same relation cannot be recorded twice. *)
+f=contradictions(palace:i64;kind:str):@$relation{
+  <relationsfrom("SELECT r.from_id,r.to_id,r.kind,r.weight,r.created_at,r.valid_to FROM memory_graph_relations r WHERE r.kind=? AND r.valid_to='' AND EXISTS (SELECT 1 FROM memory_graph_relations o WHERE o.from_id=r.from_id AND o.kind=r.kind AND o.to_id<>r.to_id AND o.valid_to='') ORDER BY r.rowid";@(kind))
+};
+
+f=dotid(s:str):str{
+  <str.concat("\"";str.concat(str.replace(str.replace(s;"\\";"\\\\");"\"";"\\\"");"\""))
+};
+
+(* Graphviz DOT for a graph result: every entity a node labelled with its name, every
+   relation an edge labelled with its kind. Identifiers are quoted and escaped. *)
+f=visualisedot(g:$graphresult):str{
+  let out=mut."digraph memory {\n";
+  lp(let i=0;i<g.entities.len;i=i+1){
+    let e:$entity=g.entities.get(i);
+    out=str.concat(out;str.concat("  ";str.concat(dotid(e.id);str.concat(" [label=";str.concat(dotid(e.name);"];\n")))))
+  };
+  lp(let j=0;j<g.relations.len;j=j+1){
+    let r:$relation=g.relations.get(j);
+    out=str.concat(out;str.concat("  ";str.concat(dotid(r.fromid);str.concat(" -> ";str.concat(dotid(r.toid);str.concat(" [label=";str.concat(dotid(r.kind);"];\n")))))))
+  };
+  <str.concat(out;"}\n")
+};
 
 f=searchentities(palace:i64;query:str):@$entity{
   let likeq=str.concat("%";str.concat(query;"%"));
