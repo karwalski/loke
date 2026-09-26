@@ -1,0 +1,1 @@
+Tests which columns may show sample values in moke's schema-first profile (MK21.18), through `moke.hooks.applyschemafirst`: unique names in a categorical column and free-text notes are suppressed; a repeating category and a numeric column keep samples; every column is still described. Depends on `std.test`, `std.str` and `moke.hooks`.
