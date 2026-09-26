@@ -140,6 +140,20 @@ case "$OUT3" in
 esac
 if grep -q '^/api/generate .*"model": *"gemma3:4b"' "$SEEN"; then echo "  ok   and the model received the request under that name"
 else echo "  FAIL the model did not receive a request for gemma3:4b" >&2; fail=1; fi
+
+# T10.1: with the per-provider kill switch engaged for ollama, the same request is refused
+# with the fallback message and nothing reaches the model. The row is written as
+# killswitch.engageprovider writes it.
+: > "$SEEN"
+sqlite3 "$DB" "INSERT OR REPLACE INTO settings (key,value,value_type,namespace,updated_at) VALUES ('governance.kill_switch.provider.ollama','true','bool','governance',datetime('now'))"
+OUT4=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+case "$OUT4" in
+  *'"provider_blocked":true'*) echo "  ok   with ollama switched off, the request is refused with the fallback message" ;;
+  *) echo "  FAIL a switched-off provider was not refused: $(printf '%s' "$OUT4" | head -c 200)" >&2; fail=1 ;;
+esac
+if grep -q '^/api/generate' "$SEEN"; then echo "  FAIL a request reached the switched-off provider" >&2; fail=1
+else echo "  ok   and nothing reached the model"; fi
 if [ -n "$rows" ] && [ "$rows_after" = "$rows" ]; then
   echo "  ok   and the refusal, which sent nothing, wrote no disclosure record"
 else echo "  FAIL disclosure_log went from '${rows}' to '${rows_after}' rows across a refused request" >&2; fail=1; fi
