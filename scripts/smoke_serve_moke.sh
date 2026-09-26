@@ -45,12 +45,17 @@ done
 [ "$up" -eq 1 ] || { echo "smoke_serve_moke: moke never answered on $PORT" >&2; tail -5 "$WORK/serve.log" >&2; exit 1; }
 
 fail=0
-for p in / /chat /insight /governance /dashboard /agents /connections /memory /settings /upload /mcp; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "http://127.0.0.1:$PORT$p")
-  if [ "$code" = 000 ] || [ "$code" -ge 500 ]; then
+# X7.2: each page must answer 200 with a whole rendered document. This replaced twelve
+# packages/moke/tests/test_*_handler.tk files that asserted literals they declared
+# themselves ("the template path is templates/chat.tkt") and so could never fail.
+for p in / /chat /insight /governance /dashboard /agents /connections /memory /settings /upload /mcp /presentation; do
+  code=$(curl -s -o "$WORK/page.html" -w '%{http_code}' -m 20 "http://127.0.0.1:$PORT$p")
+  if [ "$code" != 200 ]; then
     echo "  FAIL GET $p [$code]" >&2; fail=1
+  elif ! grep -qi '</html>' "$WORK/page.html"; then
+    echo "  FAIL GET $p [200] but not a whole HTML document ($(wc -c < "$WORK/page.html") bytes)" >&2; fail=1
   else
-    echo "  ok   GET $p [$code]"
+    echo "  ok   GET $p [200, $(wc -c < "$WORK/page.html") bytes]"
   fi
 done
 
@@ -66,6 +71,38 @@ for id in $ids; do
     echo "  ok   dataset $id [$rows rows]"
   fi
 done
+
+# X7.2: the API endpoints, each against the behaviour its old packages/moke/tests stub only
+# described. loke is not running here, so the loke-backed endpoints are checked for how they
+# fail. Every body must be valid JSON: /api/routing and /api/agents were not (every string
+# was doubly quoted) until this check existed.
+api() {  # method path body expected-code must-contain label
+  local out code
+  out=$(curl -s -m 20 -X "$1" -H 'Content-Type: application/json' ${3:+-d "$3"} -w '\n%{http_code}' "http://127.0.0.1:$PORT$2")
+  code=$(printf '%s' "$out" | tail -1); out=$(printf '%s' "$out" | sed '$d')
+  if [ "$code" != "$4" ]; then
+    echo "  FAIL $1 $2 [$code, wanted $4]: $(printf '%s' "$out" | head -c 150)" >&2; fail=1; return
+  fi
+  if ! printf '%s' "$out" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null; then
+    echo "  FAIL $1 $2 [$code] is not valid JSON: $(printf '%s' "$out" | head -c 150)" >&2; fail=1; return
+  fi
+  case "$out" in
+    *"$5"*) echo "  ok   $1 $2 [$code] $6" ;;
+    *) echo "  FAIL $1 $2 [$code] lacks $5: $(printf '%s' "$out" | head -c 150)" >&2; fail=1 ;;
+  esac
+}
+api GET  /api/health    ""                              503 '"loke":"unreachable"'  "reports loke unreachable, with a 503"
+api POST /api/datasets  '{}'                            400 'missing required field: id' "requires an id"
+api POST /api/feedback  '{"rating":"meh"}'              400 'thumbs_up or thumbs_down' "accepts only thumbs_up or thumbs_down"
+api POST /api/feedback  '{"rating":"thumbs_down"}'      200 '"rating":"thumbs_down"' "and records a valid rating"
+api GET  /api/memory    ""                              200 '"ok":true'             "memory API answers"
+api POST /api/memory    '{"action":"store"}'            400 'missing required field: content' "storing requires content"
+api POST /api/pipeline  '{}'                            400 'missing required field: prompt' "the pipeline requires a prompt"
+api POST /api/pipeline  '{"prompt":"hello"}'            502 'upstream error'        "and says so when loke is down"
+api POST /api/stream    '{}'                            400 'missing required field: prompt' "streaming requires a prompt"
+api POST /api/upload    ''                              400 'empty body'            "upload refuses an empty body"
+api POST /api/routing   '{"prompt":"hello"}'            200 '"routing":{'           "routing explains a decision"
+api GET  /api/agents    ""                              200 '"agents":['            "agents lists the agents"
 
 [ "$fail" -eq 0 ] || { echo "smoke_serve_moke: failed (MK21.16)" >&2; exit 1; }
 echo "smoke_serve_moke: OK, every page rendered and every dataset loaded"

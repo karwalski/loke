@@ -1,1 +1,0 @@
-Tests the moke API feedback handler structure. Verifies module declaration is `page.moke.api.feedback`, POST handler exists, imports (std.http, std.json) are present, and rating validation logic correctly rejects empty/invalid ratings while accepting thumbs_up and thumbs_down. Depends on `std.test` and `std.str`.

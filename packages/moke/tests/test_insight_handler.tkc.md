@@ -1,1 +1,0 @@
-Tests the moke insight page handler structure. Verifies module declaration is `page.moke.insight`, template path is `templates/insight.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.

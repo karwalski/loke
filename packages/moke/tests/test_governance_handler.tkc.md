@@ -1,1 +1,0 @@
-Tests the moke governance page handler structure. Verifies module declaration is `page.moke.governance`, template path is `templates/governance.tkt`, GET handler exists, and required imports (std.http, ooke.template) are present. Depends on `std.test` and `std.str`.
