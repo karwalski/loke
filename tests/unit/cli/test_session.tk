@@ -5,84 +5,63 @@ m=test.cli.session;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=cs:cli.session;
 
-(* --- stub session functions --- *)
+(* X4b.10 / X7.2 - create, activate and find the CLI's named sessions, through the real
+   cli.session and a real migrated store.
 
-f=createsession(name:str;provider:str):str{
-  let s=str.concat("{\"id\":\"sess_001\",\"name\":\"";name);
-  let s=str.concat(s;"\",\"provider\":\"");
-  let s=str.concat(s;provider);
-  let s=str.concat(s;"\",\"turns\":0,\"active\":true}");
-  <s
-};
-
-f=sessionid(sessionjson:str):str{
-  if(str.contains(sessionjson;"\"id\":\"sess_001\"")){<"sess_001"};
-  if(str.contains(sessionjson;"\"id\":\"sess_002\"")){<"sess_002"};
-  <""
-};
-
-f=sessionactive(sessionjson:str):bool{
-  <str.contains(sessionjson;"\"active\":true")
-};
-
-f=findsession(sessions:str;name:str):str{
-  if(str.contains(sessions;name)){
-    <str.concat("found:";name)
-  }el{
-    <""
-  }
-};
-
-f=sessionturns(sessionjson:str):i64{
-  if(str.contains(sessionjson;"\"turns\":0")){<0};
-  if(str.contains(sessionjson;"\"turns\":5")){<5};
-  <-1
-};
-
-(* --- tests --- *)
+   This file used to declare its own session functions over JSON strings and assert them
+   against themselves. Against the real module it found that no session had ever been
+   stored: the module wrote to the browser's `sessions` table, whose shape is different, and
+   hid the failure behind a result it could not read (T-18). *)
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
+  let dir=str.concat(std.homedir();"/.loke/test-cli-session");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  let store=mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  };
+  if(t.assert(store!=0;"a migrated store opens")){pass=pass+1}el{fail=fail+1};
 
-  (* session creation: has id *)
-  let s1=createsession("my-chat";"anthropic");
-  if(t.assert(str.contains(s1;"sess_001");"session has id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.listsessions(store).len==0;"there are no sessions at first")){pass=pass+1}el{fail=fail+1};
+  let a:$session=cs.newsession(store;"work");
+  if(t.assert(str.len(a.id)>0;"a session is created")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!a.active;"not yet active")){pass=pass+1}el{fail=fail+1};
+  let b:$session=cs.newsession(store;"it's personal");
+  if(t.assert(str.len(b.id)>0;"a name with a quote is stored, not spliced into the SQL")){pass=pass+1}el{fail=fail+1};
+  let dup:$session=cs.newsession(store;"work");
+  if(t.assert(str.len(dup.id)==0;"a second session with a taken name is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.listsessions(store).len==2;"so two are listed")){pass=pass+1}el{fail=fail+1};
 
-  (* session creation: has name *)
-  if(t.assert(str.contains(s1;"my-chat");"session has name")){pass=pass+1}el{fail=fail+1};
+  let found:$session=cs.findsession(store;"it's personal");
+  if(t.asserteq(found.id;b.id;"a session is found by its name, quote and all")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(cs.findsession(store;"nope").id)==0;"an unknown name finds nothing")){pass=pass+1}el{fail=fail+1};
 
-  (* session creation: has provider *)
-  if(t.assert(str.contains(s1;"anthropic");"session has provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(cs.getactive(store).id)==0;"nothing is active until one is switched to")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.switchto(store;"work");"switching to a session activates it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cs.getactive(store).name;"work";"and it is the active one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.switchto(store;"it's personal");"switching again")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cs.getactive(store).name;"it's personal";"moves the active session")){pass=pass+1}el{fail=fail+1};
+  let w:$session=cs.findsession(store;"work");
+  if(t.assert(!w.active;"and deactivates the other: one active session at a time")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cs.switchto(store;"nope");"switching to an unknown session is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(cs.getactive(store).name;"it's personal";"without deactivating the current one")){pass=pass+1}el{fail=fail+1};
 
-  (* session creation: starts with zero turns *)
-  if(t.assert(sessionturns(s1)==0;"new session has zero turns")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.recordrequest(store;b.id);"a request is recorded against a session")){pass=pass+1}el{fail=fail+1};
+  let b2:$session=cs.findsession(store;"it's personal");
+  if(t.assert(b2.requestcount==(1 as i32);"and counted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs.closesession(store;"it's personal");"a session can be closed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(cs.getactive(store).id)==0;"leaving none active")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cs.closesession(store;"nope");"closing an unknown session reports failure")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cs.formatsessions(cs.listsessions(store));"work");"the list renders its sessions")){pass=pass+1}el{fail=fail+1};
 
-  (* session creation: starts active *)
-  if(t.assert(sessionactive(s1);"new session is active")){pass=pass+1}el{fail=fail+1};
-
-  (* session id extraction *)
-  if(t.assert(str.eq(sessionid(s1);"sess_001");"session id extracted correctly")){pass=pass+1}el{fail=fail+1};
-
-  (* session find: existing *)
-  let sessions="[{\"name\":\"my-chat\"},{\"name\":\"other\"}]";
-  let found=findsession(sessions;"my-chat");
-  if(t.assert(str.contains(found;"my-chat");"found existing session by name")){pass=pass+1}el{fail=fail+1};
-
-  (* session find: not found *)
-  let notfound=findsession(sessions;"nonexistent");
-  if(t.assert(str.eq(notfound;"");"unfound session returns empty")){pass=pass+1}el{fail=fail+1};
-
-  (* session JSON is non-empty *)
-  if(t.assert(str.len(s1)>0;"session JSON is non-empty")){pass=pass+1}el{fail=fail+1};
-
-  (* session find result has prefix *)
-  if(t.assert(str.contains(found;"found:");"find result has found prefix")){pass=pass+1}el{fail=fail+1};
-
-  (* session with different provider *)
-  let s2=createsession("local-chat";"ollama");
-  if(t.assert(str.contains(s2;"ollama");"ollama session has provider")){pass=pass+1}el{fail=fail+1};
-
+  file.delete(str.concat(dir;"/loke.db"));
   <fail
-};
+}

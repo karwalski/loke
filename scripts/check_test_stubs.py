@@ -71,6 +71,14 @@ ENFORCED = [
     "tests/e2e",
     "tests/unit/mcp_broker",
     "tests/unit/platform",
+    "tests/unit/audit",
+    "tests/unit/companion",
+    "tests/unit/feedback",
+    "tests/unit/installer",
+    "tests/unit/mcp_toke",
+    "tests/unit/monitoring",
+    "tests/unit/pipeline",
+    "tests/unit/cli",
 ]
 
 LIVE_IMPORT = re.compile(r"^\s*i=([A-Za-z0-9_]+):([A-Za-z0-9_.]+)\s*;", re.M)

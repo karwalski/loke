@@ -7,6 +7,7 @@ i=t:shared.types;
 i=log:shared.log;
 i=out:cli.output;
 i=db:core.storage.db;
+i=rawdb:std.db;
 i=str:std.str;
 i=time:std.time;
 
@@ -19,150 +20,117 @@ t=$session{
   active:bool
 };
 
+(* X4b.10. Every statement here was wrong in the same two ways. It wrote to `sessions`, which
+   migration 5 had already created with a different shape (mode NOT NULL, last_active_at),
+   so CREATE TABLE IF NOT EXISTS did nothing and every insert and update named columns that
+   do not exist. And it built each statement by concatenating the session name into the SQL,
+   so a name with a quote broke the statement or became part of it. The failures were hidden:
+   core.storage.db.exec returns a user-sum result, whose arms no caller can tell apart (T-18).
+   The CLI's sessions now have their own table, `cli_sessions` (migration 33), every value is
+   a bound parameter, and every result is a bool from std.db. *)
 f=ensuretable(store:i64):bool{
-  let sql="CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, name TEXT, created_at INT, last_active INT, request_count INT DEFAULT 0, active INT DEFAULT 1)";
-  let result=mt db.exec(store;sql) {
+  <mt rawdb.exec("CREATE TABLE IF NOT EXISTS cli_sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INT NOT NULL, last_active INT NOT NULL, request_count INT NOT NULL DEFAULT 0, active INT NOT NULL DEFAULT 0)";@()) {
     $ok:v true;
     $err:e false
-  };
-  <result
+  }
 };
 
+f=execok(sql:str;params:@str):bool{
+  <mt rawdb.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=changed():i64{
+  <mt rawdb.one("SELECT changes() AS n";@()) {
+    $ok:r rawdb.rowi64(r;"n");
+    $err:e 0
+  }
+};
+
+f=nosession():$session{
+  <$session{id:"";name:"";createdat:0;lastactive:0;requestcount:0;active:false}
+};
+
+f=sessionfromrow(row:$row):$session{
+  <$session{
+    id:rawdb.rowstr(row;"id");
+    name:rawdb.rowstr(row;"name");
+    createdat:rawdb.rowi64(row;"created_at");
+    lastactive:rawdb.rowi64(row;"last_active");
+    requestcount:rawdb.rowi64(row;"request_count") as i32;
+    active:rawdb.rowi64(row;"active")==1
+  }
+};
+
+f=sessionsfrom(sql:str;params:@str):@$session{
+  let rows=mt rawdb.many(sql;params) {
+    $ok:v v;
+    $err:e @()
+  };
+  let out2=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let row:$row=rows.get(i);
+    out2=out2.push(sessionfromrow(row))
+  };
+  <out2
+};
+
+(* A new session, not yet active. An empty id means it was not created: a name that is
+   empty or already taken. *)
 f=newsession(store:i64;name:str):$session{
-  (* std.str.hexid takes an argument and this called it with none; shared.log already
-     mints ids for correlation and is what the rest of the CLI uses. *)
+  if(str.len(name)==0 || !ensuretable(store)){ <nosession() }el{};
   let id=log.newcorrelationid();
   let now=db.nowms();
-  let sql=str.concat(
-    "INSERT INTO sessions (id, name, created_at, last_active, request_count, active) VALUES ('";
-    str.concat(
-      id;
-      str.concat(
-        "', '";
-        str.concat(
-          name;
-          str.concat(
-            "', ";
-            str.concat(
-              str.fromint64(now);
-              str.concat(
-                ", ";
-                str.concat(
-                  str.fromint64(now);
-                  ", 0, 1)"
-                )
-              )
-            )
-          )
-        )
-      )
-    )
-  );
-  mt db.exec(store;sql) {
-    $ok:v 0;
-    $err:e 0
-  };
-  <$session{
-    id:id;
-    name:name;
-    createdat:now;
-    lastactive:now;
-    requestcount:0;
-    active:true
-  }
+  let nows=str.fromint(now);
+  if(!execok("INSERT INTO cli_sessions (id, name, created_at, last_active, request_count, active) VALUES (?, ?, ?, ?, 0, 0)";@(id;name;nows;nows))){
+    <nosession()
+  }el{};
+  <$session{id:id;name:name;createdat:now;lastactive:now;requestcount:0;active:false}
 };
 
 f=listsessions(store:i64):@$session{
-  let sql="SELECT id, name, created_at, last_active, request_count, active FROM sessions ORDER BY last_active DESC";
-  let rows=mt db.query(store;sql) {
-    $ok:v v;
-    $err:e @()
-  };
-  (* `let sessions=...` and `let i=i+1` inside the loop declared new bindings each
-     pass, so this listed nothing and never terminated. *)
-  let sessions=mut.@();
-  lp(let i=0;i<rows.len;i=i+1){
-    let row=rows.get(i);
-    sessions=sessions.push($session{
-      id:db.rowstr(row;"id");
-      name:db.rowstr(row;"name");
-      createdat:db.rowi64(row;"created_at");
-      lastactive:db.rowi64(row;"last_active");
-      requestcount:db.rowi32(row;"request_count");
-      active:db.rowbool(row;"active")
-    })
-  };
-  <sessions
+  if(!ensuretable(store)){ <@() }el{};
+  <sessionsfrom("SELECT id, name, created_at, last_active, request_count, active FROM cli_sessions WHERE id<>? ORDER BY last_active DESC, rowid DESC";@(""))
+};
+
+f=findsession(store:i64;name:str):$session{
+  if(!ensuretable(store)){ <nosession() }el{};
+  let found=sessionsfrom("SELECT id, name, created_at, last_active, request_count, active FROM cli_sessions WHERE name=?";@(name));
+  if(found.len==0){ <nosession() }el{};
+  <found.get(0)
 };
 
 f=getactive(store:i64):$session{
-  let sql="SELECT id, name, created_at, last_active, request_count, active FROM sessions WHERE active=1 ORDER BY last_active DESC LIMIT 1";
-  let rows=mt db.query(store;sql) {
-    $ok:v v;
-    $err:e @()
-  };
-  if(rows.len<1){
-    <$session{id:"";name:"";createdat:0;lastactive:0;requestcount:0;active:false}
-  }el{
-    let row=rows.get(0);
-    <$session{
-      id:db.rowstr(row;"id");
-      name:db.rowstr(row;"name");
-      createdat:db.rowi64(row;"created_at");
-      lastactive:db.rowi64(row;"last_active");
-      requestcount:db.rowi32(row;"request_count");
-      active:db.rowbool(row;"active")
-    }
-  }
+  if(!ensuretable(store)){ <nosession() }el{};
+  let found=sessionsfrom("SELECT id, name, created_at, last_active, request_count, active FROM cli_sessions WHERE active=? ORDER BY last_active DESC LIMIT 1";@("1"));
+  if(found.len==0){ <nosession() }el{};
+  <found.get(0)
 };
 
+(* Exactly one session is active afterwards, or none changes: an unknown name is refused
+   BEFORE the current session is deactivated. *)
 f=switchto(store:i64;name:str):bool{
-  let now=db.nowms();
-  let sqldeactivate="UPDATE sessions SET active=0";
-  mt db.exec(store;sqldeactivate) {
-    $ok:v 0;
-    $err:e false
-  };
-  let sqlactivate=str.concat(
-    "UPDATE sessions SET active=1, last_active=";
-    str.concat(
-      str.fromint64(now);
-      str.concat(" WHERE name='";str.concat(name;"'"))
-    )
-  );
-  let result=mt db.exec(store;sqlactivate) {
-    $ok:v true;
-    $err:e false
-  };
-  <result
+  let target=findsession(store;name);
+  if(str.len(target.id)==0){ <false }el{};
+  let now=str.fromint(db.nowms());
+  if(!execok("UPDATE cli_sessions SET active=0 WHERE id<>?";@(target.id))){ <false }el{};
+  if(!execok("UPDATE cli_sessions SET active=1, last_active=? WHERE id=?";@(now;target.id))){ <false }el{};
+  <changed()==1
 };
 
 f=closesession(store:i64;name:str):bool{
-  let sql=str.concat(
-    "UPDATE sessions SET active=0 WHERE name='";
-    str.concat(name;"'")
-  );
-  let result=mt db.exec(store;sql) {
-    $ok:v true;
-    $err:e false
-  };
-  <result
+  if(!ensuretable(store)){ <false }el{};
+  if(!execok("UPDATE cli_sessions SET active=0 WHERE name=?";@(name))){ <false }el{};
+  <changed()==1
 };
 
 f=recordrequest(store:i64;sessionid:str):bool{
-  let now=db.nowms();
-  let sql=str.concat(
-    "UPDATE sessions SET request_count=request_count+1, last_active=";
-    str.concat(
-      str.fromint64(now);
-      str.concat(" WHERE id='";str.concat(sessionid;"'"))
-    )
-  );
-  let result=mt db.exec(store;sql) {
-    $ok:v true;
-    $err:e false
-  };
-  <result
+  if(!ensuretable(store)){ <false }el{};
+  let now=str.fromint(db.nowms());
+  if(!execok("UPDATE cli_sessions SET request_count=request_count+1, last_active=? WHERE id=?";@(now;sessionid))){ <false }el{};
+  <changed()==1
 };
 
 (* Same two defects as listsessions, plus str.padright's third argument: it takes the
@@ -202,6 +170,10 @@ f=run(subcommand:str;args:@str;store:i64):i64{
       }el{
         let name=args.get(0);
         let s=newsession(store;name);
+        if(str.len(s.id)==0){
+          out.printerror(str.concat("could not create session (empty or already taken): ";name));
+          <1
+        }el{};
         out.printline(str.concat("Created session: ";s.name));
         <0
       }
