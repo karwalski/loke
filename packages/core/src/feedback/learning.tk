@@ -9,6 +9,7 @@ i=store:core.feedback.store;
 i=db:core.storage.db;
 i=str:std.str;
 i=t:shared.types;
+i=rawdb:std.db;
 
 t=$learningsignal{
   featurearea:str;
@@ -172,6 +173,101 @@ f=applylearning(state:$learningstate;store:$store):bool{
   <saved > 0
 };
 
+
+(* ── T12.2 ─────────────────────────────────────────────────────────────────────────
+   Per-model scores, the sensitivity review flag, and adaptations that can be listed and
+   reverted. Rates are compared as integers (ups*2 < total), not as f64. Every read and write
+   goes through std.db with plain bools: the core.storage.db wrappers return user-sum results
+   whose arms a caller cannot tell apart (T-18). *)
+
+(* A model with at least five ratings, fewer than half of them thumbs-up, is marked down
+   by 0.2. One with more than ten, over 85% thumbs-up, is reinforced by 0.1. *)
+f=modeladjustments(store:$store):@$routingadjustment{
+  let rows=mt rawdb.many("SELECT model_id, COUNT(*) AS total, SUM(CASE WHEN rating='thumbs_up' THEN 1 ELSE 0 END) AS ups FROM feedback WHERE model_id<>? GROUP BY model_id ORDER BY model_id";@("")) {
+    $ok:r r;
+    $err:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let row=rows.get(i);
+    let model=rawdb.rowstr(row;"model_id");
+    let total=rawdb.rowi64(row;"total");
+    let ups=rawdb.rowi64(row;"ups");
+    let counts="\(ups) of \(total) thumbs-up";
+    if(total>=5 && ups*2<total){
+      out=out.push($routingadjustment{ model:model; adjustment:0.0-0.2; reason:str.concat("mostly thumbs-down for this model: ";counts) })
+    }el{
+      if(total>10 && ups*100>total*85){
+        out=out.push($routingadjustment{ model:model; adjustment:0.1; reason:str.concat("consistently thumbs-up for this model: ";counts) })
+      }el{}
+    }
+  };
+  <out
+};
+
+(* Governance warnings that users mostly mark unhelpful are flagged for a human to review the
+   sensitivity rule behind them, not adjusted automatically: loosening a warning is a policy
+   decision (design principle: warnings must be earned, and the user is the authority). *)
+f=reviewflags(signals:@$learningsignal):@str{
+  let out=mut.@();
+  lp(let i=0;i<signals.len;i=i+1){
+    let sg:$learningsignal=signals.get(i);
+    if(str.contains(str.lower(sg.featurearea);"governance warning") && (sg.samplesize as i64)>=10 && sg.thumbsuprate<0.5){
+      out=out.push(str.concat("sensitivity review: most of ";str.concat(str.fromint(sg.samplesize as i64);str.concat(" ratings of '";str.concat(sg.featurearea;"' were thumbs-down")))))
+    }el{}
+  };
+  <out
+};
+
+f=adjkey(model:str):str{ <str.concat("learning.adjustment.";model) };
+f=reasonkey(model:str):str{ <str.concat("learning.reason.";model) };
+
+f=putsetting(key:str;value:str;valuetype:str):bool{
+  <mt rawdb.exec("INSERT OR REPLACE INTO settings (key, value, value_type, namespace, updated_at) VALUES (?, ?, ?, 'learning', datetime('now'))";@(key;value;valuetype)) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=settingvalue(key:str):str{
+  <mt rawdb.one("SELECT value FROM settings WHERE key=?";@(key)) {
+    $ok:r rawdb.rowstr(r;"value");
+    $err:e ""
+  }
+};
+
+(* An adaptation is its delta and the reason for it. Success is both reading back. *)
+f=recordadaptation(store:$store;adj:$routingadjustment):bool{
+  let delta=str.fromfloat(adj.adjustment);
+  let a=putsetting(adjkey(adj.model);delta;"float");
+  let b=putsetting(reasonkey(adj.model);adj.reason;"string");
+  <a && b && str.eq(settingvalue(adjkey(adj.model));delta) && str.eq(settingvalue(reasonkey(adj.model));adj.reason)
+};
+
+(* One line per active adaptation: "model: delta (reason)". *)
+f=listadaptations(store:$store):@str{
+  let rows=mt rawdb.many("SELECT key, value FROM settings WHERE namespace='learning' AND key LIKE ? ORDER BY key";@("learning.adjustment.%")) {
+    $ok:r r;
+    $err:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let row=rows.get(i);
+    let model=str.replace(rawdb.rowstr(row;"key");"learning.adjustment.";"");
+    let line=str.concat(model;str.concat(": ";str.concat(rawdb.rowstr(row;"value");str.concat(" (";str.concat(settingvalue(reasonkey(model));")")))));
+    out=out.push(line)
+  };
+  <out
+};
+
+(* Removes a model's adaptation, delta and reason both. True when neither is left. *)
+f=revert(store:$store;model:str):bool{
+  let ok=mt rawdb.exec("DELETE FROM settings WHERE key=? OR key=?";@(adjkey(model);reasonkey(model))) {
+    $ok:v true;
+    $err:e false
+  };
+  <ok && str.len(settingvalue(adjkey(model)))==0 && str.len(settingvalue(reasonkey(model)))==0
+};
 
 f=formatlearningstate(state:$learningstate):str{
   let header="=== Learning Signals ===
