@@ -22,23 +22,11 @@ i=log:shared.log;
    which is the LS1.1e/LS1.1f class: declare the real return type rather than letting
    the struct be carried as an opaque handle. alltools()'s "expected array, got array"
    was the same defect one level up — an @$mcptool built out of five i64-returning
-   calls.
-
-   std.json has no getstror; the local one below is the same fallback shape as
-   core.storage.settings.getstror, which is the pattern that landed for this today. *)
-f=getstror(obj:i64;key:str;dflt:str):str{
-  let v=json.getstr(obj;key);
-  if(str.len(v)>0){
-    <v
-  }el{
-    <dflt
-  }
-};
-
+   calls. *)
 f=toolanonymise():$mcptool{
   <$mcptool{
     name:"anonymise";
-    description:"Detect and anonymise PII in text. Returns anonymised text and detected entities.";
+    description:"Detect and anonymise PII in text. Returns the anonymised text and how many entities were detected, never the original.";
     inputschema:"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"presidio_url\":{\"type\":\"string\"},\"ollama_url\":{\"type\":\"string\"}},\"required\":[\"text\"]}"
   }
 };
@@ -106,45 +94,56 @@ f=safetosend(level:$sensitivitylevel):bool{
   }
 };
 
+f=toolerr(msg:str):$toolresult{
+  <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
+};
 
 
+(* MK6.10. anonymise is handed exactly the text a user wants kept private, so its answer carries
+   none of it. It used to answer with an `original` field holding the input as sent beside the
+   anonymised text: every personal value the pipeline had just replaced went straight back out
+   in the same reply. The answer is now the anonymised text, the count, the sensitivity and how
+   many detection layers scanned it; the log line carries only the count.
+
+   A run in which no layer completed a scan is refused (core.privacy.pipeline.issafetoforward):
+   its "anonymised" text would be the input, unscanned. The regex layer always completes today,
+   so that arm guards a future change, not a present one.
+
+   The arguments are read with jx.strvalue, as compress's are: `json.getstr` is an untyped ABI
+   name, and `json.str` turns an escaped newline into the letter n (T-47), which altered the
+   text before anything scanned it. The anonymised text is quoted with jx.escape: the old
+   quoting replaced double quotes only, so a backslash, a newline or a tab in the input made the
+   answer invalid JSON. *)
+f=anonymiseobj(obj:$json;presidiourl:str;ollamaurl:str):$toolresult{
+  let cid=log.newcorrelationid();
+  let text=jx.strvalue(obj;"text";"");
+  if(str.len(text)==0){ <toolerr("anonymise: text is required") }el{};
+  let purl=jx.strvalue(obj;"presidio_url";presidiourl);
+  let ourl=jx.strvalue(obj;"ollama_url";ollamaurl);
+  let run=privacy.run(text;"";privacy.newconfig(purl;ourl));
+  if(!privacy.issafetoforward(run)){
+    log.warn("anonymise: no detection layer completed a scan";"mcp-tools";cid);
+    <toolerr("anonymise: no detection layer completed a scan, so the text was not anonymised")
+  }el{};
+  let entitycount=run.totalentities as i64;
+  let completed=run.layerscompleted as i64;
+  let degraded=run.layersdegraded as i64;
+  let senslabel=sensitivitylabel(run.result.sensitivity);
+  let anonjson=jx.escape(run.result.anonymised);
+  let requestid=run.requestid;
+  log.info("anonymise: \(entitycount) entities found";"mcp-tools";cid);
+  <$toolresult{
+    contenttype:"text";
+    text:proto.toolresultok("{\"anonymised\":\(anonjson),\"entities_found\":\(entitycount),\"sensitivity\":\"\(senslabel)\",\"layers_completed\":\(completed),\"layers_degraded\":\(degraded),\"request_id\":\"\(requestid)\"}");
+    iserror:false
+  }
+};
 
 f=handleanonymise(argsjson:str;presidiourl:str;ollamaurl:str):$toolresult{
-  let cid=log.newcorrelationid();
-  let parsed=json.dec(argsjson);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("anonymise: invalid args JSON");iserror:true}
-  };
-
-      let text=json.getstr(obj;"text");
-      
-      let purl=getstror(obj;"presidio_url";presidiourl);
-      let ourl=getstror(obj;"ollama_url";ollamaurl);
-      let config=privacy.newconfig(purl;ourl);
-      let run=privacy.run(text;"";config);
-      let entitycount=str.fromint(run.totalentities);
-      let senslabel=sensitivitylabel(run.result.sensitivity);
-      let safestr=mut."false";
-      if(safetosend(run.result.sensitivity)){safestr="true"}el{};
-      let anonescaped=str.replace(run.result.anonymised;"\"";"\\\"");
-      let origescaped=str.replace(run.result.original;"\"";"\\\"");
-      let p1=str.concat("{\"anonymised\":\"";anonescaped);
-      let p2=str.concat(p1;"\",\"original\":\"");
-      let p3=str.concat(p2;origescaped);
-      let p4=str.concat(p3;"\",\"entities_found\":");
-      let p5=str.concat(p4;entitycount);
-      let p6=str.concat(p5;",\"sensitivity\":\"");
-      let p7=str.concat(p6;senslabel);
-      let p8=str.concat(p7;"\",\"request_id\":\"");
-      let p9=str.concat(p8;run.requestid);
-      let resultjson=str.concat(p9;"\"}");
-      log.info(str.concat("anonymise: ";str.concat(entitycount;" entities found"));"mcp-tools";cid);
-      <$toolresult{
-        contenttype:"text";
-        text:proto.toolresultok(resultjson);
-        iserror:false
-      }
+  <mt json.dec(argsjson) {
+    $ok:obj anonymiseobj(obj;presidiourl;ollamaurl);
+    $jsonerr:e toolerr("anonymise: invalid args JSON")
+  }
 };
 
 
@@ -163,10 +162,6 @@ f=handleanonymise(argsjson:str;presidiourl:str;ollamaurl:str):$toolresult{
    gone from the schema: the encoder picks the form the data has. The TOON is quoted with
    jx.escape, not json.enc: measured, json.enc leaves a newline raw, and every multi-line TOON
    made the answer invalid JSON. *)
-f=toolerr(msg:str):$toolresult{
-  <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
-};
-
 f=compressobj(obj:$json):$toolresult{
   let cid=log.newcorrelationid();
   let rawjson=jx.strvalue(obj;"json";"");
@@ -198,29 +193,39 @@ f=handlecompress(argsjson:str):$toolresult{
 };
 
 
-f=handleprofile(argsjson:str):$toolresult{
+(* MK6.10. profile matched profiler.profilejsonarray's `$datasetprofile!$lokeerr`, whose arms
+   cannot be told apart from another module (T-18): input that was not a JSON array went on
+   with the error payload bound as the profile. It reads profiler.profilejson, a plain struct,
+   through isprofiled. The schema used to be sent with its double quotes pre-escaped and then
+   escaped again by the envelope, so a quote in a dataset name arrived as backslash-quote; it is
+   now a JSON answer like compress's, the schema quoted once with jx.escape, beside the counts.
+   The schema carries names, types and rates, never a value (NC1.2). *)
+f=profileobj(obj:$json):$toolresult{
   let cid=log.newcorrelationid();
-  let parsed=json.dec(argsjson);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
-  };
-      let rawjson=json.getstr(obj;"json");
-      let name=getstror(obj;"name";"dataset");
-      let profileresult=profiler.profilejsonarray(rawjson;name);
-      let datasetprofile=mt profileresult {
-        $ok:datasetprofile datasetprofile;
-        $lokeerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("profile: failed to profile JSON array");iserror:true}
-      };
-          let schema=profiler.totoonschema(datasetprofile);
-          let schemaescaped=str.replace(schema;"\"";"\\\"");
-          log.info(str.concat("profile: schema for ";name);"mcp-tools";cid);
-          <$toolresult{
-            contenttype:"text";
-            text:proto.toolresultok(schemaescaped);
-            iserror:false
-          }
+  let name=jx.strvalue(obj;"name";"dataset");
+  let p=profiler.profilejson(jx.strvalue(obj;"json";"");name);
+  if(!profiler.isprofiled(p)){
+    let why=p.failure;
+    <toolerr("profile: cannot profile: \(why)")
+  }el{};
+  let dp=p.profile;
+  let schema=jx.escape(profiler.totoonschema(dp));
+  let rows=dp.rowcount as i64;
+  let cols=dp.colcount as i64;
+  let hint=jx.escape(dp.sensitivityhint);
+  log.info("profile: \(rows) rows, \(cols) columns";"mcp-tools";cid);
+  <$toolresult{
+    contenttype:"text";
+    text:proto.toolresultok("{\"schema\":\(schema),\"rows\":\(rows),\"cols\":\(cols),\"sensitivity_hint\":\(hint)}");
+    iserror:false
+  }
+};
 
+f=handleprofile(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj profileobj(obj);
+    $jsonerr:e toolerr("invalid args JSON")
+  }
 };
 
 
@@ -249,65 +254,58 @@ f=handledecompress(argsjson:str):$toolresult{
 };
 
 
-f=handleanalyse(argsjson:str):$toolresult{
-  let cid=log.newcorrelationid();
-  let parsed=json.dec(argsjson);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
-  };
-      let text=json.getstr(obj;"text");
-      
-      let config=privacy.newconfig("";"");
-      let dryrunconfig=$pipelineconfig{
-        presidiourl:"";
-        ollamaurl:"";
-        nermodelid:"";
-        usepresidio:false;
-        usener:false;
-        dryrun:true;
-        usepf:false;
-        pfurl:"";
-        pfthreshold:""
-      };
-      let run=privacy.run(text;"";dryrunconfig);
-      let entitycount=run.totalentities;
-      let entitycountstr=str.fromint(entitycount);
-      let senslabel=sensitivitylabel(run.result.sensitivity);
-      let safe=safetosend(run.result.sensitivity);
-      let safestr=mut."false";
-      if(safe){safestr="true"}el{};
-      
-      let entitiesjson=mut."[";
-      let ei=mut.0;
-      let entcount=run.result.entities.len;
-      lp(let lv=0;ei<entcount;lv=lv){
-        let entity=run.result.entities.get(ei);
-        let typeesc=str.replace(entity.entitytype;"\"";"\\\"");
-        let valesc=str.replace(entity.value;"\"";"\\\"");
-        let entry=str.concat("{\"type\":\"";str.concat(typeesc;str.concat("\",\"value\":\"";str.concat(valesc;"\"}"))));
-        if(ei==0){
-          entitiesjson=str.concat(entitiesjson;entry)
-        }el{
-          entitiesjson=str.concat(entitiesjson;str.concat(",";entry))
-        };
-        ei=ei+1
-      };
-      entitiesjson=str.concat(entitiesjson;"]");
-      let p1=str.concat("{\"sensitivity\":\"";senslabel);
-      let p2=str.concat(p1;"\",\"entity_count\":");
-      let p3=str.concat(p2;entitycountstr);
-      let p4=str.concat(p3;",\"entities\":");
-      let p5=str.concat(p4;entitiesjson);
-      let p6=str.concat(p5;",\"safe_to_send\":");
-      let resultjson=str.concat(p6;str.concat(safestr;"}"));
-      log.info(str.concat("analyse: ";str.concat(entitycountstr;str.concat(" entities, sensitivity=";senslabel)));"mcp-tools";cid);
-      <$toolresult{
-        contenttype:"text";
-        text:proto.toolresultok(resultjson);
-        iserror:false
-      }
+(* MK6.10. analyse is a dry run of the regex layer. Its answer used to list each entity with its
+   `value`, the personal datum itself, so asking whether a text was safe to send put its
+   personal data into the answer; each entity is now its type and where it lies in the text.
+   Quoted with jx.escape rather than a replace of double quotes, and its argument read with
+   jx.strvalue (T-47), as anonymise's is. *)
+f=entityjson(entity:$piientity):str{
+  let kind=jx.escape(entity.entitytype);
+  let from=entity.start as i64;
+  let upto=entity.end as i64;
+  <"{\"type\":\(kind),\"start\":\(from),\"end\":\(upto)}"
 };
+
+f=analyseobj(obj:$json):$toolresult{
+  let cid=log.newcorrelationid();
+  let text=jx.strvalue(obj;"text";"");
+  if(str.len(text)==0){ <toolerr("analyse: text is required") }el{};
+  let dryrunconfig=$pipelineconfig{
+    presidiourl:"";
+    ollamaurl:"";
+    nermodelid:"";
+    usepresidio:false;
+    usener:false;
+    dryrun:true;
+    usepf:false;
+    pfurl:"";
+    pfthreshold:""
+  };
+  let run=privacy.run(text;"";dryrunconfig);
+  let entitycount=run.totalentities as i64;
+  let senslabel=sensitivitylabel(run.result.sensitivity);
+  let safestr=mut."false";
+  if(safetosend(run.result.sensitivity)){safestr="true"}el{};
+  let entities=mut.@();
+  lp(let ei=0;ei<run.result.entities.len;ei=ei+1){
+    entities=entities.push(entityjson(run.result.entities.get(ei)))
+  };
+  let entitiesjson=str.join(",";entities);
+  log.info("analyse: \(entitycount) entities, sensitivity=\(senslabel)";"mcp-tools";cid);
+  <$toolresult{
+    contenttype:"text";
+    text:proto.toolresultok("{\"sensitivity\":\"\(senslabel)\",\"entity_count\":\(entitycount),\"entities\":[\(entitiesjson)],\"safe_to_send\":\(safestr)}");
+    iserror:false
+  }
+};
+
+f=handleanalyse(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj analyseobj(obj);
+    $jsonerr:e toolerr("invalid args JSON")
+  }
+};
+
 
 
 

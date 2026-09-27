@@ -1,0 +1,141 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.mcptoke.privacytools;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=log:shared.log;
+i=proto:core.mcp.protocol;
+i=tools:mcptoke.tools;
+
+(* MK6.10 — mcp-toke's anonymise, analyse and profile tools, through handletool, the function
+   the server and moke's MCP panel call. Nothing tested what any of the three computed.
+
+   anonymise answered with an `original` field holding the input as sent, so every personal
+   value it had just replaced went back out in the same reply, and analyse listed each entity's
+   value. Both read their argument with an untyped accessor that turned an escaped newline into
+   the letter n (T-47) and quoted their answer by replacing double quotes only, so a newline or a
+   tab in the text made the answer invalid JSON. profile matched a `$datasetprofile!$lokeerr`,
+   whose arms cannot be told apart from another module (T-18).
+
+   The PII checks are byte scans of the whole reply, each with a positive control: the same
+   scan finds every value in the input. The detection layers other than regex are pointed at
+   loopback ports nothing listens on, so no text leaves the process. Validity is judged by
+   Python's json module, which refuses a raw control character inside a string; std.json's
+   decoder accepts one (T-51). The fragments below are written as they appear inside the MCP
+   envelope, whose inner JSON is escaped once: \" for a quote, \\n for a newline. *)
+
+f=call(name:str;args:str):$toolresult{
+  <tools.handletool(name;args;"http://127.0.0.1:11298";"http://127.0.0.1:11299")
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+(* The envelope and the answer inside it are both strict JSON. *)
+f=strictenvelope(reply:str):bool{
+  let code="import json,sys; o=json.loads(sys.argv[1]); json.loads(o['content'][0]['text']); print('ok')";
+  let h=mt process.spawn(@("python3";"-c";code;reply)) { $ok:h h; $err:e @() };
+  if(h == @()){ <false }el{};
+  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
+  let rc=process.wait(h) as i64;
+  <str.eq(str.trim(out);"ok")
+};
+
+f=leaksnone(reply:str;values:@str):bool{
+  let clean=mut.true;
+  lp(let i=0;i<values.len;i=i+1){
+    if(str.contains(reply;values.get(i))){ clean=false }el{}
+  };
+  <clean
+};
+
+f=holdsall(text:str;values:@str):bool{
+  let all=mut.true;
+  lp(let i=0;i<values.len;i=i+1){
+    if(str.contains(text;values.get(i))){}el{ all=false }
+  };
+  <all
+};
+
+(* What the log gained since `before` was read. *)
+f=logsince(before:str):str{
+  let after=readfile(log.logpath());
+  let from=str.len(before) as i64;
+  let n=str.len(after) as i64;
+  if(n<from){ <after }el{};
+  <str.slice(after;from;n)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* Synthetic identifiers, the ones core.privacy's own pipeline tests use. The fragments
+     catch a value that was only partly replaced. *)
+  let input="Dear team,\nplease contact alice@example.com or ring 0412 345 678.\n\tCard: 4111 1111 1111 1111 \"urgent\"";
+  let pii=@("alice@example.com";"alice@";"0412 345 678";"4111 1111 1111 1111";"4111");
+  let args="{\"text\":\"Dear team,\\nplease contact alice@example.com or ring 0412 345 678.\\n\\tCard: 4111 1111 1111 1111 \\\"urgent\\\"\"}";
+  if(t.assert(holdsall(input;pii) && holdsall(args;pii);"control: the scan finds every value in the text as sent")){pass=pass+1}el{fail=fail+1};
+
+  let before=readfile(log.logpath());
+  let a=call("anonymise";args);
+  let logged=logsince(before);
+  if(t.assert(!a.iserror;"anonymise answers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(leaksnone(a.text;pii);"and its answer holds none of the personal values it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(a.text;"original");"nor an original field")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a.text;"[EMAIL") && str.contains(a.text;"[PHONE") && str.contains(a.text;"[CREDIT");"each value is replaced by a placeholder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a.text;"\\\"entities_found\\\":3,");"and the three are counted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a.text;"\\\"sensitivity\\\":\\\"RESTRICTED\\\"");"a card number makes the text RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a.text;"\\\"layers_completed\\\":1,\\\"layers_degraded\\\":2,");"and the answer says one layer scanned it and two were unavailable")){pass=pass+1}el{fail=fail+1};
+  (* T-47: the newlines and the tab reach the pipeline, and come back escaped. *)
+  if(t.assert(str.contains(a.text;"\\\"anonymised\\\":\\\"Dear team,\\\\nplease contact [EMAIL");"the text keeps its newline, not the letter n")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a.text;".\\\\n\\\\tCard: [CREDIT") && str.contains(a.text;" \\\\\\\"urgent\\\\\\\"\\\"");"and its tab and quotes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strictenvelope(a.text);"and the answer is strict JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(logged;"anonymise: 3 entities found");"control: the call wrote its log line")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(leaksnone(logged;pii);"and nothing it logged holds a personal value")){pass=pass+1}el{fail=fail+1};
+  (* shared.log redacts what the regex patterns match before it writes, so a detected value
+     would be caught there even if the tool logged the text; measured, a mutant logging the
+     text passed the scan above. What the tool itself guarantees is that none of the text is
+     logged, including what no layer detected. *)
+  if(t.assert(!str.contains(logged;"Dear team") && !str.contains(logged;"please contact");"nor any of the text")){pass=pass+1}el{fail=fail+1};
+
+  let e=call("anonymise";"{}");
+  if(t.assert(e.iserror && str.contains(e.text;"text is required");"anonymise without text is refused")){pass=pass+1}el{fail=fail+1};
+
+  let before2=readfile(log.logpath());
+  let y=call("analyse";args);
+  let logged2=logsince(before2);
+  if(t.assert(!y.iserror;"analyse answers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(leaksnone(y.text;pii);"and its answer holds none of the personal values it was given")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(y.text;"\\\"entity_count\\\":3,") && str.contains(y.text;"\\\"safe_to_send\\\":false}");"it counts the three and says the text is not safe to send")){pass=pass+1}el{fail=fail+1};
+  (* Offsets into the text as decoded: "Dear team,\nplease contact " is 26 characters. *)
+  if(t.assert(str.contains(y.text;"{\\\"type\\\":\\\"email\\\",\\\"start\\\":26,\\\"end\\\":43}");"each entity is its type and where it lies, measured in the decoded text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strictenvelope(y.text);"and the answer is strict JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(logged2;"analyse: 3 entities") && leaksnone(logged2;pii) && !str.contains(logged2;"please contact");"its log line counts them and holds no value")){pass=pass+1}el{fail=fail+1};
+
+  let rows="[{\\\"email\\\":\\\"alice@example.com\\\",\\\"region\\\":\\\"north\\\"},{\\\"email\\\":\\\"bob@example.com\\\",\\\"region\\\":\\\"south\\\"}]";
+  let p=call("profile";"{\"json\":\"\(rows)\",\"name\":\"q3 \\\"final\\\"\"}");
+  if(t.assert(!p.iserror;"profile profiles a JSON array of objects")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(p.text;"\\\"schema\\\":\\\"SCHEMA:q3 \\\\\\\"final\\\\\\\" rows:2 cols:2\\\\n");"its schema names the dataset, quoted once, and counts two rows and two columns")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(p.text;"email:str nulls:0% uniq:2 [PII]");"and marks the email column as PII")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(p.text;"\\\"rows\\\":2,\\\"cols\\\":2,\\\"sensitivity_hint\\\":\\\"contains PII candidates\\\"}");"beside the counts and the hint")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(leaksnone(p.text;@("alice@";"bob@";"north";"south"));"and no value of the data")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strictenvelope(p.text);"and the answer is strict JSON")){pass=pass+1}el{fail=fail+1};
+
+  (* T-18: each of these used to go on with an error bound as the profile. *)
+  let notjson=call("profile";"{\"json\":\"not json\"}");
+  if(t.assert(notjson.iserror && str.contains(notjson.text;"cannot profile: not JSON");"profile refuses text that is not JSON, and says so")){pass=pass+1}el{fail=fail+1};
+  let obj=call("profile";"{\"json\":\"{\\\"a\\\":1}\"}");
+  if(t.assert(obj.iserror && str.contains(obj.text;"cannot profile: not a JSON array");"and an object that is not an array")){pass=pass+1}el{fail=fail+1};
+  let nums=call("profile";"{\"json\":\"[1,2]\"}");
+  if(t.assert(nums.iserror && str.contains(nums.text;"the rows are not JSON objects");"and an array whose rows are not objects")){pass=pass+1}el{fail=fail+1};
+  let empty=call("profile";"{\"json\":\"[]\"}");
+  if(t.assert(!empty.iserror && str.contains(empty.text;"\\\"rows\\\":0,\\\"cols\\\":0,\\\"sensitivity_hint\\\":\\\"no data\\\"}");"an empty array profiles as no data")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

@@ -36,6 +36,12 @@ t=$datasetprofile{
   sensitivityhint:str
 };
 
+(* MK6.10: profilejson's answer; `failure` is "" when it profiled. See profilejson. *)
+t=$profiled{
+  profile:$datasetprofile;
+  failure:str
+};
+
 (* str.arrayget erases the element type of what it returns, and str.arraylen is its partner.
    Both are replaced throughout this module with the typed .len / .get(i) accessors — the
    same change PL1.1 made to core.privacy.placeholder.buildplaceholdermap and this session
@@ -331,16 +337,19 @@ f=profilecol(rows:@i64;colname:str;totalrows:u32):$colprofile{
 };
 
 f=profilerowarr(rowarr:@i64;name:str):$datasetprofile!$lokeerr{
+  <$ok(buildprofile(rowarr;name))
+};
+
+f=buildprofile(rowarr:@i64;name:str):$datasetprofile{
   let rowcount=rowarr.len;
   if(rowcount==0){
-    let profile=$datasetprofile{
+    <$datasetprofile{
       name:name;
       rowcount:0;
       colcount:0;
       columns:@();
       sensitivityhint:"no data"
-    };
-    <$ok(profile)
+    }
   }el{
     let colnames=json.keys(rowarr.get(0));
     let colcount=colnames.len;
@@ -356,14 +365,13 @@ f=profilerowarr(rowarr:@i64;name:str):$datasetprofile!$lokeerr{
     };
     let sensitivityhint=mut."no obvious PII";
     if(haspii){sensitivityhint="contains PII candidates"}el{};
-    let profile=$datasetprofile{
+    <$datasetprofile{
       name:name;
       rowcount:rowcount;
       colcount:colcount;
       columns:columns;
       sensitivityhint:sensitivityhint
-    };
-    <$ok(profile)
+    }
   }
 };
 
@@ -387,6 +395,58 @@ f=profilejsonarray(data:str;name:str):$datasetprofile!$lokeerr{
   <mt json.dec(data) {
     $ok:parsed profileparsedjson(parsed;name);
     $err:e2 $err($unknownerr(str.concat("profile_json_array: JSON parse failed for dataset: ";name)))
+  }
+};
+
+(* ── MK6.10: a profile a caller in another module can tell from a failure ─────────
+   profilejsonarray answers `$datasetprofile!$lokeerr`, and a match on a result whose error side
+   is a user sum takes its first arm whatever the value holds (T-18): mcp-toke's profile tool
+   matched it, so for input that was not a JSON array it went on with the error payload bound as
+   the profile. profilejson answers a plain struct instead, read through isprofiled, as
+   core.memory.search answers `$searchfound` (MK6.8). Only std.json's own results are matched
+   here; those do discriminate their arms.
+
+   An array whose first element is not an object is refused too: the columns are the keys of
+   the first row, and a row that is a number or a string has none to profile. *)
+f=profilefailed(why:str):$profiled{
+  <$profiled{
+    profile:$datasetprofile{name:"";rowcount:0;colcount:0;columns:@();sensitivityhint:""};
+    failure:why
+  }
+};
+
+f=isprofiled(p:$profiled):bool{
+  <str.len(p.failure)==0
+};
+
+(* The character code of the first non-whitespace byte at or after `from`, or -1. *)
+f=firstcode(s:str;from:i64):i64{
+  lp(let i=from;i<(str.len(s) as i64);i=i+1){
+    let c=str.charat(s;i);
+    if(c==32 || c==9 || c==10 || c==13){}el{ <c }
+  };
+  <0-1
+};
+
+f=profiledrows(parsed:$json;name:str):$profiled{
+  <mt json.arr(parsed;"") {
+    $ok:rows $profiled{profile:buildprofile(rows;name);failure:""};
+    $jsonerr:e profilefailed("not a JSON array")
+  }
+};
+
+f=profiledparsed(parsed:$json;name:str):$profiled{
+  let raw=parsed.raw;
+  if(firstcode(raw;0)==91){}el{ <profilefailed("not a JSON array") };
+  let first=firstcode(raw;str.indexof(raw;"[")+1);
+  if(first==123 || first==93){}el{ <profilefailed("the rows are not JSON objects") };
+  <profiledrows(parsed;name)
+};
+
+f=profilejson(data:str;name:str):$profiled{
+  <mt json.dec(data) {
+    $ok:parsed profiledparsed(parsed;name);
+    $jsonerr:e profilefailed("not JSON")
   }
 };
 

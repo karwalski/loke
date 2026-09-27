@@ -138,6 +138,48 @@ api POST /api/mcp/invoke '{"tool_name":"nosuchtool","args":{}}' 200 'unknown too
 # as TOON's table and measure the saving from the two lengths (17 characters to 15, 11%).
 api POST /api/mcp/invoke '{"tool_name":"compress","args":{"json":"[{\"a\":1},{\"a\":2}]"}}' 200 '[2]{a}:' "compress writes the two rows as a TOON table, not ~"
 api POST /api/mcp/invoke '{"tool_name":"compress","args":{"json":"[{\"a\":1},{\"a\":2}]"}}' 200 'toon_chars\\\":15,\\\"savings_pct\\\":11,' "and measures the saving from the lengths, 17 characters to 15"
+# MK6.10: anonymise answered with an "original" field holding the text as sent, and analyse
+# listed each entity's value. The POST echoes the caller's own arguments back in args_json, so
+# the scan is of the tool's answer, result_json, every layer of which is decoded strictly; the
+# positive control is that the same scan finds every value in args_json. Then the files the calls
+# could have written: the shared panel log and loke.log. The detection layers other than regex
+# are unreachable here.
+PII_TEXT='{"text":"Dear team,\nplease contact alice@example.com or ring 0412 345 678.\n\tCard: 4111 1111 1111 1111"}'
+PII_ROWS='{"json":"[{\"email\":\"alice@example.com\"},{\"email\":\"bob@example.com\"}]","name":"q3"}'
+tool_answer() {  # tool args-json label python-condition-on-answer
+  local out
+  out=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' \
+    -d "{\"tool_name\":\"$1\",\"args\":$2}" "http://127.0.0.1:$PORT/api/mcp/invoke")
+  if printf '%s' "$out" | python3 -c '
+import json, sys
+pii = ["alice@example.com", "alice@", "bob@", "0412 345 678", "4111 1111 1111 1111", "4111"]
+inv = json.loads(sys.stdin.read())
+sent = [v for v in pii if v in inv["args_json"]]
+assert sent, "control: the scan finds no value in args_json"
+assert inv["success"] is True, "the tool failed: %s" % inv["error"][:160]
+answer = json.loads(json.loads(inv["result_json"])["content"][0]["text"])
+leaked = [v for v in sent if v in inv["result_json"]]
+assert not leaked, "the answer holds %s" % leaked
+assert eval(sys.argv[1]), "the answer is %s" % json.dumps(answer)[:200]
+' "$4"; then
+    echo "  ok   POST /api/mcp/invoke $1: $3"
+  else
+    echo "  FAIL POST /api/mcp/invoke $1: $3: $(printf '%s' "$out" | head -c 200)" >&2; fail=1
+  fi
+}
+tool_answer anonymise "$PII_TEXT" "the answer is the anonymised text, with no personal value in it" \
+  'answer["entities_found"] == 3 and answer["anonymised"].startswith("Dear team,\nplease contact [EMAIL") and "original" not in answer'
+tool_answer analyse "$PII_TEXT" "the answer counts the entities and names none of their values" \
+  'answer["entity_count"] == 3 and answer["safe_to_send"] is False and {"type": "email", "start": 26, "end": 43} in answer["entities"]'
+tool_answer profile "$PII_ROWS" "the schema describes the column and holds none of its values" \
+  'answer["schema"] == "SCHEMA:q3 rows:2 cols:1\nemail:str nulls:0% uniq:2 [PII]" and answer["rows"] == 2'
+if grep -rqsF -e 'alice@' -e 'bob@' -e '0412 345 678' -e '4111 1111' "$WORK/home/.loke"; then
+  echo "  FAIL a personal value reached a file under ~/.loke: $(grep -rlsF -e 'alice@' -e 'bob@' -e '0412 345 678' -e '4111 1111' "$WORK/home/.loke")" >&2; fail=1
+elif ! grep -qsF 'anonymise: 3 entities found' "$WORK/home/.loke/loke.log"; then
+  echo "  FAIL control: loke.log does not hold anonymise's line, so the scan above proves nothing" >&2; fail=1
+else
+  echo "  ok   no personal value was written under ~/.loke, and loke.log holds the calls' lines"
+fi
 api GET  /api/mcp/broker ""                              200 '"name":"loke-memory"'  "the broker panel lists its servers"
 api GET  /api/mcp/memory ""                              200 '"available_tools":["memory.search"' "the memory panel lists its tools"
 api POST /api/mcp/memory '{"tool_name":"memory.diary_write","args":{"agent_id":"smoke","entry":"hello"}}' 200 '"success":true,"result_preview":"{\"ok\":true}"' "a memory tool runs and succeeds"
@@ -155,13 +197,13 @@ api GET  '/api/agents/diary?agent_id=nosuchagent' ""    404 'agent not found: no
 # MK6.6: state shared across moke's pre-forked workers. Each worker used to keep its own copy,
 # and eight reads after six invocations reported 0,0,0,1,0,0,1,1. Every read must now see all of
 # them: the nosuchtool and two compress invocations above and five more here (MK6.7 added the
-# compress pair); the five memory calls above.
+# compress pair, MK6.10 the anonymise, analyse and profile calls); the five memory calls above.
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -m 20 -X POST -H 'Content-Type: application/json' \
     -d '{"tool_name":"nosuchtool","args":{}}' "http://127.0.0.1:$PORT/api/mcp/invoke"
 done
 for i in 1 2 3 4 5 6 7 8; do
-  api GET /api/mcp/tools  "" 200 '"total_invocations":8}' "read $i of the tool log sees all eight invocations"
+  api GET /api/mcp/tools  "" 200 '"total_invocations":11}' "read $i of the tool log sees all eleven invocations"
   api GET /api/mcp/memory "" 200 '"total_invocations":5}' "read $i of the memory log sees all five calls"
   api GET '/api/agents/diary?agent_id=data-quality-scanner' "" 200 '"total_runs":1,' "read $i of the scanner sees its run"
   api GET /api/agents     "" 200 '"output_summary":"2 changes: 1 added, 1 removed' "read $i of the agents panel sees the schema run"
