@@ -115,6 +115,25 @@ leaked=$(dl "SELECT COUNT() FROM disclosure_log WHERE instr(record_id||correlati
 if [ "$leaked" = "0" ]; then echo "  ok   and it holds the address in no column"
 else echo "  FAIL the disclosure record holds the address" >&2; fail=1; fi
 
+# NC1.3: the Insight Lab's proposal path end to end. moke sends loke column NAMES only. The
+# prompt is a data-analysis task, which the catalogue can only route to a cloud model at this
+# tolerance, and no key is configured here (this test never calls a real provider), so loke
+# refuses and moke answers with its heuristic, labelled as such. What is asserted is that the
+# request reached loke's router, that no model received anything, and the label.
+: > "$SEEN"
+refused_before=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='llm_request_refused'")
+OUTP=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d '{"num_cols":["revenue","orders","ltv"],"cat_cols":["region"]}' http://127.0.0.1:11432/api/ml/propose)
+refused_after=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='llm_request_refused'")
+if [ "$refused_after" -gt "$refused_before" ]; then echo "  ok   the Insight Lab's proposal request reaches loke's router"
+else echo "  FAIL the proposal request never reached loke ($refused_before -> $refused_after refusals)" >&2; fail=1; fi
+case "$OUTP" in
+  *'"source":"heuristic"'*'"kind":"kmeans"'*) echo "  ok   and with no model available the proposals are labelled heuristic, not passed off as a model's" ;;
+  *) echo "  FAIL unexpected proposal response: $(printf '%s' "$OUTP" | head -c 200)" >&2; fail=1 ;;
+esac
+if [ -s "$SEEN" ]; then echo "  FAIL a model received a proposal request that should have been refused" >&2; fail=1
+else echo "  ok   and no model received anything"; fi
+
 # F5.12: when the routed model is not installed, loke must refuse and name what IS installed,
 # rather than send a request Ollama will reject. Restart the fake with a list that does
 # not contain the routed model.

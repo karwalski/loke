@@ -2016,6 +2016,21 @@ string too, but once per call rather than once per byte.
 **What it cost in loke.** F3.1b searches a growing window with `str.indexof` over `str.substr`
 instead. **The ask:** bounds-check against a stored length, or add `str.byteat` without the check.
 
+## T-56 — a module may import at most 32 others, which caps an ooke application's routes
+
+**Severity: blocks.**
+
+Measured 2026-09-27 at `0b0bc4e`. `TKC_MAX_IMPORTS` in `src/tkc_limits.h` is 32, and a module that
+imports more fails with `compiler limit exceeded: too many imports`. ooke's `gen_handlers.sh`
+writes one generated `_handlers.tk` that imports every page module, one import per route, so an
+application can have at most about thirty routes before its handler registry stops compiling.
+moke reached 28. Giving seven more handlers their own page files, which is the convention
+`gen_handlers.sh` documents, took it to 35 and the build failed.
+
+**What it cost in loke.** MK6.5: seven moke API handlers (the MCP panel's five and the agents'
+scan, schema and diary) stay unrouted. **The ask:** raise the limit, or have `gen_handlers.sh`
+split the registry across modules.
+
 ## T-47 — `str.nowunix()` returns the time as a STRING and is declared `i64`
 
 **Severity: wrong value, silently. It reached a budget, a kill switch and an audit trail.**

@@ -103,6 +103,10 @@ api POST /api/stream    '{}'                            400 'missing required fi
 api POST /api/upload    ''                              400 'empty body'            "upload refuses an empty body"
 api POST /api/routing   '{"prompt":"hello"}'            200 '"routing":{'           "routing explains a decision"
 api GET  /api/agents    ""                              200 '"agents":['            "agents lists the agents"
+# NC1.3 / MK6.5: the proposal route exists, takes column names only, and with loke down says
+# its suggestions are heuristic rather than presenting them as a model's.
+api POST /api/ml/propose '{}'                            400 'at least one of'       "a proposal needs column names"
+api POST /api/ml/propose '{"num_cols":["revenue","orders","ltv"],"cat_cols":["region","plan"]}' 200 '"source":"heuristic"' "and proposes analyses from names alone, labelled heuristic"
 
 [ "$fail" -eq 0 ] || { echo "smoke_serve_moke: failed (MK21.16)" >&2; exit 1; }
 echo "smoke_serve_moke: OK, every page rendered and every dataset loaded"

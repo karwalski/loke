@@ -886,7 +886,7 @@ loke is local-first and single-user by design. The companion device support (F8)
 | MK6.2 | M | **Done** | Multi-provider LLM routing (Claude Sonnet/Haiku via loke's Anthropic provider; GPT-4o-mini via loke's OpenAI provider; model selector in chat panel; local Ollama models when available; API keys from loke keychain (F1.5) — no re-entry in moke settings) |
 | MK6.3 | S | **Done** | moke settings page (session memory toggle — clear on close or persist; pipeline console verbosity; default sensitivity level; preferred model; about/version) |
 | MK6.4 | M | **Done** | Presentation mode (full-screen dashboard view for demos; hide sidebar; auto-cycle through cards; keyboard arrows to navigate; ESC to exit; timer overlay showing time in presentation; `?` overlay for keyboard shortcuts; used in user research sessions) |
-| MK6.5 | S |  | **Nine moke API handlers can never be reached** — Found 2026-09-27 by X7.2, probing the running moke. ooke's `scripts/gen_handlers.sh` registers exactly one `get` and one `post` per page file, which is its documented convention, and moke's handler registry is generated from it. So `pages/api/ml.tk`'s `postrun` and `postpropose`, `pages/api/mcp.tk`'s `gettools`, `postinvoke`, `getbroker`, `getmemory` and `postmemory`, and `pages/api/agents.tk`'s `postscan`, `postschema` and `getdiary` compile but have no route: a request answers 404 or 405. Nothing in the moke UI calls them today, so nothing visible breaks. The Insight Lab's run and propose paths, and the MCP panel's tool invocation, are among them. Either give each its own page file (for example `pages/api/ml/run.tk` exporting `post`), or delete the ones nothing will call. |
+| MK6.5 | S | **Partial** — ml routed; seven wait on T-56 | **Nine moke API handlers can never be reached** — Found 2026-09-27 by X7.2, probing the running moke. ooke's `scripts/gen_handlers.sh` registers exactly one `get` and one `post` per page file, which is its documented convention, and moke's handler registry is generated from it. So `pages/api/ml.tk`'s `postrun` and `postpropose`, `pages/api/mcp.tk`'s `gettools`, `postinvoke`, `getbroker`, `getmemory` and `postmemory`, and `pages/api/agents.tk`'s `postscan`, `postschema` and `getdiary` compile but have no route: a request answers 404 or 405. Nothing in the moke UI calls them today, so nothing visible breaks. The Insight Lab's run and propose paths, and the MCP panel's tool invocation, are among them. Either give each its own page file (for example `pages/api/ml/run.tk` exporting `post`), or delete the ones nothing will call.<br><br>**2026-09-27.** `pages/api/ml/propose.tk` and `pages/api/ml/run.tk` route `postpropose` and `postrun`; regenerating the registry also picked up `connections`, `presentation` and `setup`, which the hand-kept copy lacked. Routing the other seven the same way took `_handlers.tk` to 35 imports, past toke's cap of 32, and the build failed (T-56). They stay unrouted until the cap is raised or the registry is split. |
 
 ## Epic MK7: Demo Readiness
 
@@ -1080,15 +1080,15 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AGENTIC AI | 1 | 10 | 10 | — | — | — | — | — | — | — |
 | MEMORY PALACE AND AAAK SHORTHAND | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | CROSS-CUTTING | 9 | 83 | 83 | — | — | — | — | — | — | — |
-| DEMO LAYER — moke | 7 | 66 | 65 | — | — | — | — | — | — | 1 |
+| DEMO LAYER — moke | 7 | 66 | 65 | 1 | — | — | — | — | — | — |
 | Epic T: Test Suite | 14 | 65 | 41 | 1 | — | 23 | — | — | — | — |
 | SUMMARY | 2 | 20 | 20 | — | — | — | — | — | — | — |
 | TOOLCHAIN | 1 | 49 | 37 | 2 | — | 4 | — | 1 | — | 5 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 37 | 17 | 4 | — | — | — | — | — | 16 |
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
-| NO-CUSTODY ARCHITECTURE | 4 | 37 | 26 | 1 | — | — | — | — | — | 10 |
+| NO-CUSTODY ARCHITECTURE | 4 | 37 | 28 | 1 | — | — | — | — | — | 8 |
 | VERIFICATION PROGRAMME | 14 | 128 | 90 | 10 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **712** | **582** | **31** | **8** | **36** | **3** | **1** | — | **51** |
+| **Total** | **88** | **712** | **584** | **32** | **8** | **36** | **3** | **1** | — | **48** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1137,7 +1137,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | MK3 | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | MK4 | 1 | 37 | 37 | — | — | — | — | — | — | — |
 | MK5 | 1 | 4 | 4 | — | — | — | — | — | — | — |
-| MK6 | 1 | 5 | 4 | — | — | — | — | — | — | 1 |
+| MK6 | 1 | 5 | 4 | 1 | — | — | — | — | — | — |
 | MK7 | 1 | 4 | 4 | — | — | — | — | — | — | — |
 | T1 | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | T2 | 1 | 5 | 5 | — | — | — | — | — | — | — |
@@ -1164,7 +1164,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | GA3 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | GA4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | T15 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| NC1 | 1 | 11 | 6 | — | — | — | — | — | — | 5 |
+| NC1 | 1 | 11 | 8 | — | — | — | — | — | — | 3 |
 | DA1 | 1 | 9 | 8 | 1 | — | — | — | — | — | — |
 | EM1 | 1 | 5 | 2 | — | — | — | — | — | — | 3 |
 | PL1 | 1 | 12 | 10 | — | — | — | — | — | — | 2 |
@@ -1182,7 +1182,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 29 | 23 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **712** | **582** | **31** | **8** | **36** | **3** | **1** | — | **51** |
+| **Total** | **88** | **712** | **584** | **32** | **8** | **36** | **3** | **1** | — | **48** |
 
 Rows parsed: **712**, across **88** epics and **16** level-1 headings.
 
@@ -1537,8 +1537,8 @@ never leaves, not even for categorisation.
 | Story | Size | Status | Summary |
 |-------|------|--------|---------|
 | NC1.1 | M | **Done** | **Define the artifact contract** — Specify the closed operation set an artifact may express, building on the existing `$dashboard` DDL (`packages/moke/src/ddl.tk`) and the 15 operations in `packages/moke/src/compute.tk` (`opcount`, `opsum`, `opavg`, `opmin`, `opmax`, `opgroup`, `optimeseries`, `optopn`, `opdistribution`, `opcorrelate`, `oppercentile`, `opcountby`, `oplatest`, `opdistinct`, `opjoin`). The set MUST remain non-Turing-complete and MUST NOT include arbitrary code: toke exposes no sandboxing primitive (`process.tki` offers spawn/wait/kill only, with no jail, resource cap or syscall filter), so a closed op set is the only safe design. Write `docs/specifications/artifact-contract.md` with the grammar, the validation rules, and the explicit rejection criteria. |
-| NC1.2 | M |  | **No-custody schema profile** — Build a profile emitter that carries column names, inferred types, cardinality, null-rate and row count, and **nothing else**. This replaces `packages/moke/src/hooks.tk::profiletotoon` and `packages/core/src/optimiser/profiler.tk::totoonschema`, both of which currently embed **three real sample values per column plus real min/max/mean** — so today's "schema-first" request ships real data. Acceptance: a profile built from a dataset containing a unique sentinel value contains that value zero times. |
-| NC1.3 | M |  | **Wire the Insight Lab's proposal path** — The no-custody LLM path never executes: `packages/moke/templates/insight.tkt:897` posts `{columns: [...]}` while `packages/moke/pages/api/ml.tk:146-160` requires at least one of `schema_toon`, `num_cols`, `cat_cols` and returns 400 otherwise, so the client silently falls back to `heuristicSuggestions()`. Fix the contract, and fix `packages/moke/src/ml/proposal.tk`'s `if(i<n){...}` loops, which process only one element where `lp` was intended. |
+| NC1.2 | M | **Done** — 2026-09-27 | **No-custody schema profile** — Build a profile emitter that carries column names, inferred types, cardinality, null-rate and row count, and **nothing else**. This replaces `packages/moke/src/hooks.tk::profiletotoon` and `packages/core/src/optimiser/profiler.tk::totoonschema`, both of which currently embed **three real sample values per column plus real min/max/mean** — so today's "schema-first" request ships real data. Acceptance: a profile built from a dataset containing a unique sentinel value contains that value zero times.<br><br>**Done 2026-09-27.** Both emitters now carry no value drawn from the data. `moke.hooks.profiletotoon` emits, per column, the name, inferred type, null rate, distinct count and a cardinality band (`constant`, `low`, `high`, `unique`), plus the dataset's row and column counts. The `STATS:` line with each numeric column's real min, max and mean is gone, and so are the samples MK21.18 still allowed for repeating categories and numbers. `core.optimiser.profiler.totoonschema`, which mcp-toke's profile tool returns to a model, no longer carries the first values of every non-PII column. **Acceptance, asserted:** `packages/moke/tests/test_schema_samples.tk` puts `SENTINEL-7Q` once in a dataset, and it appears **zero** times in the profile. Neither do the category values (`NSW`, `VIC`) or any number. With the old emitter restored, 4 assertions FAIL. `tests/unit/optimiser/test_toon.tk` asserts the same for `totoonschema` (`north`, `south`, `gold` absent), and `tests/e2e/test_moke_flow.tk` for the moke flow. This is the profile disclosure-accounting spec A6 said the old emitters would fail. Custody is still passed as `redacted-data` rather than observed (DA1.7); making the sentinel check a per-dispatch observation belongs with NC1.8. |
+| NC1.3 | M | **Done** — 2026-09-27 | **Wire the Insight Lab's proposal path** — The no-custody LLM path never executes: `packages/moke/templates/insight.tkt:897` posts `{columns: [...]}` while `packages/moke/pages/api/ml.tk:146-160` requires at least one of `schema_toon`, `num_cols`, `cat_cols` and returns 400 otherwise, so the client silently falls back to `heuristicSuggestions()`. Fix the contract, and fix `packages/moke/src/ml/proposal.tk`'s `if(i<n){...}` loops, which process only one element where `lp` was intended.<br><br>**Done 2026-09-27.** The path failed at four points, not the one this row named. (1) The page posted to `/api/moke/ml/propose`, which does not exist, so every proposal fell back to the page's heuristic; and `postpropose` had no route at all (MK6.5). `pages/api/ml/propose.tk` is its route, and the page posts to `/api/ml/propose`. (2) The contract: the page now sends `num_cols` and `cat_cols`, column NAMES split by type from the loaded dataset, which is what the handler requires, and never a value. (3) `askpipeline` called `http.postheaders`, which sends nothing (T-48), so the model was never asked; it uses `http.posturl`. (4) The reply was read with the untyped `json.getarr` (LS1.1w), so a model's suggestions could never have been parsed; it now uses the typed accessors. The `if(i<n)` loops the row named had already been fixed. **Also fixed:** for any analysis the browser cannot run, such as the `groupby` the proposals offer, the page showed invented results ("14 anomalies detected" with made-up row numbers, "Inertia: 1842.3"); it now says the analysis was not run. **Evidence:** `packages/moke/tests/test_proposal.tk` (9 assertions) covers the names-only prompt, parsing a loke-wrapped model reply (FAILS with the old parser), a refusal, and the heuristic label. `smoke_serve_moke.sh` checks the route and its 400. `smoke_e2e.sh` shows the proposal reaching loke's router and, with no key configured, loke refusing it and moke answering with suggestions labelled `heuristic`, while no model receives anything. **Routing, recorded rather than changed:** a proposal is a `data_analysis` task, and the catalogue's only local model for it (`qwen2.5:72b`, 8 tok/s) is below the `patient` tier's floor. So it routes to the cloud, which the no-custody path allows because the prompt carries names only. Without a key it falls back to the heuristic. |
 | NC1.4 | L | **Done** | **Send the schema on the dashboard path** — `packages/moke/templates/dashboard.tkt`'s `buildPhase1Prompt(question)` sends only the question while telling the model *"You have access to this dataset"*. It does not. Pass the NC1.2 profile. Remove the instruction `Use realistic sample values that match the dataset schema` from both system prompts (`:1019` and `:1095`), and the equivalent clause in `templates/chat.tkt:2527`. |
 | NC1.5 | M | **Done** | **Make fabricated values inadmissible** — Drop `normaliseDDL`'s ingestion of the model's `data` array into the render slot (`dashboard.tkt:448-468`) and the `Math.round(Math.random() * 900 + 100)` chart fallback (`:791-794`). A card with no locally-resolved value MUST NOT display a number. |
 | NC1.6 | M | **Done** | **Provenance state on every card** — Render one of `resolved` / `unresolved` / `no-data` per card. `renderMetricCard` (`dashboard.tkt:714`) currently emits `→ computed locally` **unconditionally**, including on values the model invented; the only honest signal today is a `console.info` no user sees. `resolveQueries` MUST record why each `continue` fired so the reason can be surfaced. |

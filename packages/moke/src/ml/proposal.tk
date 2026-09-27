@@ -111,56 +111,76 @@ f=buildprompt(schematoon:str;numcols:@str;catcols:@str):str{
   <"You are a data analyst. Given the dataset schema below, suggest 2-4 ML analyses.\n\nSCHEMA PROFILE (no raw data):\n\(schematoon)\n\nNumeric columns: \(str.join(", ";numcols))\nCategorical columns: \(str.join(", ";catcols))\n\nRespond as a JSON array of objects, each with keys: kind, title, description, columns (array), params (JSON string), rationale.\nKinds available: kmeans, zscore, iqr, correlation, groupby.\nBe concise and practical. Do not include any raw data or PII in your response."
 };
 
-(* $ok first: `mt` binds a result's arms by POSITION, not by label, and writing the error arm
-   first inverts the match (T-31). *)
-f=itemstr(item:i64;key:str):str{
-  <mt json.str(item;key) {
+(* NC1.3. The reply is read through std.json's TYPED accessors (json.dec, json.str, json.arr),
+   each matched with $ok first (T-31). It used the untyped json.getarr over i64 handles, which
+   does not work (LS1.1w): a model's suggestions were never read even once one was asked. *)
+f=strof(o:$json;key:str):str{
+  <mt json.str(o;key) {
     $ok:v v;
     $jsonerr:e ""
   }
 };
 
-f=itemcols(item:i64):@str{
+(* A JSON string element, from its raw text. *)
+f=elemstr(e:$json):str{
+  let t=str.trim(e.raw);
+  if(str.len(t)<2){ <"" }el{};
+  <jx.unescape(str.trimsuffix(str.trimprefix(t;"\"");"\""))
+};
+
+f=colsof(item:$json):@str{
+  let arr=mt json.arr(item;"columns") {
+    $ok:a a;
+    $jsonerr:e @()
+  };
   let out=mut.@();
-  let raw=json.getarr(item;"columns");
-  lp(let i=0;i<str.arraylen(raw);i=i+1){
-    out=out.push(itemstr(raw.get(i);""))
+  lp(let i=0;i<arr.len;i=i+1){
+    let e:$json=arr.get(i);
+    out=out.push(elemstr(e))
   };
   <out
 };
 
-f=suggestionsfromarray(arr:i64):@$mlsuggestion{
+f=suggestionsfromitems(items:@$json):@$mlsuggestion{
   let out=mut.@();
-  let items=json.getarr(arr;"");
-  lp(let i=0;i<str.arraylen(items);i=i+1){
-    let item=items.get(i);
-    let kind=itemstr(item;"kind");
-    let title=itemstr(item;"title");
+  lp(let i=0;i<items.len;i=i+1){
+    let item:$json=items.get(i);
+    let kind=strof(item;"kind");
+    let title=strof(item;"title");
     if(str.len(kind) > 0 && str.len(title) > 0){
       out=out.push($mlsuggestion{
         kind:kind;
         title:title;
-        description:itemstr(item;"description");
-        columns:itemcols(item);
-        params:itemstr(item;"params");
-        rationale:itemstr(item;"rationale")
+        description:strof(item;"description");
+        columns:colsof(item);
+        params:strof(item;"params");
+        rationale:strof(item;"rationale")
       })
-    }
+    }el{}
   };
   <out
 };
 
-(* The model is asked for a bare JSON array. `response` is read first because that is the field
-   the loke pipeline wraps a completion in; a reply that is already the array is parsed directly. *)
+(* The model is asked for a bare JSON array. The loke pipeline wraps a completion as
+   {"ok":true,"response":"<text>"}; a reply that is already the array is read directly. The
+   array is read by wrapping it as {"a":...}, because json.arr reads a keyed field. *)
 f=parsellmsuggestions(body:str):@$mlsuggestion{
   let inner=mt json.dec(body) {
-    $ok:o itemstr(o;"response");
+    $ok:o strof(o;"response");
     $jsonerr:e ""
   };
-  let payload=mut.body;
-  if(str.len(inner)>0){ payload=inner };
-  <mt json.dec(payload) {
-    $ok:arr suggestionsfromarray(arr);
+  let payload=mut.str.trim(body);
+  if(str.len(inner)>0){ payload=str.trim(inner) }el{};
+  if(!str.startswith(payload;"[")){ <@() }el{};
+  <mt json.dec(str.concat("{\"a\":";str.concat(payload;"}"))) {
+    $ok:w itemsof(w);
+    $jsonerr:e @()
+  }
+};
+
+f=itemsof(w:$json):@$mlsuggestion{
+  <mt json.arr(w;"a") {
+    $ok:items suggestionsfromitems(items);
     $jsonerr:e @()
   }
 };
@@ -176,11 +196,9 @@ f=askpipeline(prompt:str):str{
     <""
   };
   let body="{\"text\":\(jsonencode(prompt)),\"system_prompt\":\"\",\"tolerance\":\"patient\",\"mode\":\"chat\"}";
-  let hc=http.client(pipelinebaseurl());
-  <mt http.postheaders(hc;"/api/pipeline";str.tobytes(body);"{\"content-type\":\"application/json\"}") {
-    $ok:raw raw;
-    $httperr:e ""
-  }
+  (* NC1.3: http.posturl. http.postheaders sends nothing in this shape (T-48), so the model
+     was never asked and every proposal was the heuristic. *)
+  <http.posturl(str.concat(pipelinebaseurl();"/api/pipeline");body)
 };
 
 f=fromschema(schematoon:str;numcols:@str;catcols:@str):$proposalresult{
