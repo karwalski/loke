@@ -32,6 +32,12 @@ PORT="${SMOKE_MOKE_PORT:-11497}"
 . "$ROOT/scripts/lib/fixedports_lock.sh"
 acquire_fixedports || { echo "smoke_serve_moke: could not get the fixed-port lock" >&2; exit 1; }
 
+# F10.38: refuse to start on a port something already holds. Another worker's fake Ollama
+# once held this port; the server failed to bind and the probes below were answered by the
+# fake. Checked after taking the lock, so the holder is not one of our own smokes.
+. "$ROOT/scripts/lib/port_owner.sh"
+refuse_if_port_busy smoke_serve_moke "$PORT" || { release_fixedports; exit 1; }
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/moke_smoke.XXXXXX")
 PID=
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; release_fixedports; }
@@ -52,6 +58,8 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 [ "$up" -eq 1 ] || { echo "smoke_serve_moke: moke never answered on $PORT" >&2; tail -5 "$WORK/serve.log" >&2; exit 1; }
+# F10.38: something answered; confirm it is the moke this script started.
+assert_port_owner smoke_serve_moke "$PORT" "$PID" || { tail -5 "$WORK/serve.log" >&2; exit 1; }
 
 fail=0
 # X7.2: each page must answer 200 with a whole rendered document. This replaced twelve
@@ -155,6 +163,9 @@ for i in 1 2 3 4 5 6 7 8; do
 done
 # The shared log is a file that outlives the request, so it keeps no arguments or results.
 api GET /api/mcp/memory "" 200 '"tool_name":"memory.store","args_json":"",' "the memory log does not keep what was stored"
+
+# F10.38: and it still is, so no answer above came from a server that took the port later.
+assert_port_owner smoke_serve_moke "$PORT" "$PID" || fail=1
 
 [ "$fail" -eq 0 ] || { echo "smoke_serve_moke: failed (MK21.16)" >&2; exit 1; }
 echo "smoke_serve_moke: OK, every page rendered and every dataset loaded"

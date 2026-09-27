@@ -38,6 +38,12 @@ PORT="${SMOKE_PORT:-11499}"
 . "$ROOT/scripts/lib/fixedports_lock.sh"
 acquire_fixedports || { echo "smoke_serve: could not get the fixed-port lock" >&2; exit 1; }
 
+# F10.38: refuse to start on a port something already holds. Another worker's fake Ollama
+# once held this port; the server failed to bind and the probes below were answered by the
+# fake. Checked after taking the lock, so the holder is not one of our own smokes.
+. "$ROOT/scripts/lib/port_owner.sh"
+refuse_if_port_busy smoke_serve "$PORT" || { release_fixedports; exit 1; }
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/loke_smoke.XXXXXX")
 PID=
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; pkill -f "$WORK/loke" 2>/dev/null; rm -rf "$WORK"; release_fixedports; }
@@ -64,6 +70,8 @@ if [ "$up" -ne 1 ]; then
   tail -5 "$WORK/serve.log" >&2
   exit 1
 fi
+# F10.38: something answered; confirm it is the loke this script started.
+assert_port_owner smoke_serve "$PORT" "$PID" || { tail -5 "$WORK/serve.log" >&2; exit 1; }
 
 fail=0
 probe() {  # $1 method, $2 path, $3 optional body
@@ -168,6 +176,9 @@ for r in settings health; do
     echo "  ok   GET /api/$r with Host rebind.example [$code]"
   fi
 done
+
+# F10.38: and it still is, so no answer above came from a server that took the port later.
+assert_port_owner smoke_serve "$PORT" "$PID" || fail=1
 
 if [ "$fail" -ne 0 ]; then
   echo "smoke_serve: at least one route failed (F10.36, GA2.6)" >&2
