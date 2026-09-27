@@ -6,6 +6,8 @@ m=core.providers.transport;
 i=http:std.http;
 i=json:std.json;
 i=str:std.str;
+i=log:shared.log;
+i=reach:shared.reachability;
 
 (* F5.11. The one HTTP POST the hosted providers are sent through.
 
@@ -59,7 +61,29 @@ f=openaiheaders(key:str):str{
 (* POST `body` to `url` with the headers in `headersjson`, and answer the response body,
    or "" when nothing came back. The 0 the glue answers on failure is tested as an
    integer before it is read as a string, because it is a null address. *)
+(* T-58: nothing leaves the machine through this until toke verifies certificates.
+
+   Measured 2026-09-27 against the pinned toke: tk_http_postheaders_w creates its TLS client
+   context, sets SNI and connects, and never calls SSL_CTX_set_verify, SSL_set1_host or
+   SSL_get_verify_result, so OpenSSL verifies nothing. A local probe with a self-signed
+   certificate for CN=probe.invalid received the request, authorization header included
+   (docs/upstream/toke-issues.md T-58). Every call here carries a provider API key, so an
+   https send today hands the key to anyone who can intercept the connection.
+
+   So only a loopback URL is sendable. Anything else is refused before the glue is called,
+   and the caller sees "", which every caller already reports as a provider failure, never
+   as an answer. This undoes nothing F5.11 measured: the URL-first call still arrives over
+   loopback, and the refusal lifts, here and only here, when T-58 is fixed upstream and a
+   test proves an untrusted certificate is rejected. *)
+f=sendable(url:str):bool{
+  <reach.isloopbackurl(url)
+};
+
 f=post(url:str;body:str;headersjson:str):str{
+  if(sendable(url)==false){
+    log.warn("provider request refused: toke's https client does not verify certificates (T-58), so a provider API key is not sent";"providers.transport";"");
+    <""
+  }el{};
   let addr=http.postheaders(url;body;headersjson;"");
   if(addr==0){ <"" }el{};
   let raw:str=addr;

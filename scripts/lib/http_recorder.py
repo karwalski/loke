@@ -108,7 +108,13 @@ class H(http.server.BaseHTTPRequestHandler):
                           {"name": "sum", "description": "adds", "inputSchema": {"type": "object"}}],
                 "content": [{"type": "text", "text": "tool-answer"}]}})
         elif p == "/v1/chat/completions":
-            self._send({"choices": [{"message": {"role": "assistant", "content": "exo-answer"}}]})
+            # Two callers share this path: the local Exo client (VM1.6f), which sends no
+            # credentials, and the hosted OpenAI dispatch (F5.11), which always sends an
+            # authorization header. The header decides which shape answers.
+            if self.headers.get("authorization"):
+                self._send(OPENAI)
+            else:
+                self._send({"choices": [{"message": {"role": "assistant", "content": "exo-answer"}}]})
         elif p == "/v1/nodes":
             self._send({"nodes": [{"id": "n1", "device": "recorder", "memory_gb": 16.0, "models": ["m"]}]})
         elif p == "/api/pipeline":
@@ -125,8 +131,6 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(PRESIDIO)
         elif p == "/v1/messages":
             self._send(ANTHROPIC)
-        elif p == "/v1/chat/completions":
-            self._send(OPENAI)
         elif p == "/compress":
             self._send({"compressed_prompt": "short", "origin_tokens": 10, "compressed_tokens": 5, "ratio": "2.0x"})
         else:

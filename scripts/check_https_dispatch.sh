@@ -24,6 +24,13 @@
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# DISABLED until toke T-58 is fixed. toke's https client verifies no certificate, so this
+# script would hand your key to anyone able to intercept the connection, and
+# core.providers.transport now refuses every non-loopback send anyway. Re-enable only when a
+# test shows an untrusted certificate being rejected.
+echo "check_https_dispatch: disabled — toke's https client does not verify certificates (T-58), so no key is sent. Nothing was sent." >&2
+exit 3
 if [ -z "${LOKE_HTTPS_CHECK_KEY:-}" ]; then
   echo "check_https_dispatch: set LOKE_HTTPS_CHECK_KEY to your Anthropic key. Nothing was sent." >&2
   exit 2
