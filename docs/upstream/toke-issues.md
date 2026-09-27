@@ -2050,3 +2050,47 @@ accumulate across requests. `metrics_raw.timestamp` held a pointer, and a test a
 `engaged_at` and auto-release (GA5.28). **Worked around** with `shared.types.nowi64()` and
 `nowms()`, which read `std.time`. **The ask** is the T-36 one: declare it `str`, or make it
 return the number its name promises.
+
+## T-57 — `http.get(client;path)` registers a server route; nothing says so, and its return value reads as success after 256 calls
+
+**Severity: an outbound request is silently never sent, and a health check built on it answers
+"down" for a live service, then "up" for anything. It reached loke's privacy pipeline.**
+
+Measured 2026-09-27 at `0b0bc4e`. `src/llvm.c` resolves `http.get` to `tk_http_get_handler` and
+then "disambiguates by argument count": ONE argument becomes the client GET `tk_http_get_w`,
+TWO arguments stay route registration. So the natural client form
+
+    let hc=http.client("http://127.0.0.1:5002");
+    let r=mt http.get(hc;"/health") { $ok:b true; $err:e false };
+
+compiles clean and calls `tk_http_get_handler(path=hc, handler="/health")`: it registers a GET
+route whose path is the client struct read as a string and whose handler is the path string's
+address. No request is made. `nm -u` on loke's objects found the symbol in nine modules that
+meant a client call. Against a recorder that logs every request, the six such calls driven from
+a test (Presidio, NER and LLMLingua health, and `loke doctor`'s three checks) sent nothing; the
+recorder's log was never created.
+
+Then the return value. Registration returns 0, which `mt` reads as `$err` (T-33), so every
+check built this way answered "down" for a service that was answering: `loke doctor` said Ollama
+was not running while it answered on the configured URL. `g_get_handler_routes` holds 256
+entries (`TK_MAX_GET_HANDLERS`); once it is full, registration returns **-1**, which `mt` reads
+as **`$ok`**. In a test process the Presidio health check flipped from false to TRUE on its
+249th call (after seven earlier registrations) with the recorder's log still empty. A long-running
+process that health-checks a sidecar per request therefore reports it healthy, forever, after
+a few hundred requests, whether or not it is running.
+
+**What it cost in loke.** The Presidio and NER detection layers were skipped as unreachable on
+every request, so the pipeline ran regex only while both sidecars answered. After the flip the
+pipeline called them; their scans used `http.postheaders`, which also sends nothing (T-48), and
+their `X!$lokeerr` results hit T-18: a Presidio that was never reached was counted as a
+COMPLETED detection layer (2 completed, 0 degraded, 0 entities), and with NER on, the run grew to
+1.9 GB before the OS killed it. `loke doctor`, `GET /api/models`, the LLMLingua check and the
+installer's three probes were all dead the same way. Two update checkers still call
+`http.get(url;@(headers))` (VM1.6f).
+
+**Worked around** (VM1.6e) with `shared.reachability.localget`, which uses the one-argument form
+after a TCP reachability probe, and by returning plain structs, not results, from the scans.
+
+**The ask:** do not overload a client verb on arity with a server verb. At minimum, reject a
+two-argument `http.get` whose first argument is an `httpclient` (the type is known), and make
+`tk_http_get_handler` return a value `mt` cannot read as success when the table is full.

@@ -28,6 +28,14 @@ class H(http.server.BaseHTTPRequestHandler):
         else: self._send({})
     def do_POST(self):
         n=int(self.headers.get('Content-Length',0)); body=self.rfile.read(n).decode('utf-8','replace')
+        # VM1.6e: loke's NER detection layer asks the same local Ollama to FIND entities, and
+        # that request carries the prompt in clear, by design. It is not the model the prompt
+        # is forwarded to, so it goes to its own log and does not count as "the model saw it".
+        # Until VM1.6e the NER layer never sent anything, so this never arose. An empty array
+        # is a completed scan that found nothing, which leaves the forward path unchanged.
+        if self.path.startswith('/api/chat') and 'named entity recognition system' in body:
+            open(LOG+'.ner','a').write(self.path+' '+body+'\n')
+            self._send({"model":"llama3","message":{"role":"assistant","content":"[]"},"done":True}); return
         open(LOG,'a').write(self.path+' '+body+'\n')
         import re
         ph=re.findall(r'\[[A-Z_]+_[0-9a-f]+_[0-9]+\]',body)

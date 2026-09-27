@@ -6,8 +6,8 @@ m=core.privacy.presidio;
 
 
 
-i=http:std.http;
 i=reach:shared.reachability;
+i=jx:shared.jsonobj;
 i=json:std.json;
 i=str:std.str;
 i=t:shared.types;
@@ -24,6 +24,20 @@ t=$presidioclient{
 };
 
 
+(* VM1.6e. What the pipeline reads: ok is true only when Presidio answered /analyze with
+   the top-level array it documents, and presidiohits is then what it found.
+
+   A plain struct, not a result, because the pipeline sits in another module and toke's
+   `mt` on a result whose error side is a user sum takes the FIRST arm whatever the value
+   is (T-18). Measured 2026-09-27: with /analyze unreached, analyze returned $err, the
+   pipeline's `$ok` arm ran, and the run counted Presidio as a COMPLETED layer with zero
+   entities. A layer that did not scan was reported as having scanned, which is the
+   fail-open NC1.9 forbids. *)
+t=$presidioscan{
+  ok:bool;
+  presidiohits:@$presidioentity
+};
+
 f=new(baseurl:str):$presidioclient{
   <$presidioclient{baseurl:baseurl}
 };
@@ -39,19 +53,15 @@ f=isavailable(client:$presidioclient):bool{
      down. That is the fail-open NC1.9 exists to close, one level below where NC1.9
      was looking. See docs/upstream/toke-issues.md T-15.
 
-     reach.localserviceup binds the port to find out, which is honest for a local
-     sidecar and is all these two are. *)
-  if(reach.localserviceup(client.baseurl)){}el{
-    <false
-  };
-  let hc=http.client(client.baseurl);
-  <mt http.get(hc;"/health") {
-    $ok:body true;
-    $err:e false
-  }
+     VM1.6e. The GET that followed the probe was `http.get(http.client(url);"/health")`,
+     and toke compiles a TWO-argument http.get as server ROUTE REGISTRATION (T-57). It
+     sent nothing. Measured 2026-09-27 against scripts/lib/http_recorder.py: this
+     answered false for a Presidio that was answering, so the pipeline skipped the layer
+     as unreachable on every request. And after 256 calls in one process the route table
+     filled, registration returned -1, the match read that as $ok, and this answered
+     TRUE with no request made. shared.reachability.localget is a real GET. *)
+  <reach.isloopbackurl(client.baseurl) && reach.localanswers(client.baseurl;"/health")
 };
-
-
 
 (* PL1.8. `score` was read with json.i64. strtoll stops at the decimal point, so 0.92
    read as 0 and 1.0 as 1 -- and an i64 1 stored in an f64 field is a denormal, not 1.0.
@@ -101,14 +111,34 @@ f=analyzeparse(raw:str):@$presidioentity!$lokeerr{
   }
 };
 
+f=scanfailed():$presidioscan{
+  <$presidioscan{ok:false;presidiohits:@()}
+};
+
+f=analyzebody(text:str):str{
+  <str.concat("{\"text\":";str.concat(jx.escape(text);",\"language\":\"en\"}"))
+};
+
+(* The request used to be `http.postheaders(http.client(url);"/analyze";...)`, measured to
+   send nothing (T-48), with the prompt spliced into the JSON unescaped, so a quote or a
+   newline in it made the body invalid. localpost uses http.posturl, which arrives, and the
+   text is escaped by shared.jsonobj. *)
+f=scan(client:$presidioclient;text:str):$presidioscan{
+  (* The prompt goes IN CLEAR, so only to a loopback host; see core.privacy.ner.scan. *)
+  if(!reach.isloopbackurl(client.baseurl)){ <scanfailed() }el{};
+  let raw=reach.localpost(client.baseurl;"/analyze";analyzebody(text));
+  let trimmed=str.trim(raw);
+  (* Anything but an array is not a scan: an error object, an HTML error page or
+     nothing at all. json.dec cannot be trusted to say so (T-51). *)
+  if(!str.startswith(trimmed;"[")){ <scanfailed() }el{};
+  <$presidioscan{ok:true;presidiohits:parseentities(trimmed)}
+};
+
+(* Kept for callers that match the result. New callers, and the pipeline, use scan. *)
 f=analyze(client:$presidioclient;text:str):@$presidioentity!$lokeerr{
-  let hc=http.client(client.baseurl);
-  let body=str.concat("{\"text\":\"";str.concat(text;"\",\"language\":\"en\"}"));
-  let result=http.postheaders(hc;"/analyze";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-  <mt result {
-    $ok:raw analyzeparse(raw);
-    $httperr:e $err($networkerr("presidio analyze: failed to reach /analyze"))
-  }
+  let r=scan(client;text);
+  if(r.ok){ <$ok(r.presidiohits) }el{};
+  <$err($networkerr("presidio analyze: no usable answer from /analyze"))
 };
 
 

@@ -3,7 +3,6 @@
 
 m=core.privacy.ner;
 
-i=http:std.http;
 i=reach:shared.reachability;
 i=json:std.json;
 i=jx:shared.jsonobj;
@@ -13,6 +12,19 @@ i=t:shared.types;
 t=$nerclient{
   ollamaurl:str;
   modelid:str
+};
+
+(* VM1.6e. What the pipeline reads: ok is true only when the model answered with a JSON
+   array in message.content, and nerhits is then what it found.
+
+   A plain struct, not a result, for the reason presidio.scan gives (T-18): the pipeline's
+   `mt` on detectentities' result takes its first arm whatever the value is. Measured
+   2026-09-27: once the route-table defect had made isavailable answer true, a pipeline run
+   with NER on read the unreached request's $err as a list of entities and grew to 1.9 GB
+   before the OS killed it. *)
+t=$nerscan{
+  ok:bool;
+  nerhits:@$piientity
 };
 
 f=new(ollamaurl:str;modelid:str):$nerclient{
@@ -30,15 +42,14 @@ f=isavailable(client:$nerclient):bool{
      was looking. See docs/upstream/toke-issues.md T-15.
 
      reach.localserviceup binds the port to find out, which is honest for a local
-     sidecar and is all these two are. *)
-  if(reach.localserviceup(client.ollamaurl)){}el{
-    <false
-  };
-  let hc=http.client(client.ollamaurl);
-  <mt http.get(hc;"/api/tags") {
-    $ok:body true;
-    $err:e false
-  }
+     sidecar and is all these two are.
+
+     VM1.6e. The GET that followed was `http.get(http.client(url);"/api/tags")`, which
+     toke compiles as server ROUTE REGISTRATION (T-57) and which sent nothing. Measured
+     2026-09-27: this answered false for an Ollama that was answering, so the NER layer
+     was skipped on every request, and TRUE with no request made once 256 calls in one
+     process had filled the route table. shared.reachability.localget is a real GET. *)
+  <reach.isloopbackurl(client.ollamaurl) && reach.localanswers(client.ollamaurl;"/api/tags")
 };
 
 
@@ -175,12 +186,36 @@ f=requestbody(modelid:str;text:str):str{
   <str.concat(mid;str.concat(usermsg;"}]}"))
 };
 
+f=scanfailed():$nerscan{
+  <$nerscan{ok:false;nerhits:@()}
+};
+
+(* The request used to be `http.postheaders(http.client(url);"/api/chat";...)`, measured to
+   send nothing (T-48). localpost uses http.posturl, which arrives. message.content is read
+   with shared.jsonobj, as core.models.ollama.sendchatplain does, because json.str refuses
+   an object (T-32) and drops escapes (T-47). A reply that is not a JSON array is not a
+   scan: the model was asked for one, and json.dec cannot be trusted to refuse text that is
+   not JSON (T-51). *)
+f=scan(client:$nerclient;text:str):$nerscan{
+  (* This request carries the prompt IN CLEAR: detection has to see what it detects. Before
+     VM1.6e it never left the process, so where it would go was never a question. It goes
+     only to a loopback host; a configured Ollama anywhere else is not a detection layer. *)
+  if(!reach.isloopbackurl(client.ollamaurl)){ <scanfailed() }el{};
+  let raw=reach.localpost(client.ollamaurl;"/api/chat";requestbody(client.modelid;text));
+  if(str.len(raw)==0){ <scanfailed() }el{};
+  let obj=mt json.dec(raw) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  let content=str.trim(jx.strvalue(jx.nested(obj;"message");"content";""));
+  if(!str.startswith(content;"[")){ <scanfailed() }el{};
+  <$nerscan{ok:true;nerhits:buildentities(content)}
+};
+
+(* Kept for callers that match the result. New callers, and the pipeline, use scan. *)
 f=detectentities(client:$nerclient;text:str):@$piientity!$lokeerr{
-  let hc=http.client(client.ollamaurl);
-  let result=http.postheaders(hc;"/api/chat";str.tobytes(requestbody(client.modelid;text));"{\"content-type\":\"application/json\"}");
-  <mt result {
-    $ok:raw parseresponse(raw);
-    $httperr:e $err($networkerr("ner detect_entities: failed to reach Ollama /api/chat"))
-  }
+  let r=scan(client;text);
+  if(r.ok){ <$ok(r.nerhits) }el{};
+  <$err($networkerr("ner detect_entities: no usable answer from Ollama /api/chat"))
 };
 

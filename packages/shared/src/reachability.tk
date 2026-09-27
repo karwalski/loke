@@ -48,6 +48,33 @@ f=urlport(url:str):i64{
   }
 };
 
+(* True only when the URL's HOST is exactly a loopback name: 127.0.0.1, localhost or [::1].
+   islocalurl below is a substring test, so it also accepts `http://localhost.example.com`
+   and `http://127.0.0.1.example.net`. That is tolerable for a reachability probe and not for
+   deciding where a prompt may be sent in clear, which is what the detection layers use this
+   for (VM1.6e). *)
+f=isloopbackurl(url:str):bool{
+  let rest=mut.url;
+  let schemeat=str.indexof(url;"://");
+  if(schemeat<0){}el{
+    rest=str.slice(url;schemeat+3;str.len(url))
+  };
+  let slash=str.indexof(rest;"/");
+  if(slash<0){}el{
+    rest=str.slice(rest;0;slash)
+  };
+  (* rest is now host[:port]. A bracketed IPv6 host keeps its brackets. *)
+  if(str.startswith(rest;"[::1]")){
+    <str.len(rest)==5 || str.startswith(rest;"[::1]:")
+  }el{};
+  let host=mut.rest;
+  let colon=str.indexof(rest;":");
+  if(colon<0){}el{
+    host=str.slice(rest;0;colon)
+  };
+  <str.eq(host;"127.0.0.1") || str.eq(host;"localhost")
+};
+
 f=islocalurl(url:str):bool{
   <str.contains(url;"127.0.0.1") || str.contains(url;"localhost") || str.contains(url;"[::1]")
 };
@@ -102,4 +129,54 @@ f=localpost(baseurl:str;path:str;body:str):str{
      through posturl, and none arrived (T-48). *)
   let raw:str=http.posturl(str.concat(baseurl;path);body);
   <raw
+};
+
+(* GET a path from a LOCAL service and answer the response body, or "" when there is no
+   usable answer. The GET counterpart of localpost. (VM1.6e)
+
+   It exists because seven call sites wrote `http.get(http.client(base);path)`, and toke
+   chooses what `http.get` means by its ARGUMENT COUNT: one argument is a client GET
+   (tk_http_get_w, answering the body), two arguments REGISTER A SERVER ROUTE
+   (tk_http_get_handler), exactly as `http.post` does. Measured 2026-09-27 against
+   scripts/lib/http_recorder.py: the two-argument form sent nothing, ever. Registration
+   returns 0, which a match reads as $err, so every health check built on it reported an
+   answering service as down: `loke doctor` said Ollama was not running while it answered,
+   and the privacy pipeline skipped Presidio and NER as unreachable. Worse, the table holds
+   256 routes; once it is full registration returns -1, which reads as $ok, and the same
+   checks then answer "available" for a service no request has reached. See T-57 in
+   docs/upstream/toke-issues.md.
+
+   An empty 200 reads as no answer. Every service loke asks this of answers /health or
+   /api/tags with a body, so that is the safe reading. The status code is not visible
+   through the one-argument form, so a service answering 500 with a body reads as up;
+   callers that need more than "something answered" parse the body. *)
+f=localget(baseurl:str;path:str):str{
+  if(!localserviceup(baseurl)){ <"" }el{};
+  <mt http.get(str.concat(baseurl;path)) {
+    $ok:b b;
+    $httperr:e ""
+  }
+};
+
+(* True when a local service answers a GET on `path` with a body. *)
+f=localanswers(baseurl:str;path:str):bool{
+  <str.len(localget(baseurl;path))>0
+};
+
+(* DELETE with a JSON body to a LOCAL service; true when it answered. (VM1.6d)
+
+   std.http has no client DELETE at this toolchain: posturl is POST only, and
+   `http.deletehandler` registers a route. Ollama's /api/delete accepts DELETE and nothing
+   else, so a POST there is refused. This uses `curl`, which ships with macOS and every
+   mainstream Linux, the same way connects() uses `nc`. The body is passed as one argv
+   element, never through a shell. *)
+f=localdelete(baseurl:str;path:str;body:str):bool{
+  if(!localserviceup(baseurl)){ <false }el{};
+  let h=mt process.spawn(@("curl";"-s";"-f";"-m";"10";"-X";"DELETE";"-H";"content-type: application/json";"--data-binary";body;str.concat(baseurl;path))) {
+    $ok:h h;
+    $err:e @()
+  };
+  if(h == @()){ <false }el{};
+  let code=process.wait(h) as i64;
+  <code==0
 };

@@ -8,6 +8,7 @@ i=log:shared.log;
 i=sys:std.sys;
 i=process:std.process;
 i=http:std.http;
+i=reach:shared.reachability;
 
 t=$installstate{
   ollamainstalled:bool;
@@ -71,57 +72,52 @@ f=detectollamainstalled():$detectresult{
   }
 };
 
-f=handlerunningresponse(r:$httpresp):$detectresult{
-  if(r.status == 200){
-    log.info("ollama server is running";"installer.detect";"system");
-    <$detectresult{ok:true;value:str.frombytes(r.body);error:""}
-  }el{
-    <$detectresult{ok:false;value:"";error:str.concat("unexpected status: ";str.fromint(r.status))}
-  }
+(* VM1.6e. The three HTTP probes in this file were `http.get(http.client(url);path)`, and
+   toke compiles a TWO-argument http.get as server ROUTE REGISTRATION (T-57). None of them
+   sent a request, and each took its error arm: the installer reported Ollama not running,
+   every model not pulled and the machine offline, whatever was true. The two local probes
+   now GET through shared.reachability.localget and take the base URL, so a test can point
+   them at a recorder; the no-argument forms keep Ollama's default. The one-argument form
+   answers the body, not an $httpresp, so no status is read: a body is an answer. *)
+f=ollamadefaulturl():str{
+  <"http://localhost:11434"
 };
 
-f=handlerunningerror(e:$httperr):$detectresult{
-  log.info("ollama server not reachable";"installer.detect";"system");
-  <$detectresult{ok:false;value:"";error:e.msg}
+f=detectollamarunningat(baseurl:str):$detectresult{
+  log.info("checking if ollama is running";"installer.detect";"system");
+  let body=reach.localget(baseurl;"/api/version");
+  if(str.len(body)==0){
+    log.info("ollama server not reachable";"installer.detect";"system");
+    <$detectresult{ok:false;value:"";error:"ollama not reachable"}
+  }el{};
+  log.info("ollama server is running";"installer.detect";"system");
+  <$detectresult{ok:true;value:body;error:""}
 };
 
 f=detectollamarunning():$detectresult{
-  log.info("checking if ollama is running";"installer.detect";"system");
-  let client=http.client("http://localhost:11434");
-  let resp=http.get(client;"/api/version");
-  <mt resp {
-    $ok:r handlerunningresponse(r);
-    $err:e handlerunningerror(e)
-  }
+  <detectollamarunningat(ollamadefaulturl())
 };
 
-f=handlemodeltags(r:$httpresp;modelid:str):$detectresult{
-  if(r.status == 200){
-    let body=str.frombytes(r.body);
-    if(str.contains(body;modelid)){
-      log.info(str.concat("model found: ";modelid);"installer.detect";"system");
-      <$detectresult{ok:true;value:modelid;error:""}
-    }el{
-      log.info(str.concat("model not found: ";modelid);"installer.detect";"system");
-      <$detectresult{ok:false;value:"";error:"model not in tag list"}
-    }
-  }el{
-    <$detectresult{ok:false;value:"";error:str.concat("unexpected status: ";str.fromint(r.status))}
-  }
-};
-
-f=handletagserror(e:$httperr):$detectresult{
-  <$detectresult{ok:false;value:"";error:e.msg}
+(* A substring test over the tag list, as before: "llama3" is found in "llama3:latest". The
+   name is matched quoted, so "llama3" is not found in "llama3.1:8b". *)
+f=detectmodelpulledat(baseurl:str;modelid:str):$detectresult{
+  log.info(str.concat("checking for model: ";modelid);"installer.detect";"system");
+  let body=reach.localget(baseurl;"/api/tags");
+  if(str.len(body)==0){
+    <$detectresult{ok:false;value:"";error:"ollama not reachable"}
+  }el{};
+  let exact=str.contains(body;"\"\(modelid)\"");
+  let tagged=str.contains(body;"\"\(modelid):");
+  if(exact || tagged){
+    log.info(str.concat("model found: ";modelid);"installer.detect";"system");
+    <$detectresult{ok:true;value:modelid;error:""}
+  }el{};
+  log.info(str.concat("model not found: ";modelid);"installer.detect";"system");
+  <$detectresult{ok:false;value:"";error:"model not in tag list"}
 };
 
 f=detectmodelpulled(modelid:str):$detectresult{
-  log.info(str.concat("checking for model: ";modelid);"installer.detect";"system");
-  let client=http.client("http://localhost:11434");
-  let resp=http.get(client;"/api/tags");
-  <mt resp {
-    $ok:r handlemodeltags(r;modelid);
-    $httperr:e handletagserror(e)
-  }
+  <detectmodelpulledat(ollamadefaulturl();modelid)
 };
 
 f=handlediskstdout(h:i64):$detectresult{
@@ -169,32 +165,20 @@ f=detectarch():bool{
   <arm
 };
 
-f=handleinternetresponse(r:$httpresp):$detectresult{
-  if(!(r.status<200)){
-    if(r.status < 400){
-      log.info("internet connectivity confirmed";"installer.detect";"system");
-      <$detectresult{ok:true;value:"connected";error:""}
-    }el{
-      <$detectresult{ok:false;value:"";error:str.concat("http status: ";str.fromint(r.status))}
-    }
-  }el{
-    <$detectresult{ok:false;value:"";error:"unexpected status"}
-  }
-};
-
-f=handleinterneterror(e:$httperr):$detectresult{
-  log.info("no internet connectivity";"installer.detect";"system");
-  <$detectresult{ok:false;value:"";error:e.msg}
-};
-
+(* The ONE-argument http.get, which is a client GET (T-57). It answers the body or nothing;
+   any body from ollama.com is taken as connectivity. *)
 f=detectinternet():$detectresult{
   log.info("checking internet connectivity";"installer.detect";"system");
-  let client=http.client("https://ollama.com");
-  let resp=http.get(client;"/");
-  <mt resp {
-    $ok:r handleinternetresponse(r);
-    $err:e handleinterneterror(e)
-  }
+  let body=mt http.get("https://ollama.com/") {
+    $ok:b b;
+    $httperr:e ""
+  };
+  if(str.len(body)==0){
+    log.info("no internet connectivity";"installer.detect";"system");
+    <$detectresult{ok:false;value:"";error:"ollama.com did not answer"}
+  }el{};
+  log.info("internet connectivity confirmed";"installer.detect";"system");
+  <$detectresult{ok:true;value:"connected";error:""}
 };
 
 f=parseplatformstr(v:str):str{

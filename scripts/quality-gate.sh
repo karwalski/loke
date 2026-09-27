@@ -566,6 +566,11 @@ step_test() {
   if [[ -x ./scripts/smoke_benchmark.sh ]]; then
     ./scripts/smoke_benchmark.sh || return 1
   fi
+  # VM1.6e: the built `loke doctor` against a recording stand-in, judged on its report AND on
+  # the requests that arrived. About a second; OS-assigned port, no lock.
+  if [[ -x ./scripts/smoke_doctor.sh ]]; then
+    ./scripts/smoke_doctor.sh || return 1
+  fi
   # The whole path: moke -> loke -> a recording fake model -> back. Asserts the model never
   # saw the PII and the user got it back. First ran end to end on 2026-09-25.
   if [[ -x ./scripts/smoke_e2e.sh ]]; then

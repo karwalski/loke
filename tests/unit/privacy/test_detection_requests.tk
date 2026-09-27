@@ -1,0 +1,199 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.detectionrequests;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pr:core.privacy.presidio;
+i=ner:core.privacy.ner;
+i=pl:core.privacy.pipeline;
+i=sh:shared.types;
+i=reach:shared.reachability;
+
+(* VM1.6e — the Presidio and NER detection layers, judged by what ARRIVES at a server.
+
+   Measured 2026-09-27, before this story, against scripts/lib/http_recorder.py answering
+   exactly as Presidio and Ollama do: NOTHING arrived, from any of the four calls. Both
+   health checks were `http.get(http.client(url);path)`, which toke compiles as server
+   ROUTE REGISTRATION (T-57), and both scans used http.postheaders, which sends nothing
+   (T-48). So a pipeline with both sidecars answering ran regex only (1 completed, 2
+   degraded), every request. Then, after 256 health checks in one process, route
+   registration ran out of table and returned -1, the health checks read that as success,
+   and the pipeline called the scans: the Presidio layer was counted as COMPLETED with no
+   request sent (2 completed, 0 degraded, 0 entities), and with NER on the run grew to
+   1.9 GB before the OS killed it. The scans returned `X!$lokeerr`, and a match on that
+   takes its first arm whatever the value is (T-18).
+
+   So this file asserts four things: each request arrives; each layer's findings reach the
+   pipeline; a layer that answers but does not scan is counted DEGRADED, never completed;
+   and the pipeline still refuses a run in which nothing scanned (NC1.9). *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_detreq_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+(* Starts scripts/lib/http_recorder.py on a port the OS hands out, and answers its base URL,
+   or "" if it did not come up. The recorder writes its port once it is listening. *)
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+(* Unprivileged and unused: a privileged port reads as "in use" to the bind probe. *)
+f=deadurl():str{
+  <"http://127.0.0.1:59997"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let garbagelog="\(base)-garbage.log";
+  let silentlog="\(base)-silent.log";
+
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let garb=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";garbagelog;"\(base)-garbage.port";"garbage")) { $ok:h h; $err:e @() };
+  let sil=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";silentlog;"\(base)-silent.port";"silent")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let gport=waitport("\(base)-garbage.port");
+  let sport=waitport("\(base)-silent.port");
+  let url="http://127.0.0.1:\(port)";
+  let gurl="http://127.0.0.1:\(gport)";
+  let surl="http://127.0.0.1:\(sport)";
+  if(t.assert(str.len(port)>0 && str.len(gport)>0 && str.len(sport)>0;"the three recorders came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Presidio ─────────────────────────────────────────────────────────── *)
+  let presidio=pr.new(url);
+  if(t.assert(pr.isavailable(presidio);"presidio.isavailable is true for a Presidio that answers /health")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /health");"and the GET /health ARRIVED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pr.isavailable(pr.new(deadurl()));"presidio.isavailable is false with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  let ps=pr.scan(presidio;"Jane Citizen said \"hi\"\nthen left");
+  if(t.assert(ps.ok;"presidio.scan is ok when /analyze answers an array")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ps.presidiohits.len==1;"and carries the one entity Presidio reported")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /analyze {\"text\":");"the POST /analyze ARRIVED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"said \\\"hi\\\"\\nthen");"with the quote and newline escaped, so the body is valid JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pr.scan(pr.new(deadurl());"Jane").ok;"presidio.scan is not ok with nothing listening")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pr.scan(pr.new(gurl);"Jane").ok;"nor when /analyze answers something other than an array")){pass=pass+1}el{fail=fail+1};
+
+  (* ── NER through Ollama ───────────────────────────────────────────────── *)
+  let nc=ner.new(url;"qwen2.5:7b");
+  if(t.assert(ner.isavailable(nc);"ner.isavailable is true for an Ollama that answers /api/tags")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/tags");"and the GET /api/tags ARRIVED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ner.isavailable(ner.new(deadurl();"m"));"ner.isavailable is false with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  let ns=ner.scan(nc;"Jane Citizen called");
+  if(t.assert(ns.ok;"ner.scan is ok when the model answers a JSON array")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ns.nerhits.len==1;"and carries the one entity the model reported")){pass=pass+1}el{fail=fail+1};
+  if(ns.nerhits.len==1){
+    let e:$piientity=ns.nerhits.get(0);
+    if(t.asserteq(e.value;"Jane Citizen";"the entity's value is read through the escaped content")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  if(t.assert(str.contains(readfile(logp);"POST /api/chat {\"model\":\"qwen2.5:7b\"");"the POST /api/chat ARRIVED, naming the model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ner.scan(ner.new(deadurl();"m");"Jane").ok;"ner.scan is not ok with nothing listening")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ner.scan(ner.new(gurl;"m");"Jane").ok;"nor when the model answers prose instead of an array")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Where the prompt may go in clear ──────────────────────────────── *)
+  (* Both scans send the prompt unredacted, as detection must. Before this story they sent
+     nothing, so no configured URL could leak it; now one could, so only a loopback host is
+     a detection layer. islocalurl's substring test would accept the first two refusals. *)
+  if(t.assert(!reach.isloopbackurl("http://localhost.example.com:11434");"a host that merely starts with localhost is not loopback")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reach.isloopbackurl("http://127.0.0.1.example.net/api");"nor one that starts with 127.0.0.1")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reach.isloopbackurl("https://api.openai.com");"nor a provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reach.isloopbackurl("http://127.0.0.1:5002") && reach.isloopbackurl("http://localhost:11434/api") && reach.isloopbackurl("http://[::1]:80");"127.0.0.1, localhost and [::1] are")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ner.isavailable(ner.new("http://localhost.example.com:11434";"m"));"an Ollama configured off-machine is not an available NER layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ner.scan(ner.new("http://localhost.example.com:11434";"m");"Jane").ok;"and does not scan")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pr.isavailable(pr.new("http://127.0.0.1.example.net:5002"));"a Presidio configured off-machine is not an available layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pr.scan(pr.new("http://127.0.0.1.example.net:5002");"Jane").ok;"and does not scan")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The pipeline, with both sidecars answering ──────────────────────── *)
+  let full=pl.runforward("Jane Citizen called";"";pl.newconfig(url;url));
+  let fc:str=str.fromint(full.layerscompleted as i64);
+  if(t.assert(full.layerscompleted==3 as u32;"regex, NER and Presidio all completed a scan (completed=\(fc))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(full.layersdegraded==0 as u32;"and none is degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(full.result.anonymised;"Jane Citizen");"the name only the sidecars found is anonymised")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Up but useless: counted DEGRADED, never completed ───────────────── *)
+  (* The fail-open that T-18 made: before this story a layer whose scan failed was counted
+     as having completed one. Both sidecars here answer their health checks, so each layer
+     is attempted, and neither returns a scan. *)
+  let useless=pl.runforward("Jane Citizen called";"";pl.newconfig(gurl;gurl));
+  let uc:str=str.fromint(useless.layerscompleted as i64);
+  if(t.assert(useless.layerscompleted==1 as u32;"a Presidio and an Ollama that answer but do not scan leave regex the only completed layer (completed=\(uc))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(useless.layersdegraded==2 as u32;"and both are counted degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(garbagelog);"POST /analyze") && str.contains(readfile(garbagelog);"POST /api/chat");"both scans were actually attempted")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Nothing listening ──────────────────────────────────────────────── *)
+  let dead=pl.runforward("Jane Citizen called";"";pl.newconfig(deadurl();deadurl()));
+  if(t.assert(dead.layerscompleted==1 as u32 && dead.layersdegraded==2 as u32;"with neither sidecar listening, regex completes and both are degraded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── NC1.9: a run in which nothing scanned is refused ──────────────── *)
+  (* The regex layer is in-process and cannot be taken down from a test, so the zero-layer
+     run is built by hand, as test_fail_closed.tk does. What this adds is that the health
+     change above did not move the gate: it still reads layerscompleted alone. *)
+  let nothing=$pipelinerun{
+    result:$piidetectionresult{
+      original:"Jane Citizen";
+      anonymised:"Jane Citizen";
+      entities:@();
+      sensitivity:sh.public()
+    };
+    stages:@();
+    totalentities:0 as u32;
+    finalsystemprompt:"";
+    requestid:"none";
+    layerscompleted:0 as u32;
+    layersdegraded:2 as u32
+  };
+  if(t.assert(!pl.issafetoforward(nothing);"a run in which no layer completed is NOT safe to forward")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(useless);"a run in which regex completed is, with the degradation recorded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The route table: 300 checks, 300 requests, no flip ────────────── *)
+  (* Before this story, the 257th registration in a process returned -1 and every check
+     after it answered true with no request made. The silent recorder answers 200 with no
+     body, which is not an answer, so every one of these must be false AND must arrive. *)
+  let silent=pr.new(surl);
+  let flipped=mut.false;
+  lp(let k=0;k<300;k=k+1){
+    if(pr.isavailable(silent)){ flipped=true }el{}
+  };
+  if(t.assert(!flipped;"300 health checks against a service that answers nothing are all false")){pass=pass+1}el{fail=fail+1};
+  let arrived=countof(readfile(silentlog);"GET /health");
+  let ac:str=str.fromint(arrived);
+  if(t.assert(arrived==300;"and all 300 requests arrived (arrived=\(ac))")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(garb == @())){ process.kill(garb); process.wait(garb); }el{};
+  if(!(sil == @())){ process.kill(sil); process.wait(sil); }el{};
+  file.delete(logp);
+  file.delete(garbagelog);
+  file.delete(silentlog);
+  file.delete("\(base).port");
+  file.delete("\(base)-garbage.port");
+  file.delete("\(base)-silent.port");
+  <fail
+};

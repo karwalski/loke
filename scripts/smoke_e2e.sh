@@ -88,6 +88,12 @@ else
   echo "  ok   the model saw only: $(grep -o '\[EMAIL_[0-9a-f]*_[0-9]*\]' "$SEEN" | head -1)"
 fi
 
+# VM1.6e: the NER layer asks the local model to find entities before anything is forwarded.
+# fake_ollama.py logs that request apart ($SEEN.ner): it carries the prompt in clear, by
+# design, to a loopback host. Before VM1.6e it was never sent at all.
+if grep -qs '^/api/chat ' "$SEEN.ner"; then echo "  ok   the NER layer consulted the local model before the forward"
+else echo "  FAIL the NER layer never reached the local model" >&2; fail=1; fi
+
 case "$resp" in
   *"$EMAIL"*) echo "  ok   the user got the email address back, restored" ;;
   *) echo "  FAIL the response did not restore the placeholder: $resp" >&2; fail=1 ;;
