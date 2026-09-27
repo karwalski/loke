@@ -1,0 +1,209 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.nocustody.bound;
+
+i=db:std.db;
+i=str:std.str;
+i=crypto:std.crypto;
+i=json:std.json;
+i=na:core.nocustody.artifact;
+i=nr:core.nocustody.request;
+
+(* NC1.10. A per-session bound on the query-shaped channel.
+
+   An artifact never carries a row to the model, but its RESULT can. Whoever shapes the
+   artifacts and sees the results across several turns can learn cell values a piece at a
+   time: "count where note = X" answers whether X is in the column, and enough of those
+   enumerate it (findings section 11). core.nocustody.artifact makes each query safe to run.
+   This module limits what a SEQUENCE of them can release, per session, and records every
+   release so a later dispatch can account for it (spec 5.5, C5, C6).
+
+   Two limits, the two session budgets of docs/specifications/artifact-contract.md section 8,
+   with that table's names and default values, each checked before any result is released:
+
+   1. SESSION_CELL_BUDGET (cellbudget): cells released per session. This is the one that
+      bounds the unfiltered channel: min, max, distinct and count_by put data values straight
+      into a result, and the only thing that limits a session built from them is volume.
+      Rows are counted too (spec 5.5 session_rows_returned_cumulative) but not budgeted
+      separately: the contract has no session row budget, and a row is at least one cell.
+   2. SESSION_PREDICATE_REPEAT_LIMIT (probelimit): filtered runs per filter column per session.
+      A filter is an equality test on one column with a value the artifact chose, so a run of
+      them against the same column with different values is the value-probing pattern. The
+      count is per filter COLUMN, not per full predicate, so changing the op or the aggregated
+      column between probes does not start a new count. The contract counts DISTINCT values;
+      this counts every filtered run, which is never fewer. The difference is deliberate: the
+      value is never stored (see core.storage.migrations, nc_artifact_runs), so a repeat
+      cannot be told from a new guess, and the count errs towards refusing.
+
+   A result that would take the session over budget is computed locally and then withheld:
+   the refusal names the limit, and the ledger records it with zero released. If the ledger
+   cannot be read or written, nothing is released. A bound whose own record failed is not a
+   bound.
+
+   WHAT THIS DOES NOT BOUND, and the claim must say so:
+   - Another session. The session id is the caller's, and a caller that starts a new session
+     starts with a fresh budget (spec U1). Until a session is something loke issues rather
+     than something the request names, this bounds a cooperative caller's session, not an
+     adversary willing to rotate ids.
+   - Information per cell. The budget counts cells, not bits: a SUM or COUNT over a filter
+     that isolates one row is one cell and can carry that row's value exactly.
+   - Probing a column without a filter, for example through group-by labels. That is bounded
+     only by the cell budget.
+   - A binary search on a numeric column. The executor has no range filter today, so an
+     equality filter is the only probe; a range operator added later needs its own count.
+   The values are the contract's unmeasured placeholders, not a measured operating point, and
+   they are constants here where the contract says configurable. No benchmark for this
+   channel exists to measure them against. *)
+
+t=$boundedresult{
+  ok:bool;
+  code:str;
+  err:str;
+  labels:@str;
+  values:@str;
+  sessionrows:i64;
+  sessioncells:i64
+};
+
+(* SESSION_CELL_BUDGET, artifact-contract section 8 default. Cells a session may be released
+   in total. *)
+f=cellbudget():i64{
+  <50000
+};
+
+(* SESSION_PREDICATE_REPEAT_LIMIT, artifact-contract section 8 default. Filtered runs a session
+   may execute against one filter column; the next is refused as value probing. *)
+f=probelimit():i64{
+  <20
+};
+
+(* The longest session id accepted. It is an opaque key, not content. *)
+f=maxsessionlen():i64{
+  <128
+};
+
+f=digest(text:str):str{
+  <crypto.tohex(crypto.sha256(str.tobytes(text)))
+};
+
+(* spec 5.5 predicate_fingerprint: filter column, op and column, with the filter value
+   excluded. Built from names only; the "loke/nc1.10" prefix keeps these digests from
+   colliding with any other SHA-256 of the same names in this store. *)
+f=fingerprint(a:$artifact):str{
+  <digest("loke/nc1.10/predicate|\(a.filtercol)|\(a.op)|\(a.column)")
+};
+
+(* The per-column probe key, or "" for an artifact with no filter. *)
+f=probekey(a:$artifact):str{
+  if(str.len(a.filtercol)==0){ <"" };
+  <digest("loke/nc1.10/probe|\(a.filtercol)")
+};
+
+(* Cells a result releases. A scalar op releases one value and an empty label. A grouped op
+   releases a data label and a value per row. distinct releases the label only. *)
+f=cellsof(op:str;rows:i64):i64{
+  if(na.scalarop(op)){ <rows };
+  if(str.eq(op;"distinct")){ <rows };
+  <rows*2
+};
+
+f=scalar(sql:str;params:@str):i64{
+  <mt db.one(sql;params) {
+    $ok:r db.rowi64(r;"n");
+    $err:e 0-1
+  }
+};
+
+(* Session totals, and the probe count for one column. -1 when the ledger cannot be read,
+   which every caller treats as a refusal. *)
+f=sessionrows(session:str):i64{
+  <scalar("SELECT COALESCE(SUM(rows_released),0) AS n FROM nc_artifact_runs WHERE session_id=?";@(session))
+};
+
+f=sessioncells(session:str):i64{
+  <scalar("SELECT COALESCE(SUM(cells_released),0) AS n FROM nc_artifact_runs WHERE session_id=?";@(session))
+};
+
+f=probecount(session:str;key:str):i64{
+  <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE session_id=? AND probe_key=? AND verdict='executed'";@(session;key))
+};
+
+(* spec 5.5 predicate_repeat_count: executed runs of this exact fingerprint in the session. *)
+f=repeatcount(session:str;fp:str):i64{
+  <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE session_id=? AND predicate_fingerprint=? AND verdict='executed'";@(session;fp))
+};
+
+(* spec 5.5 budget_refusals, summed over the session. *)
+f=refusalcount(session:str):i64{
+  <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE session_id=? AND verdict='refused'";@(session))
+};
+
+f=record(session:str;a:$artifact;verdict:str;code:str;rows:i64;cells:i64):bool{
+  <mt db.exec("INSERT INTO nc_artifact_runs (session_id, op, predicate_fingerprint, probe_key, verdict, refusal_code, rows_released, cells_released) VALUES (?, ?, ?, NULLIF(?,''), ?, NULLIF(?,''), CAST(? AS INTEGER), CAST(? AS INTEGER))";@(session;a.op;fingerprint(a);probekey(a);verdict;code;str.fromint(rows);str.fromint(cells))) {
+    $ok:n true;
+    $err:e false
+  }
+};
+
+f=refused(code:str;reason:str;srows:i64;scells:i64):$boundedresult{
+  <$boundedresult{ok:false;code:code;err:reason;labels:@();values:@();sessionrows:srows;sessioncells:scells}
+};
+
+(* Records the refusal, then returns it. The refusal stands whether or not the record could
+   be written: failing to record a refusal never turns it into a release. *)
+f=refuse(session:str;a:$artifact;verdict:str;code:str;reason:str;srows:i64;scells:i64):$boundedresult{
+  record(session;a;verdict;code;0;0);
+  <refused(code;reason;srows;scells)
+};
+
+(* The one entry point. Validate, check the session's ledger, run, check the result against
+   what is left, record, release. *)
+f=run(session:str;a:$artifact;headers:@str;rows:@(@str)):$boundedresult{
+  if(str.len(session)==0){ <refused("no_session";"missing required field: session_id";0;0) };
+  if(str.len(session)>maxsessionlen()){ <refused("no_session";"session_id is longer than \(str.fromint(maxsessionlen())) characters";0;0) };
+  let invalid=na.validate(a;headers);
+  if(str.len(invalid)>0){ <refuse(session;a;"rejected";"invalid";invalid;0;0) };
+  let usedrows=sessionrows(session);
+  let usedcells=sessioncells(session);
+  if(usedrows<0 || usedcells<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";0;0) };
+  if(usedcells>=cellbudget()){
+    <refuse(session;a;"refused";"cell_budget";"this session has used its budget of \(str.fromint(cellbudget())) result cells (NC1.10)";usedrows;usedcells)
+  };
+  let key=probekey(a);
+  if(str.len(key)>0){
+    let probes=probecount(session;key);
+    if(probes<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";usedrows;usedcells) };
+    if(probes>=probelimit()){
+      <refuse(session;a;"refused";"value_probing";"refused as value probing: this session has already filtered on this column \(str.fromint(probes)) times, the limit is \(str.fromint(probelimit())) (NC1.10)";usedrows;usedcells)
+    }el{}
+  }el{};
+  let result=na.run(a;headers;rows);
+  if(result.ok==false){ <refuse(session;a;"rejected";"query_failed";result.err;usedrows;usedcells) };
+  let n=result.labels.len;
+  let c=cellsof(a.op;n);
+  if(usedcells+c>cellbudget()){
+    <refuse(session;a;"refused";"cell_budget";"this result has \(str.fromint(c)) cells and the session has \(str.fromint(cellbudget()-usedcells)) left of its \(str.fromint(cellbudget())) (NC1.10); it was computed locally and withheld";usedrows;usedcells)
+  };
+  if(record(session;a;"executed";"";n;c)==false){
+    <refused("ledger_unavailable";"the release could not be recorded, so it was withheld";usedrows;usedcells)
+  };
+  <$boundedresult{ok:true;code:"";err:"";labels:result.labels;values:result.values;sessionrows:usedrows+n;sessioncells:usedcells+c}
+};
+
+(* NC1.10. A refusal names its code, so a caller can tell a spent budget from a bad artifact
+   without parsing the prose. *)
+f=boundedjson(b:$boundedresult):str{
+  if(b.ok==false){ <"{\"ok\":false,\"refusal\":\(json.enc(b.code)),\"error\":\(json.enc(b.err))}" };
+  <"{\"ok\":true,\"labels\":\(nr.strarrayjson(b.labels)),\"values\":\(nr.strarrayjson(b.values)),\"session_rows_released\":\(str.fromint(b.sessionrows)),\"session_cells_released\":\(str.fromint(b.sessioncells))}"
+};
+
+(* The status for a refusal: 400 for a request that could not be bounded (no session), 429
+   for a spent budget or a probing sequence, 503 when the ledger failed, 422 otherwise. *)
+f=boundedstatus(b:$boundedresult):i64{
+  if(b.ok){ <200 };
+  if(str.eq(b.code;"no_session")){ <400 };
+  if(str.eq(b.code;"cell_budget") || str.eq(b.code;"value_probing")){ <429 };
+  if(str.eq(b.code;"ledger_unavailable")){ <503 };
+  <422
+};

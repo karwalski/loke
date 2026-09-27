@@ -1,0 +1,250 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.bound;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=na:core.nocustody.artifact;
+i=nb:core.nocustody.bound;
+i=nr:core.nocustody.request;
+
+(* NC1.10 — the per-session bound on the query-shaped channel.
+
+   The assertions that carry the story are pairs. A sequence of filters guessing values in one
+   column is refused at SESSION_PREDICATE_REPEAT_LIMIT, and a session asking ordinary distinct questions is not. A
+   result that would take the session past its cell budget is withheld, and a small one
+   after it still runs. Every refusal is recorded and every release is counted. And the probe
+   values, which are what the sequence is trying to learn, are in no byte of the store, with a
+   control proving the same scan finds a value that is there.
+
+   The store lives under /tmp/loke-tests, not ~/.loke, as in test_artifact.tk. *)
+
+f=testdir():str{
+  <"/tmp/loke-tests/nocustody-bound"
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* Byte-level, as in test_artifact.tk. A str read of a SQLite file stops at the NUL in its
+   header, so a str.contains over it asserts nothing. *)
+f=bytescontain(haystack:@byte;needle:str):bool{
+  let needlebytes=str.bytes(needle);
+  let n=(needlebytes.len as i64);
+  let h=(haystack.len as i64);
+  if(n==0){
+    <false
+  }el{};
+  if(h<n){
+    <false
+  }el{};
+  let limit=h-n;
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>limit){
+      br
+    }el{
+      let j=mut.0;
+      let same=mut.true;
+      lp(let lv2=0;true;lv2=lv2){
+        if(j>=n){
+          br
+        }el{
+          if(haystack.get(i+j)==needlebytes.get(j)){
+            j=j+1
+          }el{
+            same=false;
+            br
+          }
+        }
+      };
+      if(same){
+        <true
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+f=filecontains(path:str;needle:str):bool{
+  <mt file.readbytes(path) {
+    $ok:bytes bytescontain(bytes;needle);
+    $err:e false
+  }
+};
+
+(* The database file and its write-ahead log, if there is one: a row written recently can be
+   in the log and not yet in the main file. *)
+f=storecontains(needle:str):bool{
+  let dbpath=str.concat(testdir();"/loke.db");
+  <filecontains(dbpath;needle) || filecontains(str.concat(dbpath;"-wal");needle)
+};
+
+f=headers():@str{
+  <@("region";"category";"amount";"note")
+};
+
+f=rows():@(@str){
+  <@(
+    @("north";"food";"10";"plain");
+    @("north";"rent";"100";"plain");
+    @("south";"food";"5";"PROBE-VALUE-5b1e-3");
+    @("south";"food";"7";"plain");
+    @("north";"food";"3";"plain")
+  )
+};
+
+(* n rows with n distinct labels, for the budget checks. *)
+f=wide(n:i64):@(@str){
+  let out=mut.@();
+  lp(let i=0;i<n;i=i+1){
+    out=out.push(@("r\(str.fromint(i))";"1"))
+  };
+  <out
+};
+
+f=art(op:str;column:str;groupby:str;agg:str;filtercol:str;filterval:str;limit:i64):$artifact{
+  <$artifact{op:op;column:column;groupby:groupby;agg:agg;filtercol:filtercol;filterval:filterval;limit:limit}
+};
+
+f=guess(i:i64):str{
+  <"PROBE-VALUE-5b1e-\(str.fromint(i))"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
+  let h=headers();
+  let r=rows();
+
+  (* ── The limits are the named constants ──────────────────────────────────────── *)
+  if(t.assert(nb.probelimit()==20 && nb.cellbudget()==50000;"the artifact contract's defaults: SESSION_PREDICATE_REPEAT_LIMIT 20, SESSION_CELL_BUDGET 50000")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A value-probing sequence is refused at the bound ─────────────────────────── *)
+  let admitted=mut.0;
+  let hits=mut.0;
+  lp(let i=0;i<nb.probelimit();i=i+1){
+    let p=nb.run("s-probe";art("count";"";"";"";"note";guess(i);10);h;r);
+    if(p.ok){admitted=admitted+1}el{};
+    if(p.ok && str.eq(p.values.get(0);"1")){hits=hits+1}el{}
+  };
+  if(t.assert(admitted==nb.probelimit();"the first SESSION_PREDICATE_REPEAT_LIMIT filters on one column all run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hits==1;"and they are real answers: exactly one guess matched the planted cell")){pass=pass+1}el{fail=fail+1};
+  let over=nb.run("s-probe";art("count";"";"";"";"note";guess(99);10);h;r);
+  if(t.assert(over.ok==false && str.eq(over.code;"value_probing");"the next filter on the same column is refused as value probing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(over.err;"value probing") && str.contains(over.err;"the limit is 20");"the refusal says why and names the limit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(over.labels.len==0 && over.values.len==0;"a refused run releases nothing")){pass=pass+1}el{fail=fail+1};
+  let reshaped=nb.run("s-probe";art("sum";"amount";"";"";"note";guess(3);10);h;r);
+  if(t.assert(reshaped.ok==false && str.eq(reshaped.code;"value_probing");"changing the op does not reset the count: the key is the filter column")){pass=pass+1}el{fail=fail+1};
+  let othercol=nb.run("s-probe";art("sum";"amount";"";"";"region";"south";10);h;r);
+  if(t.assert(othercol.ok && str.eq(othercol.values.get(0);"12.0");"a filter on a different column in the same session still runs")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.refusalcount("s-probe")==2;"both refusals are in the ledger")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Ordinary distinct questions are not refused ───────────────────────────────── *)
+  let okcount=mut.0;
+  let qs=@(
+    art("sum";"amount";"";"";"";"";10);
+    art("avg";"amount";"";"";"";"";10);
+    art("count";"";"";"";"";"";10);
+    art("group";"amount";"category";"sum";"";"";10);
+    art("topn";"amount";"region";"";"";"";3);
+    art("count_by";"category";"";"";"";"";10);
+    art("sum";"amount";"";"";"region";"north";10);
+    art("sum";"amount";"";"";"region";"south";10);
+    art("count";"";"";"";"category";"food";10);
+    art("group";"amount";"category";"avg";"region";"north";10);
+    art("max";"amount";"";"";"";"";10);
+    art("distinct";"region";"";"";"";"";10)
+  );
+  lp(let i=0;i<qs.len;i=i+1){
+    let q=nb.run("s-ordinary";qs.get(i);h;r);
+    if(q.ok){okcount=okcount+1}el{}
+  };
+  if(t.assert(okcount==12;"twelve ordinary distinct questions in one session all run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.refusalcount("s-ordinary")==0;"and none is recorded as a refusal")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Accounting: every release is counted (spec 5.5, C6) ───────────────────────── *)
+  (* s-ordinary released three scalars (3 rows, 3 cells), two category groups (2, 4), two topn
+     regions (2, 4), two count_by categories (2, 4), three filtered scalars (3, 3), two
+     north-only category groups (2, 4), one max (1, 1) and two distinct regions (2, 2):
+     17 rows, 25 cells. *)
+  if(t.assert(nb.sessionrows("s-ordinary")==17;"the session's released rows are summed: 17")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.sessioncells("s-ordinary")==25;"the session's released cells are summed: 25")){pass=pass+1}el{fail=fail+1};
+  let last=nb.run("s-ordinary";art("sum";"amount";"";"";"";"";10);h;r);
+  if(t.assert(last.ok && last.sessionrows==18 && last.sessioncells==26;"an answer carries the session's cumulative totals")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.repeatcount("s-ordinary";nb.fingerprint(art("sum";"amount";"";"";"";"";10)))==2;"predicate_repeat_count sees the same predicate twice")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.sessioncells("s-nobody")==0;"a session with no runs has released nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The cell budget ────────────────────────────────────────────────────────────── *)
+  (* A count_by over 1000 distinct labels releases 2000 cells, the most one artifact can (the
+     executor's limit ceiling is 1000). 24 of them and one of 999 rows reach 49998. *)
+  let w=wide(1000);
+  let wh=@("label";"n");
+  let fullruns=mut.0;
+  lp(let i=0;i<24;i=i+1){
+    let b=nb.run("s-cells";art("count_by";"label";"";"";"";"";1000);wh;w);
+    if(b.ok && b.labels.len==1000){fullruns=fullruns+1}el{}
+  };
+  if(t.assert(fullruns==24;"24 count_by runs of 1000 labels each are released")){pass=pass+1}el{fail=fail+1};
+  let near=nb.run("s-cells";art("count_by";"label";"";"";"";"";999);wh;w);
+  if(t.assert(near.ok && near.sessioncells==49998 && near.sessionrows==24999;"one of 999 more brings the session to 49998 cells and 24999 rows")){pass=pass+1}el{fail=fail+1};
+  let big2=nb.run("s-cells";art("count_by";"label";"";"";"";"";1000);wh;w);
+  if(t.assert(big2.ok==false && str.eq(big2.code;"cell_budget");"another 2000 cells would pass 50000, and is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(big2.labels.len==0 && str.contains(big2.err;"withheld");"the over-budget result is withheld, and the refusal says so")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.sessioncells("s-cells")==49998;"the withheld result is not counted as released")){pass=pass+1}el{fail=fail+1};
+  let small=nb.run("s-cells";art("count";"";"";"";"";"";10);wh;w);
+  let small2=nb.run("s-cells";art("sum";"n";"";"";"";"";10);wh;w);
+  if(t.assert(small.ok && small2.ok && small2.sessioncells==50000;"small questions under what is left still run, up to exactly the budget")){pass=pass+1}el{fail=fail+1};
+  let spent=nb.run("s-cells";art("count";"";"";"";"";"";10);wh;w);
+  if(t.assert(spent.ok==false && str.eq(spent.code;"cell_budget") && str.contains(spent.err;"has used its budget");"a spent session is refused before anything runs")){pass=pass+1}el{fail=fail+1};
+  let other=nb.run("s-other";art("count";"";"";"";"";"";10);wh;w);
+  if(t.assert(other.ok && other.sessioncells==1;"another session's budget is untouched")){pass=pass+1}el{fail=fail+1};
+
+  (* ── What the bound does not do, asserted so the limitation is not a surprise ──── *)
+  let fresh=nb.run("s-probe-2";art("count";"";"";"";"note";guess(3);10);h;r);
+  if(t.assert(fresh.ok;"LIMITATION (spec U1): a new session id starts with a fresh probe count")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Refusals before the ledger ─────────────────────────────────────────────────── *)
+  let nosess=nb.run("";art("sum";"amount";"";"";"";"";10);h;r);
+  if(t.assert(nosess.ok==false && str.eq(nosess.code;"no_session");"an artifact with no session is refused: it could not be bounded")){pass=pass+1}el{fail=fail+1};
+  let invalid=nb.run("s-invalid";art("sum";"salary";"";"";"";"";10);h;r);
+  if(t.assert(invalid.ok==false && str.eq(invalid.code;"invalid") && str.contains(invalid.err;"not in the dataset");"an invalid artifact is refused with the validator's reason")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The fingerprint excludes the value ──────────────────────────────────────────── *)
+  if(t.assert(str.eq(nb.fingerprint(art("count";"";"";"";"note";"a";10));nb.fingerprint(art("count";"";"";"";"note";"b";10)));"two probes differing only in value share a fingerprint")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(nb.fingerprint(art("count";"";"";"";"note";"a";10));nb.fingerprint(art("count";"";"";"";"region";"a";10)))==false;"a different filter column is a different fingerprint")){pass=pass+1}el{fail=fail+1};
+
+  (* ── No probe value is in the store ─────────────────────────────────────────────── *)
+  if(t.assert(storecontains("PROBE-VALUE-5b1e")==false;"no probe value, executed or refused, is in any byte of loke.db")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(storecontains("food")==false && storecontains("north")==false;"nor is a filter value or a result label from the ordinary session")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(storecontains("s-probe");"the ledger itself IS in the file: the session id is found")){pass=pass+1}el{fail=fail+1};
+  mt db.exec("CREATE TABLE nc_control (v TEXT)";@()) {$ok:n 1;$err:e 0};
+  mt db.exec("INSERT INTO nc_control (v) VALUES (?)";@("CONTROL-PROBE-77d0")) {$ok:n 1;$err:e 0};
+  if(t.assert(storecontains("CONTROL-PROBE-77d0");"control: a value in a real table IS found by the same byte scan")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The wire form ──────────────────────────────────────────────────────────────── *)
+  let req=nr.parse("{\"session_id\":\"s-wire\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},\"headers\":[\"amount\"],\"rows\":[[\"1\"]]}");
+  if(t.assert(str.eq(req.session;"s-wire");"session_id is read from the body")){pass=pass+1}el{fail=fail+1};
+  let refjson=nb.boundedjson(over);
+  if(t.assert(str.contains(refjson;"\"refusal\":\"value_probing\"") && str.contains(refjson;"\"ok\":false");"a probing refusal encodes its code")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.boundedstatus(over)==429 && nb.boundedstatus(nosess)==400 && nb.boundedstatus(invalid)==422 && nb.boundedstatus(last)==200;"refusals map to 429, 400 and 422")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nb.boundedjson(last);"\"session_cells_released\":26");"an answer's body carries the session cumulative")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

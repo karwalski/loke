@@ -94,16 +94,38 @@ artifact() {  # $1 label, $2 body, $3 expected status, $4 substring the body mus
   fi
 }
 DS='"headers":["region","amount"],"rows":[["north","10"],["south","2.5"],["north","5"]]'
+SID='"session_id":"smoke-1"'
 artifact "sum where region = north" \
-  "{\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"region\",\"filter_val\":\"north\"},$DS}" \
+  "{$SID,\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"region\",\"filter_val\":\"north\"},$DS}" \
   200 '"values":["15.0"]'
 artifact "a quote in the value is data" \
-  "{\"artifact\":{\"op\":\"count\",\"filter_col\":\"region\",\"filter_val\":\"x' OR '1'='1\"},$DS}" \
+  "{$SID,\"artifact\":{\"op\":\"count\",\"filter_col\":\"region\",\"filter_val\":\"x' OR '1'='1\"},$DS}" \
   200 '"values":["0"]'
 artifact "a column the dataset lacks" \
-  "{\"artifact\":{\"op\":\"sum\",\"column\":\"salary\"},$DS}" \
+  "{$SID,\"artifact\":{\"op\":\"sum\",\"column\":\"salary\"},$DS}" \
   422 'not in the dataset'
-artifact "no artifact" "{$DS}" 400 'missing required field: artifact'
+artifact "no artifact" "{$SID,$DS}" 400 'missing required field: artifact'
+artifact "an answer carries the session cumulative" \
+  "{$SID,\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DS}" \
+  200 '"session_rows_released":3,"session_cells_released":3'
+
+# NC1.10: no session, no run; and a sequence guessing one column's values is refused at the
+# bound (SESSION_PREDICATE_REPEAT_LIMIT, core.nocustody.bound) while a different column in the same session is not.
+artifact "no session_id" \
+  "{\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DS}" \
+  400 '"refusal":"no_session"'
+PID2='"session_id":"smoke-probe"'
+for g in $(seq 1 20); do
+  artifact "probe $g of 20 on region" \
+    "{$PID2,\"artifact\":{\"op\":\"count\",\"filter_col\":\"region\",\"filter_val\":\"guess-$g\"},$DS}" \
+    200 '"values":["0"]'
+done
+artifact "probe 21 on region is refused as value probing" \
+  "{$PID2,\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"region\",\"filter_val\":\"north\"},$DS}" \
+  429 '"refusal":"value_probing","error":"refused as value probing: this session has already filtered on this column 20 times, the limit is 20'
+artifact "the same session filtering another column still runs" \
+  "{$PID2,\"artifact\":{\"op\":\"count\",\"filter_col\":\"amount\",\"filter_val\":\"10\"},$DS}" \
+  200 '"values":["1"]'
 
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
