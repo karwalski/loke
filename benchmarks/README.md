@@ -27,6 +27,8 @@ rejects, rather than warns:
 | `tokenizer` on a token-denominated metric | Token counts differ by tokenizer; `"bytes"` is an acceptable explicit answer, silence is not |
 | `model_version` when `model` is set | Model behaviour changes between versions |
 | An interval, when more than one run was recorded | A repeated measurement must report its spread |
+| A BCa interval, when more than one run was recorded | The methodology specifies BCa (VM1.3) |
+| Two or more runs, for anything with a model or a clock | One run of a varying quantity is not a result (VM1.3) |
 
 Filled automatically: the toke and ooke commits from `TOOLCHAIN.lock`, the loke commit, the container
 identity if running in one, the host platform, and the timestamp.
@@ -46,6 +48,7 @@ environment cannot validate at all.
 
 ```sh
 python3 -m benchmarks.lib.result     # self-test the guards
+python3 -m unittest benchmarks.lib.test_result   # BCa against scipy, repetition rule
 docker build -t loke-bench .         # pinned environment
 ```
 
@@ -74,7 +77,22 @@ Worth knowing before quoting anything about tokens: **deleting whitespace alone 
 
 ## Interval method
 
-`bootstrap_ci` is a plain percentile bootstrap and is labelled as such. The methodology document
-specifies BCa. The difference is real for skewed statistics, so the function reports what it actually
-is rather than claiming BCa — replace it when the bias-correction and acceleration terms are
-implemented.
+VM1.3. `bca_ci` is the bias-corrected and accelerated (BCa) bootstrap interval of the mean that the
+methodology specifies, and `summarise()` attaches it after discarding the warm-up run. Up to seven
+kept runs the bootstrap distribution is enumerated exactly (all n^n resamples, grouped by multiset),
+so no seed is involved; past seven, 10 000 seeded resamples. The label says which
+(`bca-bootstrap-exhaustive-3125`, `bca-bootstrap-10000-seed0`). When every run gave the same value
+BCa is undefined and the interval is that point, labelled `bca-bootstrap-degenerate-identical-runs`.
+
+`test_result.py` (run by the quality gate) holds it to `scipy.stats.bootstrap(method='BCa')`, handed
+the same bootstrap distribution, both live where scipy is installed and through values frozen from
+scipy 1.17.1. The percentile bootstrap it replaces is gone, and `validate` refuses a repeated
+measurement whose interval is not BCa.
+
+**Repetition is enforced.** A measurement that can differ between runs (anything with a `model`, and
+anything timed: units such as `ms` or `MB/s`, or a latency/throughput metric) is refused unless it
+records at least two kept runs and their interval. A figure computed exactly from fixed inputs (a
+token count, recall over the committed corpus) is recorded once, because repeating it cannot change
+it. The toke sink (`core.eval.resultsink`) makes the same refusals, and `loke benchmark` runs its case
+set five times by default (`--runs 3` to `--runs 8`), discards the first, and records each figure with
+the BCa interval from `core.eval.interval`, which enumerates the same distribution.

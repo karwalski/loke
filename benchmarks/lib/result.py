@@ -36,20 +36,30 @@ Usage
     write(m)
 
 For a repeated measurement, collect the per-run values and use
-`summarise()` to attach a bootstrap confidence interval before writing.
+`summarise()` to attach a BCa bootstrap confidence interval before writing.
+
+Repetition (VM1.3)
+------------------
+A measurement that can differ between runs cannot be recorded from one run: anything with a
+model, and anything timed. It needs `runs` of at least two and a BCa interval, which
+`summarise()` supplies after discarding the warm-up run. A measurement computed exactly from
+fixed inputs (a token count, recall over the committed corpus) gives the same number every
+time, so repeating it adds nothing and it is recorded once.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
+import math
 import os
 import pathlib
 import platform
 import random
 import re
-import statistics
 import subprocess
 import sys
+from statistics import NormalDist
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
@@ -60,6 +70,17 @@ LOCK = REPO / "TOOLCHAIN.lock"
 # A tokenizer name is required for any token-denominated metric. "bytes" is an
 # acceptable explicit answer; silence is not.
 _TOKEN_METRICS = ("token", "prompt_size", "compression")
+
+# VM1.3: what makes a measurement vary between runs. A model's output does, and so does
+# anything read off a clock. Units are matched whole ("ms", "s") or as a rate ("MB/s").
+_TIMED_UNITS = ("ns", "us", "ms", "s", "seconds")
+_TIMED_METRICS = ("latency", "throughput", "duration", "elapsed")
+
+# Up to this many kept runs the bootstrap distribution is enumerated exactly (all n^n
+# resamples, 823 543 at seven) rather than drawn at random. Past it, BOOTSTRAP_RESAMPLES
+# random resamples, as the methodology specifies. core.eval.interval uses the same bound.
+EXHAUSTIVE_MAX_RUNS = 7
+BOOTSTRAP_RESAMPLES = 10_000
 
 
 class ResultRejected(ValueError):
@@ -172,6 +193,20 @@ def validate(m: Measurement) -> None:
             f"{m.runs} runs were recorded but no interval — a repeated measurement "
             "must report its spread"
         )
+    if m.runs is not None and m.runs > 1 and m.ci_method is not None \
+            and not m.ci_method.startswith("bca-"):
+        problems.append(
+            f"the interval is '{m.ci_method}', and a repeated measurement is reported with a "
+            "BCa bootstrap interval (docs/research/toon-benchmark-methodology.md, 5.2); "
+            "use summarise() or bca_ci()"
+        )
+    why = needs_repetition(m)
+    if why and (m.runs is None or m.runs < 2):
+        problems.append(
+            f"this measurement {why}, so it varies between runs and one run is not a "
+            "result (VM1.3): repeat it, discard the warm-up, and record the runs and "
+            "their BCa interval with summarise()"
+        )
 
     if problems:
         raise ResultRejected(
@@ -179,30 +214,135 @@ def validate(m: Measurement) -> None:
         )
 
 
-def bootstrap_ci(
+def needs_repetition(m: Measurement) -> str:
+    """Why this measurement can differ between runs, or "" when it cannot.
+
+    A figure computed exactly from fixed inputs, such as a token count or recall over the
+    committed corpus, is the same on every run. One that depends on a model's output, or is
+    read off a clock, is not, and VM1.3 forbids publishing it from a single run.
+    """
+    if m.model:
+        return f"depends on the output of model '{m.model}'"
+    units = (m.units or "").strip().lower()
+    if units.split(" ")[0] in _TIMED_UNITS or "/s" in units:
+        return f"is timed (units '{m.units}')"
+    metric = (m.metric or "").lower()
+    if any(t in metric for t in _TIMED_METRICS):
+        return f"is timed (metric '{m.metric}')"
+    return ""
+
+
+def _mean(xs) -> float:
+    # fsum rounds once, at the end, so a resample's mean does not depend on the order its
+    # values were drawn in, and two resamples with the same values compare equal.
+    xs = list(xs)
+    return math.fsum(xs) / len(xs)
+
+
+def bootstrap_distribution(
+    values: list[float], *, iterations: int = BOOTSTRAP_RESAMPLES, seed: int = 0,
+) -> tuple[list[tuple[float, int]], int, str]:
+    """The bootstrap distribution of the mean, as sorted (value, weight) pairs.
+
+    Returns the pairs, their total weight B, and a label. Up to EXHAUSTIVE_MAX_RUNS values
+    it is the complete distribution: every one of the n^n equally likely resamples, grouped
+    by the multiset of indices drawn and weighted by its multinomial count. That is the
+    distribution a random bootstrap only estimates, so no seed is involved. Past that,
+    `iterations` resamples are drawn with a seeded generator, each of weight one.
+    """
+    n = len(values)
+    if n < 2:
+        raise ValueError("need at least two runs to bootstrap an interval")
+    counts: dict[float, int] = {}
+    if n <= EXHAUSTIVE_MAX_RUNS:
+        nfact = math.factorial(n)
+        for combo in itertools.combinations_with_replacement(range(n), n):
+            weight = nfact
+            for _, group in itertools.groupby(combo):
+                weight //= math.factorial(len(list(group)))
+            v = _mean(values[i] for i in combo)
+            counts[v] = counts.get(v, 0) + weight
+        total, label = n ** n, f"exhaustive-{n ** n}"
+    else:
+        rng = random.Random(seed)
+        for _ in range(iterations):
+            v = _mean(rng.choices(values, k=n))
+            counts[v] = counts.get(v, 0) + 1
+        total, label = iterations, f"{iterations}-seed{seed}"
+    return sorted(counts.items()), total, label
+
+
+def _quantile(dist: list[tuple[float, int]], total: int, q: float) -> float:
+    """numpy's default ("linear") quantile of the expanded distribution, without expanding it."""
+    rank = q * (total - 1)
+    lo = max(0, min(total - 1, math.floor(rank)))
+    hi = min(lo + 1, total - 1)
+    frac = rank - lo
+
+    def at(k: int) -> float:
+        seen = 0
+        for v, w in dist:
+            seen += w
+            if k < seen:
+                return v
+        return dist[-1][0]
+
+    a = at(lo)
+    return a + frac * (at(hi) - a)
+
+
+def bca_from_distribution(
+    values: list[float], dist: list[tuple[float, int]], total: int, confidence: float = 0.95,
+) -> tuple[float, float]:
+    """BCa bounds for the mean, given its bootstrap distribution.
+
+    Efron and Tibshirani, An Introduction to the Bootstrap (1993), 14.3: z0 from the share
+    of the bootstrap distribution below the estimate (a tie counted half, as scipy counts
+    it), the acceleration from the jackknife, and the two percentiles those move the nominal
+    ones to. benchmarks/lib/test_result.py checks this against scipy.stats.bootstrap with
+    method='BCa' handed the same distribution.
+    """
+    n = len(values)
+    theta = _mean(values)
+    below = sum(w for v, w in dist if v < theta)
+    atmost = sum(w for v, w in dist if v <= theta)
+    norm = NormalDist()
+    z0 = norm.inv_cdf((below + atmost) / (2 * total))
+
+    jack = [_mean(values[:i] + values[i + 1:]) for i in range(n)]
+    jbar = _mean(jack)
+    u = [(n - 1) * (jbar - j) for j in jack]
+    num = math.fsum(x ** 3 for x in u) / n ** 3
+    den = math.fsum(x ** 2 for x in u) / n ** 2
+    accel = num / (6 * den ** 1.5)
+
+    alpha = (1.0 - confidence) / 2.0
+    bounds = []
+    for z in (norm.inv_cdf(alpha), norm.inv_cdf(1.0 - alpha)):
+        shifted = z0 + z
+        bounds.append(_quantile(dist, total, norm.cdf(z0 + shifted / (1 - accel * shifted))))
+    return bounds[0], bounds[1]
+
+
+def bca_ci(
     values: list[float],
     confidence: float = 0.95,
-    iterations: int = 10_000,
+    iterations: int = BOOTSTRAP_RESAMPLES,
     seed: int = 0,
 ) -> tuple[float, float, str]:
-    """Percentile bootstrap interval over repeated runs.
+    """Bias-corrected and accelerated bootstrap interval of the mean over repeated runs.
 
-    `docs/research/toon-benchmark-methodology.md` specifies BCa intervals. This
-    is the plain percentile bootstrap: adequate for symmetric statistics, and
-    honestly labelled as what it is so nobody reports it as BCa. Replace with
-    BCa when the bias-correction and acceleration terms are implemented.
+    The interval `docs/research/toon-benchmark-methodology.md` specifies. When every run gave
+    the same value the bootstrap distribution is one point and the acceleration is 0/0, so
+    BCa is undefined; the interval is then that point, and the label says so.
     """
     if len(values) < 2:
         raise ValueError("need at least two runs to bootstrap an interval")
-    rng = random.Random(seed)
-    n = len(values)
-    means = []
-    for _ in range(iterations):
-        means.append(statistics.fmean(rng.choices(values, k=n)))
-    means.sort()
-    lo_i = int((1.0 - confidence) / 2.0 * iterations)
-    hi_i = int((1.0 + confidence) / 2.0 * iterations) - 1
-    return means[lo_i], means[hi_i], f"percentile-bootstrap-{iterations}"
+    if all(v == values[0] for v in values):
+        return values[0], values[0], "bca-bootstrap-degenerate-identical-runs"
+    dist, total, label = bootstrap_distribution(values, iterations=iterations, seed=seed)
+    lo, hi = bca_from_distribution(values, dist, total, confidence)
+    return lo, hi, f"bca-bootstrap-{label}"
 
 
 def summarise(values: list[float], *, discard_first: bool = True, **fields) -> Measurement:
@@ -216,10 +356,9 @@ def summarise(values: list[float], *, discard_first: bool = True, **fields) -> M
         runs = runs[1:]
     if not runs:
         raise ValueError("no runs left after discarding warm-up")
-    mean = statistics.fmean(runs)
-    m = Measurement(value=mean, n=fields.pop("n", len(runs)), runs=len(runs), **fields)
+    m = Measurement(value=_mean(runs), n=fields.pop("n", len(runs)), runs=len(runs), **fields)
     if len(runs) >= 2:
-        m.ci_low, m.ci_high, m.ci_method = bootstrap_ci(runs)
+        m.ci_low, m.ci_high, m.ci_method = bca_ci(runs)
     return m
 
 
@@ -286,11 +425,22 @@ def _self_test() -> int:
                     **{**base, "ci_low": 0.6, "ci_high": 0.8, "ci_method": "x"})
     expect_rejected("repeated runs without spread", **{**base, "runs": 5})
 
-    lo, hi, method = bootstrap_ci([1.0, 2.0, 3.0, 4.0, 5.0])
-    if lo < 3.0 < hi and method.startswith("percentile-bootstrap"):
-        print(f"ok       bootstrap interval brackets the mean [{lo:.2f}, {hi:.2f}]")
+    expect_rejected("a model measured once",
+                    **{**base, "model": "m", "model_version": "v1"})
+    expect_rejected("a timing measured once", **{**base, "metric": "latency_mean", "units": "ms"})
+    expect_rejected("a rate measured once", **{**base, "units": "MB/s (10^6 bytes)"})
+    expect_rejected("a repeated measurement with a percentile interval",
+                    **{**base, "runs": 5, "ci_low": 0.4, "ci_high": 0.6,
+                       "ci_method": "percentile-bootstrap-10000"})
+    expect_accepted("a repeated timing with a BCa interval",
+                    **{**base, "units": "ms", "runs": 5, "ci_low": 0.4, "ci_high": 0.6,
+                       "ci_method": "bca-bootstrap-exhaustive-3125"})
+
+    lo, hi, method = bca_ci([1.0, 2.0, 3.0, 4.0, 5.0])
+    if lo < 3.0 < hi and method.startswith("bca-bootstrap"):
+        print(f"ok       BCa interval brackets the mean [{lo:.2f}, {hi:.2f}]")
     else:
-        print(f"FAIL     bootstrap interval looks wrong [{lo}, {hi}]")
+        print(f"FAIL     BCa interval looks wrong [{lo}, {hi}]")
         failures += 1
 
     s = summarise([99.0, 2.0, 2.0, 2.0, 2.0], metric="latency", units="ms",

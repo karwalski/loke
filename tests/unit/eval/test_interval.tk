@@ -1,0 +1,82 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.eval.interval;
+
+i=t:std.test;
+i=str:std.str;
+i=iv:core.eval.interval;
+
+(* VM1.3 — the BCa interval `loke benchmark` records, through the real core.eval.interval.
+
+   The expected bounds are what benchmarks/lib/result.py's bca_ci returns for the same runs
+   (2026-09-28), rounded outward to whole millionths as this module rounds them. result.py is
+   itself held to scipy.stats.bootstrap(method='BCa') by benchmarks/lib/test_result.py, so the
+   chain is toke to Python to scipy. A bound may differ from Python's by one millionth, which
+   is float rounding at the last place before the floor or ceiling, so each is checked to
+   within one; every mutant that matters (no bias correction, no acceleration, the percentile
+   interval, a wrong quantile) moves a bound by thousands.
+
+   The percentile interval of the first set is [200.6, 286.6] ms. The BCa bounds below are
+   [202.07, 313.8]: the long right tail of skewed timings is what BCa exists to capture. *)
+
+f=near(a:i64;b:i64):bool{
+  <a-b<=1 && b-a<=1
+};
+
+f=ms(v:i64):i64{
+  <v*1000000
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── Right-skewed timings, five kept runs (3 125 resamples) ─────────────────── *)
+  let five=iv.bca(@(ms(212);ms(198);ms(205);ms(341);ms(201));0.95);
+  if(t.assert(five.ok;"five runs give an interval")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(five.method;"bca-bootstrap-exhaustive-3125";"from all 3125 resamples, labelled BCa")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(five.lowmicros;202067227);"the lower bound is result.py's, 202.067227 ms (got \(five.lowmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(five.highmicros;313800000);"the upper bound is result.py's, 313.8 ms, not the percentile 286.6 (got \(five.highmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(five.meanmicros);"231400000";"the mean is 231.4 ms")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Four kept runs (256 resamples) ────────────────────────────────────────── *)
+  let four=iv.bca(@(ms(1750);ms(1622);ms(1618);ms(1904));0.95);
+  if(t.assert(near(four.lowmicros;1621000000);"four runs: lower bound 1621 ms (got \(four.lowmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(four.highmicros;1865500000);"four runs: upper bound 1865.5 ms (got \(four.highmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(four.method;"bca-bootstrap-exhaustive-256";"from 256 resamples")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Seven kept runs, the most enumerated (823 543 resamples in 1 716 groups) ── *)
+  let seven=iv.bca(@(1000000;750000;1000000;500000;1000000;1000000;250000);0.95);
+  if(t.assert(near(seven.lowmicros;535714);"seven scores: lower bound 0.535714 (got \(seven.lowmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(seven.highmicros;964286);"seven scores: upper bound 0.964286 (got \(seven.highmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(seven.method;"bca-bootstrap-exhaustive-823543";"from all 823543 resamples")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Left-skewed, six runs: the correction moves the interval DOWN ──────────── *)
+  let left=iv.bca(@(900000;950000;920000;200000;930000;910000);0.95);
+  if(t.assert(near(left.lowmicros;438333);"left skew: lower bound 0.438333 (got \(left.lowmicros))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(near(left.highmicros;928334);"left skew: upper bound 0.928334 (got \(left.highmicros))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Two runs, the fewest ──────────────────────────────────────────────────── *)
+  let two=iv.bca(@(ms(3);ms(5));0.95);
+  if(t.assert(near(two.lowmicros;3075000) && near(two.highmicros;4925000);"two runs: [3.075, 4.925] (got \(two.lowmicros), \(two.highmicros))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Identical runs: BCa is undefined (0/0), so the interval is the point, and says so ── *)
+  let same=iv.bca(@(1000000;1000000;1000000;1000000);0.95);
+  if(t.assert(same.ok && same.lowmicros==1000000 && same.highmicros==1000000;"identical runs give the point itself")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(same.method;"degenerate");"and the label says it is degenerate")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Refusals ─────────────────────────────────────────────────────────────── *)
+  let one=iv.bca(@(ms(5));0.95);
+  if(t.assert(!one.ok && str.len(one.reason)>0;"one run has no interval, and says why")){pass=pass+1}el{fail=fail+1};
+  let eight=iv.bca(@(1;2;3;4;5;6;7;8);0.95);
+  if(t.assert(!eight.ok && str.contains(eight.reason;"result.py");"eight runs are refused, not sampled, and the reason names the Python sink")){pass=pass+1}el{fail=fail+1};
+
+  (* ── microstr ─────────────────────────────────────────────────────────────── *)
+  if(t.asserteq(iv.microstr(1500000);"1.500000";"1500000 millionths is 1.500000")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(iv.microstr(202067227);"202.067227";"a bound keeps its six places")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(iv.microstr(0-250);"-0.000250";"a negative keeps its sign and leading zeros")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(iv.microstr(0);"0.000000";"zero")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

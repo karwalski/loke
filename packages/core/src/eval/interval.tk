@@ -1,0 +1,269 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.eval.interval;
+
+i=str:std.str;
+i=math:std.math;
+
+(* VM1.3. The BCa (bias-corrected and accelerated) bootstrap interval of a mean over repeated
+   runs, for measurements the loke binary takes itself (`loke benchmark`). It is the same
+   interval as `bca_ci` in benchmarks/lib/result.py, computed the same way, and
+   tests/unit/eval/test_interval.tk holds it to the values that function returns (which
+   benchmarks/lib/test_result.py in turn holds to scipy.stats.bootstrap with method='BCa').
+
+   The bootstrap distribution is ENUMERATED, not sampled. With n runs there are n^n equally
+   likely resamples; they are grouped by the multiset of runs drawn and weighted by its
+   multinomial count, so seven runs need 1 716 groups for the 823 543 resamples. That is the
+   distribution a random bootstrap only estimates, it needs no random numbers, and it is
+   what result.py does up to the same bound. Past seven runs this refuses rather than
+   switching to a sampled bootstrap: `loke benchmark` never needs more, and a second random
+   generator would be a second thing to verify.
+
+   Values arrive as integer MILLIONTHS of their unit. Every resample mean is then an exact
+   integer sum over n, so comparing a resample with the estimate, which decides z0, cannot
+   be disturbed by rounding. The bounds leave as integer millionths too, the lower rounded
+   down and the upper up, so the interval is never narrower than the one computed. Nothing
+   leaves this module as an f64, because an f64 returned across a module boundary arrives
+   corrupted (T-20, LS1.1h). *)
+
+t=$interval{
+  ok:bool;
+  lowmicros:i64;
+  highmicros:i64;
+  meanmicros:i64;
+  method:str;
+  reason:str
+};
+
+f=maxruns():i64{
+  <7
+};
+
+f=failed(reason:str):$interval{
+  <$interval{ok:false;lowmicros:0;highmicros:0;meanmicros:0;method:"";reason:reason}
+};
+
+(* The standard normal distribution function, from std.math's erf. *)
+f=normcdf(x:f64):f64{
+  <0.5*(1.0+math.erf(x/math.sqrt(2.0)))
+};
+
+(* Its inverse: Acklam's rational approximation (relative error below 1.2e-9), then one
+   Halley step against normcdf, which takes it to about double precision for the
+   probabilities used here (0.0005 to 0.9995). *)
+f=normppf(p:f64):f64{
+  let a1=0.0-39.69683028665376;
+  let a2=220.9460984245205;
+  let a3=0.0-275.9285104469687;
+  let a4=138.3577518672690;
+  let a5=0.0-30.66479806614716;
+  let a6=2.506628277459239;
+  let b1=0.0-54.47609879822406;
+  let b2=161.5858368580409;
+  let b3=0.0-155.6989798598866;
+  let b4=66.80131188771972;
+  let b5=0.0-13.28068155288572;
+  let c1=0.0-0.007784894002430293;
+  let c2=0.0-0.3223964580411365;
+  let c3=0.0-2.400758277161838;
+  let c4=0.0-2.549732539343734;
+  let c5=4.374664141464968;
+  let c6=2.938163982698783;
+  let d1=0.007784695709041462;
+  let d2=0.3224671290700398;
+  let d3=2.445134137142996;
+  let d4=3.754408661907416;
+  let plow=0.02425;
+  let x=mut.0.0;
+  if(p<plow){
+    let q=math.sqrt(0.0-2.0*math.ln(p));
+    x=(((((c1*q+c2)*q+c3)*q+c4)*q+c5)*q+c6)/((((d1*q+d2)*q+d3)*q+d4)*q+1.0)
+  }el{
+    if(p>1.0-plow){
+      let q=math.sqrt(0.0-2.0*math.ln(1.0-p));
+      x=0.0-(((((c1*q+c2)*q+c3)*q+c4)*q+c5)*q+c6)/((((d1*q+d2)*q+d3)*q+d4)*q+1.0)
+    }el{
+      let q=p-0.5;
+      let r=q*q;
+      x=(((((a1*r+a2)*r+a3)*r+a4)*r+a5)*r+a6)*q/(((((b1*r+b2)*r+b3)*r+b4)*r+b5)*r+1.0)
+    }
+  };
+  let u=(normcdf(x)-p)*math.sqrt(2.0*3.141592653589793)*math.exp(x*x/2.0);
+  <x-u/(1.0+x*u/2.0)
+};
+
+f=ipow(base:i64;exp:i64):i64{
+  let out=mut.1;
+  lp(let i=0;i<exp;i=i+1){ out=out*base };
+  <out
+};
+
+f=factorial(k:i64):i64{
+  let out=mut.1;
+  lp(let i=2;i<=k;i=i+1){ out=out*i };
+  <out
+};
+
+(* The weight of the resample whose digits (base n) are `code`, when those digits are in
+   non-decreasing order, which picks one representative per multiset; 0 otherwise. The
+   weight is the number of orderings of that multiset: n! over the product of each run's
+   multiplicity factorial. *)
+f=multisetweight(code:i64;n:i64;nfact:i64):i64{
+  let rest=mut.code;
+  let prev=mut.0;
+  let run=mut.0;
+  let weight=mut.nfact;
+  lp(let k=0;k<n;k=k+1){
+    let digit=rest%n;
+    rest=rest/n;
+    if(k>0 && digit<prev){ <0 }el{};
+    if(k>0 && digit==prev){ run=run+1 }el{
+      weight=weight/factorial(run);
+      run=1
+    };
+    prev=digit
+  };
+  <weight/factorial(run)
+};
+
+(* The sum of the runs a resample code draws. *)
+f=codesum(code:i64;n:i64;micros:@i64):i64{
+  let rest=mut.code;
+  let sum=mut.0;
+  lp(let k=0;k<n;k=k+1){
+    sum=sum+micros.get(rest%n);
+    rest=rest/n
+  };
+  <sum
+};
+
+(* The k-th smallest resample sum (0-based) of the expanded distribution. *)
+f=kth(sums:@i64;weights:@i64;k:i64):i64{
+  lp(let i=0;i<sums.len;i=i+1){
+    let s=sums.get(i);
+    let below=mut.0;
+    let atmost=mut.0;
+    lp(let j=0;j<sums.len;j=j+1){
+      if(sums.get(j)<s){ below=below+weights.get(j) }el{};
+      if(sums.get(j)<=s){ atmost=atmost+weights.get(j) }el{}
+    };
+    if(below<=k && k<atmost){ <s }el{}
+  };
+  <sums.get(0)
+};
+
+(* numpy's default ("linear") quantile q of the expanded distribution, as a mean in
+   millionths. `total` is n^n. *)
+f=quantile(sums:@i64;weights:@i64;total:i64;n:i64;q:f64):f64{
+  let rank=q*((total-1) as f64);
+  let lo=mut.(math.floor(rank) as i64);
+  if(lo<0){ lo=0 }el{};
+  if(lo>total-1){ lo=total-1 }el{};
+  let hi=mut.lo+1;
+  if(hi>total-1){ hi=total-1 }el{};
+  let frac=rank-(lo as f64);
+  let a=(kth(sums;weights;lo) as f64)/(n as f64);
+  <a+frac*((kth(sums;weights;hi) as f64)/(n as f64)-a)
+};
+
+f=allsame(micros:@i64):bool{
+  let same=mut.true;
+  lp(let i=1;i<micros.len;i=i+1){
+    if(micros.get(i)!=micros.get(0)){ same=false }el{}
+  };
+  <same
+};
+
+(* The group sums and weights of the enumerated distribution, as parallel arrays. Built in
+   functions of their own, each returning one @i64. *)
+f=groupsums(micros:@i64):@i64{
+  let n=micros.len;
+  let nfact=factorial(n);
+  let total=ipow(n;n);
+  let out=mut.@();
+  lp(let code=0;code<total;code=code+1){
+    if(multisetweight(code;n;nfact)>0){ out=out.push(codesum(code;n;micros)) }el{}
+  };
+  <out
+};
+
+f=groupweights(micros:@i64):@i64{
+  let n=micros.len;
+  let nfact=factorial(n);
+  let total=ipow(n;n);
+  let out=mut.@();
+  lp(let code=0;code<total;code=code+1){
+    let w=multisetweight(code;n;nfact);
+    if(w>0){ out=out.push(w) }el{}
+  };
+  <out
+};
+
+(* The BCa interval of the mean of `micros` at `confidence` (0.95 for the methodology's
+   95 per cent). Efron and Tibshirani, An Introduction to the Bootstrap (1993), 14.3. *)
+f=bca(micros:@i64;confidence:f64):$interval{
+  let n=micros.len;
+  if(n<2){ <failed("an interval needs at least two runs after the warm-up") }el{};
+  if(n>maxruns()){ <failed("more than \(maxruns()) runs: enumerate with benchmarks/lib/result.py instead") }el{};
+  let total=ipow(n;n);
+  let sum=mut.0;
+  lp(let i=0;i<n;i=i+1){ sum=sum+micros.get(i) };
+  let meanf=(sum as f64)/(n as f64);
+  let meanmicros=math.round(meanf) as i64;
+  if(allsame(micros)){
+    <$interval{ok:true;lowmicros:micros.get(0);highmicros:micros.get(0);meanmicros:micros.get(0);method:"bca-bootstrap-degenerate-identical-runs";reason:""}
+  }el{};
+  let sums=groupsums(micros);
+  let weights=groupweights(micros);
+
+  (* z0: where the estimate sits in its own bootstrap distribution, a tie counted half. The
+     estimate's sum is `sum`, and a resample's mean is below it exactly when its sum is. *)
+  let below=mut.0;
+  let atmost=mut.0;
+  lp(let i=0;i<sums.len;i=i+1){
+    if(sums.get(i)<sum){ below=below+weights.get(i) }el{};
+    if(sums.get(i)<=sum){ atmost=atmost+weights.get(i) }el{}
+  };
+  let z0=normppf(((below+atmost) as f64)/((2*total) as f64));
+
+  (* The acceleration from the jackknife. For the mean, (n-1) times the jackknife deviation
+     is the run's deviation from the mean, so a = sum(d^3) / (6 sum(d^2)^1.5). *)
+  let s2=mut.0.0;
+  let s3=mut.0.0;
+  lp(let i=0;i<n;i=i+1){
+    let d=(micros.get(i) as f64)-meanf;
+    s2=s2+d*d;
+    s3=s3+d*d*d
+  };
+  let accel=s3/(6.0*math.pow(s2;1.5));
+
+  let alpha=(1.0-confidence)/2.0;
+  let zlo=z0+normppf(alpha);
+  let zhi=z0+normppf(1.0-alpha);
+  let qlo=normcdf(z0+zlo/(1.0-accel*zlo));
+  let qhi=normcdf(z0+zhi/(1.0-accel*zhi));
+  let lo=quantile(sums;weights;total;n;qlo);
+  let hi=quantile(sums;weights;total;n;qhi);
+  if(hi<lo){ <failed("the BCa bounds came out inverted, so no interval is given") }el{};
+  <$interval{
+    ok:true;
+    lowmicros:math.floor(lo) as i64;
+    highmicros:math.ceil(hi) as i64;
+    meanmicros:meanmicros;
+    method:"bca-bootstrap-exhaustive-\(total)";
+    reason:""
+  }
+};
+
+(* A count of millionths as a decimal with six places: 1500000 is "1.500000", -250 is
+   "-0.000250". This is how an interval bound or a mean leaves for a result file. *)
+f=microstr(v:i64):str{
+  let neg=v<0;
+  let a=mut.v;
+  if(neg){ a=0-v }el{};
+  let whole=a/1000000;
+  let digits=str.slice(str.fromint(a%1000000+1000000);1;7);
+  if(neg){ <"-\(whole).\(digits)" }el{};
+  <"\(whole).\(digits)"
+};

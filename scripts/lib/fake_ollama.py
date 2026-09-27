@@ -13,14 +13,20 @@ FAKE_OLLAMA_COMPACT=1 writes JSON with no spaces, as Ollama itself does. shared.
 nested lookup matches `"key":` with no space, so a reader built on it needs this.
 FAKE_OLLAMA_DIGESTS ("name=digest,name=digest") gives a listed model its own digest in
 /api/tags; any other model is listed with the digest "x" (smoke_e2e.sh, DA1.9).
+FAKE_OLLAMA_DELAYS_MS ("0,40,5") delays the Nth logged completion by the Nth entry, cycling,
+so repeated benchmark runs time differently and their interval is not a single point
+(smoke_benchmark.sh, VM1.3).
 """
-import http.server, json, os, sys
+import http.server, json, os, sys, threading, time
 MODELS=os.environ.get("FAKE_OLLAMA_MODELS","qwen2.5:7b,llama3:latest").split(",")
 LOG=sys.argv[1]
 REPLY=os.environ.get("FAKE_OLLAMA_REPLY")
 PORT=int(os.environ.get("FAKE_OLLAMA_PORT","11434"))
 SEPS=(",",":") if os.environ.get("FAKE_OLLAMA_COMPACT")=="1" else None
 DIGESTS=dict(kv.split("=",1) for kv in os.environ.get("FAKE_OLLAMA_DIGESTS","").split(",") if "=" in kv)
+DELAYS=[int(x) for x in os.environ.get("FAKE_OLLAMA_DELAYS_MS","").split(",") if x.strip()]
+SERVED=[0]
+SERVEDLOCK=threading.Lock()
 class H(http.server.BaseHTTPRequestHandler):
     def _send(self,obj):
         b=json.dumps(obj,separators=SEPS).encode(); self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
@@ -47,6 +53,10 @@ class H(http.server.BaseHTTPRequestHandler):
             open(LOG+'.intent','a').write(self.path+' '+body+'\n')
             self._send({"model":"llama3","message":{"role":"assistant","content":""},"done":True}); return
         open(LOG,'a').write(self.path+' '+body+'\n')
+        if DELAYS:
+            with SERVEDLOCK:
+                k=SERVED[0]; SERVED[0]+=1
+            time.sleep(DELAYS[k%len(DELAYS)]/1000.0)
         import re
         ph=re.findall(r'\[[A-Z_]+_[0-9a-f]+_[0-9]+\]',body)
         reply=REPLY if REPLY is not None else "Summary: the user asked to contact "+(ph[0] if ph else "nobody")+"."

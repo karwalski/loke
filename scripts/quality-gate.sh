@@ -102,6 +102,12 @@ step_checks() {
   if [[ -f benchmarks/lib/result.py ]]; then
     echo "  measurement result sink self-test"
     python3 -m benchmarks.lib.result >/dev/null || { echo "  result sink self-test failed" >&2; failed=1; }
+    # VM1.3: the BCa interval against scipy's (frozen values, and live where scipy is
+    # installed), the exhaustive bootstrap, and the rule that a timed or model measurement
+    # is never recorded from one run.
+    echo "  BCa interval and repetition rule (benchmarks/lib/test_result.py)"
+    python3 -m unittest -q benchmarks.lib.test_result 2>&1 | tail -3 >&2
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  benchmarks/lib/test_result.py failed" >&2; failed=1; }
   fi
 
   if [[ -x ./scripts/check_claims.py ]] || [[ -f ./scripts/check_claims.py ]]; then

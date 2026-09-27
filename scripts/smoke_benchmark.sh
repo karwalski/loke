@@ -13,6 +13,12 @@
 # number. It also checks the three refusals: a hosted model id, a model Ollama does not
 # list (no digest, so no pinned version), and a malformed --out.
 #
+# VM1.3: the default is five runs with the first discarded, so each figure is recorded with
+# runs = 4 and a BCa interval. The stand-in delays its replies by a cycled list, so the kept
+# runs' latencies differ, and the interval core.eval.interval wrote is compared with
+# result.py's bca_ci over the per-run means the CLI printed. --runs 2 and --runs 9 are
+# refused before anything is dispatched.
+#
 # What it does not prove: anything about a real model. The reply is fixed.
 #
 # No fixed port: the stand-in Ollama binds a port the OS hands out (or
@@ -37,7 +43,10 @@ REPLY="42. def f(s): return s[::-1]. Caching helps performance, latency and cost
 mkdir -p "$WORK/home/.loke"
 printf '[providers]\nollama_url = "http://127.0.0.1:%s"\n' "$PORT" > "$WORK/home/.loke/config.toml"
 
+# VM1.3: seven delays, cycled over the five cases of each run, so each run's mean latency
+# differs and the latency interval is a real one rather than a single point.
 FAKE_OLLAMA_COMPACT=1 FAKE_OLLAMA_PORT="$PORT" FAKE_OLLAMA_MODELS="bench-model:latest" FAKE_OLLAMA_REPLY="$REPLY" \
+  FAKE_OLLAMA_DELAYS_MS="0,40,5,80,10,20,120" \
   python3 "$ROOT/scripts/lib/fake_ollama.py" "$WORK/ollama.log" &
 FPID=$!
 for _ in $(seq 1 50); do
@@ -62,6 +71,13 @@ check "and nothing reached the model" $([ ! -s "$WORK/ollama.log" ]; echo $?)
 # ── Malformed arguments are refused ──────────────────────────────────────────
 run benchmark bench-model --out; rc=$?
 check "--out with no path is refused" $([ "$rc" -ne 0 ] && grep -q "usage: loke benchmark" "$WORK/out.txt"; echo $?)
+
+# ── VM1.3: too few runs to leave an interval, or more than are enumerated ─────
+run benchmark bench-model --runs 2 --out "$WORK/two.jsonl"; rc=$?
+check "--runs 2 is refused: one run after the warm-up is not a result" $([ "$rc" -ne 0 ] && grep -q "runs must be from 3 to 8" "$WORK/out.txt"; echo $?)
+run benchmark bench-model --runs 9 --out "$WORK/nine.jsonl"; rc=$?
+check "--runs 9 is refused" $([ "$rc" -ne 0 ] && grep -q "runs must be from 3 to 8" "$WORK/out.txt"; echo $?)
+check "and neither dispatched anything or wrote a file" $([ ! -s "$WORK/ollama.log" ] && [ ! -e "$WORK/two.jsonl" ] && [ ! -e "$WORK/nine.jsonl" ]; echo $?)
 
 # ── A model Ollama does not list has no digest, so nothing is recorded ───────
 run benchmark not-installed --out "$WORK/none.jsonl"; rc=$?
@@ -94,15 +110,18 @@ run benchmark bench-model; rc=$?
 cp "$WORK/out.txt" "$WORK/run.txt"
 check "a local model exits 0" $([ "$rc" -eq 0 ]; echo $?)
 check "the configured Ollama URL was used" $(grep -q "Ollama at http://127.0.0.1:$PORT" "$WORK/out.txt"; echo $?)
-check "all five cases reached /api/chat" $([ "$(grep -c '^/api/chat' "$WORK/ollama.log")" -eq 5 ]; echo $?)
+check "five runs of the five cases reached /api/chat (VM1.3 default)" $([ "$(grep -c '^/api/chat' "$WORK/ollama.log")" -eq 25 ]; echo $?)
 check "carrying the case's prompt as a user message" $(grep -q '"role":"user","content":"What is 15 + 27?"' "$WORK/ollama.log"; echo $?)
-check "the table shows a 1 average" $(grep -Eq "^AVERAGE +1(\.0+)? " "$WORK/out.txt"; echo $?)
+check "the first run is shown as the discarded warm-up" $(grep -q "run 1 of 5 (warm-up, discarded)" "$WORK/out.txt"; echo $?)
+check "every run's table shows a 1 average" $([ "$(grep -Ec "^AVERAGE +1(\.0+)? " "$WORK/out.txt")" -eq 5 ]; echo $?)
 
-python3 - "$ROOT" "$WORK/home/.loke/benchmarks" <<'EOF'
-import pathlib, sys
+python3 - "$ROOT" "$WORK/home/.loke/benchmarks" "$WORK/run.txt" <<'EOF'
+import math, pathlib, re, sys
 sys.path.insert(0, sys.argv[1])
-from benchmarks.lib.result import Measurement, read_all, validate
+from benchmarks.lib.result import Measurement, bca_ci, read_all, validate
 d = pathlib.Path(sys.argv[2])
+# Each run's mean latency, as the CLI printed it, warm-up first.
+printed = [int(x) for x in re.findall(r"^AVERAGE +\S+ +(\d+)ms", pathlib.Path(sys.argv[3]).read_text(), re.M)]
 files = sorted(d.glob("*.jsonl"))
 fails = 0
 def check(label, ok):
@@ -116,7 +135,25 @@ by = {r.get("metric"): r for r in rows}
 s = by.get("keyword_score", {})
 l = by.get("latency_mean", {})
 check("keyword_score is 1.0 (every keyword in every reply)", s.get("value") == 1.0)
-check("keyword_score is a ratio over n=5", s.get("units") == "ratio" and s.get("n") == 5)
+check("keyword_score is a ratio over n=20 (five cases, four kept runs)", s.get("units") == "ratio" and s.get("n") == 20)
+# VM1.3: repetition and the interval.
+check("both rows record four kept runs", s.get("runs") == 4 and l.get("runs") == 4)
+check("identical scores give the point interval [1, 1], labelled degenerate",
+      s.get("ci_low") == 1.0 and s.get("ci_high") == 1.0 and "degenerate" in (s.get("ci_method") or ""))
+check("latency carries the exhaustive BCa interval of four runs",
+      l.get("ci_method") == "bca-bootstrap-exhaustive-256")
+check("the CLI printed five run averages", len(printed) == 5)
+kept = printed[1:]
+check("the kept runs' latencies differ, so the interval is a real one", len(set(kept)) > 1)
+check("latency_mean is the mean of the four kept runs, not the warm-up",
+      len(kept) == 4 and abs(l.get("value", -1) - sum(kept) / 4) < 1e-6)
+if len(set(kept)) > 1:
+    lo, hi, method = bca_ci([float(x) for x in kept])
+    # core.eval.interval rounds outward to the millionth; result.py does not round.
+    check(f"the toke interval is result.py's BCa interval [{lo:.6f}, {hi:.6f}]",
+          abs(l.get("ci_low", 0) - math.floor(lo * 1e6) / 1e6) <= 1.5e-6
+          and abs(l.get("ci_high", 0) - math.ceil(hi * 1e6) / 1e6) <= 1.5e-6
+          and method == l.get("ci_method"))
 check("workload is bench-default-5", s.get("workload") == "bench-default-5")
 check("model and its Ollama digest are recorded", s.get("model") == "bench-model" and s.get("model_version") == "x")
 check("seed is null: temperature is not forwarded", s.get("seed") is None and "temperature" in (s.get("caveat") or ""))

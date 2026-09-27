@@ -20,7 +20,15 @@ i=sys:std.sys;
 
    The three commit fields are written null. The Python sink reads them from TOOLCHAIN.lock
    and git at write time; a running binary has neither, and a guessed commit would be the
-   unreproducible number that module exists to prevent. *)
+   unreproducible number that module exists to prevent.
+
+   VM1.3 added the repetition fields and the refusals that go with them, mirroring
+   result.validate: an interval needs both bounds and a method, the value must lie inside
+   it, a repeated measurement needs an interval and that interval must be BCa, and a
+   measurement that varies between runs (anything with a model, anything timed) is refused
+   from fewer than two runs. `runs` below 1 is written null; the bounds and method travel
+   as strings, "" meaning none, for the same T-20 reason as the value. The struct is now
+   at toke's sixteen-field limit (T-53). *)
 
 t=$measurement{
   metric:str;
@@ -34,7 +42,11 @@ t=$measurement{
   modelversion:str;
   seed:i64;
   notes:str;
-  caveat:str
+  caveat:str;
+  runs:i64;
+  cilow:str;
+  cihigh:str;
+  cimethod:str
 };
 
 (* A seed below zero means none was used, and is written null. *)
@@ -58,6 +70,49 @@ f=isnumber(v:str):bool{
   }
 };
 
+(* VM1.3, as result.needs_repetition: why the measurement can differ between runs, or "".
+   Units are matched as a whole first word ("ms", "s") or as a rate ("MB/s"). *)
+f=needsrepetition(m:$measurement):str{
+  if(str.len(m.model)>0){ <"depends on the output of model '\(m.model)'" }el{};
+  let units=str.lower(str.trim(m.units));
+  let timed=@("ns";"us";"ms";"s";"seconds");
+  lp(let i=0;i<timed.len;i=i+1){
+    let unit=timed.get(i);
+    if(str.eq(units;unit) || str.startswith(units;"\(unit) ")){ <"is timed (units '\(m.units)')" }el{}
+  };
+  if(str.contains(units;"/s")){ <"is timed (units '\(m.units)')" }el{};
+  let metric=str.lower(m.metric);
+  let words=@("latency";"throughput";"duration";"elapsed");
+  lp(let j=0;j<words.len;j=j+1){
+    if(str.contains(metric;words.get(j))){ <"is timed (metric '\(m.metric)')" }el{}
+  };
+  <""
+};
+
+f=numberof(v:str):f64{
+  <mt str.tofloat(v) {
+    $ok:x x;
+    $err:e 0.0
+  }
+};
+
+(* The interval refusals, split out of validate so each function stays short. *)
+f=intervalproblem(m:$measurement):str{
+  let haslow=str.len(m.cilow)>0;
+  if(haslow!=(str.len(m.cihigh)>0)){ <"ci_low and ci_high must be given together" }el{};
+  if(haslow){
+    if(!isnumber(m.cilow) || !isnumber(m.cihigh)){ <"an interval bound is not a finite number" }el{};
+    if(str.len(m.cimethod)==0){ <"ci_method is required when an interval is given" }el{};
+    let v=numberof(m.value);
+    if(v<numberof(m.cilow) || v>numberof(m.cihigh)){ <"value \(m.value) lies outside its interval [\(m.cilow), \(m.cihigh)]" }el{}
+  }el{};
+  if(m.runs>1 && !haslow){ <"\(m.runs) runs were recorded but no interval — a repeated measurement must report its spread" }el{};
+  if(m.runs>1 && !str.startswith(m.cimethod;"bca-")){ <"the interval is '\(m.cimethod)', and a repeated measurement is reported with a BCa bootstrap interval" }el{};
+  let why=needsrepetition(m);
+  if(str.len(why)>0 && m.runs<2){ <"this measurement \(why), so it varies between runs and one run is not a result (VM1.3)" }el{};
+  <""
+};
+
 (* An empty string means the measurement may be written. Anything else is the reason. *)
 f=validate(m:$measurement):str{
   if(str.len(m.metric)==0){ <"metric is required" }el{};
@@ -67,7 +122,7 @@ f=validate(m:$measurement):str{
   if(!isnumber(m.value)){ <"value is not a finite number: \(m.value)" }el{};
   if(istokenmetric(m.metric) && str.len(m.tokenizer)==0){ <"metric '\(m.metric)' is token-denominated, so tokenizer is required" }el{};
   if(str.len(m.model)>0 && str.len(m.modelversion)==0){ <"model_version is required whenever model is set" }el{};
-  <""
+  <intervalproblem(m)
 };
 
 f=strornull(v:str):str{
@@ -87,9 +142,20 @@ f=hostplatform():str{
   <"\(os)/x86_64"
 };
 
+(* A validated bound is written as the number it is; "" is null. *)
+f=numornull(v:str):str{
+  if(str.len(v)==0){ <"null" }el{};
+  <v
+};
+
+f=runsornull(runs:i64):str{
+  if(runs<1){ <"null" }el{};
+  <str.fromint(runs)
+};
+
 (* Keys in sorted order, as result.write emits them with sort_keys=True. *)
 f=tojson(m:$measurement;recordedat:str):str{
-  <"{\"arm\":\(strornull(m.arm)),\"caveat\":\(strornull(m.caveat)),\"ci_high\":null,\"ci_low\":null,\"ci_method\":null,\"container\":null,\"host_platform\":\(json.enc(hostplatform())),\"loke_commit\":null,\"metric\":\(json.enc(m.metric)),\"model\":\(strornull(m.model)),\"model_version\":\(strornull(m.modelversion)),\"n\":\(m.n),\"notes\":\(strornull(m.notes)),\"ooke_commit\":null,\"recorded_at\":\(json.enc(recordedat)),\"runs\":null,\"seed\":\(seedornull(m.seed)),\"toke_commit\":null,\"tokenizer\":\(strornull(m.tokenizer)),\"units\":\(json.enc(m.units)),\"value\":\(m.value),\"workload\":\(json.enc(m.workload))}"
+  <"{\"arm\":\(strornull(m.arm)),\"caveat\":\(strornull(m.caveat)),\"ci_high\":\(numornull(m.cihigh)),\"ci_low\":\(numornull(m.cilow)),\"ci_method\":\(strornull(m.cimethod)),\"container\":null,\"host_platform\":\(json.enc(hostplatform())),\"loke_commit\":null,\"metric\":\(json.enc(m.metric)),\"model\":\(strornull(m.model)),\"model_version\":\(strornull(m.modelversion)),\"n\":\(m.n),\"notes\":\(strornull(m.notes)),\"ooke_commit\":null,\"recorded_at\":\(json.enc(recordedat)),\"runs\":\(runsornull(m.runs)),\"seed\":\(seedornull(m.seed)),\"toke_commit\":null,\"tokenizer\":\(strornull(m.tokenizer)),\"units\":\(json.enc(m.units)),\"value\":\(m.value),\"workload\":\(json.enc(m.workload))}"
 };
 
 (* Validates, then appends one line. Returns "" on success, or why nothing was written. *)

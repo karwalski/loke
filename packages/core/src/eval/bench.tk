@@ -10,6 +10,7 @@ i=str:std.str;
 i=prov:core.providers.types;
 i=ol:core.models.ollama;
 i=sink:core.eval.resultsink;
+i=iv:core.eval.interval;
 i=file:std.file;
 
 t=$benchcase{
@@ -281,32 +282,87 @@ f=defaultresultspath():str{
   <"\(dir)/\(t.strslice(now;0;10)).jsonl"
 };
 
-f=runmeasurement(run:$benchrun;metric:str;value:str;units:str;digest:str;workload:str):$measurement{
+(* VM1.3 — repetition. The case set is run `runs` times against the same model, the first
+   run is discarded as warm-up, and each figure is the mean of the kept runs' averages with
+   its BCa interval (core.eval.interval), as docs/research/toon-benchmark-methodology.md
+   specifies. The methodology asks for five runs of a local model, so that is the default.
+   At least three are needed, so that two survive the warm-up to give an interval; at most
+   eight, because core.eval.interval enumerates up to seven kept runs and refuses more. *)
+f=defaultruns():i64{
+  <5
+};
+
+f=minruns():i64{
+  <3
+};
+
+f=maxruns():i64{
+  <iv.maxruns()+1
+};
+
+f=runrepeated(model:str;cases:@$benchcase;dispatcher:$dispatcher;runs:i64):@$benchrun{
+  let out=mut.@();
+  lp(let i=0;i<runs;i=i+1){
+    log.info("bench: run \(i+1) of \(runs)";"eval";"bench");
+    out=out.push(runbenchmark(model;cases;dispatcher))
+  };
+  <out
+};
+
+(* Each kept run's average in millionths: its score (a ratio) when `latency` is false, its
+   mean latency (whole ms) when true. The warm-up, runs.get(0), is skipped. The struct is
+   bound to an annotated local before its fields are read, the shape that does not fault. *)
+f=keptmicros(runs:@$benchrun;latency:bool):@i64{
+  let out=mut.@();
+  lp(let i=1;i<runs.len;i=i+1){
+    let r:$benchrun=runs.get(i);
+    if(latency){ out=out.push(r.avglatencyms*1000000) }el{ out=out.push((r.avgscore*1000000.0+0.5) as i64) }
+  };
+  <out
+};
+
+f=runmeasurement(first:$benchrun;kept:i64;metric:str;units:str;digest:str;workload:str;ci:$interval):$measurement{
   <$measurement{
     metric:metric;
-    value:value;
+    value:iv.microstr(ci.meanmicros);
     units:units;
     workload:workload;
-    n:run.casesrun;
+    n:first.casesrun*kept;
     arm:"";
     tokenizer:"";
-    model:run.model;
+    model:first.model;
     modelversion:digest;
     seed:sink.noseed();
-    notes:"loke benchmark: keyword matching over \(run.casesrun) fixed prompts, one run each. Toolchain commits are not known to a running binary.";
-    caveat:"temperature is not forwarded to Ollama (core.models.ollama.sendchatplain), so the model sampled at its own default and a rerun may differ"
+    notes:"loke benchmark: keyword matching over \(first.casesrun) fixed prompts, run \(kept+1) times with the first discarded as warm-up; the value is the mean of the \(kept) kept runs' averages and n counts every kept case. Toolchain commits are not known to a running binary.";
+    caveat:"temperature is not forwarded to Ollama (core.models.ollama.sendchatplain), so the model sampled at its own default and a rerun may differ";
+    runs:kept;
+    cilow:iv.microstr(ci.lowmicros);
+    cihigh:iv.microstr(ci.highmicros);
+    cimethod:ci.method
   }
 };
 
-(* Writes the run's two summary figures, or neither. Returns "" or why nothing was written.
-   The numbers are formatted to str here, in the module that computed them (T-20).
+(* Writes the two summary figures, or neither. Returns "" or why nothing was written. The
+   numbers are formatted to str here and in core.eval.interval, where they are computed
+   (T-20).
 
-   A run in which any case failed to dispatch is refused: casefailed scores it 0.0, and a
-   network failure averaged in as a wrong answer is not a measurement of the model. *)
-f=record(run:$benchrun;digest:str;workload:str;path:str):str{
-  if(!allok(run)){ <"a case failed to dispatch, and a failure scored as zero is not a measurement of the model" }el{};
-  let score=runmeasurement(run;"keyword_score";t.f64fixed(run.avgscore;4);"ratio";digest;workload);
-  let latency=runmeasurement(run;"latency_mean";str.fromint(run.avglatencyms);"ms";digest;workload);
+   A set of runs in which any case failed to dispatch is refused: casefailed scores it 0.0,
+   and a network failure averaged in as a wrong answer is not a measurement of the model.
+   So is a set too short to leave two runs after the warm-up, because a single run is not a
+   result (VM1.3), and the sink would refuse it anyway. *)
+f=record(runs:@$benchrun;digest:str;workload:str;path:str):str{
+  if(runs.len<minruns()){ <"\(runs.len) run(s): at least \(minruns()) are needed, so that two remain after the warm-up is discarded" }el{};
+  lp(let i=0;i<runs.len;i=i+1){
+    if(!allok(runs.get(i))){ <"a case failed to dispatch, and a failure scored as zero is not a measurement of the model" }el{}
+  };
+  let kept=runs.len-1;
+  let first:$benchrun=runs.get(0);
+  let sci=iv.bca(keptmicros(runs;false);0.95);
+  if(!sci.ok){ <sci.reason }el{};
+  let lci=iv.bca(keptmicros(runs;true);0.95);
+  if(!lci.ok){ <lci.reason }el{};
+  let score=runmeasurement(first;kept;"keyword_score";"ratio";digest;workload;sci);
+  let latency=runmeasurement(first;kept;"latency_mean";"ms";digest;workload;lci);
   let bad=sink.validate(score);
   if(str.len(bad)>0){ <bad }el{};
   let badl=sink.validate(latency);

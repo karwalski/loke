@@ -3,8 +3,8 @@
 
 F3.1 has carried a "10MB/s target" since it was written, and nothing had ever timed the
 detector. This harness does, by the VM1.3 method: N runs per size, the first discarded as
-warm-up, reported as a median and a range (and a percentile-bootstrap interval of the mean
-through benchmarks/lib/result.py).
+warm-up, reported as a median and a range (and, since VM1.3, the BCa interval of the mean
+through benchmarks/lib/result.py; rows recorded before 2026-09-28 carry a percentile one).
 
 What is timed: `core.privacy.regex.detect`, the function the privacy pipeline calls, which
 is pattern matching PLUS span recovery, the PL1.10 filters, placeholder assignment and
