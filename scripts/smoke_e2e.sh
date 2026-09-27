@@ -341,6 +341,35 @@ pipe_post "$CARDTEXT" "$AID3"
 judge "and a declined approval is refused" 403 '"approval_refusal":"declined"'
 if [ -s "$SEEN" ]; then echo "  FAIL an expired or declined approval reached the model" >&2; fail=1; fi
 
+# DA1.9 follow-up: overlapping requests. Each server worker has its own connection to loke.db,
+# and without a busy timeout a reserve that met another worker's lock failed at once, so the
+# request was refused with 503 ("the disclosure record could not be written"). Measured: four
+# of eight concurrent requests. smoke_ui's cancel-then-send checks overlap two requests, which
+# is why it failed intermittently. Every request here carries an address, so none can be a
+# cache hit, and all must be dispatched and recorded in both tables. With the timeout set
+# only after openstore's liveness check, the check itself still failed now and then (a
+# completion went missing in 1 of 6); that shows as "could not be opened" in loke's log.
+CONC=12
+disp_before=$(dl "SELECT COUNT() FROM disclosure_log WHERE state='completed'")
+aud_before=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='llm_dispatch'")
+for i in $(seq 1 $CONC); do
+  curl -s -m 60 -o "$WORK/conc$i" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d "{\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\",\"text\":\"hello there, please write to $EMAIL about item $i\"}" \
+    http://127.0.0.1:11430/api/pipeline > "$WORK/conccode$i" & CPIDS="${CPIDS:-} $!"
+done
+for p in $CPIDS; do wait "$p"; done
+codes=$(cat "$WORK"/conccode* | tr -d '\n')
+if [ "$codes" = "$(printf '200%.0s' $(seq 1 $CONC))" ]; then echo "  ok   $CONC overlapping requests are all answered"
+else echo "  FAIL overlapping requests answered $codes: $(grep -h -o '"error":"[^"]*"' "$WORK"/conc[0-9]* | sort | uniq -c | head -3)" >&2; fail=1; fi
+disp_after=$(dl "SELECT COUNT() FROM disclosure_log WHERE state='completed'")
+aud_after=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='llm_dispatch'")
+if [ $((disp_after - disp_before)) -eq $CONC ] && [ $((aud_after - aud_before)) -eq $CONC ]; then
+  echo "  ok   and each wrote its completed disclosure record and its llm_dispatch audit row"
+else echo "  FAIL overlapping requests wrote $((disp_after - disp_before)) completed records and $((aud_after - aud_before)) llm_dispatch rows, not $CONC" >&2; fail=1; fi
+opened=$(grep -c "the database could not be opened" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
+if [ "${opened:-0}" = "0" ]; then echo "  ok   and no request found the database locked when it opened it"
+else echo "  FAIL loke logged 'the database could not be opened' $opened time(s): a connection met a lock with no busy timeout" >&2; fail=1; fi
+
 # T10.1: with the per-provider kill switch engaged for ollama, the same request is refused
 # with the fallback message and nothing reaches the model. The row is written as
 # killswitch.engageprovider writes it.

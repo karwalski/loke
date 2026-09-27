@@ -242,6 +242,41 @@ f=dbencryptionstatus():str{
 (* Whether the process-global connection answers. db.open's failure is not reliably its
    $err arm: measured 2026-09-26, sqlite3_open returned SQLITE_CANTOPEN for a directory that
    did not exist, the $ok arm was taken, and every statement after it ran on a NULL handle. *)
+(* DA1.9 follow-up - a busy database waits, it does not fail.
+
+   The server is a pool of forked workers, each with its own connection to one loke.db, and
+   SQLite's default is to answer SQLITE_BUSY at once when another connection holds the lock.
+   Measured on the merged DA1.9 tree: eight concurrent POST /api/pipeline requests, four
+   answered 503 "the disclosure record could not be written", and two of those four refusals
+   were not even audited. The reserve's BEGIN IMMEDIATE, or its COMMIT while another worker
+   was reading, met the lock and failed, and a failed reserve refuses the request (L1). The
+   same race already existed for every autocommit write; the transaction made its window
+   wide enough to hit whenever two requests overlap, which smoke_ui's cancel-then-send checks
+   do. So every connection now waits up to busytimeoutms() for the lock. Read back, as
+   secure_delete is, because a pragma accepted is not a pragma applied. *)
+f=busytimeoutms():i64{ <5000 };
+
+(* The literal in the pragma is busytimeoutms(); the read-back compares against it. *)
+f=applybusytimeout():bool{
+  mt db.exec("PRAGMA busy_timeout=5000";@()) {
+    $ok:v 1;
+    $err:e 0
+  };
+  <busytimeoutset()
+};
+
+f=busytimeoutset():bool{
+  <str.eq(busytimeoutread();str.fromi64(busytimeoutms()))
+};
+
+(* As text, for the reason securedeleteenabled gives. "" if it cannot be read. *)
+f=busytimeoutread():str{
+  <mt db.one("PRAGMA busy_timeout";@()) {
+    $ok:r rowstr(r;"timeout");
+    $err:e ""
+  }
+};
+
 f=connectionlive():bool{
   <mt db.one("SELECT 1 AS v";@()) {
     $ok:r true;
@@ -259,6 +294,16 @@ f=openstore(datadir:str):$store!$lokeerr{
   let conn=mt db.open(path) {
     $ok:conn conn;
     $err:e $err($storageerr(str.concat("failed to open database: ";path)))
+  };
+  (* The busy timeout goes on BEFORE the liveness check. The check's SELECT reads the schema,
+     which needs a shared lock, and on a connection with no timeout it failed at once whenever
+     another worker was committing. openstore then returned an error its callers cannot see
+     (page.api.pipeline matches it with `mt`, T-18) and left this connection in place with no
+     timeout, so that request's reserve, completion and audit writes all failed at the first
+     contention. Measured: 1 in 60 concurrent requests refused, with "db: the database could
+     not be opened" logged just before it. *)
+  if(applybusytimeout()){}el{
+    log.warn("db: PRAGMA busy_timeout did not take effect; a write that meets another worker's lock will fail at once";"db";"system")
   };
   if(connectionlive()){}el{
     log.error("db: the database could not be opened, so nothing will be stored";"db";"system");

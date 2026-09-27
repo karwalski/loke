@@ -59,6 +59,19 @@ for _ in $(seq 1 40); do
     && nc -z -G 1 127.0.0.1 11434 2>/dev/null && break
   sleep 0.25
 done
+# The loop above gives up silently after ten seconds. On a loaded machine (the gate runs this
+# straight after a full build) a server could still be starting, and then Chrome loaded its own
+# connection-error page and every GA3 check ran against that: "showWarning is not defined",
+# "setViewMode is not defined", null elements. So wait for the pages themselves to answer 200,
+# for up to a minute, and fail naming the one that did not rather than judge an error page.
+for url in http://127.0.0.1:11432/chat http://127.0.0.1:11430/savings http://127.0.0.1:11430/chat; do
+  up=0
+  for _ in $(seq 1 120); do
+    [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$url")" = "200" ] && { up=1; break; }
+    sleep 0.5
+  done
+  [ "$up" -eq 1 ] || { echo "smoke_ui: FAILED — $url never answered 200, so no check was run against it" >&2; exit 1; }
+done
 
 
 node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "${UI_CHECKS:-$ROOT/tests/ui/chat_ga3.json}"

@@ -23,9 +23,18 @@ PORT="${SMOKE_MOKE_PORT:-11497}"
 
 [ -x "$BIN" ] || { echo "smoke_serve_moke: $BIN not built; run scripts/build_trees.sh moke" >&2; exit 1; }
 
+# It serves on its own port, but what it serves is a CLIENT of the fixed ports: moke's /api/pipeline, /api/routing and /api/ml/propose call loke at 127.0.0.1:11430,
+# and this script asserts loke is NOT there. So
+# it takes the fixed-port lock that smoke_e2e.sh and smoke_ui.sh hold. Without it, a run
+# overlapping another worktree's smoke_e2e sent that smoke's servers requests it had not made:
+# measured on 2026-09-27, an extra disclosure row ("hello") and a proposal request reaching
+# the fake model, which failed smoke_e2e's counts. Found by the DA1.9 follow-up.
+. "$ROOT/scripts/lib/fixedports_lock.sh"
+acquire_fixedports || { echo "smoke_serve_moke: could not get the fixed-port lock" >&2; exit 1; }
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/moke_smoke.XXXXXX")
 PID=
-cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; release_fixedports; }
 trap cleanup EXIT INT TERM
 
 for d in pages templates static; do [ -d "$SRC/$d" ] && cp -R "$SRC/$d" "$WORK/"; done
