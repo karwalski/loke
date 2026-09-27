@@ -11,8 +11,11 @@ i=out:cli.output;
 i=health:cli.health;
 i=bench:core.eval.bench;
 i=disp:core.providers.dispatcher;
+i=sdb:core.storage.db;
+i=er:core.storage.erase;
 i=str:std.str;
 i=argv:std.args;
+i=file:std.file;
 
 f=handleask(prompt:str):i64{
   out.printline(str.concat("Ask: ";prompt));
@@ -99,6 +102,53 @@ f=handlebenchmark(model:str;outpath:str;config:$lokeconfig):i64{
   out.printline("recorded keyword_score and latency_mean to \(path)");
   <0
 };
+(* X8.4 found this. `cfg.loadconfig` returns `$lokeconfig!$lokeerr`, whose error side is a
+   user sum, so the match always takes its first arm (T-18): with no config.toml, `config`
+   was the error payload read as a config, and `config.datadir` printed as "could not read
+   or parse …/config.toml". Every command that read a field of it read garbage. The guard is
+   the one packages/browser/extensions/core.tk uses: call loadconfig only when the file
+   exists, where its first arm is the right one. A file that exists but does not parse is
+   still undetectable here, which is the residue of T-18. *)
+f=loadedconfig():$lokeconfig{
+  let path=t.configpath();
+  if(file.exists(path)){
+    <mt cfg.loadconfig(path) {
+      $ok:v v;
+      $err:e cfg.defaultconfig()
+    }
+  }el{
+    <cfg.defaultconfig()
+  }
+};
+(* X8.4. What `loke erase --everything --yes` removes, stated before it is done. *)
+f=erasesummary(datadir:str):str{
+  <"Erasing everything under \(datadir): every table in loke.db (settings, the audit trail, disclosure records, memory, mappings), the log, the semantic cache, exports and benchmark results. config.toml and bin/ are kept. This cannot be undone. Stop the loke server first."
+};
+f=handleerasepreview(config:$lokeconfig):i64{
+  out.printline(erasesummary(config.datadir));
+  out.printline("Nothing has been erased. Run: loke erase --everything --yes");
+  <0
+};
+f=handleerase(config:$lokeconfig):i64{
+  out.printline(erasesummary(config.datadir));
+  let opened=mt sdb.openstore(config.datadir) {
+    $ok:st st;
+    $err:e $store{conn:$dbconn{handle:0};datadir:""}
+  };
+  (* T-18: the match above takes its first arm whatever openstore returned, so whether the
+     database is really open is asked of the connection. *)
+  if(sdb.connectionlive()){}el{
+    out.printerror("not erased: the database at \(config.datadir) could not be opened");
+    <1
+  };
+  let result=er.eraseeverything(opened);
+  if(result.erased){
+    out.printline("Erased: \(result.tablesdropped) tables dropped and the schema rebuilt empty, \(result.filesdeleted) files deleted, no free pages left in loke.db.");
+    <0
+  }el{};
+  out.printerror("NOT fully erased: \(result.reason)");
+  <1
+};
 f=handleversion():i64{
   out.printline("loke 0.1.0");
   <0
@@ -130,10 +180,7 @@ f=main():i32{
   let args:@str=argv.all();
   let cid=log.newcorrelationid();
 
-  let config=mt cfg.loadconfig(t.configpath()) {
-    $ok:v v;
-    $err:e cfg.defaultconfig()
-  };
+  let config=loadedconfig();
 
   log.info("loke cli starting";"cli";cid);
 
@@ -156,6 +203,8 @@ f=dispatch(command:$command;config:$lokeconfig):i64{
   if(str.eq(kind;"agentslist")){ <handleagentslist() }el{};
   if(str.eq(kind;"overnightstatus")){ <handleovernightstatus() }el{};
   if(str.eq(kind;"doctor")){ <handledoctor(config) }el{};
+  if(str.eq(kind;"erasepreview")){ <handleerasepreview(config) }el{};
+  if(str.eq(kind;"erase")){ <handleerase(config) }el{};
   if(str.eq(kind;"version")){ <handleversion() }el{};
   if(str.eq(kind;"help")){ <handlehelp() }el{};
   <handleunknown(command.arg)

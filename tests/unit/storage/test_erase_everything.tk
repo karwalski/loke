@@ -1,0 +1,329 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.storage.eraseeverything;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=er:core.storage.erase;
+i=mg:core.storage.migrations;
+i=ph:core.privacy.placeholder;
+i=pstore:core.privacy.placeholderstore;
+i=dsar:core.governance.dsar;
+
+(* X8.4 — "delete everything" proven by reading the bytes of every file under the data
+   directory, not by asking the program whether it deleted anything.
+
+   THE SHAPE. Every table in the store — whatever the migrations and the modules have
+   created, found through sqlite_master rather than listed here — gets a row whose every
+   column holds a fixture unique to that table. Files of the kinds loke writes under the
+   data directory (the log, the semantic cache's .vecs, an export, a benchmark result) get
+   fixtures of their own. core.storage.erase.eraseeverything then runs, and every fixture
+   is searched for in every file, in plain text, as hex, and as hex of hex — the three
+   forms a value takes on its way through the X8.2 codec, so an erasure that left a value
+   behind in encoded form is found too.
+
+   POSITIVE CONTROLS FIRST, one per table and one per encoding. Before the erasure the same
+   search must FIND each table's fixture, and must find a control value that exists on
+   disk ONLY as hex and one that exists ONLY as hex of hex. A search that cannot find a
+   planted value proves nothing by failing to find an erased one.
+
+   The data directory is under /tmp and unique to the run, never under ~/.loke. *)
+
+f=testdir(stamp:i64):str{
+  <"/tmp/loke-x84-erase-\(stamp)"
+};
+
+f=secret():str{
+  <"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+};
+
+(* One fixture per place a value can live. Distinctive enough that a chance match in a page
+   header is not credible, and carrying the place's name so a failing assertion says where. *)
+f=fixture(place:str):str{
+  <"Featherstonehaugh-\(place)-0491570156"
+};
+
+f=hexcontrol():str{
+  <"Hexonly-Quarterdeck-Wilhelmina-Control"
+};
+
+f=bytescontain(haystack:@byte;needle:str):bool{
+  let nb=str.bytes(needle);
+  let n=(nb.len as i64);
+  let h=(haystack.len as i64);
+  if(n==0){
+    <false
+  }el{};
+  if(h<n){
+    <false
+  }el{};
+  let limit=h-n;
+  let first=nb.get(0);
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>limit){
+      br
+    }el{
+      if(haystack.get(i)==first){
+        let j=mut.1;
+        let same=mut.true;
+        lp(let lv2=0;true;lv2=lv2){
+          if(j>=n){
+            br
+          }el{
+            if(haystack.get(i+j)==nb.get(j)){
+              j=j+1
+            }el{
+              same=false;
+              br
+            }
+          }
+        };
+        if(same){
+          <true
+        }el{}
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+(* file.readbytes, not file.read: a text read stops at the first NUL and a SQLite page is
+   full of them, which would make every absence assertion pass for the wrong reason. *)
+f=filecontains(path:str;needle:str):bool{
+  <mt file.readbytes(path) {
+    $ok:bytes bytescontain(bytes;needle);
+    $err:e false
+  }
+};
+
+(* EVERY regular file under the directory, recursively: the database, a journal, a WAL, a
+   cache file, a log, and any file a future change adds. *)
+f=treecontains(dir:str;needle:str):bool{
+  let names=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  lp(let i=0;i<names.len;i=i+1){
+    if(filecontains("\(dir)/\(names.get(i))";needle)){
+      <true
+    }el{}
+  };
+  <false
+};
+
+(* In any of the three forms. *)
+f=treecontainsany(dir:str;value:str):bool{
+  if(treecontains(dir;value)){ <true }el{};
+  if(treecontains(dir;pstore.hexof(value))){ <true }el{};
+  <treecontains(dir;pstore.hexof(pstore.hexof(value)))
+};
+
+f=filecount(dir:str):i64{
+  let names=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  <names.len as i64
+};
+
+f=tablenames():@str{
+  let rows=mt db.many("SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7)<>'sqlite_' ORDER BY name";@()) {
+    $ok:r r;
+    $err:e @()
+  };
+  let out=mut.@();
+  lp(let ri=0;ri<rows.len;ri=ri+1){
+    out=out.push(sdb.rowstr(rows.get(ri);"name"))
+  };
+  <out
+};
+
+(* One row in `table`, every column holding that table's fixture — except an INTEGER
+   PRIMARY KEY, which is the rowid and must be an integer, so SQLite assigns it. The columns
+   come from the schema, so a column added tomorrow is filled without this file changing. *)
+f=filltable(table:str):bool{
+  let cols=mt db.many("SELECT name,type,pk FROM pragma_table_info(?)";@(table)) {
+    $ok:r r;
+    $err:e @()
+  };
+  let names=mut.@();
+  let marks=mut.@();
+  let values=mut.@();
+  lp(let ci=0;ci<cols.len;ci=ci+1){
+    let col=cols.get(ci);
+    let rowid=str.eq(sdb.rowstr(col;"pk");"1") && str.eq(str.upper(sdb.rowstr(col;"type"));"INTEGER");
+    if(rowid){}el{
+      let colname=sdb.rowstr(col;"name");
+      names=names.push(str.concat("\"";str.concat(colname;"\"")));
+      marks=marks.push("?");
+      values=values.push(fixture(table))
+    }
+  };
+  if(names.len==0){
+    <false
+  }el{};
+  let collist=str.join(",";names);
+  let marklist=str.join(",";marks);
+  let sql="INSERT INTO \"\(table)\" (\(collist)) VALUES (\(marklist))";
+  let inserted=mt db.exec(sql;values) {
+    $ok:v true;
+    $err:e false
+  };
+  if(inserted){}el{
+    <false
+  };
+  <sdb.countquery("SELECT 1 FROM \"\(table)\"";@())>0
+};
+
+f=subjectmap():$placeholdermap{
+  let m0=ph.newmap();
+  let m1=ph.addentry(m0;fixture("mapping-name");"[PERSON_7f21_1]";"PERSON");
+  <ph.addentry(m1;fixture("mapping-email");"[EMAIL_7f21_1]";"EMAIL")
+};
+
+f=writefile(path:str;content:str):bool{
+  <mt file.write(path;content) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* The files loke writes under its data directory, by the paths that write them:
+   shared.log (loke.log), page.api.pipeline's semantic cache (cache/prompt_cache.vecs),
+   core.policy.export (exports/), core.eval.bench (benchmarks/). *)
+f=erasedfiles():@str{
+  <@("loke.log";"cache/prompt_cache.vecs";"exports/audit_1758000000.json";"benchmarks/2026-09-27.jsonl")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let dir=testdir(sdb.nowms());
+
+  let opened=mt sdb.openstore(dir) {
+    $ok:st st;
+    $err:e $store{conn:$dbconn{handle:0};datadir:""}
+  };
+  if(t.assert(str.eq(opened.datadir;dir);"the test store opens in a fresh directory under /tmp")){pass=pass+1}el{fail=fail+1};
+
+  (* Tables some modules create on first use rather than by migration, and one no module
+     knows about — standing in for whatever is added next. *)
+  if(t.assert(dsar.ensuretable(0);"dsar_requests is created the way core.governance.dsar creates it")){pass=pass+1}el{fail=fail+1};
+  let future=mt db.exec("CREATE TABLE IF NOT EXISTS x84_future_table (id TEXT PRIMARY KEY, body TEXT NOT NULL, blob_col BLOB)";@()) {
+    $ok:v true;
+    $err:e false
+  };
+  if(t.assert(future;"and a table no module names, standing in for the next one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── fill every table ─────────────────────────────────────────────────────────*)
+  let tables=tablenames();
+  if(t.assert((tables.len as i64)>=22;"the store has the twenty tables the migrations create, and the two above")){pass=pass+1}el{fail=fail+1};
+  let named=@("audit_log";"decision_trace";"disclosure_log";"approval_requests";"nc_artifact_runs";"placeholder_map_records";"memory_drawers";"metrics_raw";"settings";"kv");
+  lp(let ni=0;ni<named.len;ni=ni+1){
+    if(t.assert(sdb.tableexists(named.get(ni));"among them \(named.get(ni)), so it is filled and searched for below")){pass=pass+1}el{fail=fail+1}
+  };
+  lp(let ti=0;ti<tables.len;ti=ti+1){
+    let table=tables.get(ti);
+    if(t.assert(filltable(table);"a row holding the fixture is written to \(table)")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* The sealed mapping, through its own writer. Its values never reach the file in any
+     form (X8.2); what erasure must remove is the row. *)
+  let stored=pstore.storemappingwithsecret("req-x84-erase";subjectmap();secret());
+  if(t.assert(stored;"a sealed mapping is stored")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-x84-erase")==1;"as one sealed record")){pass=pass+1}el{fail=fail+1};
+
+  (* The encoding controls: values present on disk ONLY in encoded form. *)
+  let hexrow=mt db.exec("INSERT INTO x84_future_table (id,body) VALUES (?,?)";@("hex";pstore.hexof(hexcontrol()))) {$ok:v true;$err:e false};
+  let dhexrow=mt db.exec("INSERT INTO x84_future_table (id,body) VALUES (?,?)";@("dhex";pstore.hexof(pstore.hexof(fixture("dhex-control"))))) {$ok:v true;$err:e false};
+  if(t.assert(hexrow && dhexrow;"the two encoded-only control values are written")){pass=pass+1}el{fail=fail+1};
+
+  (* ── files ────────────────────────────────────────────────────────────────────*)
+  mt file.mkdir("\(dir)/cache") {$ok:v 1;$err:e 0};
+  mt file.mkdir("\(dir)/exports") {$ok:v 1;$err:e 0};
+  mt file.mkdir("\(dir)/benchmarks") {$ok:v 1;$err:e 0};
+  mt file.mkdir("\(dir)/bin") {$ok:v 1;$err:e 0};
+  let planted=erasedfiles();
+  lp(let pi=0;pi<planted.len;pi=pi+1){
+    let rel=planted.get(pi);
+    if(t.assert(writefile("\(dir)/\(rel)";"{\"prompt\":\"\(fixture(rel))\"}\n");"a file holding the fixture is written at \(rel)")){pass=pass+1}el{fail=fail+1}
+  };
+  if(t.assert(writefile("\(dir)/config.toml";"[server]\nport = 11451\n");"config.toml is written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writefile("\(dir)/bin/tool";"#!/bin/sh\nexit 0\n");"and an installed executable under bin/")){pass=pass+1}el{fail=fail+1};
+
+  (* ── POSITIVE CONTROLS ────────────────────────────────────────────────────────
+     Before anything is erased the search must find every planted value. *)
+  lp(let ti=0;ti<tables.len;ti=ti+1){
+    let table=tables.get(ti);
+    if(t.assert(treecontains(dir;fixture(table));"CONTROL: before erasure the search finds the fixture of \(table) in plain text")){pass=pass+1}el{fail=fail+1}
+  };
+  lp(let pi=0;pi<planted.len;pi=pi+1){
+    let rel=planted.get(pi);
+    if(t.assert(treecontains(dir;fixture(rel));"CONTROL: before erasure the search finds the fixture in \(rel)")){pass=pass+1}el{fail=fail+1}
+  };
+  if(t.assert(treecontains(dir;pstore.hexof(hexcontrol()));"CONTROL: the search finds a value stored only as hex, by its hex form")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(dir;hexcontrol());"and that value is not on disk in plain text, so it is the hex search that found it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontains(dir;pstore.hexof(pstore.hexof(fixture("dhex-control"))));"CONTROL: the search finds a value stored only as hex of hex, by that form")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(dir;pstore.hexof(fixture("dhex-control")));"and not by its single-hex form, so each encoding is searched for separately")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a store that is not the one to erase is refused ────────────────────────────*)
+  let relative=er.eraseeverything($store{conn:opened.conn;datadir:"relative/loke"});
+  if(t.assert(!relative.erased;"a relative data directory is refused")){pass=pass+1}el{fail=fail+1};
+  let nodb=er.eraseeverything($store{conn:opened.conn;datadir:"\(dir)/exports"});
+  if(t.assert(!nodb.erased;"and so is a directory with no loke.db in it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontains(dir;fixture("loke.log"));"and a refusal deletes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── ERASE ─────────────────────────────────────────────────────────────────────*)
+  let result=er.eraseeverything(opened);
+  if(t.assert(result.erased;"eraseeverything reports that everything was erased")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(result.tablesdropped==(tables.len as i64);"every table found before erasure was dropped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(result.filesdeleted==(planted.len as i64);"every planted file was deleted, and nothing else")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(result.freelistempty;"no free page remains in the database file: VACUUM ran")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.pendingmigrations(mg.allmigrations())==0;"the schema is rebuilt, so the store still works")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.auditappendonlyenforced();"including the append-only triggers on the new audit_log")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.securedeleteenabled();"and secure_delete is still on")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.tableexists("x84_future_table");"the table no module names is gone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sdb.tableexists("dsar_requests");"and so is the table a module creates on first use")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pstore.countforrequest("req-x84-erase")==0;"no sealed mapping record remains")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT 1 FROM audit_log";@())==0;"and the audit trail is empty")){pass=pass+1}el{fail=fail+1};
+  db.close();
+
+  let keptconfig=file.exists("\(dir)/config.toml");
+  let keptbin=file.exists("\(dir)/bin/tool");
+  if(t.assert(keptconfig && keptbin;"config.toml and bin/ are kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(file.exists("\(dir)/loke.db");"and loke.db is erased in place, not removed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(filecount(dir)>0;"there are files left to search, so the search is not passing on an empty tree")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE X8.4 ASSERTION ─────────────────────────────────────────────────────────
+     No fixture, in any of the three forms, in any file under the data directory. *)
+  lp(let ti=0;ti<tables.len;ti=ti+1){
+    let table=tables.get(ti);
+    if(t.assert(!treecontainsany(dir;fixture(table));"AFTER erasure no file holds the fixture of \(table), plain, hex or double hex")){pass=pass+1}el{fail=fail+1}
+  };
+  lp(let pi=0;pi<planted.len;pi=pi+1){
+    let rel=planted.get(pi);
+    if(t.assert(!treecontainsany(dir;fixture(rel));"AFTER erasure no file holds the fixture of \(rel)")){pass=pass+1}el{fail=fail+1}
+  };
+  if(t.assert(!treecontains(dir;pstore.hexof(hexcontrol()));"AFTER erasure the hex-only control is gone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(dir;pstore.hexof(pstore.hexof(fixture("dhex-control"))));"and the double-hex-only control")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(dir;fixture("mapping-name"));"and the sealed mapping's values, which were never on disk, are not now either")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(dir;"req-x84-erase");"nor the sealed mapping's request id, which was stored in the clear")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(dir;"Featherstonehaugh");"nor any fragment of a fixture")){pass=pass+1}el{fail=fail+1};
+
+  (* Clean up the run's directory. Empty directories are left: std.file has no rmdir. *)
+  let leftover=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  lp(let li=0;li<leftover.len;li=li+1){
+    mt file.delete("\(dir)/\(leftover.get(li))") {$ok:v 1;$err:e 0}
+  };
+
+  <fail
+};

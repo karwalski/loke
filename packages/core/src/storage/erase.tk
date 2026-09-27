@@ -1,0 +1,241 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.storage.erase;
+
+i=db:std.db;
+i=str:std.str;
+i=file:std.file;
+i=log:shared.log;
+i=s:core.storage.db;
+i=mg:core.storage.migrations;
+
+(* ══════════════════════════════════════════════════════════════════════════════
+   X8.4 — delete everything, verifiably.
+
+   Before this module there was no "delete everything" in loke. The nearest things were
+   core.governance.dsar.processerasure, which deletes ONE subject's consent rows and
+   deliberately keeps the audit trail, and core.privacy.placeholderstore.purgeallmappings,
+   which empties one table. Neither removes what a user means by "delete everything I have
+   given loke": prompts in the semantic cache, memory drawers, disclosure records, the log
+   file, exported reports.
+
+   WHAT IS ERASED. Everything under the data directory, in two layers.
+
+     The database. EVERY table in loke.db is dropped — enumerated from sqlite_master at run
+     time, never from a list here, so a table some module creates tomorrow is erased without
+     this file being edited. That includes audit_log: its append-only triggers stop UPDATE
+     and DELETE, and they are the control against a trail being edited while it exists.
+     Destroying the whole installation at its owner's request is a different act — the
+     owner can already remove the file — and a "delete everything" that kept the trail would
+     not be one. This is the one path in the product that ends the trail, and it ends all of
+     it, never a part. SQLite's own bookkeeping tables (sqlite_sequence and the sqlite_stat tables) are
+     emptied, since they cannot be dropped. The schema is then rebuilt by the migrations, so
+     the store the caller holds keeps working, and the file is VACUUMed LAST.
+
+     Every other regular file under the data directory is unlinked: the log, the semantic
+     cache's .vecs files, exports, benchmark results, and anything a future module writes
+     there. Deletion is the default and keeping is the exception, for the same reason the
+     tables are enumerated: an allow-list of what to delete is out of date the day a module
+     adds a file. Kept: loke.db and its SQLite sidecars (erased in place above, and SQLite
+     owns them while the connection is open), config.toml (settings the user wrote, not data
+     loke gathered), and bin/ (installed executables).
+
+   WHY BOTH secure_delete AND VACUUM. Dropping a table only moves its pages to the freelist;
+   their bytes stay legible in the file. PRAGMA secure_delete zeroes them as they are freed
+   (measured, see core.storage.db.applysecuredelete), and VACUUM rebuilds the file so that
+   no free page survives at all — `PRAGMA freelist_count` is read back and must be 0. Either
+   alone clears the FILE of the dropped values; they are not redundant beyond it. The
+   rollback journal of the DROP transaction holds pre-image pages, secure_delete or not, and
+   SQLite unlinks it at commit, so those bytes sit in freed filesystem blocks outside any
+   file. With secure_delete on, the journal VACUUM writes holds only zeroed pages.
+
+   WHAT IS NOT CLAIMED. Unlinking a file frees its blocks; it does not overwrite them, and on
+   APFS (copy-on-write, and an SSD beneath it) overwriting a file in place would not
+   overwrite the old blocks either. Recovering them needs raw access to the volume; the
+   protection there is FileVault, not loke. The proof here is the one the story asks for:
+   no FILE under the data directory contains the value, in any encoding —
+   tests/unit/storage/test_erase_everything.tk reads every byte of every file to show it.
+
+   One connection. std.db keeps a single process-wide connection (T-30), so this erases
+   whatever database that connection has open; the caller passes the $store openstore
+   returned for the same data directory, and the files deleted are the ones under
+   store.datadir. The data directory must be an absolute path holding a loke.db, so an
+   empty or mistyped path cannot turn into unlinking files somewhere else.
+
+   A plain struct, not a result: a result whose error side is a user sum takes its first arm
+   whatever it holds (T-18). *)
+
+t=$eraseresult{
+  erased:bool;
+  tablesdropped:i64;
+  filesdeleted:i64;
+  freelistempty:bool;
+  reason:str
+};
+
+f=refused(reason:str):$eraseresult{
+  log.warn("erase: refused, nothing was erased: \(reason)";"erase";"system");
+  <$eraseresult{erased:false;tablesdropped:0;filesdeleted:0;freelistempty:false;reason:reason}
+};
+
+(* An identifier as SQL, double quotes doubled. Names come from sqlite_master, not from a
+   caller, but a name is still not SQL. *)
+f=doubledquotes(name:str):str{
+  <str.replace(name;"\"";"\"\"")
+};
+
+f=quoteident(name:str):str{
+  <"\"\(doubledquotes(name))\""
+};
+
+f=names(sql:str):@str{
+  let rows=mt db.many(sql;@()) {
+    $ok:r r;
+    $err:e @()
+  };
+  let out=mut.@();
+  (* An empty name is a row that failed to read (rowstr answers "" for that), and
+     `DROP TABLE ""` would only fail, so it is not collected. *)
+  lp(let ri=0;ri<rows.len;ri=ri+1){
+    let name=s.rowstr(rows.get(ri);"name");
+    if(str.len(name)>(0 as u64)){ out=out.push(name) }el{}
+  };
+  <out
+};
+
+(* Tables loke or anything else created. sqlite_* are SQLite's own and cannot be dropped. *)
+f=usertables():@str{
+  <names("SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7)<>'sqlite_' ORDER BY name")
+};
+
+f=internaltables():@str{
+  <names("SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7)='sqlite_' ORDER BY name")
+};
+
+f=views():@str{
+  <names("SELECT name FROM sqlite_master WHERE type='view' ORDER BY name")
+};
+
+f=run(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* Read as TEXT: a pragma whose legitimate value is 0 is unreadable through the integer
+   accessor, which also answers 0 for a failure (see core.storage.db.securedeleteenabled). *)
+f=freelistempty():bool{
+  <mt db.one("PRAGMA freelist_count";@()) {
+    $ok:r str.eq(s.rowstr(r;"freelist_count");"0");
+    $err:e false
+  }
+};
+
+(* What survives the file layer. Everything else is deleted. *)
+f=kept(rel:str):bool{
+  if(str.eq(rel;"loke.db")){ <true }el{};
+  if(str.eq(rel;"loke.db-journal")){ <true }el{};
+  if(str.eq(rel;"loke.db-wal")){ <true }el{};
+  if(str.eq(rel;"loke.db-shm")){ <true }el{};
+  if(str.eq(rel;"config.toml")){ <true }el{};
+  <str.startswith(rel;"bin/")
+};
+
+f=safedatadir(datadir:str):bool{
+  if(str.len(datadir)<(2 as u64)){ <false }el{};
+  if(str.startswith(datadir;"/")){}el{ <false };
+  <file.exists("\(datadir)/loke.db")
+};
+
+(* The database layer. Answers the number of tables dropped, or -1 if any step failed. *)
+f=erasedatabase(store:$store):i64{
+  if(s.applysecuredelete()){}el{
+    log.warn("erase: PRAGMA secure_delete did not take effect; relying on VACUUM alone to clear freed pages";"erase";"system")
+  };
+  let ok=mut.true;
+  let vs=views();
+  lp(let vi=0;vi<vs.len;vi=vi+1){
+    if(run("DROP VIEW IF EXISTS \(quoteident(vs.get(vi)))")){}el{ ok=false }
+  };
+  let tables=usertables();
+  let dropped=mut.0;
+  lp(let ti=0;ti<tables.len;ti=ti+1){
+    if(run("DROP TABLE IF EXISTS \(quoteident(tables.get(ti)))")){
+      dropped=dropped+1
+    }el{
+      log.error("erase: a table could not be dropped";"erase";"system");
+      ok=false
+    }
+  };
+  let internal=internaltables();
+  lp(let ii=0;ii<internal.len;ii=ii+1){
+    if(run("DELETE FROM \(quoteident(internal.get(ii)))")){}el{ ok=false }
+  };
+  (* Counted, not listed, and a failed count reads as 1: a query that cannot answer must
+     not look like an empty schema. *)
+  if(s.scalari64("SELECT COUNT(name) AS n FROM sqlite_master WHERE type='table' AND substr(name,1,7)<>'sqlite_'";@();"n";1)>0){
+    log.error("erase: tables remain after every table was dropped";"erase";"system");
+    ok=false
+  }el{};
+  (* Its result is not matched: T-18 would read it as $ok whatever it holds. Whether the
+     schema is complete is asked directly, below. *)
+  s.runmigrations(store.conn);
+  if(s.pendingmigrations(mg.allmigrations())>0){
+    log.error("erase: the schema could not be rebuilt after erasure";"erase";"system");
+    ok=false
+  }el{};
+  if(run("VACUUM")){}el{
+    log.error("erase: VACUUM failed, so freed pages may remain in the file";"erase";"system");
+    ok=false
+  };
+  if(ok){ <dropped as i64 }el{ <0-1 }
+};
+
+(* The file layer. Answers the number of files deleted, or -1 if any could not be. *)
+f=erasefiles(datadir:str):i64{
+  let rels=mt file.listall(datadir) {
+    $ok:n n;
+    $err:e @()
+  };
+  let ok=mut.true;
+  let deleted=mut.0;
+  lp(let fi=0;fi<rels.len;fi=fi+1){
+    let rel=rels.get(fi);
+    if(kept(rel)){}el{
+      if(mt file.delete("\(datadir)/\(rel)") {$ok:v true;$err:e false}){ deleted=deleted+1 }el{
+        log.error("erase: a file under the data directory could not be deleted";"erase";"system");
+        ok=false
+      }
+    }
+  };
+  if(ok){ <deleted as i64 }el{ <0-1 }
+};
+
+(* The entry point. `store` is what core.storage.db.openstore returned for the data
+   directory to erase. *)
+f=eraseeverything(store:$store):$eraseresult{
+  let datadir=store.datadir;
+  if(safedatadir(datadir)){}el{
+    <refused("the data directory is not an absolute path holding a loke.db")
+  };
+  if(s.connectionlive()){}el{
+    <refused("the database connection is not open")
+  };
+  log.info("erase: erasing everything under the data directory";"erase";"system");
+  let dropped=erasedatabase(store);
+  let empty=freelistempty();
+  let files=erasefiles(datadir);
+  let erased=dropped>=0 && files>=0 && empty;
+  let reason=mut."";
+  if(dropped<0){ reason="the database layer did not complete" }el{};
+  if(files<0){ reason="a file under the data directory could not be deleted" }el{};
+  if(empty){}el{ reason="free pages remain in the database file after VACUUM" };
+  if(erased){
+    log.info("erase: everything under the data directory was erased";"erase";"system")
+  }el{
+    log.error("erase: INCOMPLETE — \(reason)";"erase";"system")
+  };
+  <$eraseresult{erased:erased;tablesdropped:dropped;filesdeleted:files;freelistempty:empty;reason:reason}
+};

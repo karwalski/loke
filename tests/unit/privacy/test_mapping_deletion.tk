@@ -44,7 +44,16 @@ i=pstore:core.privacy.placeholderstore;
 
    The control also measures the counterfactual directly: the plaintext marker is present
    after INSERT, and gone after DELETE — which is secure_delete working, on this machine,
-   on this file, in this run. *)
+   on this file, in this run.
+
+   THREE FORMS, EACH WITH ITS OWN CONTROL. A value is searched for in plain text, as hex
+   and as hex of hex, because that is how the X8.2 codec would leave it on disk if the seal
+   were skipped; a plain-only search passed under exactly that mutant. Two markers exist on
+   disk only in encoded form, one as hex and one as hex of hex, and the search is shown
+   finding each by that form alone before any absence is asserted.
+
+   This test covers ONE subject's mapping. Deleting everything under the data directory is
+   core.storage.erase, proven the same way in tests/unit/storage/test_erase_everything.tk. *)
 
 f=testdir():str{
   (* str.concat, not interpolation: std.homedir() is truncated when interpolated (T-21). *)
@@ -72,6 +81,16 @@ f=subjectphone():str{
 
 f=plaintextmarker():str{
   <"PLAINTEXT-CONTROL-MARKER-Featherstonehaugh"
+};
+
+(* Controls that exist on disk ONLY in an encoded form, so that finding them proves the
+   hex and double-hex searches work, not the plain one. *)
+f=hexmarker():str{
+  <"HEX-ONLY-CONTROL-Featherstonehaugh"
+};
+
+f=dhexmarker():str{
+  <"DOUBLE-HEX-ONLY-CONTROL-Featherstonehaugh"
 };
 
 f=opendb():i64{
@@ -163,6 +182,17 @@ f=treecontains(dir:str;needle:str):bool{
   <false
 };
 
+(* A value in any of the three forms it takes through the X8.2 codec. Inside the sealed
+   payload every field is hex-encoded, and the row stores the sealed bytes as hex, so an
+   erasure or a seal that went wrong would leave hex(value) or hex(hex(value)) behind —
+   neither of which a plain search can see. The X8.2 worker measured exactly that: with
+   the seal bypassed and the codec kept, the plain-only version of this test passed. *)
+f=treecontainsany(dir:str;value:str):bool{
+  if(treecontains(dir;value)){ <true }el{};
+  if(treecontains(dir;pstore.hexof(value))){ <true }el{};
+  <treecontains(dir;pstore.hexof(pstore.hexof(value)))
+};
+
 f=filecount(dir:str):i64{
   let names=mt file.listall(dir) {
     $ok:n n;
@@ -200,8 +230,17 @@ f=main():i64{
       ci=ci+1
     }
   };
+  mt db.exec("INSERT OR REPLACE INTO deletion_control (id,marker) VALUES (?,?)";@("hex";pstore.hexof(hexmarker()))) {$ok:v 1;$err:e 0};
+  mt db.exec("INSERT OR REPLACE INTO deletion_control (id,marker) VALUES (?,?)";@("dhex";pstore.hexof(pstore.hexof(dhexmarker())))) {$ok:v 1;$err:e 0};
   db.close();
   if(t.assert(treecontains(testdir();plaintextmarker());"CONTROL: the search finds a value written in the clear, so it is capable of finding one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontains(testdir();pstore.hexof(hexmarker()));"CONTROL: the hex search finds a value written only as hex")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();hexmarker());"and that value is not on disk in plain text, so it was the hex search that found it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontainsany(testdir();hexmarker());"and the three-form search finds it too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontains(testdir();pstore.hexof(pstore.hexof(dhexmarker())));"CONTROL: the double-hex search finds a value written only as hex of hex")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();pstore.hexof(dhexmarker()));"and neither the single-hex search")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();dhexmarker());"nor the plain one finds it, so each encoding is searched for separately")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontainsany(testdir();dhexmarker());"and the three-form search finds it")){pass=pass+1}el{fail=fail+1};
 
   (* ── store the subject's mapping ─────────────────────────────────────────────*)
   let reopened=opendb();
@@ -220,9 +259,9 @@ f=main():i64{
      the file even now. Deletion cannot fail to remove what was never written. *)
   db.close();
   if(t.assert(treecontains(testdir();"req-dsar-1");"the request id is in the file, in the clear, as the schema intends")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();subjectname());"BEFORE deletion: the subject's name is already absent from every file, because it was never written")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();subjectemail());"and so is the email address")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();subjectphone());"and the phone number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectname());"BEFORE deletion: the subject's name is already absent from every file, plain, hex or double hex, because it was never written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectemail());"and so is the email address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectphone());"and the phone number")){pass=pass+1}el{fail=fail+1};
 
   (* ── delete ──────────────────────────────────────────────────────────────────*)
   let reopenedagain=opendb();
@@ -256,10 +295,10 @@ f=main():i64{
   (* ── THE X8.4 ASSERTION ──────────────────────────────────────────────────────
      No plaintext of the deleted subject's values in ANY file under the data directory. *)
   if(t.assert(filecount(testdir())>0;"there are files under the data directory to search, so the search is not passing on an empty tree")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();subjectname());"AFTER deletion: no plaintext of the subject's name in any file under the data directory")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();subjectemail());"nor of the email address")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();subjectphone());"nor of the phone number")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!treecontains(testdir();"[PERSON_7f21_1]");"nor of the placeholder, which carries the entity type and the ordinal")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectname());"AFTER deletion: the subject's name is in no file under the data directory, plain, hex or double hex")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectemail());"nor the email address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectphone());"nor the phone number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();"[PERSON_7f21_1]");"nor the placeholder, which carries the entity type and the ordinal")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!treecontains(testdir();"Featherstonehaugh");"nor a fragment of the surname, which would survive a partial overwrite")){pass=pass+1}el{fail=fail+1};
 
   (* And the counterfactual: the plaintext marker WAS in the file and is not any more.
@@ -285,7 +324,7 @@ f=main():i64{
   if(t.assert(pstore.expireold();"expireold runs rather than crashing on a field access against an integer")){pass=pass+1}el{fail=fail+1};
 
   db.close();
-  if(t.assert(!treecontains(testdir();subjectname());"and after a purge the subject's name is still nowhere under the data directory")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontainsany(testdir();subjectname());"and after a purge the subject's name is still nowhere under the data directory, in any of the three forms")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };
