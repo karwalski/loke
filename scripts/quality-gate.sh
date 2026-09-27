@@ -492,7 +492,10 @@ step_checks() {
   fi
 
   echo "  toke source carries its licence header and no C-style comments"
-  stray=$(git ls-files -z '*.tk' 2>/dev/null \
+  # docs/upstream/repro-*/ holds minimal reproducers of toke defects, written to be sent
+  # upstream as they are; a reproducer may need to contain the defect it demonstrates, and
+  # O-1's store.tk is a byte-for-byte copy of ooke's file. Neither rule applies to them.
+  stray=$(git ls-files -z '*.tk' ':!docs/upstream/repro-*' 2>/dev/null \
           | xargs -0 grep -ln '^//' 2>/dev/null \
           | while read -r f; do
               grep '^//' "$f" \
@@ -509,7 +512,7 @@ step_checks() {
 
   # _archived-tests/ never carried the header, so requiring it there would be a
   # rule invented by this check rather than an invariant of the repository.
-  missing=$(git ls-files -z '*.tk' 2>/dev/null \
+  missing=$(git ls-files -z '*.tk' ':!docs/upstream/repro-*' 2>/dev/null \
             | tr '\0' '\n' | grep -v '^_archived-tests/' | tr '\n' '\0' \
             | xargs -0 grep -L 'Copyright 2026 loke contributors' 2>/dev/null \
             | grep -vFf <(grep -v '^#' scripts/known-defects.txt | awk 'NF{print $1}') || true)

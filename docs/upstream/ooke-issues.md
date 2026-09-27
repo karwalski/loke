@@ -1,5 +1,7 @@
 # ooke upstream issues
 
+> **Current state: see [`handoff-2026-09-27.md`](handoff-2026-09-27.md)** (O-1 re-verified; O-2 and O-3 added).
+
 Defects in ooke found while building loke. The toke ones are in `toke-issues.md`.
 
 ## O-1 — ooke 3.0.0-rc.1 does not compile with toke after `060e11b`

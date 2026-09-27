@@ -63,6 +63,11 @@ def main() -> int:
     for f in sorted(REPO.rglob("*.tk")):
         if "archive" in f.parts or "build" in f.parts:
             continue
+        # Reproducers of upstream toke defects (docs/upstream/repro-*) contain the defect on
+        # purpose: T-24's is exactly this pattern. Agent worktrees are other branches.
+        rel = f.relative_to(REPO).as_posix()
+        if rel.startswith("docs/upstream/repro-") or rel.startswith(".claude/"):
+            continue
         text = f.read_text(errors="replace")
         pos = 0
         while True:

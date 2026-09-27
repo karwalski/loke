@@ -1,5 +1,9 @@
 # toke — issues found building loke
 
+> **Current state: see [`handoff-2026-09-27.md`](handoff-2026-09-27.md).** Every entry below was
+> re-verified there against toke `0b0bc4e` and `4a50b87`, several are stale, and T-47 names two
+> different defects (T-47a/T-47b there). This file is the detailed history.
+
 **Reported by:** the loke project (`github.com/karwalski/loke`)
 **Toolchain under test:** toke `445f519` (mechanisms re-verified against `c4e4704`) (on `feat/type-flow-bytes-redesign`, `toke_min_commit = 6cc9061`), ooke `v3.0.0-rc.1`
 **Date:** 2026-09-20
