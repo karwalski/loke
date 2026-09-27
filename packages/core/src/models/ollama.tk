@@ -122,45 +122,68 @@ f=listrunning(client:$ollamaclient):@$ollamamodel!$lokeerr{
      as $ok, so an error here would crash the caller. "No models" is also what a user
      with Ollama stopped can act on; healthcheck reports why. *)
   if(!reach.localserviceup(client.baseurl)){ <$ok(@()) }el{};
-  let url=str.concat(client.baseurl;"/api/ps");
-  let result=http.get(url);
-  let body=mt result {
-    $ok:body body;
-    $httperr:e $err($networkerr("ollama listrunning: failed to reach /api/ps"))
+  (* VM1.6d. Read as listmodels is: the body through the one-argument http.get, the array
+     with the typed json.arr through shared.jsonobj. This used `json.getarr`, one of
+     std.json's untyped helpers, and each match bound an $err(...) into a value and carried
+     on, so a failure was parsed as a response. /api/ps carries no digest. *)
+  let body=reach.localget(client.baseurl;"/api/ps");
+  if(str.len(body)==0){ <$ok(@()) }el{};
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  let parsed=json.dec(body);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $err($modelerr("ollama listrunning: failed to parse JSON response"))
+  let items=mt json.arr(obj;"models") {
+    $ok:a a;
+    $jsonerr:e @()
   };
-  let rawarr=json.getarr(obj;"models");
   let models=mut.@();
-  lp(let i=0;i<rawarr.len;i=i+1){
-    let item=rawarr.get(i);
+  lp(let i=0;i<items.len;i=i+1){
     models=models.push($ollamamodel{
-      name:json.str(item;"name");
-      size:json.i64(item;"size");
+      name:jx.elemstr(obj;"models";i;"name";"");
+      size:elemsize(obj;i);
       digest:""
     })
   };
   <$ok(models)
 };
 
+(* VM1.6d. The body for /api/generate. Ollama reads the GPU layer count from
+   options.num_gpu; a top-level `numgpu` is not a field it has, so it was ignored. It is sent
+   only when set, because 0 means "no GPU" to Ollama, not "default". *)
+f=generatebody(opts:$generateopts):str{
+  let head="{\"model\":\(json.enc(opts.model)),\"prompt\":\(json.enc(opts.prompt)),\"system\":\(json.enc(opts.system)),\"stream\":false";
+  if(opts.numgpu>0 as i32){
+    let n:str=str.fromint(opts.numgpu as i64);
+    <"\(head),\"options\":{\"num_gpu\":\(n)}}"
+  }el{};
+  <"\(head)}"
+};
+
+(* VM1.6d. The plain form, "" for every failure, as sendchatplain is. Measured 2026-09-27
+   against scripts/lib/http_recorder.py: generate posted with
+   `http.postheaders(http.client(url);…)`, which sends nothing (T-48), and then read the
+   $err it had bound in place of a body as JSON; the test process died with SIGSEGV. The
+   response field is read with shared.jsonobj, which keeps the escapes json.str drops
+   (T-47). *)
+f=generateplain(client:$ollamaclient;opts:$generateopts):str{
+  let body=reach.localpost(client.baseurl;"/api/generate";generatebody(opts));
+  if(str.len(body)==0){ <"" }el{};
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  <jx.strvalue(obj;"response";"")
+};
+
+(* Kept for callers that match the result; T-18 means a match on it takes its first arm
+   whatever the value is, so new callers use generateplain. *)
 f=generate(client:$ollamaclient;opts:$generateopts):str!$lokeerr{
-  let hc=http.client(client.baseurl);
-  let bodyobj="{\"model\":\(json.enc(opts.model)),\"prompt\":\(json.enc(opts.prompt)),\"system\":\(json.enc(opts.system)),\"numgpu\":\(opts.numgpu),\"stream\":false}";
-  let result=http.postheaders(hc;"/api/generate";str.tobytes(bodyobj);"{\"content-type\":\"application/json\"}");
-  let body=mt result {
-    $ok:body body;
-    $httperr:e $err($networkerr("ollama generate: failed to reach /api/generate"))
-  };
-  let parsed=json.dec(body);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $err($modelerr("ollama generate: failed to parse JSON response"))
-  };
-  let response=json.str(obj;"response");
-  <$ok(response)
+  let response=generateplain(client;opts);
+  if(str.len(response)==0){
+    <$err($networkerr("ollama generate: no response from /api/generate"))
+  }el{
+    <$ok(response)
+  }
 };
 
 (* LS1.1j — sendchatplain is the form core.providers.ollamaprovider can act on.
@@ -228,22 +251,30 @@ f=sendchat(client:$ollamaclient;opts:$chatopts):str!$lokeerr{
   }
 };
 
+(* VM1.6d. pullmodel and deletemodel posted with `http.postheaders(http.client(url);…)`,
+   which sends nothing (T-48): measured 2026-09-27, neither request reached a recorder.
+
+   pullmodel asks for one final answer (`stream:false`) rather than Ollama's default stream
+   of progress lines, and succeeds only when that answer says "success": Ollama answers a
+   failed pull with an error object, and an answer is not a pull. The plain bool is what a
+   caller can act on (T-18). *)
+f=pullmodelplain(client:$ollamaclient;name:str):bool{
+  let body=reach.localpost(client.baseurl;"/api/pull";"{\"name\":\(json.enc(name)),\"stream\":false}");
+  <str.contains(body;"\"success\"")
+};
+
 f=pullmodel(client:$ollamaclient;name:str):i64!$lokeerr{
-  let hc=http.client(client.baseurl);
-  let bodyobj="{\"name\":\(json.enc(name))}";
-  let result=http.postheaders(hc;"/api/pull";str.tobytes(bodyobj);"{\"content-type\":\"application/json\"}");
-  <mt result {
-    $ok:body $ok(1);
-    $httperr:e $err($networkerr("ollama pullmodel: failed to reach /api/pull"))
-  }
+  if(pullmodelplain(client;name)){ <$ok(1) }el{};
+  <$err($networkerr("ollama pullmodel: /api/pull did not report success"))
+};
+
+(* Ollama's /api/delete takes the DELETE method and refuses a POST, and std.http has no
+   client DELETE at this toolchain, so this goes through shared.reachability.localdelete. *)
+f=deletemodelplain(client:$ollamaclient;name:str):bool{
+  <reach.localdelete(client.baseurl;"/api/delete";"{\"name\":\(json.enc(name))}")
 };
 
 f=deletemodel(client:$ollamaclient;name:str):i64!$lokeerr{
-  let hc=http.client(client.baseurl);
-  let bodyobj="{\"name\":\(json.enc(name))}";
-  let result=http.postheaders(hc;"/api/delete";str.tobytes(bodyobj);"{\"content-type\":\"application/json\"}");
-  <mt result {
-    $ok:body $ok(1);
-    $httperr:e $err($networkerr("ollama deletemodel: failed to reach /api/delete"))
-  }
+  if(deletemodelplain(client;name)){ <$ok(1) }el{};
+  <$err($networkerr("ollama deletemodel: /api/delete did not succeed"))
 };

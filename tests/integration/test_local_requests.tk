@@ -1,0 +1,131 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.localrequests;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=reach:shared.reachability;
+i=ol:core.models.ollama;
+i=ll:core.optimiser.llmlingua;
+i=det:core.installer.detect;
+i=st:core.installer.start;
+i=health:cli.health;
+i=models:page.api.models;
+
+(* VM1.6e and VM1.6d — every local HTTP call these stories fixed, judged by what ARRIVES at
+   scripts/lib/http_recorder.py rather than by what the caller says happened.
+
+   Measured 2026-09-27, before the fix, against the same recorder: not one of these calls
+   sent a request. The health checks and the installer probes were
+   `http.get(http.client(url);path)`, which toke compiles as server ROUTE REGISTRATION
+   (T-57), so `loke doctor` reported an answering Ollama as down. generate, pullmodel and
+   deletemodel used http.postheaders, which sends nothing (T-48); generate then parsed the
+   $err it had bound as a body, and the test process died with SIGSEGV. The Presidio and
+   NER clients are covered separately, with the pipeline, in
+   tests/unit/privacy/test_detection_requests.tk. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_localreq_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59996"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── shared.reachability ──────────────────────────────────────────────── *)
+  if(t.assert(str.contains(reach.localget(url;"/api/version");"0.0.0-recorder");"localget answers the body")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/version");"and the GET arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(reach.localget(deadurl();"/api/version");"";"localget answers \"\" with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  (* ── cli.health, which is `loke doctor` ──────────────────────────────── *)
+  let ho=health.checkollama(url);
+  if(t.asserteq(ho.detail;"reachable";"doctor reports an answering Ollama as reachable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/tags");"because its GET /api/tags arrived")){pass=pass+1}el{fail=fail+1};
+  let hp=health.checkpresidio(url);
+  if(t.asserteq(hp.detail;"reachable";"doctor reports an answering Presidio as reachable")){pass=pass+1}el{fail=fail+1};
+  let hl=health.checkllmlingua(url);
+  if(t.asserteq(hl.detail;"reachable";"doctor reports an answering LLMLingua as reachable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /health");"and their GET /health arrived")){pass=pass+1}el{fail=fail+1};
+  let hd=health.checkollama(deadurl());
+  if(t.asserteq(hd.detail;"unreachable";"doctor still reports a dead Ollama as unreachable")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.optimiser.llmlingua ─────────────────────────────────────────── *)
+  if(t.assert(ll.isavailable(ll.new(url));"llmlingua.isavailable is true for an answering sidecar")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ll.isavailable(ll.new(deadurl()));"and false with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.models.ollama (VM1.6d) ─────────────────────────────────────── *)
+  let c=ol.new(url);
+  let g=ol.generateplain(c;$generateopts{model:"m1";prompt:"say \"hi\"";system:"be brief";numgpu:0 as i32});
+  if(t.asserteq(g;"generated-by-recorder";"generate answers the model's response")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /api/generate {\"model\":\"m1\",\"prompt\":\"say \\\"hi\\\"\",\"system\":\"be brief\",\"stream\":false}");"and the POST /api/generate arrived, escaped, with no options when numgpu is unset")){pass=pass+1}el{fail=fail+1};
+  let g2=ol.generateplain(c;$generateopts{model:"m2";prompt:"p";system:"";numgpu:12 as i32});
+  if(t.assert(str.contains(readfile(logp);"\"options\":{\"num_gpu\":12}");"numgpu is forwarded as options.num_gpu")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ol.generateplain(ol.new(deadurl());$generateopts{model:"m";prompt:"p";system:"";numgpu:0 as i32});"";"generate answers \"\" with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(ol.pullmodelplain(c;"qwen2.5:7b");"pullmodel succeeds when /api/pull reports success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /api/pull {\"name\":\"qwen2.5:7b\",\"stream\":false}");"and the POST /api/pull arrived, asking for one answer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ol.pullmodelplain(ol.new(deadurl());"m");"pullmodel fails with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(ol.deletemodelplain(c;"old:latest");"deletemodel succeeds when /api/delete answers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"DELETE /api/delete {\"name\":\"old:latest\"}");"and it arrived as a DELETE, the only method Ollama accepts there")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ol.deletemodelplain(ol.new(deadurl());"m");"deletemodel fails with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  let running=mt ol.listrunning(c) { $ok:v v; $err:e @() };
+  if(t.assert(running.len==1;"listrunning reads the one running model")){pass=pass+1}el{fail=fail+1};
+  if(running.len==1){
+    let m0:$ollamamodel=running.get(0);
+    if(t.asserteq(m0.name;"fake:latest";"by name")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  if(t.assert(str.contains(readfile(logp);"GET /api/ps");"and the GET /api/ps arrived")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.installer.detect and start ─────────────────────────────────── *)
+  if(t.assert(det.detectollamarunningat(url).ok;"the installer sees an answering Ollama as running")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!det.detectollamarunningat(deadurl()).ok;"and a dead one as not running")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(det.detectmodelpulledat(url;"fake").ok;"a pulled model is found by its bare name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(det.detectmodelpulledat(url;"fake:latest").ok;"and by its tagged name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!det.detectmodelpulledat(url;"fak").ok;"a prefix of a pulled name is not a pulled model")){pass=pass+1}el{fail=fail+1};
+  let ws=st.waitforhealthat(url);
+  if(t.assert(ws.success;"waitforhealth returns as soon as Ollama answers")){pass=pass+1}el{fail=fail+1};
+
+  (* ── page.api.models ─────────────────────────────────────────────────── *)
+  if(t.assert(str.contains(models.modelsjsonfrom(url);"fake:latest");"GET /api/models relays Ollama's model list")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(models.modelsjsonfrom(deadurl());"{\"models\":[]}";"and an empty list with Ollama down")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete("\(base).port");
+  <fail
+};
