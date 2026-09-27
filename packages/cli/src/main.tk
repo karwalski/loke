@@ -9,7 +9,10 @@ i=log:shared.log;
 i=cmd:cli.commands;
 i=out:cli.output;
 i=health:cli.health;
+i=bench:core.eval.bench;
+i=disp:core.providers.dispatcher;
 i=str:std.str;
+i=argv:std.args;
 
 f=handleask(prompt:str):i64{
   out.printline(str.concat("Ask: ";prompt));
@@ -68,6 +71,34 @@ f=handledoctor(config:$lokeconfig):i64{
     $down:d 1
   }
 };
+(* VM1.6. Scores a LOCAL model on bench.defaultcases and records the summary through the
+   VM1.1 sink. A cloud model id is refused before anything is dispatched, and the dispatcher
+   is built with empty API keys, so a benchmark cannot spend money either way. The table is
+   printed whether or not the result is recorded; the exit status says whether it was. *)
+f=handlebenchmark(model:str;outpath:str;config:$lokeconfig):i64{
+  if(bench.iscloudmodel(model)){
+    out.printerror("loke benchmark runs against a local Ollama model only; \(model) is a hosted model and would cost money");
+    <1
+  }el{};
+  out.printline("Ollama at \(config.ollamaurl)");
+  let d=disp.new($apikeys{anthropic:"";openai:""};config.ollamaurl);
+  let run=bench.runbenchmark(model;bench.defaultcases();d);
+  out.printline(bench.formatrun(run));
+  let version=bench.modelversion(config.ollamaurl;model);
+  if(str.len(version)==0){
+    out.printerror("not recorded: Ollama lists no digest for \(model), and a result without a pinned model version cannot be reproduced");
+    <1
+  }el{};
+  let path=mut.outpath;
+  if(str.len(outpath)==0){ path=bench.defaultresultspath() }el{};
+  let reason=bench.record(run;version;bench.defaultworkload();path);
+  if(str.len(reason)>0){
+    out.printerror("not recorded: \(reason)");
+    <1
+  }el{};
+  out.printline("recorded keyword_score and latency_mean to \(path)");
+  <0
+};
 f=handleversion():i64{
   out.printline("loke 0.1.0");
   <0
@@ -89,8 +120,14 @@ f=handleunknown(msg:str):i64{
 
    Every handler returns i64 and only this function narrows to the i32 the entry point
    declares; the legacy handlers declared i32 and returned an i64 literal at twelve
-   sites. *)
-f=main(args:@str):i32{
+   sites.
+
+   VM1.6: argv comes from std.args. This was `main(args:@str)`, and toke's generated C main
+   calls tk_main with NO arguments, so `args` was whatever the register held: every
+   invocation, `loke --version` included, segfaulted in cli.commands.parse reading its
+   length. The binary linked in F10.23g and had never been run. *)
+f=main():i32{
+  let args:@str=argv.all();
   let cid=log.newcorrelationid();
 
   let config=mt cfg.loadconfig(t.configpath()) {
@@ -101,6 +138,9 @@ f=main(args:@str):i32{
   log.info("loke cli starting";"cli";cid);
 
   let command=cmd.parse(args);
+  if(str.eq(command.kind;"benchmark")){
+    <(handlebenchmark(command.arg;cmd.benchmarkout(args);config) as i32)
+  }el{};
   <(dispatch(command;config) as i32)
 };
 

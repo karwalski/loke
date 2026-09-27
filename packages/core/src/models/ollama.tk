@@ -10,6 +10,7 @@ i=json:std.json;
 i=str:std.str;
 i=t:shared.types;
 i=reach:shared.reachability;
+i=jx:shared.jsonobj;
 
 t=$ollamamodel{
   name:str;
@@ -75,31 +76,46 @@ f=listmodels(client:$ollamaclient):@$ollamamodel!$lokeerr{
      as $ok, so an error here would crash the caller. "No models" is also what a user
      with Ollama stopped can act on; healthcheck reports why. *)
   if(!reach.localserviceup(client.baseurl)){ <$ok(@()) }el{};
-  let url=str.concat(client.baseurl;"/api/tags");
-  let result=http.get(url);
-  let body=mt result {
-    $ok:body body;
-    $httperr:e $err($networkerr("ollama listmodels: failed to reach /api/tags"))
+  (* VM1.6. Measured against a stand-in Ollama listing one model: this returned NO models,
+     so F5.12's installed-model check in page.api.pipeline never saw one either. The GET
+     is right as written: a ONE-argument http.get is toke's client GET (tk_http_get_w,
+     answering the body), while the TWO-argument form registers a server route (toke
+     src/llvm.c, "Disambiguate http.get/post by argument count"). What failed was
+     `json.getarr`, one of std.json's untyped helpers. The array is now read with the typed
+     json.arr, through shared.jsonobj. *)
+  let body=mt http.get("\(client.baseurl)/api/tags") {
+    $ok:b b;
+    $httperr:e ""
   };
-  let parsed=json.dec(body);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $err($modelerr("ollama listmodels: failed to parse JSON response"))
+  if(str.len(body)==0){ <$ok(@()) }el{};
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  let rawarr=json.getarr(obj;"models");
+  let items=mt json.arr(obj;"models") {
+    $ok:a a;
+    $jsonerr:e @()
+  };
   (* `let models=models.append(m)` declared a new binding each pass, so this always
      returned an empty list and loke never saw a single installed model. *)
   let models=mut.@();
-  lp(let i=0;i<rawarr.len;i=i+1){
-    let item=rawarr.get(i);
+  lp(let i=0;i<items.len;i=i+1){
     models=models.push($ollamamodel{
-      name:json.str(item;"name");
-      size:json.i64(item;"size");
-      digest:json.str(item;"digest")
+      name:jx.elemstr(obj;"models";i;"name";"");
+      size:elemsize(obj;i);
+      digest:jx.elemstr(obj;"models";i;"digest";"")
     })
   };
   <$ok(models)
 };
+
+f=elemsize(obj:$json;i:i64):u64{
+  <mt json.i64(jx.elem(obj;"models";i);"size") {
+    $ok:v v as u64;
+    $jsonerr:e 0 as u64
+  }
+};
+
 
 f=listrunning(client:$ollamaclient):@$ollamamodel!$lokeerr{
   (* Empty, not $err: every caller matches this result, and T-18 reads a returned $err
@@ -166,30 +182,39 @@ f=generate(client:$ollamaclient;opts:$generateopts):str!$lokeerr{
    content is not a usable success either, so collapsing the two is safe in the direction
    that matters: a caller is told "nothing came back" rather than handed an empty answer
    as though the model had produced it. Each failure is logged before it is collapsed, so
-   the distinction survives where an operator can see it. *)
+   the distinction survives where an operator can see it.
+
+   VM1.6. Measured against a stand-in Ollama that logs every request: this body sent
+   NOTHING, so every ollama and local dispatch through core.providers.dispatcher failed,
+   and `loke benchmark` scored five failures. Three more defects, each fixed here:
+   * `http.postheaders(http.client(url);…)` is measured to send nothing over http (T-48).
+     shared.reachability.localpost uses http.posturl, which arrives.
+   * `json.enc(opts.messages)` handed an ARRAY OF STRUCTS to an encoder that takes a str.
+     The messages are now encoded one by one.
+   * `json.str(obj;"message")` reads an object with a str accessor, which std.json refuses
+     (T-32), so even a delivered answer came back "". The nested content is read with
+     shared.jsonobj, which also decodes escapes that json.str drops (T-47).
+   Ollama's /api/chat has no top-level `system` field, so a system prompt (the guardian's
+   included) was silently ignored. It is sent as the first message. *)
+f=chatmessagesjson(system:str;msgs:@$chatmessage):str{
+  let parts=mut.@();
+  if(str.len(system)>0){ parts=parts.push("{\"role\":\"system\",\"content\":\(json.enc(system))}") }el{};
+  lp(let i=0;i<msgs.len;i=i+1){
+    let m:$chatmessage=msgs.get(i);
+    parts=parts.push("{\"role\":\(json.enc(m.role)),\"content\":\(json.enc(m.content))}")
+  };
+  <"[\(str.join(",";parts))]"
+};
+
 f=sendchatplain(client:$ollamaclient;opts:$chatopts):str{
-  let hc=http.client(client.baseurl);
-  let bodyobj="{\"model\":\(json.enc(opts.model)),\"messages\":\(json.enc(opts.messages)),\"system\":\(json.enc(opts.system)),\"numgpu\":\(opts.numgpu),\"stream\":false}";
-  let result=http.postheaders(hc;"/api/chat";str.tobytes(bodyobj);"{\"content-type\":\"application/json\"}");
-  let body=mt result {
-    $ok:body body;
-    $httperr:e ""
-  };
+  let bodyobj="{\"model\":\(json.enc(opts.model)),\"messages\":\(chatmessagesjson(opts.system;opts.messages)),\"stream\":false}";
+  let body=reach.localpost(client.baseurl;"/api/chat";bodyobj);
   if(str.len(body)==0){ <"" }el{};
-  let parsed=json.dec(body);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e 0
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   };
-  if(obj==0){ <"" }el{};
-  let msg=json.str(obj;"message");
-  let msgparsed=json.dec(msg);
-  let msgobj=mt msgparsed {
-    $ok:msgobj msgobj;
-    $jsonerr:e 0
-  };
-  if(msgobj==0){ <"" }el{};
-  <json.str(msgobj;"content")
+  <jx.strvalue(jx.nested(obj;"message");"content";"")
 };
 
 (* Kept for callers that already match this result, delegating, the same migration shape

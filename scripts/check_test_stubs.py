@@ -80,6 +80,7 @@ ENFORCED = [
     "tests/unit/monitoring",
     "tests/unit/pipeline",
     "tests/unit/cli",
+    "tests/unit/eval",
     "packages/moke/tests",
 ]
 

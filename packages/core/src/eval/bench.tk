@@ -8,6 +8,9 @@ i=log:shared.log;
 i=disp:core.providers.dispatcher;
 i=str:std.str;
 i=prov:core.providers.types;
+i=ol:core.models.ollama;
+i=sink:core.eval.resultsink;
+i=file:std.file;
 
 t=$benchcase{
   id:str;
@@ -25,7 +28,8 @@ t=$benchresult{
   keywordsmatched:i64;
   keywordstotal:i64;
   score:f64;
-  responsesnippet:str
+  responsesnippet:str;
+  ok:bool
 };
 
 t=$benchrun{
@@ -110,7 +114,8 @@ f=casefailed(bcase:$benchcase;model:str;elapsedms:i64;total:i64):$benchresult{
     keywordsmatched:0;
     keywordstotal:total;
     score:0.0;
-    responsesnippet:""
+    responsesnippet:"";
+    ok:false
   }
 };
 
@@ -130,7 +135,8 @@ f=caseresult(bcase:$benchcase;model:str;elapsedms:i64;response:$completionrespon
     keywordsmatched:matched;
     keywordstotal:total;
     score:scr;
-    responsesnippet:t.strslice(response.content;0;120)
+    responsesnippet:t.strslice(response.content;0;120);
+    ok:true
   }
 };
 
@@ -229,4 +235,83 @@ f=formatrun(run:$benchrun):str{
   let summary=str.concat(sep;str.concat(t.strpad("AVERAGE";16);str.concat(t.strpad(t.f64fixed(run.avgscore;2);8);str.concat(t.strpad(str.concat(str.fromint(run.avglatencyms);"ms");10);str.concat(t.strpad(str.concat("$";t.f64fixed(run.totalcostusd;4));10);str.concat(str.fromint(run.casesrun);" cases
 "))))));
   <str.concat(header;str.concat(sep;str.concat(colhdr;str.concat(sep;str.concat(rows;summary)))))
+};
+
+(* VM1.6 — the entry points `loke benchmark` uses, and persistence through the VM1.1 sink.
+
+   A benchmark only ever runs against a LOCAL model. providerformodel sends claude* and gpt*
+   to a hosted provider, so the CLI refuses those ids before anything is dispatched, and a
+   benchmark cannot spend money. *)
+f=iscloudmodel(model:str):bool{
+  <str.startswith(model;"claude") || str.startswith(model;"gpt")
+};
+
+(* Names the case set, not the model. *)
+f=defaultworkload():str{
+  <"bench-default-\(defaultcases().len)"
+};
+
+(* The installed model's Ollama digest, which is the pinned version VM1.1 requires; "" when
+   Ollama does not list the model. listmodels answers an empty list rather than an $err when
+   Ollama is down, because T-18 would send an $err to the first arm below. *)
+f=modelversion(ollamaurl:str;model:str):str{
+  let models=mt ol.listmodels(ol.new(ollamaurl)) {$ok:v v; $err:e @()};
+  let found=mut."";
+  lp(let i=0;i<models.len;i=i+1){
+    let m:$ollamamodel=models.get(i);
+    if(str.len(found)==0 && (str.eq(m.name;model) || str.eq(m.name;"\(model):latest"))){ found=m.digest }el{}
+  };
+  <found
+};
+
+f=allok(run:$benchrun):bool{
+  let ok=mut.true;
+  lp(let i=0;i<run.results.len;i=i+1){
+    if(!run.results.get(i).ok){ ok=false }el{}
+  };
+  <ok
+};
+
+(* ~/.loke/benchmarks/<date>.jsonl, creating the directory. HOME decides where ~ is. *)
+f=defaultresultspath():str{
+  let dir=t.lokefile("benchmarks");
+  file.mkdir(t.lokedir());
+  file.mkdir(dir);
+  let now:str=str.nowiso8601();
+  <"\(dir)/\(t.strslice(now;0;10)).jsonl"
+};
+
+f=runmeasurement(run:$benchrun;metric:str;value:str;units:str;digest:str;workload:str):$measurement{
+  <$measurement{
+    metric:metric;
+    value:value;
+    units:units;
+    workload:workload;
+    n:run.casesrun;
+    arm:"";
+    tokenizer:"";
+    model:run.model;
+    modelversion:digest;
+    seed:sink.noseed();
+    notes:"loke benchmark: keyword matching over \(run.casesrun) fixed prompts, one run each. Toolchain commits are not known to a running binary.";
+    caveat:"temperature is not forwarded to Ollama (core.models.ollama.sendchatplain), so the model sampled at its own default and a rerun may differ"
+  }
+};
+
+(* Writes the run's two summary figures, or neither. Returns "" or why nothing was written.
+   The numbers are formatted to str here, in the module that computed them (T-20).
+
+   A run in which any case failed to dispatch is refused: casefailed scores it 0.0, and a
+   network failure averaged in as a wrong answer is not a measurement of the model. *)
+f=record(run:$benchrun;digest:str;workload:str;path:str):str{
+  if(!allok(run)){ <"a case failed to dispatch, and a failure scored as zero is not a measurement of the model" }el{};
+  let score=runmeasurement(run;"keyword_score";t.f64fixed(run.avgscore;4);"ratio";digest;workload);
+  let latency=runmeasurement(run;"latency_mean";str.fromint(run.avglatencyms);"ms";digest;workload);
+  let bad=sink.validate(score);
+  if(str.len(bad)>0){ <bad }el{};
+  let badl=sink.validate(latency);
+  if(str.len(badl)>0){ <badl }el{};
+  let wrote=sink.write(score;path);
+  if(str.len(wrote)>0){ <wrote }el{};
+  <sink.write(latency;path)
 };

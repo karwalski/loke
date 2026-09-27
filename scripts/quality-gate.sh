@@ -552,6 +552,11 @@ step_test() {
   if [[ -x ./scripts/smoke_serve_moke.sh ]]; then
     ./scripts/smoke_serve_moke.sh || return 1
   fi
+  # VM1.6: the built `loke benchmark` against a stand-in Ollama, judged on the result file it
+  # writes. A couple of seconds; the stand-in takes a port from the OS, so no lock is needed.
+  if [[ -x ./scripts/smoke_benchmark.sh ]]; then
+    ./scripts/smoke_benchmark.sh || return 1
+  fi
   # The whole path: moke -> loke -> a recording fake model -> back. Asserts the model never
   # saw the PII and the user got it back. First ran end to end on 2026-09-25.
   if [[ -x ./scripts/smoke_e2e.sh ]]; then

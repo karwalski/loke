@@ -1,0 +1,104 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.eval.resultsink;
+
+i=str:std.str;
+i=file:std.file;
+i=json:std.json;
+i=sys:std.sys;
+
+(* VM1.6. The toke side of the VM1.1 result sink, for measurements taken by the loke binary
+   itself rather than by a Python harness. It writes one JSON object per line in the schema
+   `benchmarks/lib/result.py` defines, so `result.read_all` reads both, and it refuses the same
+   things `result.validate` refuses: no metric, no units, no workload, n below 1, a
+   token-denominated metric without a tokenizer, and a model without a pinned version. It also
+   refuses a value that is not a finite number, which the Python side cannot be handed.
+
+   The value travels as a string. An f64 returned across a loke module boundary arrives
+   corrupted (T-20, LS1.1h), so the caller formats the figure in the module that computed it.
+
+   The three commit fields are written null. The Python sink reads them from TOOLCHAIN.lock
+   and git at write time; a running binary has neither, and a guessed commit would be the
+   unreproducible number that module exists to prevent. *)
+
+t=$measurement{
+  metric:str;
+  value:str;
+  units:str;
+  workload:str;
+  n:i64;
+  arm:str;
+  tokenizer:str;
+  model:str;
+  modelversion:str;
+  seed:i64;
+  notes:str;
+  caveat:str
+};
+
+(* A seed below zero means none was used, and is written null. *)
+f=noseed():i64{
+  <0-1
+};
+
+f=istokenmetric(metric:str):bool{
+  let lower=str.lower(metric);
+  <str.contains(lower;"token") || str.contains(lower;"prompt_size") || str.contains(lower;"compression")
+};
+
+(* strtod accepts "nan" and "inf", which are not JSON numbers. Every finite decimal is made of
+   digits, a sign, a point and an exponent, and none of those contains an n or an i. *)
+f=isnumber(v:str):bool{
+  let lower=str.lower(v);
+  if(str.contains(lower;"n") || str.contains(lower;"i")){ <false }el{};
+  <mt str.tofloat(v) {
+    $ok:x true;
+    $err:e false
+  }
+};
+
+(* An empty string means the measurement may be written. Anything else is the reason. *)
+f=validate(m:$measurement):str{
+  if(str.len(m.metric)==0){ <"metric is required" }el{};
+  if(str.len(m.units)==0){ <"units are required — a bare number is uninterpretable" }el{};
+  if(str.len(m.workload)==0){ <"workload is required — a figure without its workload is not a measurement" }el{};
+  if(m.n<1){ <"n is required and must be at least 1" }el{};
+  if(!isnumber(m.value)){ <"value is not a finite number: \(m.value)" }el{};
+  if(istokenmetric(m.metric) && str.len(m.tokenizer)==0){ <"metric '\(m.metric)' is token-denominated, so tokenizer is required" }el{};
+  if(str.len(m.model)>0 && str.len(m.modelversion)==0){ <"model_version is required whenever model is set" }el{};
+  <""
+};
+
+f=strornull(v:str):str{
+  if(str.len(v)==0){ <"null" }el{};
+  <json.enc(v)
+};
+
+f=seedornull(seed:i64):str{
+  if(seed<0){ <"null" }el{};
+  <str.fromint(seed)
+};
+
+(* "darwin/arm64" where Python writes "Darwin/arm64": the same facts, in std.sys's spelling. *)
+f=hostplatform():str{
+  let os:str=sys.platform();
+  if(sys.isarm64()==1){ <"\(os)/arm64" }el{};
+  <"\(os)/x86_64"
+};
+
+(* Keys in sorted order, as result.write emits them with sort_keys=True. *)
+f=tojson(m:$measurement;recordedat:str):str{
+  <"{\"arm\":\(strornull(m.arm)),\"caveat\":\(strornull(m.caveat)),\"ci_high\":null,\"ci_low\":null,\"ci_method\":null,\"container\":null,\"host_platform\":\(json.enc(hostplatform())),\"loke_commit\":null,\"metric\":\(json.enc(m.metric)),\"model\":\(strornull(m.model)),\"model_version\":\(strornull(m.modelversion)),\"n\":\(m.n),\"notes\":\(strornull(m.notes)),\"ooke_commit\":null,\"recorded_at\":\(json.enc(recordedat)),\"runs\":null,\"seed\":\(seedornull(m.seed)),\"toke_commit\":null,\"tokenizer\":\(strornull(m.tokenizer)),\"units\":\(json.enc(m.units)),\"value\":\(m.value),\"workload\":\(json.enc(m.workload))}"
+};
+
+(* Validates, then appends one line. Returns "" on success, or why nothing was written. *)
+f=write(m:$measurement;path:str):str{
+  let reason=validate(m);
+  if(str.len(reason)>0){ <reason }el{};
+  let now:str=str.nowiso8601();
+  <mt file.append(path;"\(tojson(m;now))\n") {
+    $ok:b "";
+    $err:e "the results file could not be written: \(path)"
+  }
+};
