@@ -5,13 +5,13 @@ m=core.providers.openai;
 
 
 
-i=http:std.http;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
 i=pt:core.providers.types;
+i=tr:core.providers.transport;
 
 t=$openaiclient{
   config:i64
@@ -91,7 +91,13 @@ f=calccost(modelid:str;inputtokens:u32;outputtokens:u32):f64{
    segfaults. The two inner matches below are on STDLIB results (std.http, std.json), which
    DO discriminate correctly; that distinction is the whole design. *)
 f=completeplain(client:$openaiclient;req:$completionrequest):$completionresponse{
-  let hc=http.client("https://api.openai.com");
+  <completeplainat(client;req;tr.openaiurl())
+};
+
+(* F5.11. Sent through core.providers.transport, URL-first; see the note on
+   anthropic.completeplainat. The old call, `http.postheaders(http.client(...);path;...)`
+   with an @$httpheader array, was measured to send nothing (T-48). *)
+f=completeplainat(client:$openaiclient;req:$completionrequest;url:str):$completionresponse{
   (* `@(sys;req.messages)` is a two-element array literal — [message, array] — not a
      prepend. The body sent to OpenAI carried the system message and then a nested
      array where the conversation should have been, so the system prompt was never
@@ -106,17 +112,15 @@ f=completeplain(client:$openaiclient;req:$completionrequest):$completionresponse
     messages=withsys
   };
   (* pt.openaibody, not json.enc($jsonobj{...}) — see the note above pt.messagesjson. *)
-  let body=pt.openaibody(req.modelid;messages;req.maxtokens);
-  let authvalue=str.concat("Bearer ";client.config.apikey);
-  let headers=@(
-    $httpheader{key:"Authorization";value:authvalue};
-    $httpheader{key:"content-type";value:"application/json"}
-  );
-  let result=http.postheaders(hc;"/v1/chat/completions";str.tobytes(body);headers);
-  <mt result {
-    $ok:raw openaiparseplain(raw);
-    $httperr:e pt.nocompletion(str.concat("openai complete: HTTP error — ";json.enc(e)))
-  }
+  let raw=tr.post(url;pt.openaibody(req.modelid;messages;req.maxtokens);tr.openaiheaders(client.config.apikey));
+  if(str.len(raw)==0){
+    <pt.nocompletion("openai complete: no response from the provider")
+  }el{};
+  let r=openaiparseplain(raw);
+  if(pt.iscompletion(r) && str.len(r.content)==0){
+    <pt.nocompletion("openai complete: the reply carried no completion text")
+  }el{};
+  <r
 };
 
 f=openaiparseplain(raw:str):$completionresponse{

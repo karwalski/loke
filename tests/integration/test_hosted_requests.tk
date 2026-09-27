@@ -1,0 +1,150 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.hostedrequests;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=tr:core.providers.transport;
+i=ant:core.providers.anthropic;
+i=oai:core.providers.openai;
+i=pt:core.providers.types;
+i=h:page.api.pipeline;
+
+(* F5.11 — the Anthropic and OpenAI dispatch, judged by what ARRIVES at
+   scripts/lib/http_recorder.py over plain http on loopback. No request here leaves the
+   machine and no key is real.
+
+   Before this story every one of these calls was
+   `http.postheaders(http.client(url);path;bytes;headers)`, and at loke's toolchain pin that
+   shape sends nothing (T-48): the glue reads (url, body, headers, ignored). The same
+   recorder saw no request at all. These assertions are what would have caught it.
+
+   What this cannot show: https. The glue handshakes TLS when the URL is https, but
+   measuring that against a real provider needs a real key. F5.11 carries the command. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_hostedreq_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* Nothing listens here; the recorders take OS-assigned ports. *)
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=request():$completionrequest{
+  <$completionrequest{
+    modelid:"claude-test-model";
+    messages:@(pt.usermsg("hello [PERSON_1]"));
+    systemprompt:"be brief";
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let hdrp="\(base).log.headers";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  (* A second recorder that answers every request with an error-shaped document, which is
+     what a provider's 401 or 429 looks like to a transport that cannot see the status. *)
+  let glog="\(base).garbage.log";
+  let grec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";glog;"\(base).gport";"garbage")) { $ok:h h; $err:e @() };
+  let gport=waitport("\(base).gport");
+  let gurl="http://127.0.0.1:\(gport)";
+  if(t.assert(str.len(gport)>0;"the error-answering recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The production endpoints are https to the providers, and nothing else ── *)
+  if(t.asserteq(tr.anthropicurl();"https://api.anthropic.com/v1/messages";"the Anthropic endpoint is https to api.anthropic.com")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tr.openaiurl();"https://api.openai.com/v1/chat/completions";"the OpenAI endpoint is https to api.openai.com")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.providers.transport ──────────────────────────────────────────────── *)
+  let raw=tr.post("\(url)/v1/messages";"{\"probe\":1}";tr.anthropicheaders("sk-probe"));
+  if(t.assert(str.contains(raw;"answered-by-recorder");"transport.post answers the response body")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /v1/messages {\"probe\":1}");"and the POST arrived with its body")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tr.post("\(deadurl())/v1/messages";"{}";"{}");"";"transport.post answers \"\" with nothing listening")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.providers.anthropic ─────────────────────────────────────────────── *)
+  let ac=ant.new("sk-ant-test-key");
+  let ar:$completionresponse=ant.completeplainat(ac;request();"\(url)/v1/messages");
+  if(t.assert(pt.iscompletion(ar);"anthropic.completeplainat answers a completion from the recorder")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ar.content;"answered-by-recorder";"with the reply's text")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ar.modelid;"claude-recorder";"and the model the reply named")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ar.inputtokens as i64==11 && ar.outputtokens as i64==7;"and its usage")){pass=pass+1}el{fail=fail+1};
+  let log1=readfile(logp);
+  if(t.assert(str.contains(log1;"POST /v1/messages {\"model\":\"claude-test-model\"");"the POST /v1/messages arrived naming the model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(log1;"hello [PERSON_1]");"and carrying the message")){pass=pass+1}el{fail=fail+1};
+  let hdr1=readfile(hdrp);
+  if(t.assert(str.contains(hdr1;"x-api-key: sk-ant-test-key");"with the x-api-key header")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(hdr1;"anthropic-version: 2023-06-01");"and the anthropic-version header")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(hdr1;"content-type: application/json");"and no second, lower-case content-type (the transport sends one itself)")){pass=pass+1}el{fail=fail+1};
+  let adead:$completionresponse=ant.completeplainat(ac;request();"\(deadurl())/v1/messages");
+  if(t.assert(!pt.iscompletion(adead);"a closed endpoint is a failure, not an empty success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pt.completionerror(adead);"no response");"and says so")){pass=pass+1}el{fail=fail+1};
+  let aerr:$completionresponse=ant.completeplainat(ac;request();"\(gurl)/v1/messages");
+  if(t.assert(!pt.iscompletion(aerr);"an error document is a failure, not an empty success")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.providers.openai ────────────────────────────────────────────────── *)
+  let oc=oai.new("sk-oai-test-key");
+  let orr:$completionresponse=oai.completeplainat(oc;request();"\(url)/v1/chat/completions");
+  if(t.assert(pt.iscompletion(orr);"openai.completeplainat answers a completion from the recorder")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(orr.content;"answered-by-recorder";"with the reply's text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(orr.inputtokens as i64==13 && orr.outputtokens as i64==5;"and its usage")){pass=pass+1}el{fail=fail+1};
+  let log2=readfile(logp);
+  if(t.assert(str.contains(log2;"POST /v1/chat/completions {\"model\":\"claude-test-model\"");"the POST /v1/chat/completions arrived naming the model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(log2;"\"role\":\"system\"");"with the system message in front")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(hdrp);"authorization: Bearer sk-oai-test-key");"and the authorization header")){pass=pass+1}el{fail=fail+1};
+  let odead:$completionresponse=oai.completeplainat(oc;request();"\(deadurl())/v1/chat/completions");
+  if(t.assert(!pt.iscompletion(odead);"a closed endpoint is a failure")){pass=pass+1}el{fail=fail+1};
+  let oerr:$completionresponse=oai.completeplainat(oc;request();"\(gurl)/v1/chat/completions");
+  if(t.assert(!pt.iscompletion(oerr);"an error document is a failure")){pass=pass+1}el{fail=fail+1};
+
+  (* ── page.api.pipeline, the browser path's Anthropic send ─────────────────── *)
+  let body=h.anthropicbody("claude-pipe-model";"sys";"anon [EMAIL_1]");
+  let praw=h.anthropicsend("\(url)/v1/messages";"sk-ant-pipe-key";body);
+  if(t.asserteq(h.anthropictext(praw);"answered-by-recorder";"the pipeline's send answers, and its parser reads the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /v1/messages {\"model\":\"claude-pipe-model\",\"max_tokens\":4096,\"system\":\"sys\",\"messages\":[{\"role\":\"user\",\"content\":\"anon [EMAIL_1]\"}]}");"and exactly that body arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(hdrp);"x-api-key: sk-ant-pipe-key");"with the pipeline's x-api-key")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(h.anthropicsend("\(deadurl())/v1/messages";"k";body);"";"the pipeline's send answers \"\" to a closed endpoint, which toanthropic reports as a provider failure")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(h.anthropictext(h.anthropicsend("\(gurl)/v1/messages";"k";body));"";"and an error document yields no text, which anthropicreply reports as a provider failure")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(grec == @())){ process.kill(grec); process.wait(grec); }el{};
+  file.delete(logp);
+  file.delete(hdrp);
+  file.delete("\(base).port");
+  file.delete(glog);
+  file.delete("\(glog).headers");
+  file.delete("\(base).gport");
+  <fail
+};

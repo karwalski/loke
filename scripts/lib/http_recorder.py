@@ -23,6 +23,12 @@ an array); `silent` answers 200 with an empty body. Both still record.
 
 scripts/lib/fake_ollama.py is the Ollama stand-in smoke_e2e.sh uses; it logs POSTs only, and
 a GET that never arrives is precisely what VM1.6e is about, so this is a separate file.
+
+F5.11: every request's headers are also appended to `<log-file>.headers`, as a
+`METHOD path` line, one `name: value` line per header in the order they arrived (a
+duplicated header appears twice), and a blank line. The hosted-provider paths
+(/v1/messages, /v1/chat/completions) answer in Anthropic's and OpenAI's shapes, so the
+cloud dispatch can be judged by what arrives without a real key.
 """
 import http.server, json, os, sys
 
@@ -36,6 +42,14 @@ SEPS = (",", ":")
 PRESIDIO = [{"entity_type": "PERSON", "start": 0, "end": 12, "score": 0.85}]
 NER = '[{"type":"PERSON","value":"Jane Citizen"}]'
 
+# The hosted providers' success shapes, trimmed to the fields loke reads (F5.11).
+ANTHROPIC = {"id": "msg_recorder", "type": "message", "role": "assistant", "model": "claude-recorder",
+             "content": [{"type": "text", "text": "answered-by-recorder"}],
+             "usage": {"input_tokens": 11, "output_tokens": 7}}
+OPENAI = {"id": "chatcmpl-recorder", "object": "chat.completion", "model": "gpt-recorder",
+          "choices": [{"index": 0, "message": {"role": "assistant", "content": "answered-by-recorder"}}],
+          "usage": {"prompt_tokens": 13, "completion_tokens": 5}}
+
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -46,6 +60,11 @@ class H(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
         with open(LOG, "a") as f:
             f.write("%s %s %s\n" % (self.command, self.path, body.replace("\n", "\\n")))
+        with open(LOG + ".headers", "a") as f:
+            f.write("%s %s\n" % (self.command, self.path))
+            for k, v in self.headers.items():
+                f.write("%s: %s\n" % (k, v))
+            f.write("\n")
         return body
 
     def _send(self, obj):
@@ -82,6 +101,10 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"status": "ok"})
         elif p == "/analyze":
             self._send(PRESIDIO)
+        elif p == "/v1/messages":
+            self._send(ANTHROPIC)
+        elif p == "/v1/chat/completions":
+            self._send(OPENAI)
         elif p == "/compress":
             self._send({"compressed_prompt": "short", "origin_tokens": 10, "compressed_tokens": 5, "ratio": "2.0x"})
         else:

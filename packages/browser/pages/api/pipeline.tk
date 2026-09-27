@@ -30,6 +30,7 @@ i=tr:core.governance.trace;
 i=ptypes:core.privacy.pipelinetypes;
 i=dl:core.audit.disclosure;
 i=ag:core.governance.approvalgate;
+i=xport:core.providers.transport;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -662,7 +663,10 @@ f=accumulatebudget(store:i64;tokens:i64;cost:f64;day:i64):bool{
    @$httpheader where http.postheaders wants a JSON string — so the API key never reaches the
    request either. Those three defects are reported, not fixed here: they are in
    packages/core/src/providers, they are not this story, and routing a working endpoint
-   through them would replace a request that works with one that cannot.
+   through them would replace a request that works with one that cannot. (F5.11, 2026-09-27:
+   the bodies are pt.anthropicbody and pt.openaibody now, the headers are a JSON string, and
+   both providers and toanthropic below send through core.providers.transport. Neither
+   request had in fact worked: the call they shared sent nothing, T-48.)
 
    So the ROUTING is what changed, which is the whole of GA1.7, and the request bodies stay
    the hand-built ones that are known to work — now with the model id and the destination
@@ -819,9 +823,16 @@ f=pisolocal(p:$provider):bool{
   }
 };
 
-f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;r:$httpresp;piifields:str;startms:i64;decision:$policydecision):i64{
-  let raw=str.frombytes(r.body);
+(* F5.11. `raw` is the body the transport answered, already known to be non-empty. A body
+   with no completion text in it (Anthropic's error document, for one: the transport does
+   not see the status code) is a provider failure, not a 200 with an empty answer. *)
+f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;raw:str;piifields:str;startms:i64;decision:$policydecision):i64{
+  let spec:$modelspec=route.model;
   let anonresponse=anthropictext(raw);
+  if(str.len(anonresponse)==0){
+    log.warn("pipeline: anthropic answered with no completion text, treating as a provider failure";"api.pipeline";run.requestid);
+    <providerfailed(store;run;"anthropic";spec.id;startms;decision)
+  }el{};
   <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision;str.len(raw))
 };
 
@@ -859,17 +870,38 @@ f=unrecorded(store:i64;run:$pipelinerun;provider:str;modelid:str;piifields:str;s
   <http.res(503;"{\"ok\":false,\"error\":\"the disclosure record could not be written, so the request was not sent\",\"disclosure_unrecorded\":true\(piifields)}")
 };
 
+(* The request body, built here so that a test can see exactly what is sent. Only the
+   anonymised text goes into it. *)
+f=anthropicbody(modelid:str;sysprompt:str;anonymised:str):str{
+  <"{\"model\":\(json.enc(modelid)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}"
+};
+
+(* F5.11. The one send. This was
+     `mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {...}`
+   and at loke's toolchain pin that call sends NOTHING: the glue reads its arguments as
+   (url, body, headers, ignored), so it was handed a client handle for a URL. Measured over
+   http against a recorder (T-48); every cloud-routed request through this endpoint took
+   the error arm without a byte leaving the machine. core.providers.transport calls it
+   URL-first, which is measured to arrive with its headers over http; https is not
+   measured (see F5.11). `url` is a parameter for the recorder test only: toanthropic
+   passes transport.anthropicurl(), the one production endpoint. "" means nothing came
+   back. *)
+f=anthropicsend(url:str;key:str;abody:str):str{
+  <xport.post(url;abody;xport.anthropicheaders(key))
+};
+
 f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let spec:$modelspec=route.model;
-  let abody="{\"model\":\(json.enc(spec.id)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
-  let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
+  let abody=anthropicbody(spec.id;sysprompt;anonymised);
   if(reservedispatch(store;run;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;anonymised;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
   };
-  <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
-    $ok:r anthropicreply(store;run;route;r;piifields;startms;decision);
-    $err:e providerfailed(store;run;"anthropic";spec.id;startms;decision)
-  }
+  let raw=anthropicsend(xport.anthropicurl();key;abody);
+  if(str.len(raw)==0){
+    log.warn("pipeline: anthropic returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
+    <providerfailed(store;run;"anthropic";spec.id;startms;decision)
+  }el{};
+  <anthropicreply(store;run;route;raw;piifields;startms;decision)
 };
 
 (* http.posturl answers with a bare str and no result, so a dead Ollama returns "" — and the

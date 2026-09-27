@@ -1,0 +1,67 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.providers.transport;
+
+i=http:std.http;
+i=json:std.json;
+i=str:std.str;
+
+(* F5.11. The one HTTP POST the hosted providers are sent through.
+
+   Every Anthropic and OpenAI request used to be written
+   `http.postheaders(http.client(url);path;bytes;headers)`. At loke's toolchain pin
+   (toke 0b0bc4e) `http.postheaders` is declared `(i64, i64, i64, i64) -> i64` with
+   `gen:"abi"`, and its C glue, tk_http_postheaders_w, reads its four arguments as
+   (url, body, headersjson, ignored). Called client-first, the glue took the client
+   handle for the URL and the path for the body, and nothing was sent: measured against a
+   local recorder, the request never arrived and the match took its error arm (T-48,
+   docs/upstream/repro-2026-09-27/T-48/). toke main now refuses that shape at compile time.
+   Called URL-first it sends, with the headers.
+
+   So this calls it URL-first, and says what it measured:
+   - over http, the method, path, body and every header arrive (tests/integration/
+     test_hosted_requests.tk, against scripts/lib/http_recorder.py);
+   - over https it is NOT measured. The glue does a TLS handshake with SNI when the URL is
+     https and openssl was linked in, but proving that a request reaches a provider needs
+     a real key and costs money, which is the user's decision. F5.11 carries the one
+     command that measures it.
+
+   The glue answers the response BODY, or 0 when the connection, the TLS handshake or the
+   read failed. It does not expose the status code, so a 401 with an error document reads
+   as a body like any other. Callers therefore judge the body: a reply with no completion
+   text in it is a failure, never an empty success.
+
+   The glue always sends its own `Content-Type: application/json`. A second content-type
+   in `headersjson` is sent as a second header line, not merged, so the header builders
+   below do not add one. *)
+
+(* The production endpoints. Tests pass a loopback URL to the functions that take one;
+   nothing here reads a URL from configuration or the environment, so no production path
+   can be pointed anywhere else. *)
+f=anthropicurl():str{
+  <"https://api.anthropic.com/v1/messages"
+};
+
+f=openaiurl():str{
+  <"https://api.openai.com/v1/chat/completions"
+};
+
+f=anthropicheaders(key:str):str{
+  <"{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\"}"
+};
+
+f=openaiheaders(key:str):str{
+  let bearer="Bearer \(key)";
+  <"{\"authorization\":\(json.enc(bearer))}"
+};
+
+(* POST `body` to `url` with the headers in `headersjson`, and answer the response body,
+   or "" when nothing came back. The 0 the glue answers on failure is tested as an
+   integer before it is read as a string, because it is a null address. *)
+f=post(url:str;body:str;headersjson:str):str{
+  let addr=http.postheaders(url;body;headersjson;"");
+  if(addr==0){ <"" }el{};
+  let raw:str=addr;
+  <raw
+};

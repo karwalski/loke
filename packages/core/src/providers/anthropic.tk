@@ -5,13 +5,13 @@ m=core.providers.anthropic;
 
 
 
-i=http:std.http;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
 i=pt:core.providers.types;
+i=tr:core.providers.transport;
 
 t=$anthropicclient{
   config:i64
@@ -136,21 +136,31 @@ f=parseplain(raw:str):$completionresponse{
 };
 
 f=completeplain(client:$anthropicclient;req:$completionrequest):$completionresponse{
-  let hc=http.client("https://api.anthropic.com");
+  <completeplainat(client;req;tr.anthropicurl())
+};
+
+(* F5.11. The request is sent through core.providers.transport, URL-first. It was
+   `http.postheaders(http.client("https://api.anthropic.com");"/v1/messages";bytes;headers)`
+   with the headers as an @$httpheader array, and that shape was measured to send nothing
+   (T-48), so no completion ever came back from here. `url` is a parameter so a test can
+   point it at a loopback recorder; completeplain passes the one production endpoint.
+
+   The transport answers the body whatever the status, so a reply is judged by its
+   content: nothing back, or a document with no completion text in it (an error document,
+   say), is a failure and never an empty success. *)
+f=completeplainat(client:$anthropicclient;req:$completionrequest;url:str):$completionresponse{
   (* pt.anthropicbody, not json.enc($jsonobj{...}) — see the note above pt.messagesjson.
      $jsonobj is declared in no module, so the old expression sent a body naming no model and
      carrying no prompt. *)
-  let body=pt.anthropicbody(req);
-  let headers=@(
-    $httpheader{key:"x-api-key";value:client.config.apikey};
-    $httpheader{key:"anthropic-version";value:"2023-06-01"};
-    $httpheader{key:"content-type";value:"application/json"}
-  );
-  let result=http.postheaders(hc;"/v1/messages";str.tobytes(body);headers);
-  <mt result {
-    $ok:raw parseplain(raw);
-    $httperr:e pt.nocompletion(str.concat("anthropic complete: HTTP error — ";json.enc(e)))
-  }
+  let raw=tr.post(url;pt.anthropicbody(req);tr.anthropicheaders(client.config.apikey));
+  if(str.len(raw)==0){
+    <pt.nocompletion("anthropic complete: no response from the provider")
+  }el{};
+  let r=parseplain(raw);
+  if(pt.iscompletion(r) && str.len(r.content)==0){
+    <pt.nocompletion("anthropic complete: the reply carried no completion text")
+  }el{};
+  <r
 };
 
 (* The return type said i64!$lokeerr while every return in the body was a
