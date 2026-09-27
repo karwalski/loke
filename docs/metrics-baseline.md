@@ -572,7 +572,9 @@ Scoped precisely, because the unqualified version is not true:
 1. The measurement comes from a committed harness, not from a manual run.
 2. The result records workload, tokenizer or "bytes", N, model and pinned version, seed, date, and the
    toolchain commit from `TOOLCHAIN.lock`.
-3. It is reported with a confidence interval, or with its N and the statement that it is a single
-   observation. One observation is reported as one observation, never as a rate.
+3. A figure that can vary between runs (anything timed, or produced by a model) is reported from at
+   least two kept runs, the first discarded as warm-up, with a BCa confidence interval — VM1.3, and
+   `benchmarks/lib/result.py` refuses anything else. A deterministic figure (a count, or recall over a
+   fixed corpus) may be a single observation, reported with its N and stated as one, never as a rate.
 4. The caveat travels with the number, everywhere the number appears.
 5. This file is updated first. Other pages cite it; they do not restate it independently.
