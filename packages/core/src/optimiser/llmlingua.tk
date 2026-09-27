@@ -3,12 +3,11 @@
 
 m=core.optimiser.llmlingua;
 
-i=http:std.http;
 i=json:std.json;
 i=str:std.str;
 i=log:shared.log;
-i=t:shared.types;
 i=reach:shared.reachability;
+i=jx:shared.jsonobj;
 
 t=$compressresult{
   original:str;
@@ -16,7 +15,8 @@ t=$compressresult{
   origintokens:u32;
   compressedtokens:u32;
   actualratio:f64;
-  savingspct:f64
+  savingspct:f64;
+  failure:str
 };
 
 t=$llmlinguaclient{
@@ -47,77 +47,97 @@ f=isavailable(client:$llmlinguaclient):bool{
   <reach.localanswers(client.baseurl;"/health")
 };
 
-f=buildcompressresult(original:str;obj:i64):$compressresult!$lokeerr{
-  let compressed=json.str(obj;"compressed_prompt");
-  let origintokensi64=json.i64(obj;"origin_tokens");
-  let compressedtokensi64=json.i64(obj;"compressed_tokens");
-  let origintokens=origintokensi64 as u32;
-  let compressedtokens=compressedtokensi64 as u32;
+(* LS1.1x — compress and compressauto answer a plain $compressresult, and iscompressed says
+   whether it is one.
+
+   They returned $compressresult!$lokeerr, and a caller matching that takes the FIRST arm
+   whatever the value is (T-18): a failed compression read as a successful one, with the
+   error payload bound as the result, and reading a field off it segfaulted (see
+   tests/unit/optimiser/test_llmlingua.tk). Wired into the request path as they stood
+   (GA1.5), that would have forwarded an error in place of the prompt.
+
+   The failure sentinel is an empty `compressed` with the reason in `failure`. A caller asks
+   iscompressed and, when it is false, sends the ORIGINAL prompt; `compressed` is never the
+   prompt to use on failure. An answer with no compressed_prompt is a failure too: it is not
+   a compression of anything.
+
+   The request went through `http.postheaders(http.client(url);...)`, which sends nothing
+   (T-48, VM1.6f); it posts through reach.localpost now. The prompt is carried in clear, so
+   it goes only to a loopback sidecar, as the NER layer's does (VM1.6e), and it is escaped:
+   it was spliced into the body raw. *)
+f=failed(original:str;reason:str):$compressresult{
+  <$compressresult{
+    original:original;
+    compressed:"";
+    origintokens:0 as u32;
+    compressedtokens:0 as u32;
+    actualratio:0.0;
+    savingspct:0.0;
+    failure:reason
+  }
+};
+
+f=iscompressed(r:$compressresult):bool{
+  <str.len(r.failure)==0 && str.len(r.compressed)>0
+};
+
+f=compressfailure(r:$compressresult):str{
+  <r.failure
+};
+
+f=tokencount(obj:$json;key:str):u32{
+  <str.toint(jx.numtext(obj;key;"0")) as u32
+};
+
+f=buildcompressresult(original:str;obj:$json):$compressresult{
+  let compressed=jx.strvalue(obj;"compressed_prompt";"");
+  if(str.len(compressed)==0){ <failed(original;"llmlingua: the answer carries no compressed_prompt") }el{};
+  let origintokens=tokencount(obj;"origin_tokens");
+  let compressedtokens=tokencount(obj;"compressed_tokens");
   let savingspct=mut.0.0;
-  if(origintokens==0){}el{
-    savingspct=(1.0-(compressedtokens as f64/origintokens as f64))*100.0
-  };
   let actualratio=mut.0.0;
   if(origintokens==0){}el{
+    savingspct=(1.0-(compressedtokens as f64/origintokens as f64))*100.0;
     actualratio=compressedtokens as f64/origintokens as f64
   };
-  let result=$compressresult{
+  <$compressresult{
     original:original;
     compressed:compressed;
     origintokens:origintokens;
     compressedtokens:compressedtokens;
     actualratio:actualratio;
-    savingspct:savingspct
-  };
-  <$ok(result)
+    savingspct:savingspct;
+    failure:""
+  }
 };
 
-f=parsecompressresponse(original:str;raw:str):$compressresult!$lokeerr{
-  let parsed=json.dec(raw);
-  <mt parsed {
+f=parsecompressresponse(original:str;raw:str):$compressresult{
+  if(str.len(raw)==0){ <failed(original;"llmlingua: no answer from /compress") }el{};
+  <mt json.dec(raw) {
     $ok:obj buildcompressresult(original;obj);
-    $jsonerr:e $err($networkerr("llmlingua compress: failed to parse JSON response"))
+    $jsonerr:e failed(original;"llmlingua: the answer is not JSON")
   }
 };
 
-f=compressfailed(cid:str):$compressresult!$lokeerr{
-  log.error("llmlingua compress: POST /compress failed";"llmlingua";cid);
-  <$err($networkerr("llmlingua compress: failed to reach /compress"))
-};
-
-f=compressautofailed(cid:str):$compressresult!$lokeerr{
-  log.error("llmlingua compress_auto: POST /compress failed";"llmlingua";cid);
-  <$err($networkerr("llmlingua compress_auto: failed to reach /compress"))
-};
-
-f=compress(client:$llmlinguaclient;prompt:str;targetratio:f64):$compressresult!$lokeerr{
-  let hc=http.client(client.baseurl);
-  let ratios=str.fromfloat(targetratio);
-  let bodyp1=str.concat("{\"prompt\":\"";prompt);
-  let bodyp2=str.concat(bodyp1;"\",\"ratio\":");
-  let body=str.concat(bodyp2;str.concat(ratios;"}"));
+f=post(client:$llmlinguaclient;prompt:str;body:str;mode:str):$compressresult{
+  if(!reach.isloopbackurl(client.baseurl)){
+    <failed(prompt;"llmlingua: the sidecar is not on this machine, and the prompt is not sent off it")
+  }el{};
   let cid=log.newcorrelationid();
-  log.debug(str.concat("llmlingua compress: ratio=";ratios);"llmlingua";cid);
-  let result=http.postheaders(hc;"/compress";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-  <mt result {
-    $ok:raw parsecompressresponse(prompt;raw);
-    $httperr:e compressfailed(cid)
-  }
+  log.debug("llmlingua \(mode)";"llmlingua";cid);
+  let r=parsecompressresponse(prompt;reach.localpost(client.baseurl;"/compress";body));
+  if(iscompressed(r)){}el{
+    log.error("llmlingua \(mode): \(r.failure)";"llmlingua";cid)
+  };
+  <r
 };
 
-f=compressauto(client:$llmlinguaclient;prompt:str;maxtokens:u32):$compressresult!$lokeerr{
-  let hc=http.client(client.baseurl);
-  let maxs=str.fromint(maxtokens as i64);
-  let bodyp1=str.concat("{\"prompt\":\"";prompt);
-  let bodyp2=str.concat(bodyp1;"\",\"target_token\":");
-  let body=str.concat(bodyp2;str.concat(maxs;"}"));
-  let cid=log.newcorrelationid();
-  log.debug(str.concat("llmlingua compress_auto: max_tokens=";maxs);"llmlingua";cid);
-  let result=http.postheaders(hc;"/compress";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-  <mt result {
-    $ok:raw parsecompressresponse(prompt;raw);
-    $httperr:e compressautofailed(cid)
-  }
+f=compress(client:$llmlinguaclient;prompt:str;targetratio:f64):$compressresult{
+  <post(client;prompt;"{\"prompt\":\(jx.escape(prompt)),\"ratio\":\(str.fromfloat(targetratio))}";"compress")
+};
+
+f=compressauto(client:$llmlinguaclient;prompt:str;maxtokens:u32):$compressresult{
+  <post(client;prompt;"{\"prompt\":\(jx.escape(prompt)),\"target_token\":\(str.fromint(maxtokens as i64))}";"compress_auto")
 };
 
 f=shouldcompress(promptlen:u32;thresholdchars:u32):bool{

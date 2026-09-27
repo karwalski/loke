@@ -5,7 +5,28 @@ m=test.optimiser.llmlingua;
 
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=process:std.process;
 i=ll:core.optimiser.llmlingua;
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
 
 (* X7.2 — this file used to declare seven stand-ins for core.optimiser.llmlingua and assert
    against them. The damning pair:
@@ -111,6 +132,53 @@ f=main():i64{
   if(t.assert(ll.shouldcompress(1500 as u32;1000 as u32);"a caller's own threshold is honoured when it is non-zero")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!ll.shouldcompress(1500 as u32;2000 as u32);"in both directions")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!ll.shouldcompress(0 as u32;0 as u32);"an empty prompt is never compressed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── LS1.1x: compress and compressauto, both outcomes ───────────────────────
+     They answer a plain $compressresult now, read with iscompressed, so the failure path
+     the note above could not execute (reading a field off a mis-bound $lokeerr segfaulted)
+     is asserted here. Against scripts/lib/http_recorder.py: `answer` sends LLMLingua's
+     shape, `garbage` a 200 with a JSON object that has no compressed_prompt. *)
+  let hex:str=str.randhex(8);
+  let base="/tmp/loke_llm_\(hex)";
+  let oklog="\(base).ok.log";
+  let okport="\(base).ok.port";
+  let badlog="\(base).bad.log";
+  let badport="\(base).bad.port";
+  let recok=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";oklog;okport)) { $ok:h h; $err:e @() };
+  let recbad=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";badlog;badport;"garbage")) { $ok:h h; $err:e @() };
+  let okp=waitport(okport);
+  let badp=waitport(badport);
+  let okurl="http://127.0.0.1:\(okp)";
+  let badurl="http://127.0.0.1:\(badp)";
+
+  let c:$compressresult=ll.compress(ll.new(okurl);"say \"hi\" twice";0.5);
+  if(t.assert(ll.iscompressed(c);"compress against an answering sidecar is a compression")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(c.compressed;"short";"carrying the sidecar's compressed_prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(c.origintokens==10 as u32 && c.compressedtokens==5 as u32;"and its token counts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(oklog);"POST /compress {\"prompt\":\"say \\\"hi\\\" twice\",\"ratio\":");"the POST /compress arrived with the prompt escaped")){pass=pass+1}el{fail=fail+1};
+  let ca:$compressresult=ll.compressauto(ll.new(okurl);"p";300 as u32);
+  if(t.assert(ll.iscompressed(ca);"compressauto against an answering sidecar is a compression")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(oklog);"\"target_token\":300}");"and its POST carried the token target")){pass=pass+1}el{fail=fail+1};
+
+  let g:$compressresult=ll.compress(ll.new(badurl);"p";0.5);
+  if(t.assert(!ll.iscompressed(g);"a 200 with no compressed_prompt is NOT a compression")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(g.compressed;"";"and carries no text to forward in place of the prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ll.compressfailure(g);"compressed_prompt");"and says why")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ll.iscompressed(ll.compressauto(ll.new(badurl);"p";300 as u32));"compressauto likewise")){pass=pass+1}el{fail=fail+1};
+
+  let d:$compressresult=ll.compress(ll.new("http://127.0.0.1:59992");"p";0.5);
+  if(t.assert(!ll.iscompressed(d);"with nothing listening it is not a compression")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ll.compressfailure(d);"no answer");"because there was no answer")){pass=pass+1}el{fail=fail+1};
+  let far:$compressresult=ll.compress(ll.new("http://llmlingua.example.com:5000");"p";0.5);
+  if(t.assert(!ll.iscompressed(far);"a sidecar off this machine is not sent the prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ll.compressfailure(far);"not on this machine");"and says so")){pass=pass+1}el{fail=fail+1};
+
+  if(!(recok == @())){ process.kill(recok); process.wait(recok); }el{};
+  if(!(recbad == @())){ process.kill(recbad); process.wait(recbad); }el{};
+  file.delete(oklog);
+  file.delete(okport);
+  file.delete(badlog);
+  file.delete(badport);
 
   <fail
 };

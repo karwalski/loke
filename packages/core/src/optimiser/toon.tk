@@ -5,8 +5,13 @@ m=core.optimiser.toon;
 
 i=str:std.str;
 i=json:std.json;
-i=t:shared.types;
 i=tt:core.optimiser.toontypes;
+
+(* LS1.1x: what fromjsonstr and decode answer; see isparsed. *)
+t=$toonparsed{
+  tvalue:$toonvalue;
+  failure:str
+};
 
 f=defaultopts():$toonopts{
   <$toonopts{maxstrlen:200;abbreviatekeys:false;omitnulls:true}
@@ -60,10 +65,32 @@ f=jsonvaltotoon(v:$json):$toonvalue{
 };
 
 
-f=fromjsonstr(raw:str):$toonvalue!$lokeerr{
+(* LS1.1x — the optimiser's entry points answer plain values with a predicate, as LS1.1j's
+   chokepoints do. They returned `X!$lokeerr`, and a caller's match on that takes the FIRST
+   arm whatever the value is (T-18): a failed conversion read as a successful one.
+
+   $toonparsed (declared at the top of this file) carries a value, or a non-empty `failure`
+   and a null value that is not to be used; isparsed tells them apart. *)
+f=parsed(v:$toonvalue):$toonparsed{
+  <$toonparsed{tvalue:v;failure:""}
+};
+
+f=notparsed(reason:str):$toonparsed{
+  <$toonparsed{tvalue:$toonvalue{$tvnull:0};failure:reason}
+};
+
+f=isparsed(p:$toonparsed):bool{
+  <str.len(p.failure)==0
+};
+
+(* The failure no longer quotes the input: it was the caller's JSON, which may hold anything.
+   Blank input is refused before json.dec, which does not reliably refuse what is not JSON
+   (T-51); json.dec's own verdict is taken for the rest. *)
+f=fromjsonstr(raw:str):$toonparsed{
+  if(str.len(str.trimws(raw))==0){ <notparsed("from_json_str: empty input") }el{};
   <mt json.dec(raw) {
-    $ok:v $ok(jsonvaltotoon(v));
-    $err:e $err($unknownerr(str.concat("from_json_str: JSON parse failed: ";raw)))
+    $ok:v parsed(jsonvaltotoon(v));
+    $jsonerr:e notparsed("from_json_str: JSON parse failed")
   }
 };
 
@@ -152,11 +179,17 @@ f=encodetable(rows:@$toonvalue;opts:$toonopts):str{
   }
 };
 
-f=jsontotoon(rawjson:str;opts:$toonopts):str!$lokeerr{
-  <mt fromjsonstr(rawjson) {
-    $ok:tv $ok(encode(tv;opts));
-    $err:e $err(e)
-  }
+(* LS1.1x. "" when the input is not JSON; encode never answers "" for a value (its smallest
+   outputs are "~", "y", "n" and "0"), so isconverted reads the sentinel. It was
+   str!$lokeerr, which a caller could not see fail (T-18). *)
+f=jsontotoon(rawjson:str;opts:$toonopts):str{
+  let p=fromjsonstr(rawjson);
+  if(!isparsed(p)){ <"" }el{};
+  <encode(p.tvalue;opts)
+};
+
+f=isconverted(s:str):bool{
+  <str.len(s)>0
 };
 
 f=decodeflatobj(s:str):@$toonfield{
@@ -206,27 +239,28 @@ f=decodescalar(s:str):$toonvalue{
   }
 };
 
-f=decode(toonstr:str):$toonvalue!$lokeerr{
+(* LS1.1x. decode answers a plain $toonparsed; isparsed says whether it holds a value.
+
+   It returned $toonvalue!$lokeerr, and a caller's match took the first arm whatever the
+   value was (T-18), so a table with no rows read as decoded. Its two structured arms also
+   returned the BARE variants `$tvarr` and `$tvobj`, which toke accepts in a value position
+   and which crash when matched (T-13); they are built as `$toonvalue{$tvarr:0}` now, as
+   jsonvaltotoon builds them. What they carry is still only the kind of value (see the GA1.5
+   note above encodeinner). The rows and fields the old code computed and discarded are not
+   computed. *)
+f=decode(toonstr:str):$toonparsed{
   let s=str.trim(toonstr);
   if(str.startswith(s;"HDR[")){
-    let lines=str.split(s;"
-");
-    if(lines.len<2){
-      <$err($unknownerr("decode: HDR table has no data rows"))
-    }el{
-      let hdrline=lines.get(0);
-      let hdrinner=str.slice(hdrline;4;str.len(hdrline)-1);
-      let headers=str.split(hdrinner;"|");
-      <$ok($tvarr)
-    }
-  }el{
-    if(str.contains(s;"|")){
-      let fields=decodeflatobj(s);
-      <$ok($tvobj)
-    }el{
-      <$ok(decodescalar(s))
-    }
-  }
+    if(str.split(s;"
+").len<2){
+      <notparsed("decode: HDR table has no data rows")
+    }el{};
+    <parsed($toonvalue{$tvarr:0})
+  }el{};
+  if(str.contains(s;"|")){
+    <parsed($toonvalue{$tvobj:0})
+  }el{};
+  <parsed(decodescalar(s))
 };
 
 f=parseobjfields(s:str):@$toonfield{
@@ -300,11 +334,12 @@ f=toonvaltojson(val:$toonvalue):str{
   }
 };
 
-f=toontojson(toonstr:str):str!$lokeerr{
-  <mt decode(toonstr) {
-    $ok:tv $ok(toonvaltojson(tv));
-    $err:e $err(e)
-  }
+(* LS1.1x. "" when the TOON did not decode; a decoded value always has non-empty JSON, so
+   isconverted reads the sentinel. It was str!$lokeerr (T-18). *)
+f=toontojson(toonstr:str):str{
+  let d=decode(toonstr);
+  if(!isparsed(d)){ <"" }el{};
+  <toonvaltojson(d.tvalue)
 };
 
 (* A CHARACTER ratio, not a token saving, and it must never be reported as one.
