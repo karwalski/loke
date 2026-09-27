@@ -653,5 +653,40 @@ if [[ "$mb" == *invoice* ]] && [[ "$mb" == *'[EMAIL_'* ]] && [[ "$mb" != *'"prom
 else echo "  FAIL the model did not receive the uncompressed prompt: $(printf '%s' "$mb" | head -c 200)" >&2; fail=1; fi
 sqlite3 "$DB" "DELETE FROM settings WHERE key IN ('optimiser.llmlingua_url','optimiser.llmlingua_min_chars')"
 
+# DA1.10, spec 6.3 (A15) and G2: after every dispatch above, `loke audit verify` finds the
+# hash chain intact, with each disclosure record bound into it, and no orphan either way.
+# Then, on a copy of the store: a reserve field edited in one disclosure row breaks the chain,
+# and a deleted disclosure row is reported as an llm_dispatch row with no disclosure row.
+if [ -x "$CLI_BIN" ]; then
+  bound=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='llm_dispatch' AND length(disclosure_digest)=64")
+  disp=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='llm_dispatch'")
+  if [ -n "$disp" ] && [ "$disp" -gt 0 ] && [ "$bound" = "$disp" ]; then echo "  ok   all $disp llm_dispatch audit rows carry the digest of their disclosure record"
+  else echo "  FAIL $bound of $disp llm_dispatch audit rows carry a disclosure digest" >&2; fail=1; fi
+  AV=$(HOME="$WORK/lk/home" "$CLI_BIN" audit verify 2>&1); avrc=$?
+  case "$avrc:$AV" in
+    "0:"*"audit chain intact"*"0 disclosure row(s) with no audit row, 0 llm_dispatch row(s) with no disclosure row (reconciled)"*)
+      echo "  ok   loke audit verify: chain intact and reconciled over $(dl "SELECT COUNT() FROM disclosure_log") disclosure rows" ;;
+    *) echo "  FAIL loke audit verify exited $avrc: $(printf '%s' "$AV" | head -c 600)" >&2; fail=1 ;;
+  esac
+  mkdir -p "$WORK/tamper/home/.loke"
+  TDB="$WORK/tamper/home/.loke/loke.db"
+  sqlite3 "$DB" ".backup '$TDB'"
+  tcid=$(sqlite3 "$TDB" "SELECT correlation_id FROM disclosure_log WHERE state='completed' ORDER BY rowid LIMIT 1")
+  sqlite3 "$TDB" "UPDATE disclosure_log SET bytes_body=bytes_body+1 WHERE correlation_id='$tcid'"
+  AV=$(HOME="$WORK/tamper/home" "$CLI_BIN" audit verify 2>&1); avrc=$?
+  tid=$(sqlite3 "$TDB" "SELECT id FROM audit_log WHERE correlation_id='$tcid' AND event_type='llm_dispatch'")
+  case "$avrc:$AV" in
+    "1:"*"AUDIT CHAIN BROKEN"*"at id $tid: the disclosure_log row"*) echo "  ok   a disclosure row's bytes_body edited by one: the chain breaks at its llm_dispatch row" ;;
+    *) echo "  FAIL an edited disclosure row was not detected at '$tid' (exit $avrc): $(printf '%s' "$AV" | head -c 600)" >&2; fail=1 ;;
+  esac
+  sqlite3 "$TDB" "DELETE FROM disclosure_log WHERE correlation_id='$tcid'"
+  AV=$(HOME="$WORK/tamper/home" "$CLI_BIN" audit verify 2>&1); avrc=$?
+  case "$avrc:$AV" in
+    "1:"*"0 disclosure row(s) with no audit row, 1 llm_dispatch row(s) with no disclosure row"*"llm_dispatch row with no disclosure row: $tcid"*)
+      echo "  ok   and the row deleted, the reconciliation reports it by correlation id" ;;
+    *) echo "  FAIL a deleted disclosure row was not reported (exit $avrc): $(printf '%s' "$AV" | head -c 600)" >&2; fail=1 ;;
+  esac
+fi
+
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"

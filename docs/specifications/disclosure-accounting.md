@@ -385,6 +385,24 @@ So: `disclosure_log` is a separate table, and its canonical serialisation is an 
 a disclosure row breaks verification at the corresponding `audit_log` row. "Through `audit_log`" is
 satisfied by the chain and the join, not by the column list.
 
+How that is met (DA1.10). `audit_log.disclosure_digest` (migration 40) holds the sha256 of the
+disclosure row's canonical serialisation, and the audit row's hash covers it as a fifteenth field.
+The serialisation is SQLite's `quote()` of each column in a fixed order, prefixed with a version
+and the column set, so a NULL and an empty string differ and nothing is read back through a
+numeric type. There are two digests, one per phase. The `llm_dispatch` row binds the reserve
+fields (§5.1 to §5.4), taken in the reserve's transaction, and so enforces L3. The outcome row
+(`llm_request`, `llm_request_failed`) binds the whole record, taken in the completion's
+transaction. A no-custody refusal's `llm_request_refused` row also binds the whole record, since
+that record is written whole. An outcome row written while its record is still `dispatched`
+binds nothing, because the later sweep to `abandoned` would otherwise read as tampering.
+`core.storage.audit.verifychain` recomputes the digest from the disclosure row itself. Editing a
+bound field, or deleting the row, fails verification at the audit row that bound it. Rewriting
+the stored digest to match an edit breaks that row's own hash. Rows written before migration 40,
+and events with no disclosure record, hash exactly as before. Not covered: a sweep to
+`abandoned` with no later completion writes no audit row, so that row's outcome fields are bound
+by nothing. A column added by a later migration is outside the serialisation until a new version
+names it.
+
 ### 6.4 A dispatch with no record is detectable
 
 | # | Rule |
@@ -392,6 +410,14 @@ satisfied by the chain and the join, not by the column list.
 | G1 | Every `audit_log` row of an external-dispatch event type has exactly one `disclosure_log` row on the same `correlation_id`. An orphan on either side is a defect, not a gap to be tolerated |
 | G2 | A reconciliation check runs on demand and reports orphan counts both ways. It is the only way to know the accounting is complete, and completeness is the property every rate computed from this table assumes |
 | G3 | Acceptance, per DA1.3: after exactly one external request, exactly one `disclosure_log` row exists, with non-null values in every reserve field of §5.1 to §5.4 |
+
+G2 is `core.audit.reconcile.reconcile` (DA1.10), run on demand by `loke audit verify` together
+with the chain verification. It counts, and lists by correlation id (the first 100 each way),
+disclosure rows with no `llm_dispatch` audit row (or, for a no-custody refusal, no
+`llm_request_refused` row), and `llm_dispatch` rows with no disclosure row. The command exits
+non-zero on any orphan, on a broken chain, or when either table cannot be read. It cannot see a
+pair deleted together. The deleted audit row breaks the hash chain instead, unless it was the
+newest row: a chain cannot show that its tail was cut.
 
 ### 6.5 Inherited evidentiary defects
 

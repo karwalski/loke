@@ -1,0 +1,117 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.audit.reconcile;
+
+i=db:std.db;
+i=s:core.storage.db;
+
+(* DA1.10 - spec 6.4, G1 and G2. Every external dispatch writes a disclosure_log row and an
+   `llm_dispatch` audit row on the same correlation id, in one transaction (DA1.9, spec P2).
+   So an orphan on either side is not a gap to tolerate: it means a row was deleted, or a
+   write path went round the transaction. G2 asks for a check that runs on demand and reports
+   orphan counts both ways, and this is it:
+
+     unaudited    a disclosure_log row with no audit row that records it. That is an
+                  `llm_dispatch` row, or, for a no-custody refusal (NC1.12), the
+                  `llm_request_refused` row its record was written with
+     undisclosed  an `llm_dispatch` audit row with no disclosure_log row
+
+   The other direction is `llm_dispatch` only. The request path also writes
+   `llm_request_refused` for refusals that never reached a reserve (a policy block, an empty
+   route), and those have no disclosure record by design: a refusal sends nothing.
+
+   What it does not see: a pair deleted together. Neither side is then an orphan, and that is
+   the hash chain's to detect (core.storage.audit.verifychain), since audit_log is
+   append-only and a deleted audit row breaks the chain at the next row. Not if it was the
+   newest row: a hash chain cannot show that its tail was cut.
+
+   Counts are read with COUNT() and the lists are capped at `listlimit`, so a large orphan
+   set is reported in full by number and in part by id. Correlation ids are generated, not
+   taken from content, so listing them discloses nothing. Returns a plain struct, never a
+   result (T-18); `readable` is false when either query failed, and a caller must then not
+   read zero orphans as a clean store. *)
+t=$reconciliation{
+  readable:bool;
+  disclosurerows:i64;
+  dispatchrows:i64;
+  unauditedcount:i64;
+  undisclosedcount:i64;
+  unaudited:@str;
+  undisclosed:@str
+};
+
+f=unauditedwhere():str{
+  <"FROM disclosure_log d WHERE NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.correlation_id=d.correlation_id AND (a.event_type='llm_dispatch' OR a.event_type='llm_request_refused'))"
+};
+
+f=undisclosedwhere():str{
+  <"FROM audit_log a WHERE a.event_type='llm_dispatch' AND NOT EXISTS (SELECT 1 FROM disclosure_log d WHERE d.correlation_id=a.correlation_id)"
+};
+
+(* A string, because it is only ever interpolated into SQL (T-46). *)
+f=listlimit():str{ <"100" };
+
+f=idsfrom(rows:@$row):@str{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    out=out.push(s.rowstr(rows.get(i);"cid"))
+  };
+  <out
+};
+
+f=listed(sql:str):@str{
+  <mt db.many(sql;@()) {
+    $ok:rows idsfrom(rows);
+    $err:e @()
+  }
+};
+
+f=counted(sql:str):i64{
+  <s.scalari64(sql;@();"n";0-1)
+};
+
+f=reconcile():$reconciliation{
+  let limit=listlimit();
+  let dwhere=unauditedwhere();
+  let awhere=undisclosedwhere();
+  let drows=counted("SELECT COUNT() AS n FROM disclosure_log");
+  let arows=counted("SELECT COUNT() AS n FROM audit_log WHERE event_type='llm_dispatch'");
+  let dorph=counted("SELECT COUNT() AS n \(dwhere)");
+  let aorph=counted("SELECT COUNT() AS n \(awhere)");
+  <$reconciliation{
+    readable:drows>=0 && arows>=0 && dorph>=0 && aorph>=0;
+    disclosurerows:drows;
+    dispatchrows:arows;
+    unauditedcount:dorph;
+    undisclosedcount:aorph;
+    unaudited:listed("SELECT d.correlation_id AS cid \(dwhere) ORDER BY d.rowid LIMIT \(limit)");
+    undisclosed:listed("SELECT a.correlation_id AS cid \(awhere) ORDER BY a.rowid LIMIT \(limit)")
+  }
+};
+
+(* Reconciled means readable and no orphan either way. *)
+f=reconciled(r:$reconciliation):bool{
+  <r.readable && r.unauditedcount==0 && r.undisclosedcount==0
+};
+
+(* One line per listed id. `unaudited` selects the label, so no literal sits inside an
+   interpolation at the call. *)
+f=idlines(unaudited:bool;ids:@str):str{
+  let label=mut."llm_dispatch row with no disclosure row:";
+  if(unaudited){ label="disclosure row with no audit row:" }el{};
+  let out=mut."";
+  lp(let i=0;i<ids.len;i=i+1){
+    out="\(out)\n  \(label) \(ids.get(i))"
+  };
+  <out
+};
+
+f=formatreconciliation(r:$reconciliation):str{
+  if(r.readable==false){
+    <"DISCLOSURE RECONCILIATION COULD NOT RUN: disclosure_log or audit_log could not be read"
+  };
+  let head="disclosure reconciliation: \(r.disclosurerows) disclosure row(s), \(r.dispatchrows) llm_dispatch audit row(s); \(r.unauditedcount) disclosure row(s) with no audit row, \(r.undisclosedcount) llm_dispatch row(s) with no disclosure row";
+  if(reconciled(r)){ <"\(head) (reconciled)" };
+  <"ORPHANS FOUND — \(head)\(idlines(true;r.unaudited))\(idlines(false;r.undisclosed))"
+}

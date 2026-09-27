@@ -1,1 +1,3 @@
 Audit event logging module. Writes tamper-evident audit records (with hash chaining) to the audit_log table and retrieves recent events. Depends on std.db, std.str, std.json, and shared.types for the $lokeerr error type.
+
+DA1.10: rows that record a dispatch bind the digest of their `disclosure_log` row (`audit_log.disclosure_digest`, migration 40) as a fifteenth hashed field (`digestbound`, `insertbound`). `disclosuredigest(correlationid;full)` is the sha256 of a versioned `quote()` serialisation: the reserve fields for `llm_dispatch`, the whole record for every other event type (`bindsfull`). `verifychain` recomputes it from the disclosure row, so an edited or deleted disclosure row fails at the audit row that bound it. Rows with no digest hash as before.

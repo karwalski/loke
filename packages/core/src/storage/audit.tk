@@ -102,11 +102,11 @@ t=$chainresult{
    stored value and the digest: sub-cent amounts are rounded once, at the writer, and
    nothing finer is kept to tamper with. Rows written before the migration keep the old
    normalisation — see core.storage.db.auditcostcols. *)
-f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str):str{
+f=fieldstring(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str):str{
   (* The separator keeps two different field splits from hashing alike. A pipe is enough
      here because no field is free text — the closest is the correlation id, which is
      generated. *)
-  let fields=str.join("|";@(
+  <str.join("|";@(
     prevhash;
     id;
     eventtype;
@@ -121,14 +121,112 @@ f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provide
     durationms;
     correlationid;
     created
-  ));
-  (* sha256 takes [byte], not str — str.tobytes first. Passing the string directly
-     type-checked and crashed at run time. *)
-  <crypto.tohex(crypto.sha256(str.tobytes(fields)))
+  ))
+};
+
+(* sha256 takes [byte], not str — str.tobytes first. Passing the string directly
+   type-checked and crashed at run time. *)
+f=sha256hex(v:str):str{
+  <crypto.tohex(crypto.sha256(str.tobytes(v)))
+};
+
+f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str):str{
+  <sha256hex(fieldstring(prevhash;id;eventtype;usecase;modelid;provider;sensitivity;risktier;tokensin;tokensout;costusd;durationms;correlationid;created))
+};
+
+(* DA1.10 - spec 6.3 and A15. A row that carries the digest of a disclosure_log row hashes
+   it as a fifteenth field, so the chain covers the disclosure record: rewriting the stored
+   disclosure digest to match an edited disclosure row breaks this row's hash, and the
+   verifier recomputes the disclosure digest from the disclosure row itself. A row with no
+   disclosure digest (every event that is not a dispatch or its outcome, and every row
+   written before migration 40) hashes exactly as before, so an existing chain still
+   verifies. *)
+f=digestbound(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str;disclosure:str):str{
+  let base=fieldstring(prevhash;id;eventtype;usecase;modelid;provider;sensitivity;risktier;tokensin;tokensout;costusd;durationms;correlationid;created);
+  if(str.len(disclosure)==0){ <sha256hex(base) };
+  <sha256hex("\(base)|disclosure:\(disclosure)")
+};
+
+(* ── DA1.10: the disclosure record's canonical serialisation ───────────────────────────
+   Spec 6.3: disclosure_log is a companion table, and its row is an input to the digest of
+   its audit_log row. Two digests, because the row is written in two phases (spec 2.3):
+
+     reserve  the fields of spec 5.1 to 5.4, everything about what was sent. Bound into the
+              `llm_dispatch` audit row, written in the same transaction as the reserve
+              (DA1.9). L3 says these fields are immutable, and this is what detects a breach
+     full     the reserve fields and the outcome (state, reported tokens, response size,
+              duration, outcome). Bound into the outcome audit row (`llm_request`,
+              `llm_request_failed`), written in one transaction with the completion, and into
+              a no-custody refusal's `llm_request_refused` row, whose record is written whole
+
+   The serialisation is SQLite's quote() of each column, comma-separated, in a fixed order.
+   quote() renders a value as an SQL literal: NULL as NULL, an integer as its digits, a
+   string in single quotes with every quote doubled. So the list parses one way only, a NULL
+   and an empty string differ, and an integer and the same digits stored as text differ.
+   Nothing is read back through a toke numeric type, so no float rendering sits between what
+   was hashed and what is stored (the GA5.15 lesson). The prefix names the version and the
+   column set: a column added by a later migration is not covered until a new version names
+   it, and a verifier must not guess which. *)
+f=disclosurereservecols():@str{
+  <@("record_id";"correlation_id";"request_id";"session_id";"parent_record_id";"occurred_at";"dispatch_kind";"pipeline_disabled";"provider";"provider_class";"model_id";"model_version";"endpoint_host";"jurisdiction";"retention_class";"bytes_body";"bytes_headers";"bytes_schema_profile";"bytes_question";"bytes_other";"tokens_estimated";"tokeniser_id";"custody";"custody_check";"fallback_reason";"fallback_selected_by";"surrogate_style";"surrogate_scope";"datasets_disclosed";"fields_disclosed";"fields_disclosed_count";"field_types_disclosed";"cardinality_disclosed";"row_count_disclosed";"entity_types";"entities_total";"detection_layers";"real_values_included";"real_value_count";"sample_values_included";"aggregates_included";"qi_combination_present";"qi_combination_fields")
+};
+
+f=disclosureoutcomecols():@str{
+  <@("state";"tokens_source";"response_bytes";"tokens_in_reported";"tokens_out_reported";"duration_ms";"outcome")
+};
+
+f=quotedcols(cols:@str):str{
+  let out=mut."";
+  lp(let i=0;i<cols.len;i=i+1){
+    if(i>0){ out="\(out)||','||" }el{};
+    out="\(out)quote(\(cols.get(i)))"
+  };
+  <out
+};
+
+(* The SQL that serialises one row. A full digest is taken only once the row has left
+   `dispatched`: an outcome row written while its record was still in flight (a completion
+   that failed to update it) binds nothing, because the later sweep to `abandoned` would
+   otherwise read as tampering. *)
+f=disclosureserialsql(full:bool):str{
+  let cols=quotedcols(disclosurereservecols());
+  if(full){
+    <"SELECT 'disclosure-v1-full:'||\(cols)||','||\(quotedcols(disclosureoutcomecols())) AS s FROM disclosure_log WHERE correlation_id=? AND state<>'dispatched'"
+  };
+  <"SELECT 'disclosure-v1-reserve:'||\(cols) AS s FROM disclosure_log WHERE correlation_id=?"
+};
+
+f=serialfromrows(rows:@$row):str{
+  if(rows.len==0){ <"" };
+  <s.rowstr(rows.get(0);"s")
+};
+
+f=disclosureserial(correlationid:str;full:bool):str{
+  <mt db.many(disclosureserialsql(full);@(correlationid)) {
+    $ok:rows serialfromrows(rows);
+    $err:e ""
+  }
+};
+
+(* The digest of the disclosure row on `correlationid`, or "" when there is none to bind. *)
+f=disclosuredigest(correlationid:str;full:bool):str{
+  let serial=disclosureserial(correlationid;full);
+  if(str.len(serial)==0){ <"" };
+  <sha256hex(serial)
+};
+
+(* Which digest an audit row binds is fixed by its event type, which the chain covers: the
+   dispatch row binds the reserve, every other row the whole record. *)
+f=bindsfull(eventtype:str):bool{
+  <str.eq(eventtype;"llm_dispatch")==false
 };
 
 f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
-  <digestfields(
+  <eventdigestbound(prevhash;id;event;created;"")
+};
+
+f=eventdigestbound(prevhash:str;id:str;event:$auditevent;created:i64;disclosure:str):str{
+  <digestbound(
     prevhash;
     id;
     event.eventtype;
@@ -142,10 +240,19 @@ f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
     str.fromi64(t.f64hundredths(event.costusd));
     str.fromint(event.durationms);
     event.correlationid;
-    str.fromi64(created))
+    str.fromi64(created);
+    disclosure)
 };
 
 f=insertevent(store:i64;event:$auditevent):bool{
+  <insertbound(store;event;"")
+};
+
+(* DA1.10. The row for a dispatch or its outcome, with the digest of its disclosure row
+   (disclosuredigest above) stored and hashed. `disclosure` is "" for an event with no
+   disclosure record. The caller holds the transaction that wrote the disclosure row, so the
+   digest is of the row as it is committed. *)
+f=insertbound(store:i64;event:$auditevent;disclosure:str):bool{
   let id=str.randhex(16);
   let created=db.nowms(0);
 
@@ -155,9 +262,9 @@ f=insertevent(store:i64;event:$auditevent):bool{
     $err:v ""
   };
 
-  let hash=eventdigest(prevhashval;id;event;created);
+  let hash=eventdigestbound(prevhashval;id;event;created;disclosure);
 
-  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";@(
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at,disclosure_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''))";@(
     id;
     event.eventtype;
     event.usecase;
@@ -172,7 +279,8 @@ f=insertevent(store:i64;event:$auditevent):bool{
     event.correlationid;
     prevhashval;
     hash;
-    str.fromi64(created))) {
+    str.fromi64(created);
+    disclosure)) {
     $ok:v true;
     $err:e false
   }
@@ -228,7 +336,7 @@ f=digestfromrow(r:$row):str{
      integer of cents (GA5.15), or for a row written before migration 28 the legacy REAL
      read through the same rounding its digest was written with. See
      core.storage.db.auditcostcols. *)
-  <digestfields(
+  <digestbound(
     s.rowstr(r;"prev_hash");
     s.rowstr(r;"id");
     s.rowstr(r;"event_type");
@@ -242,7 +350,8 @@ f=digestfromrow(r:$row):str{
     str.fromi64(s.rowauditcostcents(r));
     s.rowstr(r;"duration_ms");
     s.rowstr(r;"correlation_id");
-    s.rowstr(r;"created_at"))
+    s.rowstr(r;"created_at");
+    s.rowstr(r;"disclosure_digest"))
 };
 
 f=verifyrows(rows:@$row):$chainresult{
@@ -262,6 +371,16 @@ f=verifyrows(rows:@$row):$chainresult{
       <chainbad(i;id;"the stored hash does not match a digest recomputed from this row's own fields: a field was altered")
     };
 
+    (* DA1.10: the disclosure record this row is bound to must still be the one it was
+       bound to. The stored digest is covered by the row hash checked above, so it cannot
+       be rewritten to match an edited disclosure row without failing that check. *)
+    let bound=s.rowstr(r;"disclosure_digest");
+    if(str.len(bound)>0){
+      if(str.eq(disclosuredigest(s.rowstr(r;"correlation_id");bindsfull(s.rowstr(r;"event_type")));bound)){}el{
+        <chainbad(i;id;"the disclosure_log row this audit row is bound to was altered or deleted: its digest no longer matches")
+      }
+    };
+
     expectedprev=storedhash
   };
   <chainok(rows.len as i64)
@@ -270,7 +389,7 @@ f=verifyrows(rows:@$row):$chainresult{
 (* The first row's prev_hash is "" — logevent writes the empty string when the table is
    empty — so an empty trail verifies trivially and says so through rowschecked. *)
 f=verifychain(store:i64):$chainresult{
-  <mt db.many(str.join("";@("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,";s.auditcostcols();",duration_ms,correlation_id,prev_hash,hash,created_at FROM audit_log ORDER BY created_at ASC, rowid ASC"));@()) {
+  <mt db.many(str.join("";@("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,";s.auditcostcols();",duration_ms,correlation_id,prev_hash,hash,created_at,COALESCE(disclosure_digest,'') AS disclosure_digest FROM audit_log ORDER BY created_at ASC, rowid ASC"));@()) {
     $ok:rows verifyrows(rows);
     $err:e chainbad(0;"";"the audit trail could not be read")
   }

@@ -1,0 +1,207 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.audit.testdisclosurechain;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=dl:core.audit.disclosure;
+i=rec:core.audit.reconcile;
+
+(* DA1.10 - spec 6.3 (A15) and 6.4 (G2), against the production modules and the real
+   migrations.
+
+   The disclosure record is bound into the audit hash chain: the `llm_dispatch` row carries
+   the digest of the reserve fields, and the outcome (or no-custody refusal) row the digest of
+   the whole record. Asserted here: an untouched store verifies and reconciles clean; editing a
+   reserve field fails verification AT the matching llm_dispatch row, and editing an outcome
+   field at the outcome row; putting the value back verifies again; an attacker who also
+   rewrites the stored disclosure digest to match breaks the row's own hash; deleting a
+   disclosure row is reported by the verifier and by the reconciliation; and the
+   reconciliation reports orphans in BOTH directions, with counts and ids.
+
+   audit_log is append-only by trigger (GA5.9), so the test drops a trigger to play the
+   attacker who can, which is exactly the attacker the chain exists for. *)
+
+f=storedir():str{
+  <str.concat(std.homedir();"/.loke/test-disclosure-chain")
+};
+
+f=openfresh():i64{
+  let dir=storedir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=exec(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=firstcol(rs:@$row;c:str):str{
+  if(rs.len==0){ <"<no row>" }el{ <db.rowstr(rs.get(0);c) }
+};
+
+f=textof(sql:str;params:@str):str{
+  <mt db.many(sql;params) {
+    $ok:rs firstcol(rs;"v");
+    $err:e "<error>"
+  }
+};
+
+f=auditid(cid:str;eventtype:str):str{
+  <textof("SELECT id AS v FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype))
+};
+
+f=bounddigest(cid:str;eventtype:str):str{
+  <textof("SELECT COALESCE(disclosure_digest,'') AS v FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype))
+};
+
+f=event(eventtype:str;cid:str):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:"browser-chat";
+    modelid:"qwen2.5:7b";
+    provider:"ollama";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:0;
+    tokensout:0;
+    costusd:0.0;
+    durationms:0 as u32;
+    correlationid:cid
+  }
+};
+
+f=reserve(store:i64;cid:str):bool{
+  <dl.reserveaudited(event("llm_dispatch";cid);cid;"sess-a";"local";"sha256:9f1c";"127.0.0.1:11434";120;45;"email:1";1;"scanned=regex";"redacted-data";"not_run";"task_requires_prose";"user";store)
+};
+
+f=nocustody(store:i64;eventtype:str;cid:str;check:str):bool{
+  <dl.reservenocustody(event(eventtype;cid);cid;"sess-a";"unknown";"127.0.0.1:11434";200;150;30;"[\"sales\"]";"[\"region\"]";1;check;0;store)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=openfresh();
+  if(t.assert(store!=0;"a fresh store opens and migrates")){pass=pass+1}el{fail=fail+1};
+
+  (* ── an untouched store ───────────────────────────────────────────────────── *)
+  if(t.assert(audit.insertevent(store;event("settings_changed";"cfg-1"));"an event with no disclosure record is written unbound")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reserve(store;"ch-a");"a redact-and-forward dispatch is reserved")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.completeaudited("ch-a";true;300;12;9;40;store;event("llm_request";"ch-a"));"and completed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nocustody(store;"llm_dispatch";"ch-b";"sentinel_pass");"a no-custody dispatch is reserved")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.completeaudited("ch-b";true;80;5;4;20;store;event("llm_request";"ch-b"));"and completed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nocustody(store;"llm_request_refused";"ch-c";"sentinel_fail");"a no-custody refusal is recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.insertevent(store;event("llm_request_refused";"ch-d"));"a policy refusal with no disclosure record is audited")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reserve(store;"ch-e");"a dispatch left in flight is reserved")){pass=pass+1}el{fail=fail+1};
+
+  let da=bounddigest("ch-a";"llm_dispatch");
+  let oa=bounddigest("ch-a";"llm_request");
+  if(t.assert(str.len(da)==64;"the llm_dispatch row carries a sha256 of its disclosure row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(da;audit.disclosuredigest("ch-a";false);"and it is the digest of the reserve fields")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(oa;audit.disclosuredigest("ch-a";true);"the outcome row carries the digest of the whole record")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(da;oa)==false;"and the two differ, because the outcome is covered too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(bounddigest("ch-c";"llm_request_refused"))==64;"a no-custody refusal's row binds its record")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bounddigest("ch-d";"llm_request_refused");"";"a refusal with no record binds nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bounddigest("cfg-1";"settings_changed");"";"nor does an event that is not a dispatch")){pass=pass+1}el{fail=fail+1};
+
+  let clean=audit.verifychain(store);
+  if(t.assert(clean.ok;"an untouched store verifies")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(clean.rowschecked==8;"over every audit row")){pass=pass+1}el{fail=fail+1};
+  let r0=rec.reconcile();
+  if(t.assert(rec.reconciled(r0);"and reconciles clean")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.disclosurerows==4;"four disclosure rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.dispatchrows==3;"three llm_dispatch rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.unauditedcount==0;"no disclosure row without an audit row, the refusal's included")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r0.undisclosedcount==0;"no llm_dispatch row without a disclosure row")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a reserve field is edited ────────────────────────────────────────────── *)
+  if(t.assert(exec("UPDATE disclosure_log SET bytes_body=bytes_body-1 WHERE correlation_id=?";@("ch-a"));"a reserve field is edited")){pass=pass+1}el{fail=fail+1};
+  let v1=audit.verifychain(store);
+  if(t.assert(v1.ok==false;"a tampered disclosure field fails verification")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(v1.firstbadid;auditid("ch-a";"llm_dispatch");"at the matching llm_dispatch row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(v1.reason;"disclosure_log");"and the reason names the disclosure record")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE disclosure_log SET bytes_body=bytes_body+1 WHERE correlation_id=?";@("ch-a"));"the value is put back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"and the store verifies again")){pass=pass+1}el{fail=fail+1};
+
+  (* A NULL and an empty string serialise differently. *)
+  if(t.assert(exec("UPDATE disclosure_log SET jurisdiction='' WHERE correlation_id=?";@("ch-b"));"a NULL reserve field is made empty")){pass=pass+1}el{fail=fail+1};
+  let v2=audit.verifychain(store);
+  if(t.asserteq(v2.firstbadid;auditid("ch-b";"llm_dispatch");"which fails verification at that dispatch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE disclosure_log SET jurisdiction=NULL WHERE correlation_id=?";@("ch-b"));"it is put back")){pass=pass+1}el{fail=fail+1};
+
+  (* ── an outcome field is edited ───────────────────────────────────────────── *)
+  if(t.assert(exec("UPDATE disclosure_log SET response_bytes=1 WHERE correlation_id=?";@("ch-a"));"an outcome field is edited")){pass=pass+1}el{fail=fail+1};
+  let v3=audit.verifychain(store);
+  if(t.asserteq(v3.firstbadid;auditid("ch-a";"llm_request");"verification fails at the outcome row, not the dispatch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE disclosure_log SET response_bytes=300 WHERE correlation_id=?";@("ch-a"));"it is put back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE disclosure_log SET outcome='ok' WHERE correlation_id=?";@("ch-c"));"a no-custody refusal's record is edited")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(audit.verifychain(store).firstbadid;auditid("ch-c";"llm_request_refused");"verification fails at its refusal row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE disclosure_log SET outcome='rejected_locally' WHERE correlation_id=?";@("ch-c"));"it is put back")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the attacker also rewrites the stored disclosure digest ─────────────── *)
+  if(t.assert(exec("UPDATE disclosure_log SET bytes_body=bytes_body-1 WHERE correlation_id=?";@("ch-a"));"a reserve field is edited again")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("DROP TRIGGER audit_log_append_only_update";@());"the attacker drops the append-only update trigger")){pass=pass+1}el{fail=fail+1};
+  let forged=audit.disclosuredigest("ch-a";false);
+  if(t.assert(str.eq(forged;da)==false;"the edited row has a different digest")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE audit_log SET disclosure_digest=? WHERE correlation_id=? AND event_type='llm_dispatch'";@(forged;"ch-a"));"and the bound digest is rewritten to match the edit")){pass=pass+1}el{fail=fail+1};
+  let v5=audit.verifychain(store);
+  if(t.assert(v5.ok==false;"verification still fails: the bound digest is hashed into the row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(v5.reason;"a field was altered");"as an altered audit field")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(v5.firstbadid;auditid("ch-a";"llm_dispatch");"at that row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE audit_log SET disclosure_digest=NULL WHERE correlation_id=? AND event_type='llm_dispatch'";@("ch-a"));"blanking the bound digest instead")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(audit.verifychain(store).firstbadid;auditid("ch-a";"llm_dispatch");"fails there too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE audit_log SET disclosure_digest=? WHERE correlation_id=? AND event_type='llm_dispatch'";@(da;"ch-a")) && exec("UPDATE disclosure_log SET bytes_body=bytes_body+1 WHERE correlation_id=?";@("ch-a"));"both are put back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"and the store verifies again")){pass=pass+1}el{fail=fail+1};
+
+  (* The in-flight row is swept, which changes no reserve field, and the chain holds. *)
+  if(t.assert(exec("UPDATE disclosure_log SET state='abandoned', outcome='timeout' WHERE correlation_id=?";@("ch-e"));"the in-flight row is swept to abandoned")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"and the chain still verifies")){pass=pass+1}el{fail=fail+1};
+
+  (* ── an llm_dispatch audit row is deleted ─────────────────────────────────── *)
+  let afterb=auditid("ch-b";"llm_request");
+  if(t.assert(exec("DROP TRIGGER audit_log_append_only_delete";@());"the attacker drops the append-only delete trigger")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("DELETE FROM audit_log WHERE correlation_id=? AND event_type='llm_dispatch'";@("ch-b"));"and deletes an llm_dispatch row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(audit.verifychain(store).firstbadid;afterb;"the chain breaks at the row after it")){pass=pass+1}el{fail=fail+1};
+  let r1=rec.reconcile();
+  if(t.assert(rec.reconciled(r1)==false;"the reconciliation is no longer clean")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r1.unauditedcount==1;"it reports one disclosure row with no audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r1.unaudited.len==1;"and lists it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r1.unaudited.get(0);"ch-b";"by its correlation id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r1.undisclosedcount==0;"and no orphan the other way")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rec.formatreconciliation(r1);"ORPHANS FOUND");"the report says orphans were found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rec.formatreconciliation(r1);"ch-b");"and names them")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a disclosure row is deleted: the other direction ─────────────────────── *)
+  if(t.assert(exec("DELETE FROM disclosure_log WHERE correlation_id=?";@("ch-a"));"a disclosure row is deleted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(audit.verifychain(store).firstbadid;auditid("ch-a";"llm_dispatch");"the verifier reports it at the llm_dispatch row")){pass=pass+1}el{fail=fail+1};
+  let r2=rec.reconcile();
+  if(t.assert(r2.undisclosedcount==1;"the reconciliation reports one llm_dispatch row with no disclosure row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r2.undisclosed.len==1;"and lists it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r2.undisclosed.get(0);"ch-a";"by its correlation id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r2.unauditedcount==1;"while still reporting the first orphan: both ways at once")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r2.disclosurerows==3 && r2.dispatchrows==2;"over three disclosure rows and two llm_dispatch rows")){pass=pass+1}el{fail=fail+1};
+
+  (* A store that cannot be read is not a clean one. *)
+  if(t.assert(exec("ALTER TABLE disclosure_log RENAME TO disclosure_log_held";@());"disclosure_log is moved away")){pass=pass+1}el{fail=fail+1};
+  let r3=rec.reconcile();
+  if(t.assert(r3.readable==false;"the reconciliation says it could not read")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rec.reconciled(r3)==false;"and does not report a clean store")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+}

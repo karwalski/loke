@@ -194,13 +194,34 @@ f=endtx(bothwritten:bool):bool{
   <false
 };
 
+(* DA1.10 - spec 6.3. Each audit row written here carries the digest of the disclosure row
+   it describes, taken inside the same transaction, so the hash chain covers the record
+   (core.storage.audit.disclosuredigest). The dispatch row binds the reserve fields, and the
+   outcome or refusal row the whole record. A reserve whose row cannot be digested is not
+   bound, so its audit row is not written and the transaction rolls back: the dispatch does
+   not happen (L1). An outcome whose record is still in flight binds nothing and is written
+   anyway, because the outcome must not be lost. *)
+f=bindingfor(ev:$auditevent):str{
+  <audit.disclosuredigest(ev.correlationid;audit.bindsfull(ev.eventtype))
+};
+
+f=insertreserveaudit(store:i64;ev:$auditevent):bool{
+  let bound=bindingfor(ev);
+  if(str.len(bound)==0){ <false };
+  <audit.insertbound(store;ev;bound)
+};
+
+f=insertoutcomeaudit(store:i64;ev:$auditevent):bool{
+  <audit.insertbound(store;ev;bindingfor(ev))
+};
+
 (* `ev` is the dispatch's audit row, and names the correlation id, provider and model the
    disclosure row is written with. *)
 f=reserveaudited(ev:$auditevent;requestid:str;sessionid:str;providerclass:str;modelversion:str;endpointhost:str;bodybytes:i64;questionbytes:i64;entitytypes:str;entitiestotal:i64;detectionlayers:str;custody:str;custodycheck:str;fallbackreason:str;fallbackby:str;store:i64):bool{
   if(sqlok("BEGIN IMMEDIATE")==false){ <false };
   let reserved=insertreserve(ev;requestid;sessionid;providerclass;modelversion;endpointhost;bodybytes;questionbytes;entitytypes;entitiestotal;detectionlayers;custody;custodycheck;fallbackreason;fallbackby);
   let audited=mut.false;
-  if(reserved){ audited=audit.insertevent(store;ev) }el{};
+  if(reserved){ audited=insertreserveaudit(store;ev) }el{};
   <endtx(reserved && audited)
 };
 
@@ -212,9 +233,9 @@ f=reserveaudited(ev:$auditevent;requestid:str;sessionid:str;providerclass:str;mo
 f=completeaudited(correlationid:str;ok:bool;responsebytes:i64;tokensin:i64;tokensout:i64;durationms:i64;store:i64;ev:$auditevent):bool{
   if(sqlok("BEGIN IMMEDIATE")==false){ <false };
   if(complete(correlationid;ok;responsebytes;tokensin;tokensout;durationms)){
-    <endtx(audit.insertevent(store;ev))
+    <endtx(insertoutcomeaudit(store;ev))
   }el{};
-  endtx(audit.insertevent(store;ev));
+  endtx(insertoutcomeaudit(store;ev));
   <false
 };
 
@@ -335,6 +356,6 @@ f=reservenocustody(ev:$auditevent;requestid:str;sessionid:str;modelversion:str;e
   if(sqlok("BEGIN IMMEDIATE")==false){ <false };
   let reserved=insertnocustody(ev;requestid;sessionid;modelversion;endpointhost;bodybytes;profilebytes;questionbytes;datasetsjson;fieldsjson;fieldcount;check;valuecount);
   let audited=mut.false;
-  if(reserved){ audited=audit.insertevent(store;ev) }el{};
+  if(reserved){ audited=insertreserveaudit(store;ev) }el{};
   <endtx(reserved && audited)
 }
