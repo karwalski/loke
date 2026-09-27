@@ -5,6 +5,7 @@ m=core.audit.disclosure;
 
 i=str:std.str;
 i=db:std.db;
+i=audit:core.storage.audit;
 
 (* DA1.7 - the disclosure record, one row per external dispatch, in disclosure_log (migration
    31). docs/specifications/disclosure-accounting.md section 5 defines the fields and section
@@ -27,10 +28,16 @@ i=db:std.db;
      - tokens_estimated and tokeniser_id stay NULL: no tokeniser runs before dispatch.
        tokens_source is set to provider_reported by `complete` only when the provider
        reported a count, and is otherwise left NULL rather than labelled an estimate
-     - bytes_headers is NULL: the transports this tree uses do not report the octets they
-       put on the wire
-     - model_version is the model id: nothing pins a version yet (VM1.2)
-     - the abandoned sweep (L2), jurisdiction and retention (U5) *)
+     - bytes_headers is NULL: neither transport this tree uses reports the octets it puts
+       on the wire. http.posturl takes no headers at all, and http.postheaders is given a
+       JSON map that std.http serialises, adding Host and Content-Length itself. Counting
+       the map would be a guess at the wire form, which C1 rules out (DA1.9)
+     - model_version is what the caller measured, and `unknown` when it measured nothing.
+       For a local dispatch that is the digest Ollama reports for the installed model. A
+       cloud model id is a name the provider resolves after transport, so it is not a
+       version, and the id is no longer copied into this column as if it were (DA1.9)
+     - jurisdiction is NULL and retention_class is `unknown`: no provider registry exists,
+       and the spec forbids filling either from assumption (U5, findings section 8 item 8) *)
 
 f=boolint(b:bool):str{
   if(b){ <"1" }el{ <"0" }
@@ -43,7 +50,7 @@ f=realvaluesincluded(custody:str;check:str):bool{
   <true
 };
 
-(* The fourteen reserve facts are parameters, not a struct. A record type here is imported into
+(* The reserve facts are parameters, not a struct. A record type here is imported into
    page.api.pipeline, which already sees 64 struct types, and toke caps a compilation unit at
    64 (TKC_MAX_STRUCT_TYPES). The 65th silently displaced std.http's $httpresp, and the error
    reported was an ambiguous field `body` (T-54). *)
@@ -71,11 +78,55 @@ f=orsqlnull(custody:str;v:str):str{
   <""
 };
 
+(* model_version is NOT NULL, so a version nobody measured is recorded as `unknown`, never
+   as the model id. *)
+f=versionor(v:str):str{
+  if(str.len(v)==0){ <"unknown" };
+  <v
+};
+
+(* DA1.9 (4) - session_id. The browser endpoint had no session and wrote `none`. A caller
+   that has one now names it, as POST /api/artifact's callers do (NC1.10), and it is recorded
+   as given: the id joins turns and asserts nothing about custody (C1). A request without one
+   is still recorded as `none`, so `none` is reserved and a caller may not send it. The id is
+   stored in the record, so it is held to a short identifier alphabet (letters, digits, `-`,
+   `_`, `.`, `:`, at most 64 characters), which keeps free text, and an address or a name
+   with it, out of the column. loke does not issue the id yet (NC1.13). *)
+f=nosession():str{ <"none" };
+
+f=sessionchar(c:i64):bool{
+  <(c>=48 && c<=58) || (c>=65 && c<=90) || (c>=97 && c<=122) || c==45 || c==46 || c==95
+};
+
+f=sessionidvalid(s:str):bool{
+  let n=str.len(s);
+  if(n==0 || n>64 || str.eq(s;nosession())){ <false };
+  let ok=mut.true;
+  lp(let i=0;i<n;i=i+1){
+    if(sessionchar(str.charat(s;i))==false){ ok=false }el{}
+  };
+  <ok
+};
+
+(* The reserve without an audit row and without a measured model version, as DA1.7 wrote
+   it. The request path uses reserveaudited. *)
 f=reserve(correlationid:str;requestid:str;sessionid:str;provider:str;providerclass:str;modelid:str;endpointhost:str;bodybytes:i64;questionbytes:i64;entitytypes:str;entitiestotal:i64;detectionlayers:str;custody:str;custodycheck:str;fallbackreason:str;fallbackby:str):bool{
+  <insertreserve($auditevent{eventtype:"";usecase:"";modelid:modelid;provider:provider;sensitivity:"";risktier:"";tokensin:0;tokensout:0;costusd:0.0;durationms:0 as u32;correlationid:correlationid};requestid;sessionid;providerclass;"";endpointhost;bodybytes;questionbytes;entitytypes;entitiestotal;detectionlayers;custody;custodycheck;fallbackreason;fallbackby)
+};
+
+(* The row's correlation id, provider and model are read from the audit event, so the
+   disclosure row and its audit row cannot disagree on them. That also keeps every call at
+   sixteen arguments or fewer: at this toolchain pin a call with a seventeenth argument is
+   miscompiled, its first argument emitted as an undefined value (TKC_MAX_PARAMS, measured
+   by DA1.9 and filed with T-53). *)
+f=insertreserve(ev:$auditevent;requestid:str;sessionid:str;providerclass:str;modelversion:str;endpointhost:str;bodybytes:i64;questionbytes:i64;entitytypes:str;entitiestotal:i64;detectionlayers:str;custody:str;custodycheck:str;fallbackreason:str;fallbackby:str):bool{
   if(fallbackadmissible(custody;fallbackreason;fallbackby)==false){ <false };
+  let correlationid=ev.correlationid;
+  let provider=ev.provider;
+  let modelid=ev.modelid;
   let sql="INSERT INTO disclosure_log (record_id,correlation_id,request_id,session_id,parent_record_id,occurred_at,state,dispatch_kind,pipeline_disabled,provider,provider_class,model_id,model_version,endpoint_host,jurisdiction,retention_class,bytes_body,bytes_headers,bytes_schema_profile,bytes_question,bytes_other,tokens_estimated,tokeniser_id,tokens_source,custody,custody_check,fallback_reason,fallback_selected_by,datasets_disclosed,fields_disclosed,fields_disclosed_count,field_types_disclosed,cardinality_disclosed,row_count_disclosed,entity_types,entities_total,detection_layers,real_values_included,real_value_count,sample_values_included,aggregates_included,qi_combination_present,qi_combination_fields) VALUES (?,?,?,?,NULL,?,'dispatched','initial',0,?,?,?,?,?,NULL,'unknown',CAST(? AS INTEGER),NULL,0,CAST(? AS INTEGER),CAST(? AS INTEGER),NULL,NULL,NULL,?,?,NULLIF(?,''),NULLIF(?,''),'','',0,'',0,0,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),NULL,0,0,NULL,'')";
   let other=bodybytes-questionbytes;
-  <mt db.exec(sql;@(str.randhex(16);correlationid;requestid;sessionid;str.nowiso8601();provider;providerclass;modelid;modelid;endpointhost;str.fromint(bodybytes);str.fromint(questionbytes);str.fromint(other);custody;custodycheck;orsqlnull(custody;fallbackreason);orsqlnull(custody;fallbackby);entitytypes;str.fromint(entitiestotal);detectionlayers;boolint(realvaluesincluded(custody;custodycheck)))) {
+  <mt db.exec(sql;@(str.randhex(16);correlationid;requestid;sessionid;str.nowiso8601();provider;providerclass;modelid;versionor(modelversion);endpointhost;str.fromint(bodybytes);str.fromint(questionbytes);str.fromint(other);custody;custodycheck;orsqlnull(custody;fallbackreason);orsqlnull(custody;fallbackby);entitytypes;str.fromint(entitiestotal);detectionlayers;boolint(realvaluesincluded(custody;custodycheck)))) {
     $ok:v true;
     $err:e false
   }
@@ -108,6 +159,59 @@ f=complete(correlationid:str;ok:bool;responsebytes:i64;tokensin:i64;tokensout:i6
     $err:e false
   };
   if(written){ <changedrows()==1 }el{ <false }
+};
+
+(* ── DA1.9 (2): one transaction with audit_log (spec P2) ──────────────────────────────
+   The reserve used to be written before transport and the audit row only after the
+   response, so a crash, a kill or a hung provider between the two left a disclosure with no
+   audit row at all, and the audit trail silently understated what had been sent. The fix
+   gives the dispatch its own audit row, `llm_dispatch`, written in the SAME transaction as
+   the reserve and before transport: both rows exist, or neither does and nothing is sent.
+   That row is the one the spec's one-to-one join and G1 refer to. The outcome row
+   (`llm_request`, `llm_request_failed`) still follows the response, now in one transaction
+   with the completion, so a completed disclosure always has its outcome in the trail.
+
+   BEGIN IMMEDIATE, not a deferred BEGIN: the audit insert reads the chain's tail and then
+   writes after it, and each server worker is a separate process with its own connection.
+   Taking the write lock first means no other worker can append between that read and the
+   write. If the lock cannot be taken, the reserve fails and the dispatch does not happen.
+   std.db has one connection per process, so these statements are on the same connection
+   as every other write; measured to roll back in tests/unit/audit/test_disclosure_tx.tk. *)
+f=sqlok(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* Commits when both writes succeeded, and otherwise rolls back. False unless committed. *)
+f=endtx(bothwritten:bool):bool{
+  if(bothwritten){
+    if(sqlok("COMMIT")){ <true }el{}
+  }el{};
+  sqlok("ROLLBACK");
+  <false
+};
+
+(* `ev` is the dispatch's audit row, and names the correlation id, provider and model the
+   disclosure row is written with. *)
+f=reserveaudited(ev:$auditevent;requestid:str;sessionid:str;providerclass:str;modelversion:str;endpointhost:str;bodybytes:i64;questionbytes:i64;entitytypes:str;entitiestotal:i64;detectionlayers:str;custody:str;custodycheck:str;fallbackreason:str;fallbackby:str;store:i64):bool{
+  if(sqlok("BEGIN IMMEDIATE")==false){ <false };
+  let reserved=insertreserve(ev;requestid;sessionid;providerclass;modelversion;endpointhost;bodybytes;questionbytes;entitytypes;entitiestotal;detectionlayers;custody;custodycheck;fallbackreason;fallbackby);
+  let audited=mut.false;
+  if(reserved){ audited=audit.insertevent(store;ev) }el{};
+  <endtx(reserved && audited)
+};
+
+(* The outcome. The audit row is what must not be lost, so it commits even when the
+   completion changed nothing (a row already swept to abandoned, say), and the return says
+   whether the disclosure row was completed. If the audit row cannot be written, the
+   completion is rolled back with it: the row stays `dispatched`, is later swept to
+   `abandoned`, and so reads as an outcome unknown, which is what the trail then holds. *)
+f=completeaudited(correlationid:str;ok:bool;responsebytes:i64;tokensin:i64;tokensout:i64;durationms:i64;store:i64;ev:$auditevent):bool{
+  if(sqlok("BEGIN IMMEDIATE")==false){ <false };
+  let completed=complete(correlationid;ok;responsebytes;tokensin;tokensout;durationms);
+  <endtx(audit.insertevent(store;ev)) && completed
 };
 
 

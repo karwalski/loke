@@ -56,7 +56,10 @@ cp "$LOKE_BIN" "$WORK/lk/loke"
 cp "$MOKE_BIN" "$WORK/mk/moke"
 
 SEEN="$WORK/model_saw.log"; : > "$SEEN"
-python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+QWEN_DIGEST=2bada8a7450677000f678be90653b85d364de7db25eb5ea54136ada5f3933730
+LLAMA_DIGEST=365c0bd3c000a25d28ddbf732fe1c6add414de7275464c4e4d1c3b5fcb5d8ad1
+FAKE_OLLAMA_DIGESTS="qwen2.5:7b=$QWEN_DIGEST,llama3:latest=$LLAMA_DIGEST" \
+  python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
 ( cd "$WORK/lk" && HOME="$WORK/lk/home" exec "$WORK/lk/loke" > "$WORK/lk.log" 2>&1 ) & PIDS="$PIDS $!"
 ( cd "$WORK/mk" && HOME="$WORK/mk/home" exec "$WORK/mk/moke" > "$WORK/mk.log" 2>&1 ) & PIDS="$PIDS $!"
 
@@ -121,6 +124,21 @@ case "$sv" in
     echo "  ok   /api/savings reports the dispatch and its $sent_bytes bytes" ;;
   *) echo "  FAIL /api/savings does not report the recorded dispatch: $(printf '%s' "$sv" | head -c 300)" >&2; fail=1 ;;
 esac
+# DA1.9 (4): the session moke's caller named reaches the record. (3): the model version is the
+# digest Ollama listed for the model the row names, measured before transport; header octets,
+# jurisdiction and retention are not measured, so NULL, NULL and unknown rather than a guess.
+ver=$(dl "SELECT session_id||' '||model_id||' '||model_version||' '||COALESCE(bytes_headers,'NULL')||' '||COALESCE(jurisdiction,'NULL')||' '||retention_class FROM disclosure_log")
+case "$ver" in
+  "e2e qwen2.5:7b $QWEN_DIGEST NULL NULL unknown"|"e2e llama3:latest $LLAMA_DIGEST NULL NULL unknown")
+    echo "  ok   it carries the caller's session and the digest Ollama reported for its model: $ver" ;;
+  *) echo "  FAIL the record's session, model version or unmeasured fields are '$ver'" >&2; fail=1 ;;
+esac
+# DA1.9 (2), spec P2 and G1: the dispatch has exactly one llm_dispatch audit row on its
+# correlation id, written with the reserve, and one outcome row after the response.
+cid=$(dl "SELECT correlation_id FROM disclosure_log")
+pair=$(dl "SELECT (SELECT COUNT() FROM audit_log WHERE correlation_id='$cid' AND event_type='llm_dispatch')||' '||(SELECT COUNT() FROM audit_log WHERE correlation_id='$cid' AND event_type='llm_request')")
+if [ -n "$cid" ] && [ "$pair" = "1 1" ]; then echo "  ok   and it joins one llm_dispatch audit row and one outcome row"
+else echo "  FAIL the dispatch's audit rows are '$pair' (llm_dispatch, llm_request) for '$cid'" >&2; fail=1; fi
 leaked=$(dl "SELECT COUNT() FROM disclosure_log WHERE instr(record_id||correlation_id||request_id||session_id||provider||model_id||endpoint_host||custody||entity_types||detection_layers||fields_disclosed, '$EMAIL')>0")
 if [ "$leaked" = "0" ]; then echo "  ok   and it holds the address in no column"
 else echo "  FAIL the disclosure record holds the address" >&2; fail=1; fi
@@ -207,6 +225,17 @@ esac
 if [ -s "$SEEN" ]; then echo "  FAIL the model received an unselected fallback request" >&2; fail=1; fi
 if [ "$(dl "SELECT COUNT() FROM disclosure_log")" = "$rows_unsel" ]; then echo "  ok   and it wrote no disclosure record"
 else echo "  FAIL an unselected fallback wrote a disclosure record" >&2; fail=1; fi
+# DA1.9 (4): a session id that is not a plain identifier is refused before anything is sent,
+# so an address cannot reach the record through it.
+OUTS=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\",\"session_id\":\"$EMAIL\",\"text\":\"hello there\"}" http://127.0.0.1:11430/api/pipeline)
+case "$OUTS" in
+  *'"session_invalid":true'*) echo "  ok   a session id that is not a plain identifier is refused" ;;
+  *) echo "  FAIL an address as session id was not refused: $(printf '%s' "$OUTS" | head -c 200)" >&2; fail=1 ;;
+esac
+if [ -s "$SEEN" ] || [ "$(dl "SELECT COUNT() FROM disclosure_log")" != "$rows_unsel" ]; then
+  echo "  FAIL a request with an invalid session id reached the model or wrote a record" >&2; fail=1
+else echo "  ok   and nothing was sent or recorded"; fi
 
 # GA5.26: a request carrying restricted data is HELD for approval, not forwarded. The input is
 # a card number: core.privacy.pipeline.maxsensitivity classifies CREDIT_CARD as RESTRICTED,

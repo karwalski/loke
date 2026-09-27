@@ -364,6 +364,14 @@ The implementation target is therefore:
 | P3 | `metrics_raw` is created by its own migration (DA1.2) and keeps its existing purpose — token and cost savings. It is **not** the home of the disclosure fields. Rationale: `metrics_raw` is a savings ledger with a `savings_by_stage` free-text column; disclosure needs to be chained and is not a savings figure |
 | P4 | `avgsavingpct` is computed or removed. A hardcoded zero in a summary is a published figure with no measurement behind it |
 
+How P2 is met (DA1.9). The reserve must precede transport (L1) and the outcome follows it, so
+one `audit_log` row cannot be written in the same transaction as both. A dispatch therefore
+writes two audit rows on its `correlation_id`. The first, event type `llm_dispatch`, is inserted
+in one transaction with the reserve, before transport, so both exist or neither does and nothing
+is sent. This is the audit row the one-to-one join of §2.2 and G1 refer to. The second is the
+outcome (`llm_request` or `llm_request_failed`), inserted in one transaction with the completion.
+Request counts over `audit_log` leave `llm_dispatch` out, so a dispatch is not counted twice.
+
 Choice of a companion table rather than widening `audit_log` — and the reasoning, since the story text
 says "persist through the `audit_log` table":
 

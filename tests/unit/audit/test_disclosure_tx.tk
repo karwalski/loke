@@ -1,0 +1,172 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.audit.testdisclosuretx;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=dl:core.audit.disclosure;
+
+(* DA1.9 (2) and (4) - core.audit.disclosure against the real migrations.
+
+   Spec P2: the disclosure record and its audit_log row are written in one transaction. Before
+   DA1.9 the reserve was written before transport and the audit row only after the response,
+   so a crash between the two left a disclosure with no audit row. The crash is simulated
+   here the way it matters: the audit insert fails after the reserve has succeeded, and
+   neither row may persist. The failure is made real by moving audit_log out of the way, so
+   every insert into it fails and the production reserveaudited runs its own path, not a stub.
+   (A trigger raising on insert would do the same, but its body needs a `;`, and one db.exec
+   applies one statement.)
+
+   This is also the measurement that std.db's one connection honours BEGIN and ROLLBACK at
+   this toolchain pin: with the transaction removed, the reserve row survives the failure. *)
+
+f=storedir():str{
+  <str.concat(std.homedir();"/.loke/test-disclosure-tx")
+};
+
+f=openfresh():i64{
+  let dir=storedir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=exec(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=disclosures(cid:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM disclosure_log WHERE correlation_id=?";@(cid);"n";0-1)
+};
+
+f=auditrows(cid:str;eventtype:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype);"n";0-1)
+};
+
+f=statusof(cid:str):str{
+  <mt db.many("SELECT state FROM disclosure_log WHERE correlation_id=?";@(cid)) {
+    $ok:rs statusfrom(rs);
+    $err:e "<error>"
+  }
+};
+
+f=statusfrom(rs:@$row):str{
+  if(rs.len==0){ <"<no row>" }el{ <db.rowstr(rs.get(0);"state") }
+};
+
+f=columnof(cid:str;c:str):str{
+  <mt db.many(str.concat("SELECT COALESCE(CAST(";str.concat(c;" AS TEXT),'NULL') AS v FROM disclosure_log WHERE correlation_id=?"));@(cid)) {
+    $ok:rs valuefrom(rs);
+    $err:e "<error>"
+  }
+};
+
+f=valuefrom(rs:@$row):str{
+  if(rs.len==0){ <"<no row>" }el{ <db.rowstr(rs.get(0);"v") }
+};
+
+f=event(eventtype:str;cid:str):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:"browser-chat";
+    modelid:"qwen2.5:7b";
+    provider:"ollama";
+    sensitivity:"confidential";
+    risktier:"MEDIUM";
+    tokensin:0;
+    tokensout:0;
+    costusd:0.0;
+    durationms:0 as u32;
+    correlationid:cid
+  }
+};
+
+f=reserve(store:i64;cid:str;sid:str):bool{
+  <dl.reserveaudited(event("llm_dispatch";cid);cid;sid;"local";"sha256:9f1c";"127.0.0.1:11434";120;45;"email:1";1;"scanned=regex";"redacted-data";"not_run";"task_requires_prose";"user";store)
+};
+
+(* Every insert into audit_log fails while the table is renamed away: the crash between the
+   two writes, made deterministic. *)
+f=breakaudit():bool{
+  <exec("ALTER TABLE audit_log RENAME TO audit_log_da19_held")
+};
+
+f=mendaudit():bool{
+  <exec("ALTER TABLE audit_log_da19_held RENAME TO audit_log")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=openfresh();
+  if(t.assert(store!=0;"a fresh store opens and migrates")){pass=pass+1}el{fail=fail+1};
+
+  (* ── both rows, together ──────────────────────────────────────────────────── *)
+  if(t.assert(reserve(store;"tx-ok";"sess-a");"a dispatch is reserved with its audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disclosures("tx-ok")==1;"the disclosure row is written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("tx-ok";"llm_dispatch")==1;"and so is its llm_dispatch audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(columnof("tx-ok";"session_id");"sess-a";"the caller's session is recorded (DA1.9 (4))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(columnof("tx-ok";"model_version");"sha256:9f1c";"and the measured model version (DA1.9 (3))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the audit insert fails after the reserve succeeded ──────────────────── *)
+  if(t.assert(breakaudit();"the audit insert is made to fail")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reserve(store;"tx-crash";"sess-a")==false;"a reserve whose audit row cannot be written is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disclosures("tx-crash")==0;"and its disclosure row does not persist: both or neither")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the outcome: completion rolled back with a failed audit row ──────────── *)
+  if(t.assert(dl.completeaudited("tx-ok";true;300;12;9;40;store;event("llm_request";"tx-ok"))==false;"a completion whose audit row cannot be written reports failure")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof("tx-ok");"dispatched";"and the completion is rolled back, so the row is still in flight")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(mendaudit();"the audit insert is mended")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("tx-crash";"llm_dispatch")==0;"the refused reserve left no audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("tx-ok";"llm_request")==0;"and the rolled-back completion no outcome row")){pass=pass+1}el{fail=fail+1};
+
+  (* A failed transaction must not be left open: the next one begins, and commits. *)
+  if(t.assert(reserve(store;"tx-after";"sess-b");"after a rollback the next dispatch reserves")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(disclosures("tx-after")==1 && auditrows("tx-after";"llm_dispatch")==1;"with both rows")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the reserve fails: no audit row is left behind either ───────────────── *)
+  if(t.assert(reserve(store;"tx-ok";"sess-a")==false;"a second reserve for one correlation id is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("tx-ok";"llm_dispatch")==1;"and adds no audit row")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the outcome, together ──────────────────────────────────────────────── *)
+  if(t.assert(dl.completeaudited("tx-ok";true;300;12;9;40;store;event("llm_request";"tx-ok"));"a completion writes its outcome with its audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof("tx-ok");"completed";"the disclosure row is completed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("tx-ok";"llm_request")==1;"and the outcome audit row is written")){pass=pass+1}el{fail=fail+1};
+
+  (* An abandoned row cannot be completed, and its outcome still reaches the trail. *)
+  if(t.assert(exec("UPDATE disclosure_log SET state='abandoned' WHERE correlation_id='tx-after'");"a dispatch is swept to abandoned")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.completeaudited("tx-after";false;0;0;0;9;store;event("llm_request_failed";"tx-after"))==false;"completing it reports that the row was not completed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("tx-after";"llm_request_failed")==1;"but the outcome's audit row is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof("tx-after");"abandoned";"and the row stays abandoned")){pass=pass+1}el{fail=fail+1};
+
+  (* Nothing rolled back left a hole in the hash chain. *)
+  let chain=audit.verifychain(store);
+  if(t.assert(chain.ok;"the audit chain verifies across the rolled-back writes")){pass=pass+1}el{fail=fail+1};
+
+  (* ── DA1.9 (4): the session id a caller may send ─────────────────────────── *)
+  if(t.assert(dl.sessionidvalid("e2e");"a plain id is accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.sessionidvalid("sess-1:a.b_C9");"with digits, '-', ':', '.' and '_'")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.sessionidvalid("0123456789012345678901234567890123456789012345678901234567890123");"64 characters are accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.sessionidvalid("01234567890123456789012345678901234567890123456789012345678901234");"65 are not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.sessionidvalid("");"an empty id is not an id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.sessionidvalid("none");"`none` is reserved for a request with no session")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.sessionidvalid("jane.doe@example.com");"an address is not an id, and is kept out of the column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.sessionidvalid("two words");"nor is free text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!dl.sessionidvalid("a/b");"nor a path")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+}

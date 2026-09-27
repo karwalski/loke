@@ -1990,6 +1990,17 @@ result: the runtime limit they set is not the array bound codegen uses.
 declaration with too many fields at the declaration and name the limit, or size the table from
 the configured limit.
 
+**The same limit on a call, which is worse (measured 2026-09-27 at `0b0bc4e`, DA1.9).** A
+function declared with seventeen parameters compiles, and its `define` in the IR is correct. A
+CALL passing seventeen arguments is not: the first argument is emitted as `%t1`, a value never
+defined in the caller, and the seventeenth `i8*` is passed through `ptrtoint` as an `i64`. clang
+rejects the module with `use of undefined value '%t1'`, which at least stops the build, but
+names neither the call nor the limit. `core.audit.disclosure.reserve` reached seventeen when
+DA1.9 added the model version. **What it cost in loke:** `reserveaudited` takes the audit event
+and reads the correlation id, provider and model from it, so no call passes more than sixteen.
+**The ask:** reject a call or a declaration with more than `TKC_MAX_PARAMS` parameters, naming
+the limit.
+
 ## T-54 — a 65th struct type in scope silently displaces another, and the error blames a field name
 
 **Severity: blocks, with a misleading diagnostic.**

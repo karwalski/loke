@@ -6,11 +6,13 @@ loke placeholder it finds in the prompt, so the round trip through restoration c
 Every POST is appended to the log file named on the command line, so the test can assert
 exactly what a model would have been given.
 
-Three optional variables, all off by default so smoke_e2e.sh sees what it always saw:
+Four optional variables, all off by default so smoke_e2e.sh sees what it always saw:
 FAKE_OLLAMA_REPLY replaces the echoed sentence with a fixed reply (smoke_benchmark.sh),
 FAKE_OLLAMA_PORT moves it off 11434 so a run needs no machine-wide lock, and
 FAKE_OLLAMA_COMPACT=1 writes JSON with no spaces, as Ollama itself does. shared.jsonobj's
 nested lookup matches `"key":` with no space, so a reader built on it needs this.
+FAKE_OLLAMA_DIGESTS ("name=digest,name=digest") gives a listed model its own digest in
+/api/tags; any other model is listed with the digest "x" (smoke_e2e.sh, DA1.9).
 """
 import http.server, json, os, sys
 MODELS=os.environ.get("FAKE_OLLAMA_MODELS","qwen2.5:7b,llama3:latest").split(",")
@@ -18,12 +20,13 @@ LOG=sys.argv[1]
 REPLY=os.environ.get("FAKE_OLLAMA_REPLY")
 PORT=int(os.environ.get("FAKE_OLLAMA_PORT","11434"))
 SEPS=(",",":") if os.environ.get("FAKE_OLLAMA_COMPACT")=="1" else None
+DIGESTS=dict(kv.split("=",1) for kv in os.environ.get("FAKE_OLLAMA_DIGESTS","").split(",") if "=" in kv)
 class H(http.server.BaseHTTPRequestHandler):
     def _send(self,obj):
         b=json.dumps(obj,separators=SEPS).encode(); self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self,*a): pass
     def do_GET(self):
-        if self.path.startswith('/api/tags'): self._send({"models":[{"name":m,"size":1,"digest":"x"} for m in MODELS if m]})
+        if self.path.startswith('/api/tags'): self._send({"models":[{"name":m,"size":1,"digest":DIGESTS.get(m,"x")} for m in MODELS if m]})
         elif self.path.startswith('/api/ps'): self._send({"models":[]})
         else: self._send({})
     def do_POST(self):

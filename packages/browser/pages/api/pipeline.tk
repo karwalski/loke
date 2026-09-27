@@ -226,25 +226,39 @@ f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;
   <recordeventwith(store;run;eventtype;provider;modelid;tokensin;tokensout;durationms;decision;approvaloutcome(decision))
 };
 
+f=senslabelof(res:$piidetectionresult):str{
+  <t.senslabel(res.sensitivity)
+};
+
+f=auditeventfor(run:$pipelinerun;eventtype:str;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:"browser-chat";
+    modelid:modelid;
+    provider:provider;
+    sensitivity:senslabelof(run.result);
+    risktier:risklabel(risktierof(run));
+    tokensin:tokensin as u32;
+    tokensout:tokensout as u32;
+    costusd:0.0;
+    durationms:durationms as u32;
+    correlationid:run.requestid
+  }
+};
+
 f=recordeventwith(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64;decision:$policydecision;approval:str):bool{
   if(store==0){
     <false
   }el{
-    let res:$piidetectionresult=run.result;
-    let ev=$auditevent{
-      eventtype:eventtype;
-      usecase:"browser-chat";
-      modelid:modelid;
-      provider:provider;
-      sensitivity:t.senslabel(res.sensitivity);
-      risktier:risklabel(risktierof(run));
-      tokensin:tokensin as u32;
-      tokensout:tokensout as u32;
-      costusd:0.0;
-      durationms:durationms as u32;
-      correlationid:run.requestid
-    };
-    let ok=audit.insertevent(store;ev);
+    <tracedafter(store;run;eventtype;provider;modelid;durationms;decision;approval;audit.insertevent(store;auditeventfor(run;eventtype;provider;modelid;tokensin;tokensout;durationms)))
+  }
+};
+
+(* The decision trace for an audited outcome, whichever way its audit row was written. *)
+f=tracedafter(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;durationms:i64;decision:$policydecision;approval:str;ok:bool):bool{
+  if(store==0){
+    <false
+  }el{
     (* GA5.5 - every audited outcome also persists its decision trace. The kill switch was
        read as disengaged at the top of `post`, because an engaged one returns before any
        event is recorded; killswitchtrace records that case itself. *)
@@ -440,13 +454,27 @@ f=restoretext(run:$pipelinerun;text:str):str{
 
 (* A failed provider call is audited too. An audit trail that records only successes
    describes a system that never has an outage, which is worse than no trail. *)
-f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
-  let elapsed=t.nowms()-startms;
-  (* DA1.7 - the reserved disclosure row is completed as failed. *)
-  if(dl.complete(run.requestid;false;0;0;0;elapsed)){}el{
-    log.warn("disclosure record was not completed for this failed dispatch";"api.pipeline";run.requestid)
+(* DA1.9 - the outcome: the disclosure row is completed and the outcome's audit row inserted
+   in one transaction (core.audit.disclosure.completeaudited), then the decision trace is
+   written. Returns whether the audit row was written, as recordevent does. *)
+f=outcome(store:i64;run:$pipelinerun;eventtype:str;ok:bool;provider:str;modelid:str;responsebytes:i64;tin:i64;tout:i64;elapsed:i64;decision:$policydecision):bool{
+  if(store==0){ <false };
+  if(dl.completeaudited(run.requestid;ok;responsebytes;tin;tout;elapsed;store;auditeventfor(run;eventtype;provider;modelid;tin;tout;elapsed))){}el{
+    log.warn("disclosure record was not completed with its audit row for this dispatch";"api.pipeline";run.requestid)
   };
-  recordevent(store;run;"llm_request_failed";provider;modelid;0;0;elapsed;decision);
+  <tracedafter(store;run;eventtype;provider;modelid;elapsed;decision;approvaloutcome(decision);auditrowwritten(run.requestid;eventtype))
+};
+
+(* Whether the outcome's audit row exists. completeaudited's bool is the disclosure
+   completion, which can be false with the audit row committed (a row already abandoned). *)
+f=auditrowwritten(cid:str;eventtype:str):bool{
+  <dbmod.scalari64("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype);"n";0)>0
+};
+
+f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
+  (* DA1.7 - the reserved disclosure row is completed as failed, in one transaction with the
+     outcome's audit row (DA1.9). *)
+  outcome(store;run;"llm_request_failed";false;provider;modelid;0;0;0;t.nowms()-startms;decision);
   recordmetric(run;provider;modelid;0;0;0.0);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
 };
@@ -748,11 +776,6 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
   let elapsed=t.nowms()-startms;
   let res:$piidetectionresult=run.result;
 
-  (* DA1.7 - the reserved disclosure row is completed with what came back. *)
-  if(dl.complete(run.requestid;true;rawbytes;tin;tout;elapsed)){}el{
-    log.warn("disclosure record was not completed for this dispatch";"api.pipeline";run.requestid)
-  };
-
   (* Stored BEFORE restoration, so the cache holds only anonymised text. *)
   cachestore(run;res.anonymised;anonresponse);
 
@@ -762,7 +785,9 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
     log.warn("budget counters were not persisted, so the limit is not accumulating";"api.pipeline";run.requestid)
   };
 
-  let logged=recordevent(store;run;"llm_request";provstr;spec.id;tin;tout;elapsed;decision);
+  (* DA1.7 - the reserved disclosure row is completed with what came back, in one
+     transaction with the outcome's audit row (DA1.9). *)
+  let logged=outcome(store;run;"llm_request";true;provstr;spec.id;rawbytes;tin;tout;elapsed;decision);
   recordmetric(run;provstr;spec.id;tin;tout;requestcost(spec;tin;tout));
   if(logged){}el{
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
@@ -808,8 +833,22 @@ f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;r:$httpresp;p
    what this path sends, and it is passed rather than observed until NC1.2's sentinel check
    exists (spec C1-C3). The correlation id is the request id, which is also audit_log's, so
    the two rows join one-to-one. *)
-f=reservedispatch(run:$pipelinerun;provider:str;providerclass:str;modelid:str;host:str;sent:str;anonymised:str;fbreason:str;fbby:str):bool{
-  <dl.reserve(run.requestid;run.requestid;"none";provider;providerclass;modelid;host;str.len(sent);str.len(json.enc(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run";fbreason;fbby)
+(* DA1.9 - the reserve and its audit row, `llm_dispatch`, are one transaction (spec P2), so a
+   dispatch cannot be recorded in disclosure_log and missing from audit_log, or the reverse.
+   The decision trace is not written for this row: the trace records the outcome, once. The
+   model version is what was measured before transport, or "" for unknown (see
+   core.audit.disclosure). *)
+f=reservedispatch(store:i64;run:$pipelinerun;provider:str;providerclass:str;modelid:str;modelversion:str;host:str;sent:str;anonymised:str;fbreason:str;fbby:str;sid:str;decision:$policydecision):bool{
+  if(store==0){ <false };
+  <dl.reserveaudited(auditeventfor(run;"llm_dispatch";provider;modelid;0;0;0);run.requestid;sid;providerclass;modelversion;host;str.len(sent);str.len(json.enc(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run";fbreason;fbby;store)
+};
+
+(* "" for a missing session_id is `none`; anything else must be a valid id, and "" is the
+   answer for one that is not. *)
+f=sessionof(given:str):str{
+  if(str.len(given)==0){ <dl.nosession() };
+  if(dl.sessionidvalid(given)){ <given };
+  <""
 };
 
 (* A dispatch that cannot be recorded does not happen (spec section 4). It is refused and
@@ -820,11 +859,11 @@ f=unrecorded(store:i64;run:$pipelinerun;provider:str;modelid:str;piifields:str;s
   <http.res(503;"{\"ok\":false,\"error\":\"the disclosure record could not be written, so the request was not sent\",\"disclosure_unrecorded\":true\(piifields)}")
 };
 
-f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
+f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let spec:$modelspec=route.model;
   let abody="{\"model\":\(json.enc(spec.id)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
   let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
-  if(reservedispatch(run;"anthropic";"cloud";spec.id;"api.anthropic.com";abody;anonymised;fbreason;fbby)){}el{
+  if(reservedispatch(store;run;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;anonymised;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
   };
   <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
@@ -848,8 +887,27 @@ f=isinstalled(id:str;names:@str):bool{
   <found
 };
 
+f=installedmodels():@$ollamamodel{
+  <mt ollama.listmodels(ollama.new("http://127.0.0.1:11434")) {$ok:v v; $err:e @()}
+};
+
 f=installednames():@str{
-  let models=mt ollama.listmodels(ollama.new("http://127.0.0.1:11434")) {$ok:v v; $err:e @()};
+  <namesof(installedmodels())
+};
+
+(* DA1.9 (3) - model_version for a local dispatch: the digest Ollama reports for the model
+   it will run, read before transport. "" (recorded as unknown) when the model is not listed
+   or Ollama gave no digest. *)
+f=digestof(id:str;models:@$ollamamodel):str{
+  let d=mut."";
+  lp(let i=0;i<models.len;i=i+1){
+    let m:$ollamamodel=models.get(i);
+    if(str.eq(m.name;id) || str.eq(m.name;str.concat(id;":latest"))){ d=m.digest }el{}
+  };
+  <d
+};
+
+f=namesof(models:@$ollamamodel):@str{
   let names=mut.@();
   lp(let i=0;i<models.len;i=i+1){
     let m:$ollamamodel=models.get(i);
@@ -858,21 +916,22 @@ f=installednames():@str{
   <names
 };
 
-f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
+f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let spec:$modelspec=route.model;
   (* F5.12. The router chooses from a static catalogue, not from what is installed, so it
      can route to a model Ollama does not have, and Ollama answers 404. This refuses with
      the names the user can act on. It does not substitute another model: a second routing
      decision taken here, out of the router's sight, is what GA1.7 removed. The routed model
      not being installed is still the router's defect, and F5.12 stays open for it. *)
-  let installed=installednames();
+  let models=installedmodels();
+  let installed=namesof(models);
   if(installed.len>0 && !isinstalled(spec.id;installed)){
     recordevent(store;run;"llm_request_refused";"ollama";spec.id;0;0;t.nowms()-startms;decision);
     let msg="the router chose \(spec.id), which is not installed in Ollama. Installed: \(str.join(", ";installed))";
     <http.res(503;"{\"ok\":false,\"error\":\(json.enc(msg)),\"model_not_installed\":true\(piifields)}")
   }el{};
   let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
-  if(reservedispatch(run;"ollama";"local";spec.id;"127.0.0.1:11434";payload;anonymised;fbreason;fbby)){}el{
+  if(reservedispatch(store;run;"ollama";"local";spec.id;digestof(spec.id;models);"127.0.0.1:11434";payload;anonymised;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"ollama";spec.id;piifields;startms;decision)
   };
   let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
@@ -904,30 +963,30 @@ f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:
   <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
 };
 
-f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
+f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let key=anthropickey();
   if(str.len(key)>20){}el{
     <needsanthropickey(store;run;route;piifields;startms;decision)
   };
-  <toanthropic(store;run;route;anonymised;sysprompt;key;piifields;startms;decision;fbreason;fbby)
+  <toanthropic(store;run;route;anonymised;sysprompt;key;piifields;startms;decision;fbreason;fbby;sid)
 };
 
 (* All seven $provider variants are named. A match on a plain user sum DOES discriminate
    across a module boundary — it is only a result whose error side is a user sum that does
    not (T-18) — and listing every variant is what lets the refusal say WHICH provider was
    unsupported. *)
-f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
+f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let res:$piidetectionresult=run.result;
   let spec:$modelspec=route.model;
   let prov:$provider=spec.provider;
   <mt prov {
-    $anthropic:v toanthropicchecked(store;run;route;res.anonymised;sysprompt;piifields;startms;decision;fbreason;fbby);
+    $anthropic:v toanthropicchecked(store;run;route;res.anonymised;sysprompt;piifields;startms;decision;fbreason;fbby;sid);
     $openai:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $google:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $mistral:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $openrouter:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $ollama:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby);
-    $local:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby)
+    $ollama:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby;sid);
+    $local:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby;sid)
   }
 };
 
@@ -955,7 +1014,7 @@ f=fallbackunselected():i64{
    The order is the story: cache, then budget, then route, then dispatch. A hit spends
    nothing; an exhausted budget refuses before a provider is paid; and the route is what
    decides where the text is allowed to go. *)
-f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
+f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let res:$piidetectionresult=run.result;
   let piifields=str.concat(privacyfields(run);custodyfields(fbreason;fbby));
 
@@ -1008,7 +1067,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
     <http.res(403;"{\"ok\":false,\"error\":\(json.enc(ks.fallbackmessage(pname))),\"provider_blocked\":true\(piifields)}")
   }el{};
 
-  <dispatch(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby)
+  <dispatch(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby;sid)
 };
 
 (* ── GA5.26: hold until approved ─────────────────────────────────────────────────
@@ -1103,6 +1162,14 @@ f=post(req:i64):i64{
   if(dl.fallbackreasonvalid(fbreason) && dl.fallbackselectorvalid(fbby)){}el{
     <fallbackunselected()
   };
+  (* DA1.9 (4) - the caller's session, recorded on the disclosure row. Optional: a request
+     without one is recorded as `none`, because no session is invented for it. One that is
+     sent must be a plain identifier (see core.audit.disclosure.sessionidvalid), and is
+     refused before the scan otherwise. *)
+  let sid=sessionof(json.str(parsed;"session_id"));
+  if(str.len(sid)==0){
+    <http.res(400;"{\"ok\":false,\"error\":\"session_id, when sent, must be 1 to 64 letters, digits, '-', '_', '.' or ':', and not 'none'\",\"session_invalid\":true}")
+  }el{};
 
   (* The only path to a provider. A refusal here is the point of NC1.9: no detection
      layer scanned this text, so it does not leave the machine. *)
@@ -1137,7 +1204,7 @@ f=post(req:i64):i64{
         <approvalrefused(store;run;decision;aid;bind;startms)
       }
     }el{};
-    <forward(store;run;sysprompt;startms;decision;fbreason;fbby)
+    <forward(store;run;sysprompt;startms;decision;fbreason;fbby;sid)
   }el{
     privacyrefusedtrace(store;run;t.nowms()-startms);
     <refused("no privacy detection layer is available")
