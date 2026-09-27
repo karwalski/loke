@@ -5,9 +5,10 @@ m=core.installer.pull;
 
 i=str:std.str;
 i=log:shared.log;
-i=http:std.http;
 i=proc:std.process;
 i=json:std.json;
+i=jx:shared.jsonobj;
+i=reach:shared.reachability;
 
 t=$pullprogress{
   modelid:str;
@@ -257,33 +258,36 @@ f=parsemodeltagserr(e:str):bool{
   <false
 };
 
-f=handlemodeltagsresp(r:$httpresp;modelid:str):bool{
-  if(r.status == 200){
-    (* Returned: the match used to be a statement, so a 200 fell through to toke's implicit
-       `ret 0`, and "is the model installed?" answered false whenever Ollama said yes. *)
-    let obj=json.dec(str.frombytes(r.body));
-    <mt json.arr(obj;"models") {
-      $ok:models namesmatch(models;modelid);
-      $err:e parsemodeltagserr("no models array")
-    }
-  }el{
-    log.warn(str.concat("ollama tags returned status: ";str.fromint(r.status as i64));"installer.pull";"system");
-    <false
+(* VM1.6h. The body of Ollama's /api/tags answer. This took an `$httpresp` and read `.status`
+   and `.body` off it, but the one-argument `http.get` answers the body itself, a str.
+   Measured against scripts/lib/http_recorder.py listing the model asked for: the GET arrived
+   and the answer was "not available", because the "status" was the bytes `{"models` read as
+   an integer. *)
+f=handlemodeltagsbody(body:str;modelid:str):bool{
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  <mt json.arr(obj;"models") {
+    $ok:models namesmatch(models;modelid);
+    $err:e parsemodeltagserr("no models array")
   }
 };
 
-f=handlemodeltagserr(e:str):bool{
-  log.warn(str.concat("ollama not reachable: ";e);"installer.pull";"system");
-  <false
+(* The GET goes through shared.reachability.localget, which probes the port first (T-15)
+   and answers "" when nothing usable came back; that is logged, not read as a list. *)
+f=ismodelavailableat(baseurl:str;modelid:str):bool{
+  log.info(str.concat("checking model availability: ";modelid);"installer.pull";"system");
+  let body=reach.localget(baseurl;"/api/tags");
+  if(str.len(body)==0){
+    log.warn("ollama not reachable, or /api/tags answered nothing";"installer.pull";"system");
+    <false
+  }el{};
+  <handlemodeltagsbody(body;modelid)
 };
 
 f=ismodelavailable(modelid:str):bool{
-  log.info(str.concat("checking model availability: ";modelid);"installer.pull";"system");
-  let resp=http.get("http://localhost:11434/api/tags");
-  <mt resp {
-    $ok:r handlemodeltagsresp(r;modelid);
-    $err:e handlemodeltagserr(e)
-  }
+  <ismodelavailableat("http://localhost:11434";modelid)
 };
 
 f=parseinstalledmodels(output:str):@str{

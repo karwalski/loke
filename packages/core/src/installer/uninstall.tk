@@ -8,7 +8,8 @@ i=log:shared.log;
 i=proc:std.process;
 i=file:std.file;
 i=json:std.json;
-i=http:std.http;
+i=jx:shared.jsonobj;
+i=reach:shared.reachability;
 
 t=$removablemodel{
   name:str;
@@ -23,35 +24,31 @@ t=$uninstallresult{
   freedspace:str
 };
 
-(* json.decode, not json.parse. `json.parse` mangles to tk_json_parse_w, which does
-   not exist; the linker binds it to tk_json_parse — an unrelated runtime helper that
-   parses an int array, a boolean or a number and returns an int64, not a Json*. So
-   every json.parse in this repository returned garbage that json.getopt and json.str
-   then read as a document, silently. Filed as T-17 in docs/upstream/toke-issues.md. *)
-f=parseremovablefromapi(r:$httpresp;inmodels:@$removablemodel):@$removablemodel{
-  let parsed=json.decode(r.body);
-  let modellist=json.getarr(parsed;"models");
-  let i=mut.0;
+(* VM1.6h. This took an `$httpresp` and read `.body` off it, but the one-argument `http.get`
+   answers the body itself, a str, and the body was then read with std.json's untyped ABI
+   names (json.decode, getarr, arrlen, arrget; T-32). Measured against
+   scripts/lib/http_recorder.py answering /api/tags: the GET arrived and the process died with
+   SIGSEGV, so listing removable models crashed whenever Ollama was running. Now the body is
+   read with the typed accessors, $ok first (T-31). *)
+f=removableof(m:$json):$removablemodel{
+  let name=mt json.str(m;"name") {$ok:v v; $err:e ""};
+  let sizebytes=mt json.i64(m;"size") {$ok:v v; $err:e 0};
+  let digest=mt json.str(m;"digest") {$ok:v v; $err:e ""};
+  let modified=mt json.str(m;"modified_at") {$ok:v v; $err:e ""};
+  <$removablemodel{ name:name; size:formatsize(sizebytes); digest:digest; modified:modified }
+};
+
+f=parseremovablefrombody(body:str;inmodels:@$removablemodel):@$removablemodel{
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  let items=mt json.arr(obj;"models") {$ok:a a; $err:e @()};
   let models=mut.inmodels;
-  lp(let lv=0;true;lv=lv){
-    if(!(i<json.arrlen(modellist))){
-      <models
-    }el{
-      let m=json.arrget(modellist;i);
-      let name=json.str(m;"name");
-      let sizebytes=json.i64(m;"size");
-      let size=formatsize(sizebytes);
-      let digest=json.str(m;"digest");
-      let modified=json.str(m;"modified_at");
-      models=models.push($removablemodel{
-        name:name;
-        size:size;
-        digest:digest;
-        modified:modified
-      });
-      i=i+1
-    }
-  }
+  lp(let i=0;i<items.len;i=i+1){
+    models=models.push(removableof(items.get(i)))
+  };
+  <models
 };
 
 f=parseremovablefromcli(out:str;inmodels:@$removablemodel):@$removablemodel{
@@ -90,13 +87,20 @@ f=parseremovablefallback(e:str;models:@$removablemodel):@$removablemodel{
   }
 };
 
-f=listremovable():@$removablemodel{
+(* The GET goes through shared.reachability.localget, which probes the port first (T-15) and
+   answers "" when nothing usable came back. Then, as before, `ollama list` is asked instead. *)
+f=listremovableat(baseurl:str):@$removablemodel{
   let models=@($removablemodel);
-  let resp=http.get("http://localhost:11434/api/tags");
-  <mt resp {
-    $ok:r parseremovablefromapi(r;models);
-    $err:e parseremovablefallback(e;models)
-  }
+  let body=reach.localget(baseurl;"/api/tags");
+  if(str.len(body)==0){
+    log.warn("ollama /api/tags gave no answer; asking ollama list";"installer.uninstall";"system");
+    <parseremovablefallback("no answer";models)
+  }el{};
+  <parseremovablefrombody(body;models)
+};
+
+f=listremovable():@$removablemodel{
+  <listremovableat("http://localhost:11434")
 };
 
 f=formatsize(bytes:i64):str{

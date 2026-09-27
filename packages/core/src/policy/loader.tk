@@ -3,8 +3,9 @@
 
 m=core.policy.loader;
 i=file:std.file;
-i=http:std.http;
 i=json:std.json;
+i=reach:shared.reachability;
+i=log:shared.log;
 i=str:std.str;
 i=time:std.time;
 i=t:core.policy.types;
@@ -86,31 +87,49 @@ f=loadfile(path:str):i64{
   }
 };
 
-f=parseurlcontents(body:str;url:str):i64{
-  let parsed=json.decode(body);
-  <mt parsed {
-    $ok:data $policyset{
-        name:json.str(data;"name");
-        source:url;
-        regulations:regulationsof(body);
-        loadedat:time.nowms();
-        hash:str.randhex(8)
-      };
-    $err:e emptypolicyset(url;"")
+(* VM1.6h. Read with the typed accessors: the name was `json.str(data;"name")` stored as a str
+   without matching its result, over a json.decode handle. An answer that is not a JSON
+   object is an empty set, as a missing file is. *)
+f=parseurlcontents(body:str;url:str):$policyset{
+  let ok=mt json.dec(body) {
+    $ok:o true;
+    $jsonerr:e false
+  };
+  if(!ok){ <emptypolicyset(url;"") }el{};
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  <$policyset{
+    name:jx.strvalue(obj;"name";"");
+    source:url;
+    regulations:regulationsof(body);
+    loadedat:time.nowms();
+    hash:str.randhex(8)
   }
 };
 
-f=loadurl(url:str):i64{
-  <mt http.get(url) {
-    $ok:resp policyfromresponse(resp;url);
-    $err:e emptypolicyset(url;"")
-  }
-};
+(* VM1.6h. This matched the one-argument `http.get`, which answers the response BODY, and
+   handed it to a function that read `.body` off it as an `$httpresp`. Measured against
+   scripts/lib/http_recorder.py answering a policy document: the GET arrived and the process
+   died with SIGSEGV. So an enterprise policy URL crashed whatever loaded it the first time
+   the URL answered. (Nothing calls loadall with a URL today.)
 
-(* Typed so that resp.body resolves: a match binding carries no struct type, and
-   `body` is declared at different offsets by more than one struct. *)
-f=policyfromresponse(resp:$httpresp;url:str):i64{
-  <parseurlcontents(str.frombytes(resp.body);url)
+   Only a URL on this machine is fetched, through shared.reachability.localget. Any other is
+   refused, logged, and loads as an empty set: an enterprise policy is exactly what a network
+   attacker would want to replace, and toke's https client verifies no certificate (T-58;
+   VM1.6g). *)
+f=loadurl(url:str):$policyset{
+  if(!reach.isloopbackurl(url)){
+    log.warn("enterprise policy URL is not on this machine; not fetched until the https client verifies certificates (T-58)";"policy.loader";"system");
+    <emptypolicyset(url;"")
+  }el{};
+  let body=reach.localget(url;"");
+  if(str.len(body)==0){
+    log.warn("enterprise policy URL gave no answer";"policy.loader";"system");
+    <emptypolicyset(url;"")
+  }el{};
+  <parseurlcontents(body;url)
 };
 
 f=loadallpaths(cfg:$loaderconfig;paths:@str):@i64{

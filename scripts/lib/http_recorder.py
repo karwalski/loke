@@ -14,7 +14,7 @@ It answers in the shape of the local sidecars loke talks to, enough for a client
 Ollama (/api/tags, /api/ps, /api/version, /api/chat, /api/generate, /api/pull, /api/delete),
 Presidio (/health, /analyze), LLMLingua (/health, /compress), and since VM1.6f an MCP server
 (/mcp), Exo (/v1/health, /v1/nodes, /v1/chat/completions), Ollama's /api/show and loke's own
-/api/pipeline; any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
+/api/pipeline, and since VM1.6h a policy document (/policy.json); any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
 compact (no spaces after `:`), as Ollama's are, because shared.jsonobj's nested lookup
 matches `"key":` exactly.
 
@@ -51,6 +51,10 @@ ANTHROPIC = {"id": "msg_recorder", "type": "message", "role": "assistant", "mode
 OPENAI = {"id": "chatcmpl-recorder", "object": "chat.completion", "model": "gpt-recorder",
           "choices": [{"index": 0, "message": {"role": "assistant", "content": "answered-by-recorder"}}],
           "usage": {"prompt_tokens": 13, "completion_tokens": 5}}
+
+# A policy set in the shape core.policy.loader reads from a file or a URL (VM1.6h).
+POLICY = {"name": "recorder-policy", "regulations": [{"name": "recorder-reg", "jurisdiction": "AU", "version": "1",
+          "rules": [{"id": "r1", "description": "no secrets", "action": "block", "severity": "high"}]}]}
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -131,6 +135,9 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(PRESIDIO)
         elif p == "/v1/messages":
             self._send(ANTHROPIC)
+        elif p == "/policy.json":
+            # core.policy.loader.loadurl's enterprise policy document (VM1.6h).
+            self._send(POLICY)
         elif p == "/compress":
             self._send({"compressed_prompt": "short", "origin_tokens": 10, "compressed_tokens": 5, "ratio": "2.0x"})
         else:

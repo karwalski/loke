@@ -1,0 +1,152 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.localgets;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=ini:cli.init;
+i=doc:cli.doctor;
+i=pull:core.installer.pull;
+i=un:core.installer.uninstall;
+i=lo:core.policy.loader;
+i=pt:core.policy.types;
+
+(* VM1.6h. One-argument `http.get` callers that read `.status` or `.body` off what that call
+   answers, which is the response BODY, a str. Each is judged by what ARRIVES at
+   scripts/lib/http_recorder.py and by what the caller makes of the answer, against three
+   recorders: one answering in the services' shapes, one answering 200 with an unrelated JSON
+   object (garbage), one answering 200 with an empty body (silent).
+
+   Measured 2026-09-27 at the pin, before the change, against the same recorder: every GET
+   arrived, and cli.init reported an answering Ollama as not found, cli.doctor reported it as
+   "unexpected status: 8317134093887021691" (the bytes `{"models` read as an integer),
+   core.installer.pull said a listed model was not available, and
+   core.installer.uninstall.listremovable and core.policy.loader.loadurl crashed the process
+   (SIGSEGV). The broker's registry and moke's two health pages are in
+   test_local_gets_broker.tk. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_localget_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59994"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let glogp="\(base)-g.log";
+  let slogp="\(base)-s.log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let grec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";glogp;"\(base)-g.port";"garbage")) { $ok:h h; $err:e @() };
+  let srec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";slogp;"\(base)-s.port";"silent")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let gport=waitport("\(base)-g.port");
+  let sport=waitport("\(base)-s.port");
+  let url="http://127.0.0.1:\(port)";
+  let gurl="http://127.0.0.1:\(gport)";
+  let surl="http://127.0.0.1:\(sport)";
+  if(t.assert(str.len(port)>0 && str.len(gport)>0 && str.len(sport)>0;"the three recorders came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── cli.init ────────────────────────────────────────────────────────── *)
+  if(t.assert(ini.ollamarunning(url);"init: an answering Ollama is found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/tags");"init: because its GET /api/tags arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ini.ollamarunning(gurl);"init: a server answering something else is not Ollama")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(glogp);"GET /api/tags");"init: though it was asked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ini.ollamarunning(deadurl());"init: nothing listening is not found")){pass=pass+1}el{fail=fail+1};
+
+  (* ── cli.doctor ──────────────────────────────────────────────────────── *)
+  let co=doc.checkollamaat(url);
+  if(t.assert(co.ok;"doctor: an answering Ollama passes")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(co.detail;"running at \(url)";"doctor: and says where it runs")){pass=pass+1}el{fail=fail+1};
+  let cp=doc.checkpresidioat(url);
+  if(t.assert(cp.ok;"doctor: an answering Presidio passes")){pass=pass+1}el{fail=fail+1};
+  let cl=doc.checkllmlinguaat(url);
+  if(t.assert(cl.ok;"doctor: an answering LLMLingua passes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /health");"doctor: their GET /health arrived")){pass=pass+1}el{fail=fail+1};
+  let cg=doc.checkollamaat(gurl);
+  if(t.assert(!cg.ok;"doctor: a server answering something else is not a working Ollama")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cg.detail;"answered, but not as Ollama");"doctor: and says so")){pass=pass+1}el{fail=fail+1};
+  let cs=doc.checkpresidioat(surl);
+  if(t.assert(!cs.ok;"doctor: an empty answer is not a working Presidio")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cs.detail;"no answer from");"doctor: and says it answered nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(slogp);"GET /health");"doctor: though the GET arrived")){pass=pass+1}el{fail=fail+1};
+  let cd=doc.checkllmlinguaat(deadurl());
+  if(t.assert(!cd.ok && str.contains(cd.detail;"not reachable");"doctor: nothing listening is reported as not reachable")){pass=pass+1}el{fail=fail+1};
+  let cf=doc.checkollamaat("http://ollama.example.com:11434");
+  if(t.assert(!cf.ok && str.contains(cf.detail;"not on this machine");"doctor: a URL off this machine is not checked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.installer.pull ─────────────────────────────────────────────── *)
+  if(t.assert(pull.ismodelavailableat(url;"fake");"pull: a model /api/tags lists is available")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pull.ismodelavailableat(url;"absent-model");"pull: one it does not list is not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pull.ismodelavailableat(gurl;"fake");"pull: an answer with no models array lists nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pull.ismodelavailableat(surl;"fake");"pull: an empty answer lists nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pull.ismodelavailableat(deadurl();"fake");"pull: nothing listening lists nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.installer.uninstall ────────────────────────────────────────── *)
+  (* Not called with nothing listening: that path asks `ollama list`, which depends on the
+     machine running the test. *)
+  let rm=un.listremovableat(url);
+  if(t.assert(rm.len==1;"uninstall: the one model /api/tags lists is removable")){pass=pass+1}el{fail=fail+1};
+  if(rm.len==1){
+    let m0:$removablemodel=rm.get(0);
+    if(t.asserteq(m0.name;"fake:latest";"uninstall: by name")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(m0.digest;"d1";"uninstall: with its digest")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+2 };
+  let rg=un.listremovableat(gurl);
+  if(t.assert(rg.len==0;"uninstall: an answer with no models array lists none")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.policy.loader ──────────────────────────────────────────────── *)
+  let purl="\(url)/policy.json";
+  let ps:$policyset=lo.loadurl(purl);
+  if(t.assert(str.contains(readfile(logp);"GET /policy.json");"policy: the GET arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ps.name;"recorder-policy";"policy: and the policy's name is read")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ps.regulations.len==1;"policy: with its one regulation")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ps.source;purl;"policy: and its source")){pass=pass+1}el{fail=fail+1};
+  let pg:$policyset=lo.loadurl("\(gurl)/policy.json");
+  if(t.assert(str.len(pg.name)==0 && pg.regulations.len==0;"policy: a document that is not a policy loads empty")){pass=pass+1}el{fail=fail+1};
+  let pd:$policyset=lo.loadurl(deadurl());
+  if(t.assert(str.len(pd.name)==0 && pd.regulations.len==0;"policy: nothing listening loads empty")){pass=pass+1}el{fail=fail+1};
+  let pf:$policyset=lo.loadurl("https://policy.example.com/p.json");
+  if(t.assert(str.len(pf.name)==0 && pf.regulations.len==0;"policy: a URL off this machine loads empty")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(grec == @())){ process.kill(grec); process.wait(grec); }el{};
+  if(!(srec == @())){ process.kill(srec); process.wait(srec); }el{};
+  file.delete(logp);
+  file.delete(glogp);
+  file.delete(slogp);
+  file.delete("\(logp).headers");
+  file.delete("\(glogp).headers");
+  file.delete("\(slogp).headers");
+  file.delete("\(base).port");
+  file.delete("\(base)-g.port");
+  file.delete("\(base)-s.port");
+  <fail
+};

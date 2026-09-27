@@ -1,0 +1,100 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.localgetsbroker;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=reg:mcpbroker.registry;
+i=lh:page.moke.lokehealth;
+i=ah:page.moke.api.health;
+
+(* VM1.6h — the MCP broker's registry health check and moke's two health pages, judged by
+   what ARRIVES at scripts/lib/http_recorder.py. The core and CLI callers are in
+   test_local_gets.tk.
+
+   Measured 2026-09-27 at the pin, before the change: registry.healthcheck's GET /health
+   arrived and an answering server was reported unhealthy (it read `.status` off the body).
+   moke's two pages were NOT broken: the same shapes, measured against the same recorder,
+   answered true (and the body) for a server that answered, and false (and "") with nothing
+   listening. They moved to shared.reachability with the rest. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_localgetb_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=entry(host:str;port:i64):$serverentry{
+  let none:@str=@();
+  <$serverentry{ name:"rec"; host:host; port:port as i32; toolprefix:"rec_"; healthy:false; lastchecked:0; tools:none }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let slogp="\(base)-s.log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let srec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";slogp;"\(base)-s.port";"silent")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let sport=waitport("\(base)-s.port");
+  let url="http://127.0.0.1:\(port)";
+  let surl="http://127.0.0.1:\(sport)";
+  let dead="http://127.0.0.1:59992";
+  if(t.assert(str.len(port)>0 && str.len(sport)>0;"the recorders came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── mcpbroker.registry ─────────────────────────────────────────────── *)
+  if(t.assert(reg.healthcheck(entry("127.0.0.1";str.toint(port)));"registry: an answering server is healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /health");"registry: because its GET /health arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.healthcheck(entry("127.0.0.1";str.toint(sport)));"registry: an empty answer is not healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(slogp);"GET /health");"registry: though the GET arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.healthcheck(entry("127.0.0.1";59992));"registry: nothing listening is not healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reg.healthcheck(entry("mcp.example.com";3000));"registry: a server off this machine is not checked, so not healthy")){pass=pass+1}el{fail=fail+1};
+
+  (* ── page.moke.lokehealth ───────────────────────────────────────────── *)
+  let both=lh.statusjsonat(url;url);
+  if(t.asserteq(both;"{\"ok\":true,\"version\":\"0.2.0\",\"ollama\":\"running\"}";"lokehealth: loke and Ollama both answering")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/version");"lokehealth: Ollama's GET /api/version arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET / ");"lokehealth: and loke's GET / arrived")){pass=pass+1}el{fail=fail+1};
+  let none=lh.statusjsonat(dead;dead);
+  if(t.asserteq(none;"{\"ok\":false,\"version\":\"0.2.0\",\"ollama\":\"offline\"}";"lokehealth: neither listening")){pass=pass+1}el{fail=fail+1};
+  let silent=lh.statusjsonat(surl;url);
+  if(t.asserteq(silent;"{\"ok\":false,\"version\":\"0.2.0\",\"ollama\":\"running\"}";"lokehealth: loke answering nothing is not ok")){pass=pass+1}el{fail=fail+1};
+
+  (* ── page.moke.api.health ───────────────────────────────────────────── *)
+  if(t.asserteq(ah.lokehealthat(url);"{}";"api/health: loke's /api/health body is relayed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/health");"api/health: because its GET /api/health arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ah.lokehealthat(dead);"";"api/health: nothing listening answers \"\"")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(srec == @())){ process.kill(srec); process.wait(srec); }el{};
+  file.delete(logp);
+  file.delete(slogp);
+  file.delete("\(logp).headers");
+  file.delete("\(slogp).headers");
+  file.delete("\(base).port");
+  file.delete("\(base)-s.port");
+  <fail
+};

@@ -5,7 +5,7 @@ m=cli.doctor;
 
 i=t:shared.types;
 i=out:cli.output;
-i=http:std.http;
+i=reach:shared.reachability;
 i=str:std.str;
 i=log:shared.log;
 i=file:std.file;
@@ -17,52 +17,56 @@ t=$check{
   fix:str
 };
 
+(* VM1.6h. Each check matched the one-argument `http.get`, which answers the response BODY,
+   and read `.status` off it as if it were a response struct. Measured against
+   scripts/lib/http_recorder.py: the GET arrived, and an answering Ollama was reported as
+   "unexpected status: 8317134093887021691", which is the bytes `{"models` read as an
+   integer. So every service that answered was reported as failing. No status is visible
+   through that call, so a check reads the body: something must answer, and where the
+   service's answer has a known shape (`expect`), it must be that shape.
+
+   The probe comes first (shared.reachability), so "nothing listening" and "answered
+   nothing" are reported apart. A URL off this machine is not checked: these are local
+   sidecars, and toke's https client verifies no certificate (T-58). *)
+f=checkservice(name:str;baseurl:str;path:str;expect:str;fix:str):$check{
+  if(!reach.isloopbackurl(baseurl)){
+    <$check{ name:name; ok:false; detail:"not checked: \(baseurl) is not on this machine"; fix:fix }
+  }el{};
+  if(!reach.localserviceup(baseurl)){
+    <$check{ name:name; ok:false; detail:"not reachable at \(baseurl)"; fix:fix }
+  }el{};
+  let body=reach.localget(baseurl;path);
+  if(str.len(body)==0){
+    <$check{ name:name; ok:false; detail:"no answer from \(baseurl)\(path)"; fix:fix }
+  }el{};
+  if(str.len(expect)>0 && !str.contains(body;expect)){
+    <$check{ name:name; ok:false; detail:"\(baseurl)\(path) answered, but not as \(name) does"; fix:fix }
+  }el{};
+  <$check{ name:name; ok:true; detail:"running at \(baseurl)"; fix:"" }
+};
+
+f=checkollamaat(baseurl:str):$check{
+  <checkservice("Ollama";baseurl;"/api/tags";"\"models\"";"Run: ollama serve")
+};
+
 f=checkollama():$check{
-  let result=mt http.get("http://localhost:11434/api/tags") {
-    $ok:resp checkollamaresp(resp);
-    $err:e $check{ name:"Ollama"; ok:false; detail:"not reachable"; fix:"Run: ollama serve" }
-  };
-  <result
+  <checkollamaat("http://localhost:11434")
 };
 
-f=checkollamaresp(resp:i64):$check{
-  if(resp.status == 200){
-    <$check{ name:"Ollama"; ok:true; detail:"running at http://localhost:11434"; fix:"" }
-  }el{
-    <$check{ name:"Ollama"; ok:false; detail:str.concat("unexpected status: ";str.fromint(resp.status)); fix:"Run: ollama serve" }
-  }
-};
-
-f=checkpresidioresp(resp:i64):$check{
-  if(resp.status == 200){
-    <$check{ name:"Presidio"; ok:true; detail:"running at http://localhost:5001"; fix:"" }
-  }el{
-    <$check{ name:"Presidio"; ok:false; detail:str.concat("unexpected status: ";str.fromint(resp.status)); fix:"Run: docker run -p 5001:3000 mcr.microsoft.com/presidio-analyzer" }
-  }
+f=checkpresidioat(baseurl:str):$check{
+  <checkservice("Presidio";baseurl;"/health";"";"Run: docker run -p 5001:3000 mcr.microsoft.com/presidio-analyzer")
 };
 
 f=checkpresidio():$check{
-  let result=mt http.get("http://localhost:5001/health") {
-    $ok:resp checkpresidioresp(resp);
-    $err:e $check{ name:"Presidio"; ok:false; detail:"not reachable"; fix:"Run: docker run -p 5001:3000 mcr.microsoft.com/presidio-analyzer" }
-  };
-  <result
+  <checkpresidioat("http://localhost:5001")
 };
 
-f=checkllmlinguaresp(resp:i64):$check{
-  if(resp.status == 200){
-    <$check{ name:"LLMLingua"; ok:true; detail:"running at http://localhost:8000"; fix:"" }
-  }el{
-    <$check{ name:"LLMLingua"; ok:false; detail:str.concat("unexpected status: ";str.fromint(resp.status)); fix:"Run: pip install llmlingua && python -m llmlingua.server" }
-  }
+f=checkllmlinguaat(baseurl:str):$check{
+  <checkservice("LLMLingua";baseurl;"/health";"";"Run: pip install llmlingua && python -m llmlingua.server")
 };
 
 f=checkllmlingua():$check{
-  let result=mt http.get("http://localhost:8000/health") {
-    $ok:resp checkllmlinguaresp(resp);
-    $err:e $check{ name:"LLMLingua"; ok:false; detail:"not reachable"; fix:"Run: pip install llmlingua && python -m llmlingua.server" }
-  };
-  <result
+  <checkllmlinguaat("http://localhost:8000")
 };
 
 f=checkdatadir():$check{
