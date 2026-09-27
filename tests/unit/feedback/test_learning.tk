@@ -12,6 +12,8 @@ i=sdb:core.storage.db;
 i=ft:core.feedback.types;
 i=fs:core.feedback.store;
 i=fl:core.feedback.learning;
+i=rx:core.privacy.regex;
+i=ty:shared.types;
 
 (* T12.2 — the test this row names has never run. The archived version
    (_archived-tests/loke/unit/feedback/test_learning.tk) is written against a pre-toke API
@@ -84,6 +86,48 @@ f=nrows(sqltext:str):i64{
     $ok:rr rr.len as i64;
     $err:e 0-1
   }
+};
+
+(* A byte-level search, as in tests/unit/privacy/test_mapping_encryption.tk: file.read stops
+   at the first NUL, which in a SQLite page is within the first few bytes, so a text search
+   would report "not found" for a value in plain sight. *)
+f=bytescontain(haystack:@byte;needle:str):bool{
+  let nb=str.bytes(needle);
+  let n=(nb.len as i64);
+  let h=(haystack.len as i64);
+  if(n==0 || h<n){
+    <false
+  }el{};
+  lp(let i=0;i<=h-n;i=i+1){
+    let same=mut.true;
+    lp(let j=0;j<n;j=j+1){
+      if(same && haystack.get(i+j)!=nb.get(j)){ same=false }el{}
+    };
+    if(same){
+      <true
+    }el{}
+  };
+  <false
+};
+
+f=filecontains(path:str;needle:str):bool{
+  <mt file.readbytes(path) {
+    $ok:bytes bytescontain(bytes;needle);
+    $err:e false
+  }
+};
+
+(* Every file under the directory — the database, and any journal or WAL beside it. *)
+f=treecontains(dir:str;needle:str):bool{
+  let names=mt file.listall(dir) {
+    $ok:n n;
+    $err:e @()
+  };
+  let found=mut.false;
+  lp(let i=0;i<(names.len as i64);i=i+1){
+    if(filecontains(str.concat(dir;str.concat("/";names.get(i)));needle)){ found=true }el{}
+  };
+  <found
 };
 
 (* A sentinel rather than a result: T-18 makes the error arm of a user-declared sum dead
@@ -317,6 +361,84 @@ f=main():i64{
     if(str.startswith(line2;"model-bad:")){ still=true }el{}
   };
   if(t.assert(!still;"and it is no longer listed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── T12.2: a false-positive PII report lowers THAT pattern's confidence ────
+     The entity comes from the real detector, so the pattern name the report carries is the
+     one core.privacy.regex wrote, not one this test typed. *)
+  let fpvalue="jane.citizen@example.com";
+  let det=rx.detect(str.concat("Please write to ";str.concat(fpvalue;" today")));
+  let fpent=mut.$piientity{entitytype:"";value:"";start:0 as u32;end:0 as u32;confidence:0.0;placeholder:""};
+  lp(let i=0;i<det.entities.len;i=i+1){
+    let e:$piientity=det.entities.get(i);
+    if(str.eq(e.entitytype;"email")){ fpent=e }el{}
+  };
+  if(t.asserteq(fpent.value;fpvalue;"the regex detector flags the address as an email entity — the report is built from what the detector produced")){pass=pass+1}el{fail=fail+1};
+
+  let before=fl.learnedconfidence("email");
+  if(t.assert(before.base>0.949 && before.base<0.951 && before.adjusted>0.949 && before.adjusted<0.951;"before any report, email's learned confidence is its shipped 0.95")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fl.patternconfidences(st).len==0;"and no pattern has a lowered confidence")){pass=pass+1}el{fail=fail+1};
+
+  let r1=fl.reportfalsepositive(fpent;"req-fp-1");
+  let r2=fl.reportfalsepositive(fpent;"req-fp-2");
+  let r3=fl.reportfalsepositive(fpent;"req-fp-3");
+  if(t.assert(r1 && r2 && r3;"three false-positive reports on the flagged entity are recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fs.patternreportcount("email")==3;"each report is held against the pattern that produced the entity, 'email'")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fs.patternreportcount("phone_au")==0;"and against no other pattern")){pass=pass+1}el{fail=fail+1};
+
+  let pcs=fl.patternconfidences(st);
+  let emailpc=mut.$patternconfidence{patternid:"";base:0.0;adjusted:0.0;falsepositives:0};
+  lp(let i=0;i<pcs.len;i=i+1){
+    let pc:$patternconfidence=pcs.get(i);
+    if(str.eq(pc.patternid;"email")){ emailpc=pc }el{}
+  };
+  if(t.assert(pcs.len==1;"exactly one pattern's confidence is lowered: the reported one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(emailpc.falsepositives==3 && emailpc.adjusted>0.799 && emailpc.adjusted<0.801;"false-positive PII reduces confidence for that pattern: email 0.95 less 3 x 0.05 is 0.80")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(fl.applypatternconfidence(st)==1;"the lowered confidence is persisted and read back")){pass=pass+1}el{fail=fail+1};
+  let after3=fl.learnedconfidence("email");
+  if(t.assert(after3.adjusted>0.799 && after3.adjusted<0.801 && after3.base>0.949;"the learning store now holds email at 0.80 against a shipped 0.95")){pass=pass+1}el{fail=fail+1};
+  let plisted=fl.listadaptations(st);
+  let hasemail=mut.false;
+  lp(let i=0;i<plisted.len;i=i+1){
+    let line3:str=plisted.get(i);
+    if(str.startswith(line3;"pattern.email:") && str.contains(line3;"3 false-positive PII reports")){ hasemail=true }el{}
+  };
+  if(t.assert(hasemail;"listadaptations shows the pattern change and its reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fl.revert(st;"pattern.email");"a pattern adaptation can be reverted")){pass=pass+1}el{fail=fail+1};
+  let reverted=fl.learnedconfidence("email");
+  if(t.assert(reverted.adjusted>0.949 && reverted.adjusted<0.951;"and email reads its shipped 0.95 again")){pass=pass+1}el{fail=fail+1};
+
+  (* The floor: twelve reports would take url's 0.60 below zero; it stops at 0.10. *)
+  let urlent=$piientity{entitytype:"url";value:"https://intranet.example/x";start:0 as u32;end:0 as u32;confidence:0.6;placeholder:""};
+  lp(let i=0;i<12;i=i+1){ fl.reportfalsepositive(urlent;"req-fp-url") };
+  let urlpc=mut.$patternconfidence{patternid:"";base:0.0;adjusted:0.0;falsepositives:0};
+  let pcs2=fl.patternconfidences(st);
+  lp(let i=0;i<pcs2.len;i=i+1){
+    let pc2:$patternconfidence=pcs2.get(i);
+    if(str.eq(pc2.patternid;"url")){ urlpc=pc2 }el{}
+  };
+  if(t.assert(urlpc.falsepositives==12 && urlpc.adjusted>0.099 && urlpc.adjusted<0.101;"a pattern's confidence is floored at 0.10, never zero or negative")){pass=pass+1}el{fail=fail+1};
+
+  (* A report whose "pattern" is not a shipped pattern is refused, so the flagged text cannot
+     be put where the pattern name belongs. *)
+  let smuggled=$piientity{entitytype:fpvalue;value:fpvalue;start:0 as u32;end:0 as u32;confidence:0.9;placeholder:""};
+  if(t.assert(!fl.reportfalsepositive(smuggled;"req-fp-x");"a report naming the flagged value as its pattern is refused")){pass=pass+1}el{fail=fail+1};
+  let nerent=$piientity{entitytype:"PERSON";value:"Jane Citizen";start:0 as u32;end:0 as u32;confidence:0.85;placeholder:""};
+  if(t.assert(!fl.reportfalsepositive(nerent;"req-fp-x");"and so is an NER label, which has no per-pattern confidence to lower")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nrows("SELECT id FROM pii_feedback")==15;"only the fifteen accepted reports are stored")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The stored feedback carries no raw PII ─────────────────────────────────
+     A byte scan of every file under the data directory, after the connection is closed so
+     nothing is left in a journal. The positive control comes first: the scan must find what
+     IS stored in the clear (a request id and the verdict) before its failure to find the
+     flagged values means anything. *)
+  db.close();
+  if(t.assert(treecontains(testdir();"req-fp-1");"the scan finds the request id, which is stored in the clear")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(treecontains(testdir();"false_positive");"and the verdict")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();fpvalue);"and finds no trace of the flagged email address anywhere under the data directory")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"jane.citizen");"nor of its local part")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"intranet.example");"nor of the flagged URL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();"Jane Citizen");"nor of the refused NER value")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

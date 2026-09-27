@@ -10,6 +10,7 @@ i=db:core.storage.db;
 i=str:std.str;
 i=t:shared.types;
 i=rawdb:std.db;
+i=rx:core.privacy.regex;
 
 t=$learningsignal{
   featurearea:str;
@@ -22,6 +23,15 @@ t=$routingadjustment{
   model:str;
   adjustment:f64;
   reason:str
+};
+
+(* T12.2. A regex pattern's shipped confidence, the confidence after the false-positive
+   reports held against it, and how many reports that is. *)
+t=$patternconfidence{
+  patternid:str;
+  base:f64;
+  adjusted:f64;
+  falsepositives:i64
 };
 
 t=$learningstate{
@@ -267,6 +277,100 @@ f=revert(store:$store;model:str):bool{
     $err:e false
   };
   <ok && str.len(settingvalue(adjkey(model)))==0 && str.len(settingvalue(reasonkey(model)))==0
+};
+
+(* ── T12.2: a false-positive PII report lowers THAT pattern's confidence ───────────
+   The report is built from the flagged entity itself, because the entity already names the
+   pattern that produced it: core.privacy.regex writes `entitytype:pdef.name`. Only that name
+   is kept. The entity's value is never read here, never stored and never logged: the store
+   has no column for it (core.feedback.store.savepatternreport).
+
+   The pattern must be one core.privacy.regex ships. Anything else is refused, and that is
+   also the guard against a caller putting the flagged text where the pattern name belongs:
+   a free-form "pattern" would let the value in by the side door. NER and Presidio labels
+   (PERSON, EMAIL_ADDRESS, ...) are refused too; their confidences are fixed tables in
+   core.privacy.presidio with no per-pattern setting to lower.
+
+   WHAT THE LOWERED CONFIDENCE DOES, AND DOES NOT DO. Each report takes 0.05 off the
+   pattern's shipped confidence, floored at 0.10, and applypatternconfidence persists the
+   change as an adaptation keyed `pattern.<name>`, so listadaptations shows it and revert
+   removes it. Detection does NOT consult it. core.privacy.regex still stamps every entity
+   with the shipped confidence, and nothing in the pipeline drops an entity on confidence
+   today (the only comparison is which of two overlapping entities to keep). Wiring the
+   learned value into detection would let user reports weaken a privacy filter that must
+   fail closed, so it needs an explicit, recorded threshold decided by a person; that is
+   filed as its own row rather than done silently here. *)
+f=patternstep():f64{ <0.05 };
+f=patternfloor():f64{ <0.10 };
+
+f=patternkey(patternid:str):str{ <"pattern.\(patternid)" };
+
+f=knownpattern(patternid:str):bool{
+  let pats=rx.getpatterns();
+  let found=mut.false;
+  lp(let i=0;i<pats.len;i=i+1){
+    let p:$patterndef=pats.get(i);
+    if(str.eq(p.name;patternid)){ found=true }el{}
+  };
+  <found
+};
+
+f=reportfalsepositive(entity:$piientity;requestid:str):bool{
+  if(!knownpattern(entity.entitytype)){
+    (* The refused name is not logged: when it is not a pattern, it may be the value. *)
+    log.warn("feedback: false-positive report refused, not a known detection pattern";"feedback.learning";"system");
+    <false
+  }el{};
+  <store.savepatternreport(entity.entitytype;requestid)
+};
+
+(* One entry per shipped pattern that has at least one report against it. *)
+f=patternconfidences(st:$store):@$patternconfidence{
+  let pats=rx.getpatterns();
+  let out=mut.@();
+  lp(let i=0;i<pats.len;i=i+1){
+    let p:$patterndef=pats.get(i);
+    let n=store.patternreportcount(p.name);
+    if(n>0){
+      let lowered=mut.p.confidence-(patternstep()*str.tofloat(str.fromint(n)));
+      if(lowered<patternfloor()){ lowered=patternfloor() }el{};
+      out=out.push($patternconfidence{patternid:p.name;base:p.confidence;adjusted:lowered;falsepositives:n})
+    }el{}
+  };
+  <out
+};
+
+(* Persists each lowered confidence as an adaptation whose delta is the (negative) change
+   from the shipped value. The reason counts reports and says nothing about what was
+   flagged. Returns how many were recorded and read back. *)
+f=applypatternconfidence(st:$store):i64{
+  let pcs=patternconfidences(st);
+  let saved=mut.0;
+  lp(let i=0;i<pcs.len;i=i+1){
+    let pc:$patternconfidence=pcs.get(i);
+    let adj=$routingadjustment{
+      model:patternkey(pc.patternid);
+      adjustment:pc.adjusted-pc.base;
+      reason:"\(pc.falsepositives) false-positive PII reports against this pattern"
+    };
+    if(recordadaptation(st;adj)){ saved=saved+1 }el{}
+  };
+  <saved
+};
+
+(* The confidence the learning store holds for a pattern: its shipped value plus any
+   persisted adaptation. An unknown pattern reads as base 0.0, adjusted 0.0. *)
+f=learnedconfidence(patternid:str):$patternconfidence{
+  let pats=rx.getpatterns();
+  let base=mut.0.0;
+  lp(let i=0;i<pats.len;i=i+1){
+    let p:$patterndef=pats.get(i);
+    if(str.eq(p.name;patternid)){ base=p.confidence }el{}
+  };
+  let delta=settingvalue(adjkey(patternkey(patternid)));
+  let adjusted=mut.base;
+  if(str.len(delta)>0){ adjusted=base+str.tofloat(delta) }el{};
+  <$patternconfidence{patternid:patternid;base:base;adjusted:adjusted;falsepositives:store.patternreportcount(patternid)}
 };
 
 f=formatlearningstate(state:$learningstate):str{
