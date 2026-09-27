@@ -387,5 +387,30 @@ if [ -n "$rows" ] && [ "$rows_after" = "$rows" ]; then
   echo "  ok   and the refusal, which sent nothing, wrote no disclosure record"
 else echo "  FAIL disclosure_log went from '${rows}' to '${rows_after}' rows across a refused request" >&2; fail=1; fi
 
+# G1.6: the per-use-case switch, engaged through the real CLI against the running server's
+# database. ollama is switched back on first, so only the use-case switch can refuse. The
+# request is refused before it is scanned: neither the model nor the NER layer is asked.
+sqlite3 "$DB" "UPDATE settings SET value='false' WHERE key='governance.kill_switch.provider.ollama'"
+CLI_BIN="$ROOT/build/trees/loke-cli/loke-cli"
+if [ ! -x "$CLI_BIN" ]; then echo "  FAIL $CLI_BIN not built (scripts/build_trees.sh loke-cli)" >&2; fail=1
+else
+  if HOME="$WORK/lk/home" "$CLI_BIN" kill-switch on --use-case browser-chat >/dev/null 2>&1; then
+    echo "  ok   loke kill-switch on --use-case browser-chat succeeds"
+  else echo "  FAIL loke kill-switch on --use-case browser-chat exited non-zero" >&2; fail=1; fi
+  : > "$SEEN"; : > "$SEEN.ner"
+  pipe_post "hello there, please write to $EMAIL" ""
+  judge "with the browser-chat use case switched off, the request is refused" 403 '"kill_switch_scope":"use_case"'
+  judge "with a message that names the use case" 403 'The browser-chat use case is switched off by the kill switch'
+  if [ -s "$SEEN" ] || grep -qs . "$SEEN.ner"; then echo "  FAIL a request for a switched-off use case reached a model" >&2; fail=1
+  else echo "  ok   and nothing reached the model, not even the NER layer"; fi
+  ucaud=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='kill_switch_refused' AND correlation_id='use_case:browser-chat'")
+  ucset=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='kill_switch_engaged' AND use_case='browser-chat'")
+  if [ "$ucaud" = "1" ] && [ "$ucset" = "1" ]; then echo "  ok   the switch and the refusal are each in the audit trail"
+  else echo "  FAIL audit rows for the use-case switch: engaged '$ucset', refused '$ucaud', expected 1 and 1" >&2; fail=1; fi
+  HOME="$WORK/lk/home" "$CLI_BIN" kill-switch off --use-case browser-chat >/dev/null 2>&1
+  pipe_post "hello there, please write to $EMAIL" ""
+  judge "released, the same request is answered again" 200 '"ok":true'
+fi
+
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"

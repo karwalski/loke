@@ -8,17 +8,31 @@ i=pipeline:core.privacy.pipeline;
 i=log:shared.log;
 i=t:shared.types;
 i=at:core.agents.types;
+i=ks:core.governance.killswitch;
 
+(* store is the settings store the kill switch is read from (G1.6). 0 means none, and
+   with no store every agent is refused: an unreadable kill switch is an engaged one. *)
 t=$executorconfig{
   presidiourl:str;
   ollamaurl:str;
-  pipelineconfig:i64
+  pipelineconfig:i64;
+  store:i64
 };
 
 
-f=newconfig(presidiourl:str;ollamaurl:str):$executorconfig{
+f=newconfig(presidiourl:str;ollamaurl:str;store:i64):$executorconfig{
   let pc=pipeline.newconfig(presidiourl;ollamaurl);
-  <$executorconfig{presidiourl:presidiourl;ollamaurl:ollamaurl;pipelineconfig:pc}
+  <$executorconfig{presidiourl:presidiourl;ollamaurl:ollamaurl;pipelineconfig:pc;store:store}
+};
+
+(* G1.6. An agent switched off by the kill switch, or any agent while the global switch is
+   engaged or cannot be read, is refused before its prompt is built or scanned, and the
+   refusal is audited, because this path has no audit row of its own. *)
+f=refuseswitchedoff(sandbox:$sandbox;agentid:str;store:i64;cid:str):$sandboxresult{
+  let violation=ks.agentrefusalmessage(agentid);
+  log.warn("executor refused \(agentid): switched off by the kill switch";"executor";cid);
+  ks.recordrefusal(store;"agent";agentid);
+  <sb.toresult(sb.recordviolation(sandbox;violation);violation;false)
 };
 
 
@@ -78,6 +92,10 @@ f=runwithscan(agent:$agentdef;sandbox:$sandbox;pipelinerun:$pipelinerun;cid:str)
 
 f=execute(agent:$agentdef;context:str;config:$executorconfig;cid:str):$sandboxresult{
   let sandbox=sb.newsandbox(agent);
+
+  if(ks.isagentblocked(config.store;agent.id)){
+    <refuseswitchedoff(sandbox;agent.id;config.store;cid)
+  }el{};
 
   if(sb.checkcostlimit(sandbox;0.0)){}el{
     let violation="cost limit exceeded";

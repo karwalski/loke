@@ -1,0 +1,71 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.agents.testexecutorkillswitch;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=ks:core.governance.killswitch;
+i=ex:core.agents.executor;
+i=at:core.agents.types;
+i=sb:core.agents.sandbox;
+
+(* G1.6 - the per-agent kill switch is enforced where agents run, core.agents.executor.execute,
+   and not only recorded. The refusal comes before the prompt is built or scanned, so the
+   presidio and ollama URLs below are loopback ports nothing listens on: an agent that is
+   refused never reaches them, and one that is not refused fails or passes on the scan,
+   which is not what is asserted. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-executor-killswitch")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=refusedrows(agentid:str):i64{
+  <sdb.countquery("SELECT id FROM audit_log WHERE event_type='kill_switch_refused' AND correlation_id=?";@(str.concat("agent:";agentid)))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  if(t.assert(store!=0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+  let config=ex.newconfig("http://127.0.0.1:9";"http://127.0.0.1:9";store);
+  let digest=at.newagent("daily-digest";"Daily digest";"test";"Summarise the day.");
+  let prep=at.newagent("meeting-prep";"Meeting prep";"test";"Prepare the meeting.");
+
+  if(t.assert(ks.engageagent(store;"daily-digest";"incident");"daily-digest is switched off")){pass=pass+1}el{fail=fail+1};
+
+  let refused:$sandboxresult=ex.execute(digest;"context";config;"cid-g16");
+  if(t.assert(!refused.ok;"A SWITCHED-OFF AGENT IS NOT RUN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(refused.output;"Agent daily-digest is switched off by the kill switch");"and the refusal names the agent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refused.violations.len==1;"and is recorded as a sandbox violation")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refusedrows("daily-digest")==1;"and the refusal is in the audit trail")){pass=pass+1}el{fail=fail+1};
+
+  let other:$sandboxresult=ex.execute(prep;"context";config;"cid-g16");
+  if(t.assert(!str.contains(other.output;"switched off by the kill switch");"AN AGENT THAT IS NOT SWITCHED OFF IS NOT REFUSED BY THE SWITCH")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refusedrows("meeting-prep")==0;"and no refusal is audited for it")){pass=pass+1}el{fail=fail+1};
+
+  let nostore=ex.newconfig("http://127.0.0.1:9";"http://127.0.0.1:9";0);
+  let closed:$sandboxresult=ex.execute(prep;"context";nostore;"cid-g16");
+  if(t.assert(!closed.ok && str.contains(closed.output;"switched off by the kill switch");"with no store the switch cannot be read, and every agent is refused")){pass=pass+1}el{fail=fail+1};
+
+  ks.releaseagent(store;"daily-digest");
+  let again:$sandboxresult=ex.execute(digest;"context";config;"cid-g16");
+  if(t.assert(!str.contains(again.output;"switched off by the kill switch");"released, the agent is no longer refused by the switch")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

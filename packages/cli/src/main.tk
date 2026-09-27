@@ -13,6 +13,7 @@ i=bench:core.eval.bench;
 i=disp:core.providers.dispatcher;
 i=sdb:core.storage.db;
 i=er:core.storage.erase;
+i=ks:core.governance.killswitch;
 i=str:std.str;
 i=argv:std.args;
 i=file:std.file;
@@ -149,6 +150,51 @@ f=handleerase(config:$lokeconfig):i64{
   out.printerror("NOT fully erased: \(result.reason)");
   <1
 };
+(* G1.6. The switch is written to the settings table of the loke.db a running server reads
+   on every request, so it takes effect on the next request without a restart. Each change
+   is audited by core.governance.killswitch; a refused target (an unknown use case or
+   provider, a malformed agent id) changes nothing and exits 1. *)
+f=killswitchchange(store:i64;kind:str;target:str):bool{
+  let reason="set from the command line";
+  if(str.eq(kind;"killswitch.on.global")){ <ks.engage(store;reason;0 as i32) }el{};
+  if(str.eq(kind;"killswitch.off.global")){ <ks.release(store) }el{};
+  if(str.eq(kind;"killswitch.on.use_case")){ <ks.engageusecase(store;target;reason) }el{};
+  if(str.eq(kind;"killswitch.off.use_case")){ <ks.releaseusecase(store;target) }el{};
+  if(str.eq(kind;"killswitch.on.agent")){ <ks.engageagent(store;target;reason) }el{};
+  if(str.eq(kind;"killswitch.off.agent")){ <ks.releaseagent(store;target) }el{};
+  if(str.eq(kind;"killswitch.on.provider")){ <ks.engageprovider(store;target;reason) }el{};
+  if(str.eq(kind;"killswitch.off.provider")){ <ks.releaseprovider(store;target) }el{};
+  <false
+};
+f=handlekillswitch(kind:str;target:str;config:$lokeconfig):i64{
+  let opened=mt sdb.openstore(config.datadir) {
+    $ok:st st;
+    $err:e $store{conn:$dbconn{handle:0};datadir:""}
+  };
+  (* T-18, as handleerase: whether the database is open is asked of the connection. *)
+  if(sdb.connectionlive()){}el{
+    out.printerror("kill switch not changed: the database at \(config.datadir) could not be opened");
+    <1
+  };
+  let store=1;
+  if(str.eq(kind;"killswitch.status")){
+    let active=ks.listactive(store);
+    if(active.len==0){
+      out.printline("Kill switch: nothing is switched off")
+    }el{
+      lp(let i=0;i<active.len;i=i+1){
+        out.printline(str.concat("Kill switch ON: ";active.get(i)))
+      }
+    };
+    <0
+  }el{};
+  if(killswitchchange(store;kind;target)){
+    out.printline("Kill switch: \(kind) \(target) done, and recorded in the audit trail");
+    <0
+  }el{};
+  out.printerror("kill switch not changed: \(kind) refused \(target)");
+  <1
+};
 f=handleversion():i64{
   out.printline("loke 0.1.0");
   <0
@@ -205,6 +251,7 @@ f=dispatch(command:$command;config:$lokeconfig):i64{
   if(str.eq(kind;"doctor")){ <handledoctor(config) }el{};
   if(str.eq(kind;"erasepreview")){ <handleerasepreview(config) }el{};
   if(str.eq(kind;"erase")){ <handleerase(config) }el{};
+  if(str.startswith(kind;"killswitch.")){ <handlekillswitch(kind;command.arg;config) }el{};
   if(str.eq(kind;"version")){ <handleversion() }el{};
   if(str.eq(kind;"help")){ <handlehelp() }el{};
   <handleunknown(command.arg)

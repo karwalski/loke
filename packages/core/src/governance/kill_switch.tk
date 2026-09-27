@@ -4,6 +4,8 @@
 m=core.governance.killswitch;
 
 i=set:core.storage.settings;
+i=au:core.storage.audit;
+i=db:std.db;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
@@ -51,6 +53,7 @@ f=engage(store:i64;reason:str;autoreleaseminutes:i32):bool{
   set.setstr(store;"governance.kill_switch.reason";reason;"governance");
   set.setint(store;"governance.kill_switch.auto_release_at";autoreleaseat;"governance");
   log.warn(str.concat("Kill switch ENGAGED: ";reason);"kill-switch";"system");
+  auditscoped(store;"kill_switch_engaged";"global";"all");
   <true
 };
 
@@ -61,6 +64,7 @@ f=release(store:i64):bool{
   set.setstr(store;"governance.kill_switch.reason";"";"governance");
   set.setint(store;"governance.kill_switch.auto_release_at";0;"governance");
   log.info("Kill switch released";"kill-switch";"system");
+  auditscoped(store;"kill_switch_released";"global";"all");
   <true
 };
 
@@ -114,6 +118,7 @@ f=engageprovider(store:i64;provider:str;reason:str):bool{
   set.setbool(store;providerkey(provider);true;"governance");
   set.setstr(store;str.concat(providerkey(provider);".reason");reason;"governance");
   log.warn(str.concat("Kill switch ENGAGED for provider ";str.concat(provider;str.concat(": ";reason)));"kill-switch";"system");
+  auditscoped(store;"kill_switch_engaged";"provider";provider);
   <set.getboolor(store;providerkey(provider);false)
 };
 
@@ -122,19 +127,194 @@ f=releaseprovider(store:i64;provider:str):bool{
   set.setbool(store;providerkey(provider);false;"governance");
   set.setstr(store;str.concat(providerkey(provider);".reason");"";"governance");
   log.info(str.concat("Kill switch released for provider ";provider);"kill-switch";"system");
+  auditscoped(store;"kill_switch_released";"provider";provider);
   <!set.getboolor(store;providerkey(provider);true)
 };
 
-(* usecase is accepted for the row's shape and not yet scoped: per-use-case and per-agent
-   scope are the rest of G1.6. *)
-f=isblocked(store:i64;provider:str;usecase:str):bool{
+(* ── G1.6: per-use-case and per-agent scope ───────────────────────────────────────
+   One persisted flag per use case and one per agent, beside the global and provider flags
+   and in the same settings table, so a switch survives a restart exactly as they do.
+
+   The use cases are the ones a request path actually passes to isblocked, and no others:
+   today that is "browser-chat", page.api.pipeline's POST. core.governance.usecases has a
+   registry of other ids, and nothing on a request path consults it, so accepting one of
+   them here would report a use case switched off while nothing refuses it. Agent ids are
+   user-defined, so an agent id is checked for shape only: 1 to 64 characters of
+   [A-Za-z0-9._-], the form core.agents.templates uses.
+
+   Fail closed, as the global switch does. With no store every scope is blocked. A scoped
+   flag whose read FAILS (the settings table cannot be queried) reads as engaged, which
+   set.getboolor cannot do: it returns its default on an error, and the default for "is
+   this switched off" is false. A flag with no row is not engaged. *)
+f=usecases():@str{
+  <@("browser-chat")
+};
+
+f=usecasekey(usecase:str):str{
+  <"governance.kill_switch.use_case.\(usecase)"
+};
+
+f=agentprefix():str{ <"governance.kill_switch.agent." };
+
+f=agentkey(agentid:str):str{
+  <"\(agentprefix())\(agentid)"
+};
+
+f=isknownusecase(usecase:str):bool{
+  let all=usecases();
+  let found=mut.false;
+  lp(let i=0;i<all.len;i=i+1){
+    if(str.eq(all.get(i);usecase)){ found=true }el{}
+  };
+  <found
+};
+
+f=agentchar(c:i64):bool{
+  <(c>=48 && c<=57) || (c>=65 && c<=90) || (c>=97 && c<=122) || c==45 || c==46 || c==95
+};
+
+f=agentidvalid(agentid:str):bool{
+  let n=str.len(agentid);
+  if(n==0 || n>64){ <false }el{};
+  let ok=mut.true;
+  lp(let i=0;i<n;i=i+1){
+    if(agentchar(str.charat(agentid;i))==false){ ok=false }el{}
+  };
+  <ok
+};
+
+(* A flag read that fails is an engaged flag. db.many's error side is std's, not a user
+   sum, so its $err arm does run (T-18 is about user sums); set.getboolor relies on the same. *)
+f=flagfailclosed(key:str):bool{
+  <mt db.many("SELECT value,value_type FROM settings WHERE key=?";@(key)) {
+    $ok:rows set.boolrowsor(rows;false);
+    $err:e true
+  }
+};
+
+(* One audit_log row per change of a scoped switch and per refusal it causes where the
+   caller has no audit row of its own. The scope and its target are in correlation_id
+   ("use_case:browser-chat", "agent:daily-digest"), and the use case or provider in its own
+   column where there is one. A failed write is logged and does not undo the switch: an
+   engaged switch that could not be audited still blocks. *)
+f=auditscoped(store:i64;eventtype:str;scope:str;target:str):bool{
+  if(store==0){ <false }el{};
+  let ucol=mut.""; if(str.eq(scope;"use_case")){ ucol=target }el{};
+  let pcol=mut.""; if(str.eq(scope;"provider")){ pcol=target }el{};
+  let ok=au.insertevent(store;$auditevent{eventtype:eventtype;usecase:ucol;modelid:"";provider:pcol;sensitivity:"";risktier:"";tokensin:0 as u32;tokensout:0 as u32;costusd:0.0;durationms:0 as u32;correlationid:"\(scope):\(target)"});
+  if(ok){}el{
+    log.error("kill switch: the audit row for \(eventtype) \(scope):\(target) could not be written";"kill-switch";"system")
+  };
+  <ok
+};
+
+(* For a caller that refused work because of a switch and has no audit row of its own
+   (core.agents.executor). page.api.pipeline records its refusals through recordevent,
+   which carries the request's fields. *)
+f=recordrefusal(store:i64;scope:str;target:str):bool{
+  <auditscoped(store;"kill_switch_refused";scope;target)
+};
+
+f=engageusecase(store:i64;usecase:str;reason:str):bool{
+  if(store==0 || !isknownusecase(usecase)){ <false }el{};
+  set.setbool(store;usecasekey(usecase);true;"governance");
+  set.setstr(store;"\(usecasekey(usecase)).reason";reason;"governance");
+  log.warn("Kill switch ENGAGED for use case \(usecase): \(reason)";"kill-switch";"system");
+  auditscoped(store;"kill_switch_engaged";"use_case";usecase);
+  <set.getboolor(store;usecasekey(usecase);false)
+};
+
+f=releaseusecase(store:i64;usecase:str):bool{
+  if(store==0 || !isknownusecase(usecase)){ <false }el{};
+  set.setbool(store;usecasekey(usecase);false;"governance");
+  set.setstr(store;"\(usecasekey(usecase)).reason";"";"governance");
+  log.info("Kill switch released for use case \(usecase)";"kill-switch";"system");
+  auditscoped(store;"kill_switch_released";"use_case";usecase);
+  <!set.getboolor(store;usecasekey(usecase);true)
+};
+
+f=engageagent(store:i64;agentid:str;reason:str):bool{
+  if(store==0 || !agentidvalid(agentid)){ <false }el{};
+  set.setbool(store;agentkey(agentid);true;"governance");
+  set.setstr(store;"\(agentkey(agentid)).reason";reason;"governance");
+  log.warn("Kill switch ENGAGED for agent \(agentid): \(reason)";"kill-switch";"system");
+  auditscoped(store;"kill_switch_engaged";"agent";agentid);
+  <set.getboolor(store;agentkey(agentid);false)
+};
+
+f=releaseagent(store:i64;agentid:str):bool{
+  if(store==0 || !agentidvalid(agentid)){ <false }el{};
+  set.setbool(store;agentkey(agentid);false;"governance");
+  set.setstr(store;"\(agentkey(agentid)).reason";"";"governance");
+  log.info("Kill switch released for agent \(agentid)";"kill-switch";"system");
+  auditscoped(store;"kill_switch_released";"agent";agentid);
+  <!set.getboolor(store;agentkey(agentid);true)
+};
+
+f=isusecaseblocked(store:i64;usecase:str):bool{
   if(store==0){ <true }el{};
+  <flagfailclosed(usecasekey(usecase))
+};
+
+(* An agent is blocked by the global switch or by its own flag. An id that is not a valid
+   agent id cannot have been switched off or released, and is refused with the rest. *)
+f=isagentblocked(store:i64;agentid:str):bool{
+  if(store==0 || !agentidvalid(agentid)){ <true }el{};
   if(isengaged(store)){ <true }el{};
-  <set.getboolor(store;providerkey(provider);false)
+  <flagfailclosed(agentkey(agentid))
+};
+
+(* Which switch blocks this request, or "" when none does: "store" (no store, fail
+   closed), "global", "provider" or "use_case", in that order. *)
+f=blockedscope(store:i64;provider:str;usecase:str):str{
+  if(store==0){ <"store" }el{};
+  if(isengaged(store)){ <"global" }el{};
+  if(set.getboolor(store;providerkey(provider);false)){ <"provider" }el{};
+  if(isusecaseblocked(store;usecase)){ <"use_case" }el{};
+  <""
+};
+
+(* The global switch, the provider's flag or the use case's flag. *)
+f=isblocked(store:i64;provider:str;usecase:str):bool{
+  <str.len(blockedscope(store;provider;usecase))>0
+};
+
+f=keysof(rows:@$row):@str{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    out=out.push(db.rowstr(rows.get(i);"key"))
+  };
+  <out
+};
+
+(* The agent a settings key switches off, or "" for any other key (".reason" rows). *)
+f=agentfromkey(key:str):str{
+  if(!str.startswith(key;agentprefix())){ <"" }el{};
+  let rest=str.trimprefix(key;agentprefix());
+  if(!agentidvalid(rest) || str.contains(rest;".reason")){ <"" }el{};
+  <rest
+};
+
+f=agentidsof(store:i64;keys:@str):@str{
+  let out=mut.@();
+  lp(let i=0;i<keys.len;i=i+1){
+    let a=agentfromkey(keys.get(i));
+    if(str.len(a)>0 && set.getboolor(store;agentkey(a);false)){ out=out.push(a) }el{}
+  };
+  <out
+};
+
+f=blockedagents(store:i64):@str{
+  if(store==0){ <@() }el{};
+  <mt db.many("SELECT key FROM settings WHERE key LIKE 'governance.kill_switch.agent.%' ORDER BY key";@()) {
+    $ok:rows agentidsof(store;keysof(rows));
+    $err:e @()
+  }
 };
 
 (* Every active entry: "global" when the global switch is engaged, then each blocked
-   provider by name. *)
+   provider by name, then "use_case:<id>" per blocked use case and "agent:<id>" per
+   blocked agent. *)
 f=listactive(store:i64):@str{
   let out=mut.@();
   if(isengaged(store)){ out=out.push("global") }el{};
@@ -143,11 +323,39 @@ f=listactive(store:i64):@str{
     let p=all.get(i);
     if(set.getboolor(store;providerkey(p);false)){ out=out.push(p) }el{}
   };
+  let ucs=usecases();
+  lp(let j=0;j<ucs.len;j=j+1){
+    let u=ucs.get(j);
+    if(set.getboolor(store;usecasekey(u);false)){ out=out.push(str.concat("use_case:";u)) }el{}
+  };
+  let agents=blockedagents(store);
+  lp(let k=0;k<agents.len;k=k+1){
+    out=out.push(str.concat("agent:";agents.get(k)))
+  };
   <out
 };
 
 f=fallbackmessage(provider:str):str{
   <"\(provider) is switched off by the kill switch, so this request was not sent. A local model can still answer, or an administrator can release the switch."
+};
+
+(* The message a refused request is given, naming the switch that refused it. *)
+f=refusalmessage(store:i64;provider:str;usecase:str):str{
+  let scope=blockedscope(store;provider;usecase);
+  if(str.eq(scope;"use_case")){
+    <"The \(usecase) use case is switched off by the kill switch, so this request was not sent to any model. An administrator can release it with: loke kill-switch off --use-case \(usecase)"
+  }el{};
+  if(str.eq(scope;"global")){
+    <"The kill switch is engaged for all AI traffic, so this request was not sent. An administrator can release it with: loke kill-switch off"
+  }el{};
+  if(str.eq(scope;"store")){
+    <"The kill switch could not be read, so this request was not sent: an unreadable switch is treated as engaged."
+  }el{};
+  <fallbackmessage(provider)
+};
+
+f=agentrefusalmessage(agentid:str):str{
+  <"Agent \(agentid) is switched off by the kill switch, so it was not run. An administrator can release it with: loke kill-switch off --agent \(agentid)"
 };
 
 f=formatwidget(state:$killswitchstate):str{

@@ -1,1 +1,3 @@
 Agent execution engine that runs an agent within a sandbox. Checks cost limits, runs the prompt through the privacy pipeline, evaluates sensitivity levels, enforces permission checks for restricted data, and returns the sandboxed result. Depends on core.agents.sandbox and core.privacy.pipeline.
+
+G1.6: `$executorconfig` carries the settings store, and `execute` refuses an agent switched off by the kill switch (or any agent while the global switch is engaged or the switch cannot be read) before its prompt is built or scanned, recording a sandbox violation and a `kill_switch_refused` audit row. Depends on core.governance.killswitch.

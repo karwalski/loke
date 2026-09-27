@@ -12,6 +12,7 @@ i=set:core.storage.settings;
 i=ks:core.governance.killswitch;
 i=h:page.api.pipeline;
 i=clk:shared.types;
+i=db:std.db;
 
 (* X7.2 — this file used to declare an ENTIRE parallel kill switch: its own
    $killswitchstate with a `switches` array, its own enableglobal / disableglobal /
@@ -81,6 +82,18 @@ f=openfreshstore():i64{
     $ok:s s;
     $err:e 0
   }
+};
+
+(* The same database file, not deleted: a restart. *)
+f=reopenstore():i64{
+  <mt sdb.openstore(testdir()) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=auditrows(eventtype:str;scopetarget:str):i64{
+  <sdb.countquery("SELECT id FROM audit_log WHERE event_type=? AND correlation_id=?";@(eventtype;scopetarget))
 };
 
 f=main():i64{
@@ -210,6 +223,71 @@ f=main():i64{
   if(t.assert(!ks.isblocked(store;"anthropic";"any");"and then anthropic is unblocked")){pass=pass+1}el{fail=fail+1};
   if(t.assert(ks.isblocked(0;"ollama";"any");"with no store, every provider is blocked: fail closed")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(ks.fallbackmessage("anthropic");"anthropic") && str.len(ks.fallbackmessage("anthropic"))>20;"fallbackmessage names the provider and explains")){pass=pass+1}el{fail=fail+1};
+
+  (* ── G1.6: per-use-case scope ───────────────────────────────────────────────
+     "browser-chat" is the one use case a request path passes (page.api.pipeline). *)
+  if(t.assert(!ks.isblocked(store;"ollama";"browser-chat");"with nothing engaged, browser-chat is not blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.engageusecase(store;"browser-chat";"incident 43");"the browser-chat use case can be switched off")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isusecaseblocked(store;"browser-chat");"ENGAGING A USE CASE BLOCKS THAT USE CASE")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isblocked(store;"ollama";"browser-chat");"and isblocked refuses it on every provider, local included")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ks.blockedscope(store;"ollama";"browser-chat");"use_case";"blockedscope names the use-case switch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.isblocked(store;"ollama";"agent-task");"AND ONLY THAT USE CASE: another use case on the same provider is not blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!h.killswitchengaged(store);"and the global switch stays off")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ks.refusalmessage(store;"ollama";"browser-chat");"browser-chat use case is switched off");"the refusal message names the use case")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.engageusecase(store;"chat-completion";"x");"a use case no request path passes is refused, so it cannot report blocked while nothing refuses it")){pass=pass+1}el{fail=fail+1};
+  let act3=ks.listactive(store);
+  if(t.assert(act3.len==1;"listactive has the use-case entry")){pass=pass+1}el{fail=fail+1};
+  if(act3.len==1){
+    if(t.asserteq(act3.get(0);"use_case:browser-chat";"named with its scope")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+
+  (* ── G1.6: per-agent scope ──────────────────────────────────────────────── *)
+  if(t.assert(!ks.isagentblocked(store;"daily-digest");"with no agent switch, an agent is not blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.engageagent(store;"daily-digest";"incident 44");"an agent can be switched off")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isagentblocked(store;"daily-digest");"ENGAGING AN AGENT BLOCKS THAT AGENT")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.isagentblocked(store;"meeting-prep");"AND ONLY THAT AGENT: another agent still runs")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.engageagent(store;"bad agent id";"x") && !ks.engageagent(store;"";"x");"a malformed or empty agent id is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isagentblocked(store;"bad agent id");"and an id that cannot name an agent is refused, never run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ks.agentrefusalmessage("daily-digest");"Agent daily-digest is switched off");"the agent refusal names the agent")){pass=pass+1}el{fail=fail+1};
+  let act4=ks.listactive(store);
+  if(t.assert(act4.len==2;"listactive now has the use case and the agent")){pass=pass+1}el{fail=fail+1};
+  if(act4.len==2){
+    if(t.asserteq(act4.get(1);"agent:daily-digest";"the agent named with its scope")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  ks.engage(store;"global over agents";0 as i32);
+  if(t.assert(ks.isagentblocked(store;"meeting-prep");"the global switch blocks every agent")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+
+  (* ── G1.6: persisted across a reopened store ─────────────────────────────────
+     The same database file opened again, as a restart would. *)
+  let reopened=reopenstore();
+  if(t.assert(reopened!=0;"the store reopens")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isusecaseblocked(reopened;"browser-chat");"THE USE-CASE SWITCH SURVIVES A REOPEN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isagentblocked(reopened;"daily-digest");"THE AGENT SWITCH SURVIVES A REOPEN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ks.isagentblocked(reopened;"meeting-prep");"and nothing else became blocked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── G1.6: audited ─────────────────────────────────────────────────────── *)
+  if(t.assert(auditrows("kill_switch_engaged";"use_case:browser-chat")==1;"engaging the use case wrote one audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("kill_switch_engaged";"agent:daily-digest")==1;"engaging the agent wrote one audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("kill_switch_engaged";"agent:bad agent id")==0;"a refused change wrote none")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.countquery("SELECT id FROM audit_log WHERE event_type='kill_switch_engaged' AND use_case='browser-chat'";@())==1;"the use case is in the audit row's use_case column")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.recordrefusal(reopened;"agent";"daily-digest") && auditrows("kill_switch_refused";"agent:daily-digest")==1;"a refusal is audited")){pass=pass+1}el{fail=fail+1};
+
+  (* ── G1.6: unreadable fails CLOSED ───────────────────────────────────────────
+     The settings table is renamed away, so every read of it fails. set.getboolor would
+     answer "not engaged" here; the scoped reads must answer "engaged". *)
+  mt db.exec("ALTER TABLE settings RENAME TO settings_away";@()) { $ok:v v; $err:e 0 };
+  if(t.assert(ks.isusecaseblocked(reopened;"browser-chat") && ks.isblocked(reopened;"ollama";"browser-chat");"AN UNREADABLE SETTINGS TABLE BLOCKS THE USE CASE")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isagentblocked(reopened;"meeting-prep");"AND EVERY AGENT, including one never switched off")){pass=pass+1}el{fail=fail+1};
+  mt db.exec("ALTER TABLE settings_away RENAME TO settings";@()) { $ok:v v; $err:e 0 };
+  if(t.assert(!ks.isagentblocked(reopened;"meeting-prep");"with the table back, the unswitched agent runs again")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.isusecaseblocked(0;"browser-chat") && ks.isagentblocked(0;"meeting-prep");"with no store, the use case and every agent are blocked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── G1.6: release ─────────────────────────────────────────────────────── *)
+  if(t.assert(ks.releaseusecase(reopened;"browser-chat") && !ks.isusecaseblocked(reopened;"browser-chat");"the use case can be released")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.releaseagent(reopened;"daily-digest") && !ks.isagentblocked(reopened;"daily-digest");"and the agent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditrows("kill_switch_released";"use_case:browser-chat")==1 && auditrows("kill_switch_released";"agent:daily-digest")==1;"each release wrote its audit row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.listactive(reopened).len==0;"and nothing is active")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };
