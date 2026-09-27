@@ -3,8 +3,9 @@
 
 m=core.installer.updater;
 
-i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
+i=reach:shared.reachability;
 i=str:std.str;
 i=log:shared.log;
 i=db:core.storage.db;
@@ -113,29 +114,35 @@ f=getinstalleddigest(modelid:str):str{
   }
 };
 
-f=parsedigestresponse(r:$httpresp):str{
-  let parsed=json.decode(r.body);
-  let digest=json.str(parsed;"digest");
+(* Read through the typed decoder and shared.jsonobj; json.decode and json.str on the
+   untyped handle are the shape that crashes on a str. *)
+f=parsedigestresponse(raw:str):str{
+  let parsed=mt json.dec(raw) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  let digest=jx.strvalue(parsed;"digest";"");
   if(str.len(digest) > 0){
     <digest
   }el{};
-  let info=json.getobj(parsed;"modelinfo");
-  let d2=json.str(info;"general.file_type");
-  <d2
+  <jx.strvalue(jx.nested(parsed;"modelinfo");"general.file_type";"")
 };
 
-f=latestdigesterr(e:$httperr):str{
-  log.warn("failed to query model info: \(e.msg)";"installer.updater";"system");
-  <""
+(* VM1.6f. The request was `http.postheaders(http.client(url);"";...)`. The runtime reads
+   postheaders' first argument as a URL string, so nothing was sent (T-48), and the latest
+   digest was always "", so checkmodelupdate never reported an update. reach.localpost
+   sends it. The model id is escaped; it was spliced in raw. *)
+f=getlatestdigestat(baseurl:str;modelid:str):str{
+  let raw=reach.localpost(baseurl;"/api/show";"{\"name\":\(jx.escape(modelid))}");
+  if(str.len(raw)==0){
+    log.warn("failed to query model info: no answer from /api/show";"installer.updater";"system");
+    <""
+  }el{};
+  <parsedigestresponse(raw)
 };
 
 f=getlatestdigest(modelid:str):str{
-  let body=str.concat("{\"name\":\"";str.concat(modelid;"\"}"));
-  let resp=http.postheaders(http.client("http://localhost:11434/api/show");"";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-  <mt resp {
-    $ok:r parsedigestresponse(r);
-    $err:e latestdigesterr(e)
-  }
+  <getlatestdigestat("http://localhost:11434";modelid)
 };
 
 f=checkmodelupdate(modelid:str):$updatecheck{

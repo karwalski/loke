@@ -4,7 +4,7 @@
 m=core.governance.external;
 
 i=str:std.str;
-i=http:std.http;
+i=reach:shared.reachability;
 
 t=$integrationtype{
   $monitoring:i64;
@@ -235,9 +235,29 @@ f=dispatch(config:$externalconfig;event:$governanceevent):@$dispatchresult{
   };
   <results
 };
+(* VM1.6f. Every attempt was `http.postheaders(http.client(url);"";...)`. The runtime reads
+   postheaders' first argument as a URL string, so nothing was sent (T-48) and every
+   dispatch retried and failed. What can be sent now is sent through reach.localpost: an
+   endpoint on this machine that takes no auth header. localpost carries no headers, and no
+   client call at this toolchain is measured to send a header-carrying POST or to reach
+   another host (T-48, F5.11), so any other endpoint is reported as not delivered, with the
+   reason, and nothing is attempted. buildauthheaders is kept for that client; note that it
+   writes the token's environment variable NAME, not its value, and a header line rather
+   than the JSON postheaders expects. *)
+f=unsendable(ep:$externalendpoint):str{
+  if(!reach.isloopbackurl(ep.url)){ <"endpoint is not on this machine; no client call reaches it (T-48)" }el{};
+  if(str.eq(ep.authmethod;"bearer_token") || str.eq(ep.authmethod;"api_key_header")){
+    <"endpoint needs an auth header; no client call sends one (T-48)"
+  }el{};
+  <""
+};
+
 f=sendtoendpoint(ep:$externalendpoint;event:$governanceevent):$dispatchresult{
+  let refused=unsendable(ep);
+  if(str.len(refused)>0){
+    <$dispatchresult{endpointid:ep.id;success:false;statuscode:0;error:refused;latencyms:0}
+  }el{};
   let payload=formatpayload(ep;event);
-  let headers=buildauthheaders(ep);
   let attempt=mut.0;
   let lasterror=mut."";
   let done=mut.false;
@@ -247,11 +267,7 @@ f=sendtoendpoint(ep:$externalendpoint;event:$governanceevent):$dispatchresult{
     if(attempt>ep.retrycount){
       done=true
     }el{
-      let hc=http.client(ep.url);
-      let httpok=mt http.postheaders(hc;"";str.tobytes(payload);headers) {
-        $ok:resp true;
-        $err:e false
-      };
+      let httpok=str.len(reach.localpost(ep.url;"";payload))>0;
       if(httpok){
         finalresult=$dispatchresult{endpointid:ep.id;success:true;statuscode:200;error:"";latencyms:0};
         done=true

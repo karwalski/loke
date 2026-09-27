@@ -39,6 +39,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path.startswith('/api/chat') and 'named entity recognition system' in body:
             open(LOG+'.ner','a').write(self.path+' '+body+'\n')
             self._send({"model":"llama3","message":{"role":"assistant","content":"[]"},"done":True}); return
+        # VM1.6f: the router's intent classifier asks the local Ollama to name the task when its
+        # keywords are unsure. That is not the forward either, so it is logged apart too. The
+        # reply names no task, so the classifier keeps its keyword result and the routing the
+        # smoke asserts is unchanged; tests/integration/test_local_posts.tk covers a real answer.
+        if self.path.startswith('/api/chat') and 'Classify the intent' in body:
+            open(LOG+'.intent','a').write(self.path+' '+body+'\n')
+            self._send({"model":"llama3","message":{"role":"assistant","content":""},"done":True}); return
         open(LOG,'a').write(self.path+' '+body+'\n')
         import re
         ph=re.findall(r'\[[A-Z_]+_[0-9a-f]+_[0-9]+\]',body)

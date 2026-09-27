@@ -1,0 +1,163 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.localposts;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=intent:core.router.intent;
+i=mcpc:core.mcp.client;
+i=disc:core.mcp.discovery;
+i=exo:core.companion.exo;
+i=upd:core.installer.updater;
+i=draft:core.feedback.draft;
+i=alert:core.governance.alert;
+i=ext:core.governance.external;
+
+(* VM1.6f — the local POSTs that were built on `http.postheaders(http.client(url);...)`,
+   judged by what ARRIVES at scripts/lib/http_recorder.py.
+
+   The pinned runtime's postheaders (tk_http_postheaders_w) reads its first argument as a URL
+   STRING; every one of these callers passed a client handle there, so none of them sent a
+   request (T-48). Each now posts through shared.reachability.localpost, and each assertion
+   below names the request as the recorder logged it. The callers whose URL is configurable
+   refuse a host that is not this machine's, and that refusal is asserted too.
+
+   The broker and moke callers are in test_local_posts_broker.tk. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_localpost_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=ctx():$draftcontext{
+  <$draftcontext{
+    requestid:"req-vm16f";
+    userdescription:"the answer was cut off";
+    pipelinelogs:@("line one";"line two");
+    modelused:"m";
+    provider:"ollama";
+    latencyms:12 as i32;
+    errorcode:""
+  }
+};
+
+f=event():$governanceevent{
+  <$governanceevent{
+    eventtype:"audit.test";
+    timestamp:"2026-09-27T00:00:00Z";
+    severity:"info";
+    title:"vm16f-external";
+    description:"d";
+    source:"test";
+    requestid:"r";
+    metadata:"{}"
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.router.intent ─────────────────────────────────────────────── *)
+  let ic=intent.classify("hello how are you today";url);
+  if(t.assert(str.contains(readfile(logp);"POST /api/chat {\"model\":\"qwen2.5:7b\"");"intent: the classification POST /api/chat arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"\"content\":\"hello how are you today\"}]}");"intent: carrying the text, escaped")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ic.method;"llm";"intent: the model's answer decides the classification")){pass=pass+1}el{fail=fail+1};
+  let ioff=intent.classify("hello how are you today";"http://example.com:11434");
+  if(t.asserteq(ioff.method;"keyword";"intent: an Ollama off this machine is not sent the text")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.mcp.client ────────────────────────────────────────────────── *)
+  let mraw=mcpc.sendraw(mcpc.new(url;"rec");"tools/list";"null");
+  if(t.assert(str.contains(readfile(logp);"POST /mcp {\"jsonrpc\":\"2.0\",\"id\":\"");"mcp client: the POST /mcp arrived, with a string id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"\"method\":\"tools/list\",\"params\":null}");"mcp client: naming its method")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(mraw;"recorder-mcp");"mcp client: and the server's answer comes back")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mcpc.sendraw(mcpc.new("http://example.com:3000";"far");"tools/list";"null");"";"mcp client: a server off this machine is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mcpc.sendraw(mcpc.new(deadurl();"dead");"tools/list";"null");"";"mcp client: nothing listening answers \"\"")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.mcp.discovery ─────────────────────────────────────────────── *)
+  let found=disc.probeport("127.0.0.1";str.toint(port) as i32);
+  if(t.assert(str.contains(readfile(logp);"\"method\":\"initialize\"");"discovery: the initialize POST arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"");"discovery: and the tools/list POST")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(found.name;"recorder-mcp";"discovery: the server is named from its answer")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(found.version;"9.9.9";"discovery: with its version")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found.toolscount==2;"discovery: and its two tools counted")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.companion.exo ─────────────────────────────────────────────── *)
+  let ecfg=$exoconfig{ host:"127.0.0.1"; port:str.toint(port) as i32 };
+  if(t.assert(exo.isavailable(ecfg);"exo: an answering Exo is available")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /v1/health");"exo: because its GET /v1/health arrived")){pass=pass+1}el{fail=fail+1};
+  let cl:$exocluster=exo.clusterstatus(ecfg);
+  if(t.assert(cl.nodes.len==1;"exo: the cluster's node is read from GET /v1/nodes")){pass=pass+1}el{fail=fail+1};
+  let gen=exo.generate(ecfg;"m";"hi there";16 as i32);
+  if(t.asserteq(gen;"exo-answer";"exo: generate answers the completion's content")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /v1/chat/completions {\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi there\"}],\"max_tokens\":16}");"exo: and the POST /v1/chat/completions arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(exo.generate($exoconfig{ host:"example.com"; port:52415 as i32 };"m";"p";8 as i32);"";"exo: an Exo off this machine is not sent the prompt")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.installer.updater ─────────────────────────────────────────── *)
+  if(t.asserteq(upd.getlatestdigestat(url;"qwen2.5:7b");"sha256:recorder-digest";"updater: the latest digest is read from /api/show")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /api/show {\"name\":\"qwen2.5:7b\"}");"updater: because the POST /api/show arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(upd.getlatestdigestat(deadurl();"m");"";"updater: nothing listening answers \"\"")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.feedback.draft ────────────────────────────────────────────── *)
+  let d:$draftresult=draft.draftat(ctx();url);
+  if(t.assert(str.contains(readfile(logp);"POST /api/pipeline {\"text\":");"draft: the POST /api/pipeline arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"\"request_id\":\"req-vm16f\"");"draft: carrying its request id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(d.title;"Issue report (draft failed)");"draft: an answer is not reported as a failed draft")){pass=pass+1}el{fail=fail+1};
+  let dd:$draftresult=draft.draftat(ctx();deadurl());
+  if(t.asserteq(dd.title;"Issue report (draft failed)";"draft: nothing listening is a failed draft")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.governance.alert ──────────────────────────────────────────── *)
+  let acfg=$alertconfig{ quotathresholdpct:20.0 as f32; webhookurl:"\(url)/hook"; logonly:false };
+  if(t.assert(alert.send(acfg;alert.makealert("quota";"warn";"vm16f-alert"));"alert: a local webhook is delivered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /hook ");"alert: because the POST /hook arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"vm16f-alert");"alert: carrying the alert")){pass=pass+1}el{fail=fail+1};
+  let afar=$alertconfig{ quotathresholdpct:20.0 as f32; webhookurl:"https://hooks.example.com/x"; logonly:false };
+  if(t.assert(!alert.send(afar;alert.makealert("quota";"warn";"far"));"alert: a webhook off this machine is reported undelivered")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.governance.external ───────────────────────────────────────── *)
+  let ep=ext.webhook("w1";"local";"\(url)/ext";"none";"";@("audit.all"));
+  let er=ext.sendtoendpoint(ep;event());
+  if(t.assert(er.success;"external: a local endpoint without auth is delivered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /ext ");"external: because the POST /ext arrived")){pass=pass+1}el{fail=fail+1};
+  let eauth=ext.sendtoendpoint(ext.webhook("w2";"authed";"\(url)/authed";"bearer_token";"TOKEN_ENV";@("audit.all"));event());
+  if(t.assert(!eauth.success;"external: an endpoint needing an auth header is not delivered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(eauth.error;"auth header");"external: and says why")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(readfile(logp);"POST /authed");"external: and nothing was sent without its header")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete("\(base).port");
+  <fail
+};

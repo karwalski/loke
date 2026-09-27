@@ -161,6 +161,10 @@ case "$OUTP" in
 esac
 if [ -s "$SEEN" ]; then echo "  FAIL a model received a proposal request that should have been refused" >&2; fail=1
 else echo "  ok   and no model received anything"; fi
+# VM1.6f: the router's intent classifier now reaches the local model when its keywords are
+# unsure (it sent nothing before, T-48). fake_ollama.py logs that apart ($SEEN.intent).
+if grep -qs '^/api/chat ' "$SEEN.intent"; then echo "  ok   the router's intent classifier consulted the local model, apart from any forward"
+else echo "  FAIL the intent classifier never reached the local model" >&2; fail=1; fi
 
 # F5.12: when the routed model is not installed, loke must refuse and name what IS installed,
 # rather than send a request Ollama will reject. Restart the fake with a list that does

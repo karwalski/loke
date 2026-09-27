@@ -4,7 +4,8 @@
 m=mcpbroker.proxy;
 i=t:shared.types;
 i=proto:core.mcp.protocol;
-i=http:std.http;
+i=reach:shared.reachability;
+i=jx:shared.jsonobj;
 i=json:std.json;
 i=log:shared.log;
 i=reg:mcpbroker.registry;
@@ -31,7 +32,8 @@ i=str:std.str;
    Also fixed: reg.findfortool returns a $serverentry, not an option, so the
    `$none`/`$some` match had no variants to match (its predicate is reg.isfound);
    std.http.post is not callable at all because http.tki double-declares it as a route
-   (F10.16), so this uses http.postheaders; proto.errorresponse takes
+   (F10.16), so this used http.postheaders, later measured to send nothing in that shape
+   (T-48) and replaced by reach.localpost (VM1.6f); proto.errorresponse takes
    (id, code, message) and was being called with (code, message, detail); and every
    entry parameter was a bare i64 where it meant $serverentry. *)
 
@@ -59,29 +61,28 @@ f=proxyupstreamfail(toolname:str;entry:$serverentry):$proxyresult{
   }
 };
 
-f=proxyhandleresponse(r:$httpresp;toolname:str;entry:$serverentry;map:$placeholdermap):$proxyresult{
+f=proxyhandleresponse(raw:str;toolname:str;entry:$serverentry;map:$placeholdermap):$proxyresult{
   log.info(str.concat("proxied ";str.concat(toolname;str.concat(" via ";entry.name)));"proxy";"proxy_call");
   <$proxyresult{
     ok:true;
-    responsebody:ph.restore(r.body;map);
+    responsebody:ph.restore(raw;map);
     upstreamserver:entry.name;
     privacyapplied:true
   }
 };
 
+(* VM1.6f. The tools/call request was `http.postheaders(http.client(url);"/mcp";...)`, and
+   the runtime reads postheaders' first argument as a URL string, so it was never sent (T-48):
+   every proxied call failed upstream. An upstream on this machine is called through
+   reach.localpost, which arrives. No client call at this toolchain is measured to reach
+   another host (T-48), so an upstream elsewhere fails here, before anything is attempted. *)
 f=proxysendrequest(cleanargs:str;toolname:str;entry:$serverentry;map:$placeholdermap):$proxyresult{
+  if(!reach.isloopbackurl(serverurl(entry))){ <proxyupstreamfail(toolname;entry) }el{};
   let upstreamtool=stripprefix(toolname;entry.toolprefix);
-  let rpcbody=str.concat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"";str.concat(upstreamtool;str.concat("\",\"arguments\":";str.concat(cleanargs;"}}"))));
-  let resp=http.postheaders(
-    http.client(serverurl(entry));
-    "/mcp";
-    str.tobytes(rpcbody);
-    "{\"content-type\":\"application/json\"}"
-  );
-  <mt resp {
-    $ok:r proxyhandleresponse(r;toolname;entry;map);
-    $err:e proxyupstreamfail(toolname;entry)
-  }
+  let rpcbody="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\(jx.escape(upstreamtool)),\"arguments\":\(cleanargs)}}";
+  let raw=reach.localpost(serverurl(entry);"/mcp";rpcbody);
+  if(str.len(raw)==0){ <proxyupstreamfail(toolname;entry) }el{};
+  <proxyhandleresponse(raw;toolname;entry;map)
 };
 
 f=proxyblocked(toolname:str;entry:$serverentry):$proxyresult{

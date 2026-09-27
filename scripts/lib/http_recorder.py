@@ -12,7 +12,9 @@ that reads the log after a call returns sees exactly what arrived.
 
 It answers in the shape of the local sidecars loke talks to, enough for a client to parse:
 Ollama (/api/tags, /api/ps, /api/version, /api/chat, /api/generate, /api/pull, /api/delete),
-Presidio (/health, /analyze) and LLMLingua (/health, /compress). The replies are fixed and
+Presidio (/health, /analyze), LLMLingua (/health, /compress), and since VM1.6f an MCP server
+(/mcp), Exo (/v1/health, /v1/nodes, /v1/chat/completions), Ollama's /api/show and loke's own
+/api/pipeline; any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
 compact (no spaces after `:`), as Ollama's are, because shared.jsonobj's nested lookup
 matches `"key":` exactly.
 
@@ -75,7 +77,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def _answer(self):
+    def _answer(self, body=""):
         p = self.path.split("?")[0]
         if MODE == "silent":
             self.send_response(200)
@@ -89,8 +91,28 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"models": [{"name": "fake:latest", "size": 7}]})
         elif p == "/api/version":
             self._send({"version": "0.0.0-recorder"})
+        elif p == "/api/chat" and "Classify the intent" in body:
+            # core.router.intent's classification request (VM1.6f): a task name.
+            self._send({"model": "fake", "message": {"role": "assistant", "content": "code_review"}, "done": True})
         elif p == "/api/chat":
             self._send({"model": "fake", "message": {"role": "assistant", "content": NER}, "done": True})
+        elif p == "/api/show":
+            self._send({"digest": "sha256:recorder-digest", "modelinfo": {}})
+        elif p == "/mcp":
+            # A JSON-RPC answer carrying both an initialize result and a tools/list result,
+            # so one reply serves core.mcp and the broker (VM1.6f).
+            self._send({"jsonrpc": "2.0", "id": 1, "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "recorder-mcp", "version": "9.9.9"},
+                "tools": [{"name": "echo", "description": "echoes", "inputSchema": {"type": "object"}},
+                          {"name": "sum", "description": "adds", "inputSchema": {"type": "object"}}],
+                "content": [{"type": "text", "text": "tool-answer"}]}})
+        elif p == "/v1/chat/completions":
+            self._send({"choices": [{"message": {"role": "assistant", "content": "exo-answer"}}]})
+        elif p == "/v1/nodes":
+            self._send({"nodes": [{"id": "n1", "device": "recorder", "memory_gb": 16.0, "models": ["m"]}]})
+        elif p == "/api/pipeline":
+            self._send({"response": "pipeline-answer"})
         elif p == "/api/generate":
             self._send({"model": "fake", "response": "generated-by-recorder", "done": True})
         elif p == "/api/pull":
@@ -115,8 +137,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self._answer()
 
     def do_POST(self):
-        self._record()
-        self._answer()
+        self._answer(self._record())
 
     def do_DELETE(self):
         self._record()

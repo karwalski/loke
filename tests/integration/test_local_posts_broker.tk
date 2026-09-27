@@ -1,0 +1,94 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.localpostsbroker;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=proto:core.mcp.protocol;
+i=reg:mcpbroker.registry;
+i=agg:mcpbroker.aggregator;
+i=proxy:mcpbroker.proxy;
+i=ph:core.privacy.placeholder;
+i=dash:moke.dashboardflow;
+
+(* VM1.6f — the MCP broker's two upstream calls and moke's dashboard flow, judged by what
+   ARRIVES at scripts/lib/http_recorder.py. All three were `http.postheaders(http.client(
+   url);"/mcp" or "/api/pipeline";...)`, which the pinned runtime reads with the client handle
+   as the URL string, so none was ever sent (T-48). The core callers are in
+   test_local_posts.tk. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_localpostb_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=entry(host:str;port:i64):$serverentry{
+  let none:@str=@();
+  <$serverentry{ name:"rec"; host:host; port:port as i32; toolprefix:"rec_"; healthy:true; lastchecked:0; tools:none }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  let local=entry("127.0.0.1";str.toint(port));
+  let far=entry("mcp.example.com";3000);
+
+  (* ── mcpbroker.aggregator ───────────────────────────────────────────── *)
+  let tools=agg.fetchtools(local);
+  if(t.assert(str.contains(readfile(logp);"POST /mcp {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");"aggregator: the tools/list POST arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tools.len==2;"aggregator: both upstream tools are aggregated")){pass=pass+1}el{fail=fail+1};
+  if(tools.len==2){
+    let t0:$mcptool=tools.get(0);
+    if(t.asserteq(t0.name;"rec_echo";"aggregator: under the server's prefix")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  if(t.assert(agg.fetchtools(far).len==0;"aggregator: an upstream off this machine contributes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── mcpbroker.proxy ────────────────────────────────────────────────── *)
+  let map=ph.mapfromentities(@());
+  let pr=proxy.proxysendrequest("{\"x\":1}";"rec_echo";local;map);
+  if(t.assert(str.contains(readfile(logp);"\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"x\":1}}}");"proxy: the tools/call POST arrived, unprefixed, with its arguments")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pr.ok;"proxy: an answering upstream is a proxied call")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pr.responsebody;"tool-answer");"proxy: and its answer is relayed")){pass=pass+1}el{fail=fail+1};
+  let pfar=proxy.proxysendrequest("{}";"rec_echo";far;map);
+  if(t.assert(!pfar.ok;"proxy: an upstream off this machine fails")){pass=pass+1}el{fail=fail+1};
+
+  (* ── moke.dashboardflow ─────────────────────────────────────────────── *)
+  let reply=dash.postpromptat(url;"show sales by month";"req-dash");
+  if(t.assert(str.contains(readfile(logp);"POST /api/pipeline {\"text\":\"show sales by month\"");"dashboard: the POST /api/pipeline arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"\"request_id\":\"req-dash\"");"dashboard: carrying its request id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(reply;"pipeline-answer");"dashboard: and loke's answer comes back")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dash.postpromptat("http://127.0.0.1:59993";"p";"r");"";"dashboard: nothing listening answers \"\"")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete("\(base).port");
+  <fail
+};

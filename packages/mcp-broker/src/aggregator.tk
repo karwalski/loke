@@ -4,8 +4,9 @@
 m=mcpbroker.aggregator;
 i=t:shared.types;
 i=proto:core.mcp.protocol;
-i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
+i=reach:shared.reachability;
 i=log:shared.log;
 i=reg:mcpbroker.registry;
 i=str:std.str;
@@ -17,7 +18,8 @@ i=str:std.str;
    toolslistresult, and there was never a decoder, so one is written here. `std.http.post`
    is not callable at all: http.tki declares it twice, once as a route taking
    (str, funcdecl), and toke resolves the route, so no argument list satisfies it
-   (F10.16); http.postheaders is the one that works. `doc.getpath("result.tools")` is not
+   (F10.16). http.postheaders, which replaced it, was later measured to send nothing
+   in the shape used here (T-48); fetchtools now posts through reach.localpost (VM1.6f). `doc.getpath("result.tools")` is not
    a member of anything. And every signature here took or returned a bare i64 where it
    meant $serverentry, $mcptool or @$mcptool, which is the LS1.1e class — an untyped
    handle plus a field read is how you get the wrong offset silently.
@@ -39,16 +41,23 @@ f=serverurl(entry:$serverentry):str{
    the document has no result.tools, which is the same outcome as a transport failure
    and is logged by the caller. *)
 f=decodetoollist(body:str):@$mcptool{
-  let doc=json.decode(body);
-  let result=json.getobj(doc;"result");
-  let raw=json.getarray(result;"tools");
+  (* VM1.6f: typed accessors and shared.jsonobj. json.getstr and friends are the untyped
+     shape that crashes on a str; nothing had reached this while no request was sent. *)
+  let doc=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  let raw=mt json.arr(jx.nested(doc;"result");"tools") {
+    $ok:a a;
+    $jsonerr:e @()
+  };
   let tools=mut.@();
   lp(let i=0;i<raw.len;i=i+1){
-    let item=raw.get(i);
+    let item=jx.elemat(raw;i as i64);
     tools=tools.push($mcptool{
-      name:json.getstr(item;"name");
-      description:json.getstr(item;"description");
-      inputschema:json.enc(json.getval(item;"inputSchema"))
+      name:jx.strvalue(item;"name";"");
+      description:jx.strvalue(item;"description";"");
+      inputschema:jx.rawvalue(item;"inputSchema")
     })
   };
   <tools
@@ -71,24 +80,19 @@ f=prefixtools(entry:$serverentry;tools:@$mcptool):@$mcptool{
   <prefixed
 };
 
+(* VM1.6f. The tools/list request was `http.postheaders(http.client(url);"/mcp";...)`, and
+   the runtime reads postheaders' first argument as a URL string, so it was never sent (T-48)
+   and the broker aggregated no tools from any upstream. An upstream on this machine is asked
+   through reach.localpost, which arrives. No client call at this toolchain is measured to
+   reach another host (T-48), so an upstream elsewhere contributes no tools, with the reason
+   logged. *)
 f=fetchtools(entry:$serverentry):@$mcptool{
-  let body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}";
-  let resp=http.postheaders(
-    http.client(serverurl(entry));
-    "/mcp";
-    str.tobytes(body);
-    "{\"content-type\":\"application/json\"}"
-  );
-  <mt resp {
-    $ok:r toolsfromresp(entry;r);
-    $err:e notools(entry.name;"upstream call failed")
-  }
-};
-
-(* `body` sits at a different offset in $httpresp than in other structs this module
-   sees, so the response is bound with its declared type before the field is read. *)
-f=toolsfromresp(entry:$serverentry;r:$httpresp):@$mcptool{
-  <prefixtools(entry;decodetoollist(r.body))
+  if(!reach.isloopbackurl(serverurl(entry))){
+    <notools(entry.name;"upstream is not on this machine; no client call reaches it (T-48)")
+  }el{};
+  let raw=reach.localpost(serverurl(entry);"/mcp";"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
+  if(str.len(raw)==0){ <notools(entry.name;"upstream call failed") }el{};
+  <prefixtools(entry;decodetoollist(raw))
 };
 
 f=aggregateall(registry:$brokerregistry):@$mcptool{

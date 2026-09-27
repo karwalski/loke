@@ -3,8 +3,8 @@
 
 m=core.companion.exo;
 
-i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=sh:shared.types;
 i=str:std.str;
 i=reach:shared.reachability;
@@ -37,13 +37,11 @@ f=baseurl(cfg:$exoconfig):str{
 (* X4b.10. http.get against a closed port returns $ok with a nil response (T-15), so the
    status read that followed dereferenced nil whenever Exo was not running, which is the
    usual case. The port is probed first, as core.models.ollama does. *)
+(* VM1.6f. The one-argument http.get answers the response BODY, a str, and this read
+   `.status` off it. reach.localanswers probes the port and then GETs, as the other local
+   health checks do since VM1.6e. *)
 f=isavailable(cfg:$exoconfig):bool{
-  if(!reach.localserviceup(baseurl(cfg))){ <false }el{};
-  let resp=http.get(str.concat(baseurl(cfg);"/v1/health"));
-  <mt resp {
-    $ok:r r.status==200;
-    $err:e false
-  }
+  <reach.localanswers(baseurl(cfg);"/v1/health")
 };
 
 (* X4b.10. The body is parsed by its own function, so the node and model list can be tested
@@ -100,44 +98,37 @@ f=parsecluster(bodytext:str):$exocluster{
   <$exocluster{ nodes:nodes; totalmemorygb:total as f32 }
 };
 
-f=parseclusterresp(r:$httpresp):$exocluster{
-  if(r.status>199 && r.status<300){ <parsecluster(r.body) }el{};
-  <$exocluster{ nodes:@(); totalmemorygb:0.0 }
-};
-
+(* VM1.6f. As isavailable: the GET answers the body, and this read `.status` and `.body`
+   off it. An empty answer is refused by parsecluster's shape check. *)
 f=clusterstatus(cfg:$exoconfig):$exocluster{
-  if(!reach.localserviceup(baseurl(cfg))){ <$exocluster{ nodes:@(); totalmemorygb:0.0 } }el{};
-  let resp=http.get(str.concat(baseurl(cfg);"/v1/nodes"));
-  <mt resp {
-    $ok:r parseclusterresp(r);
-    $err:e $exocluster{ nodes:@(); totalmemorygb:0.0 }
-  }
+  <parsecluster(reach.localget(baseurl(cfg);"/v1/nodes"))
 };
 
+(* VM1.6f. The request was `http.postheaders(http.client(url);"";...)`. The runtime reads
+   postheaders' first argument as a URL string, so nothing was sent (T-48) and generate
+   answered "" for every prompt. reach.localpost sends it.
+
+   The request carries the prompt in clear, so it goes only to a loopback host, as the NER
+   layer's does (VM1.6e). An Exo configured on another machine answers "". The body's
+   token limit is `max_tokens`, the OpenAI-compatible name Exo reads; it was `maxtokens`. *)
 f=generate(cfg:$exoconfig;model:str;prompt:str;maxtokens:i32):str{
-  let url=str.concat("http://";str.concat(cfg.host;str.concat(":";str.concat(str.fromint(cfg.port);"/v1/chat/completions"))));
-  let body="{\"model\":\(json.enc(model)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(prompt))}],\"maxtokens\":\(maxtokens)}";
-  let hc=http.client(url);
-  let resp=http.postheaders(hc;"";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-  <mt resp {
-    $ok:r completioncontent(r);
-    $err:e ""
+  if(!reach.isloopbackurl(baseurl(cfg))){ <"" }el{};
+  let body="{\"model\":\(jx.escape(model)),\"messages\":[{\"role\":\"user\",\"content\":\(jx.escape(prompt))}],\"max_tokens\":\(maxtokens)}";
+  <completioncontent(reach.localpost(baseurl(cfg);"/v1/chat/completions";body))
+};
+
+(* choices[0].message.content, or "" when the answer has none. Through shared.jsonobj, as
+   core.models.ollama reads message.content: json.str refuses an object (T-32). *)
+f=decoded(raw:str):$json{
+  <mt json.dec(raw) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
   }
 };
 
-(* The response is read in its own function, not lifted out of the match arm.
-   Binding `let r=mt resp { $err:e ""; $ok:r r }` gave `r` two types — str on the
-   error arm, $httpresp on the ok arm — and `r.body` then had no established type
-   at all, which is what E4034 was reporting. *)
-f=completioncontent(r:$httpresp):str{
-  if(!(r.status>199)){ <"" }el{};
-  if(!(r.status<300)){ <"" }el{};
-  let parsed=json.decode(r.body);
-  let choices=json.getarray(parsed;"choices");
-  if(choices.len==0){ <"" }el{};
-  let first=choices.get(0);
-  let msg=json.getobj(first;"message");
-  <json.str(msg;"content")
+f=completioncontent(raw:str):str{
+  if(str.len(raw)==0){ <"" }el{};
+  <jx.strvalue(jx.nested(jx.elem(decoded(raw);"choices";0);"message");"content";"")
 };
 
 f=formatcluster(c:$exocluster):str{

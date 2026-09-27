@@ -1838,6 +1838,20 @@ compiler's binding and the glue's parameter order cannot be checked against each
 loke could not measure https without spending a real provider key, so what this means for
 the Anthropic and OpenAI paths is recorded as F5.11 and not asserted here.
 
+**Measured 2026-09-27 at `0b0bc4e` (VM1.6f): the call works when it is called the way the glue
+reads it.** `let raw:str=http.postheaders("http://127.0.0.1:P/probe";"{\"a\":1}";
+"{\"x-probe\":\"yes\",\"authorization\":\"Bearer not-a-real-key\"}";0)` arrived at a local
+server that logs every header, with both custom headers, and answered the response body. The
+same call to `https://127.0.0.1:P/probe`, against a local TLS server holding a SELF-SIGNED
+certificate for `CN=probe.invalid`, also arrived with both headers and answered: see T-58. So
+T-48 is loke's calling convention (a client handle where the glue reads a URL string; toke at a
+later commit type-rejects exactly that, E4031 "argument 1 ... read by the runtime as a C
+string", as reported to loke and not re-measured here), not an inability of the runtime. Also
+read from the glue: the request always carries `Content-Type: application/json` whatever the
+headers say, a header value cannot contain a `"`, and the Host header omits the port. loke's
+local callers post through `shared.reachability.localpost`; the hosted ones stay where they
+are until T-58 is resolved (VM1.6g).
+
 ## T-49 — `net.listen(port)` segfaults
 
 Measured 2026-09-25: `let fd=net.listen(59433);` in a test binary crashes (SIGSEGV).
@@ -2115,3 +2129,30 @@ after a TCP reachability probe, and by returning plain structs, not results, fro
 **The ask:** do not overload a client verb on arity with a server verb. At minimum, reject a
 two-argument `http.get` whose first argument is an `httpclient` (the type is known), and make
 `tk_http_get_handler` return a value `mt` cannot read as success when the table is full.
+
+## T-58 — `http.postheaders` over https does not verify the server's certificate
+
+**Severity: security. Any API key sent through it is exposed to anyone who can intercept the
+connection. Not reached by loke today (no loke caller uses the working shape).**
+
+Measured 2026-09-27 at `0b0bc4e`, locally, with no provider involved. A Python server wrapping
+its socket in TLS with a freshly generated self-signed certificate for `CN=probe.invalid`
+listened on 127.0.0.1. `http.postheaders("https://127.0.0.1:P/probe";body;headersjson;0)`
+completed the handshake, sent the request with an `authorization` header, and answered the
+server's body. A client that verified certificates would have refused on two counts: the
+certificate chains to no trusted root, and its name is not the host connected to.
+
+Read from `src/stdlib/tk_web_glue.c`: `tk_http_postheaders_w` makes a fresh
+`SSL_CTX_new(TLS_client_method())` and calls `SSL_set_tlsext_host_name`, but never
+`SSL_CTX_set_verify`, `SSL_CTX_set_default_verify_paths` or `SSL_set1_host`, and never reads
+`SSL_get_verify_result`. OpenSSL's default for a client context is `SSL_VERIFY_NONE`.
+`std.tls` (`tls.c`) does set verification, so the gap is in this one call.
+
+**What it means for loke.** T-48's addendum shows this is the only header-carrying POST that
+arrives at this pin. Moving the Anthropic, OpenAI, OAuth or GitHub callers onto it would make
+them send for the first time, and send a bearer token to whoever answers. They are left where
+they are (VM1.6g, F5.11).
+
+**The ask:** verify the peer by default (`SSL_VERIFY_PEER`, the system trust store, and
+`SSL_set1_host` for the name), fail closed when verification fails, and let a caller opt out
+only explicitly.

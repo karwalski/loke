@@ -3,7 +3,6 @@
 
 m=moke.dashboardflow;
 i=str:std.str;
-i=http:std.http;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=reach:shared.reachability;
@@ -13,11 +12,9 @@ i=ddl:moke.ddl;
    1. `http.post(url; body; "application/json")` — three arguments; the client `http.post` takes
       two, and what it RETURNS is a result, not a struct. `res.ok` and `res.body` were field
       reads on a result value, which nothing checks. Both request functions therefore branched
-      on a field that does not exist. The pattern that works in this tree is the one
-      `core.privacy.presidio.analyze` uses: `http.client(baseurl)` then
-      `http.postheaders(hc; path; bytes; headersjson)`, matched with `mt` — `$ok` FIRST, because
-      `mt` binds a result's arms by position and writing the error arm first inverts the match
-      (T-31).
+      on a field that does not exist. They were then moved to `http.postheaders(http.client(
+      baseurl); path; bytes; headersjson)`, which was later measured to send nothing (T-48);
+      the request now goes through `shared.reachability.localpost` (VM1.6f).
    2. `dash.summary == rawjson` and `card.metric.label == card.metric.label + " [...]"` were
       meant as assignments. The language has no field assignment and E2002 advises `==`, which
       compiles to a DISCARDED COMPARISON and does nothing (T-26). So the fallback that stashes
@@ -141,10 +138,6 @@ f=pipelinebody(prompt:str;requestid:str):str{
   <"{\"text\":\(jx.escape(prompt)),\"system_prompt\":\"You are a dashboard design assistant. Output only valid JSON.\",\"tolerance\":\"patient\",\"mode\":\"dashboard\",\"fallback_reason\":\"policy_directed\",\"fallback_selected_by\":\"policy\",\"request_id\":\(jx.escape(requestid))}"
 };
 
-f=jsonheaders():str{
-  <"{\"content-type\":\"application/json\"}"
-};
-
 f=errorstate(state:$flowstate;message:str):$flowstate{
   <$flowstate{
     phase:state.phase;
@@ -158,17 +151,16 @@ f=errorstate(state:$flowstate;message:str):$flowstate{
 (* The prompt was escaped with `str.replace(prompt;"\"";"\\\"")`, which handles the quote and
    nothing else: a newline in the schema TOON — and there is one per column — went into the
    JSON body raw and made it unparseable. `jx.escape` is the escaper. *)
+(* VM1.6f. This was `http.postheaders(http.client(base);"/api/pipeline";...)`. The runtime
+   reads postheaders' first argument as a URL string, so nothing reached loke (T-48) and both
+   phases reported "pipeline unreachable" while loke was up. reach.localpost probes the port
+   and posts through http.posturl, which arrives; "" when there is no answer. *)
+f=postpromptat(baseurl:str;prompt:str;requestid:str):str{
+  <reach.localpost(baseurl;"/api/pipeline";pipelinebody(prompt;requestid))
+};
+
 f=postprompt(prompt:str;requestid:str):str{
-  (* http.postheaders against a dead port reports $ok carrying nothing (T-15), so an empty reply
-     is indistinguishable from an unreachable pipeline unless the port is checked first. *)
-  if(reach.localserviceup(pipelinebaseurl())){}el{
-    <""
-  };
-  let hc=http.client(pipelinebaseurl());
-  <mt http.postheaders(hc;"/api/pipeline";str.tobytes(pipelinebody(prompt;requestid));jsonheaders()) {
-    $ok:raw raw;
-    $httperr:e ""
-  }
+  <postpromptat(pipelinebaseurl();prompt;requestid)
 };
 
 f=phase1request(schematoon:str;userquestion:str;requestid:str):$flowstate{

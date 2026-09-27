@@ -3,8 +3,8 @@
 
 m=core.mcp.discovery;
 
-i=http:std.http;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=str:std.str;
 i=log:shared.log;
 i=time:std.time;
@@ -30,40 +30,33 @@ f=wellknownports():@i32{
   <@(11434 as i32;11435 as i32;11436 as i32;11437 as i32;3000 as i32;8080 as i32;8000 as i32;5000 as i32)
 };
 
+(* VM1.6f. These read the answers through the typed accessors and shared.jsonobj. They used
+   json.getval, json.str and json.getarr on an i64 handle, which is the untyped shape that
+   crashes on a str; it never mattered while no answer ever arrived. *)
 f=extractserverinfo(initraw:str):@str{
-  let name="unknown";
-  let version="unknown";
-  let parsed=json.dec(initraw);
-  <mt parsed {
-    $ok:obj extractinfofromobj(obj;name;version);
-    $jsonerr:e @(name;version)
+  <mt json.dec(initraw) {
+    $ok:obj extractinfofromobj(obj;"unknown";"unknown");
+    $jsonerr:e @("unknown";"unknown")
   }
 };
 
-f=extractinfofromobj(obj:i64;defname:str;defversion:str):@str{
-  let resultval=json.getval(obj;"result");
-  let infoval=json.getval(resultval;"serverInfo");
-  let name=json.str(infoval;"name");
-  let version=json.str(infoval;"version");
-  let rname=mut.defname;
-  if(str.len(name) > 0){ rname=name };
-  let rversion=mut.defversion;
-  if(str.len(version) > 0){ rversion=version };
-  <@(rname;rversion)
+f=extractinfofromobj(obj:$json;defname:str;defversion:str):@str{
+  let infoval=jx.nested(jx.nested(obj;"result");"serverInfo");
+  <@(jx.strvalue(infoval;"name";defname);jx.strvalue(infoval;"version";defversion))
 };
 
 f=counttoolsfromraw(toolsraw:str):i32{
-  let toolsparsed=json.dec(toolsraw);
-  <mt toolsparsed {
+  <mt json.dec(toolsraw) {
     $ok:toolsobj counttoolsfromobj(toolsobj);
-    $jsonerr:e 0
+    $jsonerr:e 0 as i32
   }
 };
 
-f=counttoolsfromobj(toolsobj:i64):i32{
-  let resultval=json.getval(toolsobj;"result");
-  let toolsarr=json.getarr(resultval;"tools");
-  <toolsarr.len
+f=counttoolsfromobj(toolsobj:$json):i32{
+  <mt json.arr(jx.nested(toolsobj;"result");"tools") {
+    $ok:a a.len as i32;
+    $jsonerr:e 0 as i32
+  }
 };
 
 (* The $ok arm comes first in every match in this file, deliberately.
@@ -83,22 +76,21 @@ f=counttoolsfromobj(toolsobj:i64):i32{
    is listening, because http.get cannot detect a closed port at all (T-15). Two separate
    compiler bugs, two separate workarounds; when T-31 is fixed the arm order stops
    mattering, and T-15 still will. *)
+(* VM1.6f. Both requests below were `http.postheaders(http.client(url);"";...)`, and the
+   runtime reads postheaders' first argument as a URL string, so neither was sent (T-48):
+   every server discovery found was named "unknown" with no tools. probeport only calls this
+   for a port on this machine, so reach.localpost is the client. An empty answer reads as
+   "unknown" and 0 tools, as a failed request did. *)
 f=buildserver(host:str;port:i32;baseurl:str):$discoveredserver{
-  let initurl=str.concat(baseurl;"/mcp");
-  let initresp=http.postheaders(http.client(initurl);"";str.tobytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"loke-discovery\",\"version\":\"0.1.0\"}}}");"{\"content-type\":\"application/json\"}");
-  let info=mt initresp {
-    $ok:initraw extractserverinfo(initraw);
-    $httperr:e @("unknown";"unknown")
-  };
+  let initraw=reach.localpost(baseurl;"/mcp";"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"loke-discovery\",\"version\":\"0.1.0\"}}}");
+  let info=mut.@("unknown";"unknown");
+  if(str.len(initraw)>0){ info=extractserverinfo(initraw) }el{};
   let servername=info.get(0);
   let serverversion=info.get(1);
 
-  let toolsurl=str.concat(baseurl;"/mcp");
-  let toolsresp=http.postheaders(http.client(toolsurl);"";str.tobytes("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":null}");"{\"content-type\":\"application/json\"}");
-  let toolscount=mt toolsresp {
-    $ok:toolsraw counttoolsfromraw(toolsraw);
-    $httperr:e 0
-  };
+  let toolsraw=reach.localpost(baseurl;"/mcp";"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":null}");
+  let toolscount=mut.0 as i32;
+  if(str.len(toolsraw)>0){ toolscount=counttoolsfromraw(toolsraw) }el{};
 
   log.debug(
     str.concat(

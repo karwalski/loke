@@ -3,10 +3,10 @@
 
 m=core.feedback.draft;
 
-i=http:std.http;
 i=str:std.str;
-i=json:std.json;
+i=jx:shared.jsonobj;
 i=log:shared.log;
+i=reach:shared.reachability;
 
 t=$draftcontext{
   requestid:str;
@@ -150,18 +150,18 @@ f=parsedraftresponse(raw:str):$draftresult{
   }
 };
 
-f=draftrespok(r:$httpresp;requestid:str):$draftresult{
+f=draftrespok(raw:str;requestid:str):$draftresult{
   log.info(
     str.concat("draft pipeline response received for request: ";requestid);
     "feedback.draft";
     requestid
   );
-  <parsedraftresponse(r.body)
+  <parsedraftresponse(raw)
 };
 
-f=draftrespfail(e:$httperr;requestid:str;userdescription:str):$draftresult{
+f=draftrespfail(requestid:str;userdescription:str):$draftresult{
   log.warn(
-    "draft pipeline request failed: \(e.msg)";
+    "draft pipeline request failed: no answer from /api/pipeline";
     "feedback.draft";
     requestid
   );
@@ -175,19 +175,23 @@ f=draftrespfail(e:$httperr;requestid:str;userdescription:str):$draftresult{
   }
 };
 
+(* VM1.6f. The request was `http.postheaders(http.client(url);"";...)`. The runtime reads
+   postheaders' first argument as a URL string, so nothing was sent (T-48) and every draft
+   came back "draft failed". reach.localpost sends it, to loke's own /api/pipeline, so the
+   draft prompt goes through the privacy pipeline like any other request.
+
+   localpost carries no headers, so the bearer token this used to build is not sent. loke's
+   /api/pipeline reads no Authorization header, so it was never needed; `apikey` is kept
+   only so draft's signature does not change. The prompt is escaped with jx.escape: it is
+   multi-line, and json.enc escapes only quote and backslash. *)
+f=draftat(ctx:$draftcontext;baseurl:str):$draftresult{
+  let raw=reach.localpost(baseurl;"/api/pipeline";"{\"text\":\(jx.escape(builddraftprompt(ctx))),\"request_id\":\(jx.escape(ctx.requestid)),\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\"}");
+  if(str.len(raw)==0){ <draftrespfail(ctx.requestid;ctx.userdescription) }el{};
+  <draftrespok(raw;ctx.requestid)
+};
+
 f=draft(ctx:$draftcontext;apikey:str):$draftresult{
-  let prompt=builddraftprompt(ctx);
-  (* json.enc supplies both the escaping and the quotes; str.escapejson does not
-     exist. http.post is declared twice upstream, so postheaders is the name that
-     resolves to the four-parameter function. *)
-  let payload="{\"text\":\(json.enc(prompt)),\"request_id\":\(json.enc(ctx.requestid)),\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\"}";
-  let bearer="Bearer \(apikey)";
-  let hdrs="{\"content-type\":\"application/json\",\"authorization\":\(json.enc(bearer))}";
-  let resp=http.postheaders(http.client("http://127.0.0.1:11430/api/pipeline");"";str.tobytes(payload);hdrs);
-  <mt resp {
-    $ok:r draftrespok(r;ctx.requestid);
-    $err:e draftrespfail(e;ctx.requestid;ctx.userdescription)
-  }
+  <draftat(ctx;"http://127.0.0.1:11430")
 };
 
 f=formatpreview(draft:$draftresult):str{

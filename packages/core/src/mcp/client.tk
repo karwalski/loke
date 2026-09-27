@@ -3,12 +3,12 @@
 
 m=core.mcp.client;
 
-i=http:std.http;
 i=json:std.json;
 i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
 i=proto:core.mcp.protocol;
+i=reach:shared.reachability;
 
 t=$mcpclient{
   serverurl:str;
@@ -44,28 +44,42 @@ f=parsesendresponse(raw:str):str!$lokeerr{
   }
 };
 
-f=sendrequest(client:$mcpclient;method:str;paramsjson:str):str!$lokeerr{
-  let cid=log.newcorrelationid();
+(* VM1.6f. The request went through `http.postheaders(http.client(url);"/mcp";...)`. The
+   runtime reads postheaders' first argument as a URL string, so the client handle's bytes
+   were the URL and nothing was ever sent (T-48). sendraw posts through reach.localpost,
+   which arrives, and answers the response text, or "" when there is none.
+
+   Only to a loopback server. No client call at this toolchain is measured to send a
+   header-carrying POST to another host, so an MCP server configured off-machine is refused
+   here, in the open, rather than handed to a call that sends nothing.
+
+   The id is sent as a JSON STRING. It is a random hex correlation id and was spliced in
+   bare, which is not JSON (`"id":3fa9...`), so any server that parsed the request would
+   have refused it. JSON-RPC 2.0 allows a string id. *)
+f=requestbody(id:str;method:str;paramsjson:str):str{
+  <"{\"jsonrpc\":\"2.0\",\"id\":\"\(id)\",\"method\":\"\(method)\",\"params\":\(paramsjson)}"
+};
+
+f=sendraw(client:$mcpclient;method:str;paramsjson:str):str{
   (* The id must differ per request so a response can be matched to its request.
      client.nextid==client.nextid+1 never incremented anything — toke cannot mutate
      the caller's struct — so every request reused id 1. Deriving it from the
      correlation id keeps requests distinguishable without a mutable field. LS1.1a. *)
-  let idstr=cid;
-  let hc=http.client(client.serverurl);
+  let cid=log.newcorrelationid();
+  if(!reach.isloopbackurl(client.serverurl)){
+    log.warn("mcp send: \(client.servername) is not on this machine, and no client call reaches it (T-48)";"mcp-client";cid);
+    <""
+  }el{};
+  log.debug("mcp send: \(method)";"mcp-client";cid);
+  <reach.localpost(client.serverurl;"/mcp";requestbody(cid;method;paramsjson))
+};
 
-  let bodyp1=str.concat("{\"jsonrpc\":\"2.0\",\"id\":";idstr);
-  let bodyp2=str.concat(bodyp1;",\"method\":\"");
-  let bodyp3=str.concat(bodyp2;method);
-  let bodyp4=str.concat(bodyp3;"\",\"params\":");
-  let body=str.concat(bodyp4;str.concat(paramsjson;"}"));
-
-  log.debug(str.concat("mcp send: ";method);"mcp-client";cid);
-
-  let resp=http.postheaders(hc;"/mcp";str.tobytes(body);"{\"content-type\":\"application/json\"}");
-  <mt resp {
-    $ok:raw parsesendresponse(raw);
-    $httperr:e $networkerr(str.concat("mcp send_request: HTTP error calling ";client.serverurl))
-  }
+f=sendrequest(client:$mcpclient;method:str;paramsjson:str):str!$lokeerr{
+  let raw=sendraw(client;method;paramsjson);
+  if(str.len(raw)==0){
+    <$networkerr("mcp send_request: no answer from \(client.serverurl)")
+  }el{};
+  <parsesendresponse(raw)
 };
 
 f=checkinitobj(obj:i64;servername:str;cid:str):bool{
