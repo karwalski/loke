@@ -23,6 +23,9 @@ command -v node >/dev/null || { echo "smoke_ui: SKIPPED — node is not installe
 for b in "$LOKE_BIN" "$MOKE_BIN"; do
   [ -x "$b" ] || { echo "smoke_ui: $b not built" >&2; exit 1; }
 done
+. "$ROOT/scripts/lib/fixedports_lock.sh"
+trap release_fixedports EXIT INT TERM
+acquire_fixedports || { echo "smoke_ui: could not get the fixed-port lock" >&2; exit 1; }
 for port in 11430 11432 11434; do
   if nc -z -G 1 127.0.0.1 "$port" 2>/dev/null; then
     echo "smoke_ui: SKIPPED — port $port is in use, and this test must own it. Nothing was run." >&2
@@ -36,6 +39,7 @@ cleanup() {
   for p in $PIDS; do kill "$p" 2>/dev/null; done
   pkill -9 -f "$WORK/" 2>/dev/null
   rm -rf "$WORK"
+  release_fixedports
 }
 trap cleanup EXIT INT TERM
 
