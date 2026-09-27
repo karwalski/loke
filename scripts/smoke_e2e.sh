@@ -104,6 +104,13 @@ rec=$(dl "SELECT state||' '||bytes_body||' '||custody||' '||custody_check FROM d
 if [ -n "$sent_bytes" ] && [ "$rec" = "completed $sent_bytes redacted-data not_run" ]; then
   echo "  ok   its bytes_body ($sent_bytes) is what the model received, and it is completed"
 else echo "  FAIL disclosure record '$rec' does not match the $sent_bytes octets the model received" >&2; fail=1; fi
+# DA1.5: the savings view reads the same record. One local dispatch, and its bytes.
+sv=$(curl -s -m 20 http://127.0.0.1:11430/api/savings)
+case "$sv" in
+  *"\"dispatches\":1,"*"\"local_dispatches\":1,"*"\"bytes_sent_local\":$sent_bytes,"*)
+    echo "  ok   /api/savings reports the dispatch and its $sent_bytes bytes" ;;
+  *) echo "  FAIL /api/savings does not report the recorded dispatch: $(printf '%s' "$sv" | head -c 300)" >&2; fail=1 ;;
+esac
 leaked=$(dl "SELECT COUNT() FROM disclosure_log WHERE instr(record_id||correlation_id||request_id||session_id||provider||model_id||endpoint_host||custody||entity_types||detection_layers||fields_disclosed, '$EMAIL')>0")
 if [ "$leaked" = "0" ]; then echo "  ok   and it holds the address in no column"
 else echo "  FAIL the disclosure record holds the address" >&2; fail=1; fi
@@ -140,6 +147,14 @@ case "$OUT3" in
 esac
 if grep -q '^/api/generate .*"model": *"gemma3:4b"' "$SEEN"; then echo "  ok   and the model received the request under that name"
 else echo "  FAIL the model did not receive a request for gemma3:4b" >&2; fail=1; fi
+# DA1.5: the answer carries its own disclosure, and its bytes are what the model received.
+g_bytes=$(python3 -c 'import sys
+for line in open(sys.argv[1],encoding="utf-8"):
+    if line.startswith("/api/generate "): print(len(line[len("/api/generate "):].rstrip("\n").encode("utf-8"))); break' "$SEEN")
+case "$OUT3" in
+  *"\"disclosure\":{\"bytes_body\":$g_bytes,\"destination\":\"local\""*) echo "  ok   and the answer reports its own disclosure: $g_bytes bytes to a local model" ;;
+  *) echo "  FAIL the answer does not report its disclosure ($g_bytes bytes sent): $(printf '%s' "$OUT3" | head -c 300)" >&2; fail=1 ;;
+esac
 
 # T10.1: with the per-provider kill switch engaged for ollama, the same request is refused
 # with the fallback message and nothing reaches the model. The row is written as

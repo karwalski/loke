@@ -5,16 +5,54 @@ m=page.api.savings;
 
 i=http:std.http;
 i=str:std.str;
+i=std:std;
 i=org:shared.origin;
+i=jx:shared.jsonobj;
+i=dbmod:core.storage.db;
+i=am:core.audit.metrics;
+i=dl:core.audit.disclosure;
 
-(* The GET body is a constant. This endpoint is a STUB: it returns fixed JSON and
-   reads nothing. Exposing the body as a function lets tests/unit/browser cover the
-   response contract — those tests called str.mockhttpreq and str.httpbody, which
-   exist in no module, so they had never compiled — but a green test here means the
-   SHAPE is right, not that the endpoint does anything. Recorded in the backlog so a
-   passing test is not mistaken for a working feature. *)
+(* DA1.5 - what has actually been recorded, from the two tables that record it:
+   metrics_raw (DA1.3, DA1.6) and disclosure_log (DA1.7). This endpoint returned a constant
+   until DA1.5, when there was nothing to read.
+
+   `tokens_saved` and `cost_saved_usd` are JSON null, not 0: nothing on the request path
+   optimises (GA1.5), so no saving has been measured, and 0 would claim one was measured to be
+   nothing. Every figure is over all recorded time. The store is opened per request, as
+   page.api.pipeline opens it. *)
+
+f=openstore():i64{
+  <mt dbmod.openstore(str.concat(std.homedir();"/.loke")) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=providerjson(p:$providermetric):str{
+  <"{\"provider\":\(jx.escape(p.provider)),\"requests\":\(p.requests),\"tokens_in\":\(p.tokensin),\"tokens_out\":\(p.tokensout),\"cost_usd\":\(str.fromfloat(p.costusd))}"
+};
+
+f=providersjson(ps:@$providermetric):str{
+  let parts=mut.@();
+  lp(let i=0;i<ps.len;i=i+1){
+    let p:$providermetric=ps.get(i);
+    parts=parts.push(providerjson(p))
+  };
+  <str.concat("[";str.concat(str.join(",";parts);"]"))
+};
+
+f=disclosurejson():str{
+  <"{\"dispatches\":\(dl.dispatchcount("")),\"cloud_dispatches\":\(dl.dispatchcount("cloud")),\"local_dispatches\":\(dl.dispatchcount("local")),\"bytes_sent_cloud\":\(dl.bytessent("cloud")),\"bytes_sent_local\":\(dl.bytessent("local")),\"abandoned\":\(dl.abandonedcount())}"
+};
+
 f=savingsjson():str{
-  <"{\"tokens_saved\":0,\"cost_saved_usd\":0.0,\"requests\":0}"
+  let s:$metricsummary=am.summaryfrom(0);
+  let c:$cacheinfo=am.cachefrom(0);
+  <"{\"measured\":true,\"period\":\"all\",\"requests\":\(s.totalrequests),\"cache_hits\":\(c.hits),\"cache_misses\":\(c.misses),\"entities_redacted\":\(s.entitiesredacted),\"local_ratio\":\(str.fromfloat(s.localratio)),\"tokens_saved\":null,\"cost_saved_usd\":null,\"providers\":\(providersjson(am.byproviderfrom(0))),\"disclosure\":\(disclosurejson())}"
+};
+
+f=unavailablejson():str{
+  <"{\"measured\":false,\"error\":\"the local store could not be opened, so nothing can be read\"}"
 };
 
 f=savingspostjson():str{
@@ -24,6 +62,7 @@ f=savingspostjson():str{
 f=get(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
+  if(openstore()==0){ <http.res(503;unavailablejson()) }el{};
   <http.res(200;savingsjson())
 };
 

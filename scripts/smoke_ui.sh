@@ -59,5 +59,10 @@ done
 
 node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "${UI_CHECKS:-$ROOT/tests/ui/chat_ga3.json}"
 rc=$?
+# DA1.5: loke's savings page, after the chat checks above have sent requests through it.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/savings" "$ROOT/tests/ui/savings_da15.json"
+  rc=$?
+fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
 exit $rc

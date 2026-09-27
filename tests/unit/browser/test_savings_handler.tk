@@ -2,41 +2,81 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=test.browser.savingshandler;
+
 i=t:std.test;
 i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=sdb:core.storage.db;
+i=mc:core.metrics.collector;
+i=dl:core.audit.disclosure;
 i=h:page.api.savings;
 
-(* Rewritten to call the handler's body function rather than str.mockhttpreq and
-   str.httpbody, which exist in no module — this test had never compiled. toke exposes
-   no way to build an http request or read a response body from source (T-16), so a
-   handler taking req:i64 cannot be unit-tested; the body-building function can.
+(* DA1.5 - the savings endpoint reports what is recorded, not a constant.
 
-   This endpoint is a STUB — it returns fixed JSON and reads nothing. These
-   assertions cover the response CONTRACT, not any behaviour. A green test here
-   must not be read as the feature working. *)
+   The body is built by savingsjson, the function get() answers with (T-16: a handler taking
+   req:i64 cannot be called from a test). Rows are written through the modules the request
+   path writes them with: core.metrics.collector for metrics_raw, and core.audit.disclosure
+   for disclosure_log. Until DA1.5 this endpoint returned a fixed body of zeros, and this test
+   asserted those zeros. *)
 
-f=jsonfields(body:str;fields:@str):bool{
-  let ok=mut.true;
-  lp(let i=0;i<fields.len;i=i+1){
-    if(str.contains(body;fields.get(i))){}el{ok=false}
-  };
-  <ok
-};
-
-f=wellformed(body:str):bool{
-  <str.startswith(body;"{") && str.endswith(body;"}")
+f=ev(rid:str;provider:str;local:bool;hit:bool;tin:i64;tout:i64;pii:i64):$metricevent{
+  <$metricevent{
+    requestid:rid;
+    timestamp:"1790000000";
+    tokensbefore:tin;
+    tokensafter:tin;
+    tokenssaved:0;
+    tokensout:tout;
+    costbeforeusd:0.0;
+    costafterusd:0.0;
+    costsavedusd:0.0;
+    piientitiesfound:pii;
+    piientitiesblocked:pii;
+    routedlocal:local;
+    cachehit:hit;
+    modelid:"m";
+    providerid:provider;
+    savingsbystage:""
+  }
 };
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
-  let body=h.savingsjson();
-  if(t.assert(wellformed(body);"GET body is a well-formed JSON object")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(jsonfields(body;@("\"tokens_saved\"";"\"cost_saved_usd\"";"\"requests\""));"response carries all three savings fields")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(body;"\"tokens_saved\":0");"tokens_saved defaults to 0")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(body;"\"requests\":0");"requests defaults to 0")){pass=pass+1}el{fail=fail+1};
+  let dir=str.concat(std.homedir();"/.loke/test-savings-handler");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  let store=mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  };
+  if(t.assert(store!=0;"a store opens")){pass=pass+1}el{fail=fail+1};
+
+  let empty=h.savingsjson();
+  if(t.assert(str.contains(empty;"\"requests\":0") && str.contains(empty;"\"dispatches\":0");"with nothing recorded, every count is zero")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(empty;"\"tokens_saved\":null") && str.contains(empty;"\"cost_saved_usd\":null");"and the savings are null, not a measured zero: nothing optimises yet")){pass=pass+1}el{fail=fail+1};
+
+  mc.insert(ev("r1";"anthropic";false;false;100;40;2));
+  mc.insert(ev("r2";"ollama";true;false;50;20;1));
+  mc.insert(ev("r3";"cache";true;true;0;0;0));
+  dl.reserve("r1";"r1";"none";"anthropic";"cloud";"claude";"api.anthropic.com";300;120;"email:2";2;"scanned=regex";"redacted-data";"not_run");
+  dl.reserve("r2";"r2";"none";"ollama";"local";"qwen2.5:7b";"127.0.0.1:11434";80;30;"email:1";1;"scanned=regex";"redacted-data";"not_run");
+  dl.complete("r1";true;500;100;40;900);
+
+  let j=h.savingsjson();
+  if(t.assert(str.contains(j;"\"requests\":3");"requests counts every recorded request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"cache_hits\":1") && str.contains(j;"\"cache_misses\":2");"the cache hits and misses")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"entities_redacted\":3");"the entities redacted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"provider\":\"anthropic\",\"requests\":1,\"tokens_in\":100,\"tokens_out\":40");"a per-provider breakdown from the rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"dispatches\":2,\"cloud_dispatches\":1,\"local_dispatches\":1");"disclosure counts each dispatch, by destination")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"bytes_sent_cloud\":300,\"bytes_sent_local\":80");"and the bytes sent to each")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"abandoned\":0");"and how many were abandoned")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(j;"{") && str.endswith(j;"}") && !str.contains(j;"\"\"");"the body is a single object with no doubled quote")){pass=pass+1}el{fail=fail+1};
+
   let post=h.savingspostjson();
   if(t.assert(str.contains(post;"\"ok\":true");"POST body reports ok true")){pass=pass+1}el{fail=fail+1};
+  file.delete(str.concat(dir;"/loke.db"));
 
   <fail
-};
+}
