@@ -1,0 +1,248 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.nocustody.artifact;
+
+i=db:std.db;
+i=str:std.str;
+i=s:core.storage.db;
+
+(* NC1.7. The execution target for no-custody artifacts.
+
+   A model on the no-custody path is sent column names and types (NC1.2) and returns an
+   ARTIFACT: a small declarative request such as "sum of amount grouped by category where
+   region = north". This module is the only thing that turns one into a query, and it does so
+   in three steps that each close a door:
+
+   1. validate: the op must be on an allowlist, and every column the artifact names must be a
+      column of the dataset it will run against. Nothing else in the artifact is an identifier.
+   2. tosql: identifiers are taken from the dataset's own headers, never from the artifact's
+      text, and are double-quoted with embedded quotes doubled. Every VALUE — the filter value
+      — is a bound parameter. The limit is an integer the validator has range-checked, so it
+      is the only literal in the statement and it cannot carry text.
+   3. run: the dataset is loaded into a TEMP table and the statement runs through std.db with
+      its parameters bound.
+
+   Why TEMP, and why this module never calls db.open: toke's std.db keeps ONE process-wide
+   connection (`g_db` in stdlib/db.c at the pinned commit), and db.open replaces it without
+   closing the old one. Opening a scratch database here would silently repoint every later
+   audit write at it. A TEMP table lives on the caller's connection, is private to it, and is
+   never written into the main database file, so the rows do not persist in loke.db. It is
+   dropped before and after every run.
+
+   The model never sees what this returns. What the caller does with a result — show it to the
+   user, or send it back to a model — is a disclosure decision recorded elsewhere (DA1), and
+   the bound on how much a sequence of artifacts can extract is NC1.10's. *)
+
+t=$artifact{
+  op:str;
+  column:str;
+  groupby:str;
+  agg:str;
+  filtercol:str;
+  filterval:str;
+  limit:i64
+};
+
+t=$sqlstmt{
+  sql:str;
+  params:@str
+};
+
+t=$artifactresult{
+  ok:bool;
+  err:str;
+  sql:str;
+  labels:@str;
+  values:@str
+};
+
+f=tablename():str{
+  <"nc_artifact"
+};
+
+f=maxlimit():i64{
+  <1000
+};
+
+(* Ops that return a single value, and ops that return labelled rows. *)
+f=scalarop(op:str):bool{
+  <str.eq(op;"count") || str.eq(op;"sum") || str.eq(op;"avg") || str.eq(op;"min") || str.eq(op;"max")
+};
+
+f=groupop(op:str):bool{
+  <str.eq(op;"group") || str.eq(op;"count_by") || str.eq(op;"topn") || str.eq(op;"distinct")
+};
+
+f=aggallowed(agg:str):bool{
+  <str.eq(agg;"") || str.eq(agg;"count") || str.eq(agg;"sum") || str.eq(agg;"avg")
+};
+
+f=hascolumn(headers:@str;name:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<headers.len;i=i+1){
+    if(str.eq(headers.get(i);name)){found=true}el{}
+  };
+  <found
+};
+
+(* An empty string means valid. Anything else is the reason, naming the field. *)
+f=validate(a:$artifact;headers:@str):str{
+  if(scalarop(a.op) || groupop(a.op)){}el{
+    <str.concat("op is not on the allowlist: ";a.op)
+  };
+  if(str.eq(a.op;"count")==false && hascolumn(headers;a.column)==false){
+    <str.concat("column is not in the dataset: ";a.column)
+  };
+  if(str.eq(a.op;"count") && str.len(a.column)>0 && hascolumn(headers;a.column)==false){
+    <str.concat("column is not in the dataset: ";a.column)
+  };
+  if(str.eq(a.op;"group") || str.eq(a.op;"topn")){
+    if(hascolumn(headers;a.groupby)==false){
+      <str.concat("groupby is not in the dataset: ";a.groupby)
+    }el{}
+  }el{};
+  if(aggallowed(a.agg)==false){
+    <str.concat("agg is not on the allowlist: ";a.agg)
+  };
+  if(str.len(a.filtercol)>0 && hascolumn(headers;a.filtercol)==false){
+    <str.concat("filtercol is not in the dataset: ";a.filtercol)
+  };
+  if(groupop(a.op) && (a.limit<1 || a.limit>maxlimit())){
+    <str.concat("limit must be between 1 and ";str.fromint(maxlimit()))
+  };
+  <""
+};
+
+(* Double-quoted SQL identifier. The name has already been checked against the dataset's
+   headers; doubling embedded quotes is what keeps a header like  a"b  one identifier. *)
+f=quoteident(name:str):str{
+  <str.join("";@("\"";str.replace(name;"\"";"\"\"");"\""))
+};
+
+f=numeric(col:str):str{
+  <"CAST(\(quoteident(col)) AS REAL)"
+};
+
+f=aggexpr(agg:str;col:str):str{
+  if(str.eq(agg;"sum")){ <"SUM(\(numeric(col)))" };
+  if(str.eq(agg;"avg")){ <"AVG(\(numeric(col)))" };
+  <"COUNT(*)"
+};
+
+f=scalarexpr(op:str;col:str):str{
+  if(str.eq(op;"sum")){ <"SUM(\(numeric(col)))" };
+  if(str.eq(op;"avg")){ <"AVG(\(numeric(col)))" };
+  if(str.eq(op;"min")){ <"MIN(\(quoteident(col)))" };
+  if(str.eq(op;"max")){ <"MAX(\(quoteident(col)))" };
+  <"COUNT(*)"
+};
+
+f=whereclause(a:$artifact):str{
+  if(str.len(a.filtercol)==0){ <"" };
+  <" WHERE \(quoteident(a.filtercol)) = ?"
+};
+
+f=whereparams(a:$artifact):@str{
+  if(str.len(a.filtercol)==0){ <@() };
+  <@(a.filterval)
+};
+
+(* Call only after validate() has returned "". *)
+f=tosql(a:$artifact):$sqlstmt{
+  let from=str.concat(" FROM ";quoteident(tablename()));
+  let wh=whereclause(a);
+  let lim=str.concat(" LIMIT ";str.fromint(a.limit));
+  let sql=mut."";
+  if(scalarop(a.op)){
+    sql="SELECT '' AS k, \(scalarexpr(a.op;a.column)) AS v\(from)\(wh)"
+  }el{};
+  if(str.eq(a.op;"count_by")){
+    sql="SELECT \(quoteident(a.column)) AS k, COUNT(*) AS v\(from)\(wh) GROUP BY \(quoteident(a.column)) ORDER BY v DESC, k\(lim)"
+  }el{};
+  if(str.eq(a.op;"group") || str.eq(a.op;"topn")){
+    let agg=mut.a.agg;
+    if(str.eq(a.op;"topn") && str.eq(agg;"")){agg="sum"}el{};
+    let order=mut." ORDER BY k";
+    if(str.eq(a.op;"topn")){order=" ORDER BY v DESC, k"}el{};
+    sql="SELECT \(quoteident(a.groupby)) AS k, \(aggexpr(agg;a.column)) AS v\(from)\(wh) GROUP BY \(quoteident(a.groupby))\(order)\(lim)"
+  }el{};
+  if(str.eq(a.op;"distinct")){
+    sql="SELECT DISTINCT \(quoteident(a.column)) AS k, '' AS v\(from)\(wh) ORDER BY k\(lim)"
+  }el{};
+  <$sqlstmt{sql:sql;params:whereparams(a)}
+};
+
+f=placeholders(n:i64):str{
+  let parts=mut.@();
+  lp(let i=0;i<n;i=i+1){parts=parts.push("?")};
+  <str.join(", ";parts)
+};
+
+f=quotedheaders(headers:@str):str{
+  let parts=mut.@();
+  lp(let i=0;i<headers.len;i=i+1){parts=parts.push(quoteident(headers.get(i)))};
+  <str.join(", ";parts)
+};
+
+f=dropsql():str{
+  <str.concat("DROP TABLE IF EXISTS temp.";quoteident(tablename()))
+};
+
+f=exec(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {$ok:n true;$err:e false}
+};
+
+(* A row shorter than the header list is padded with empty cells, and a longer one is cut,
+   so a ragged CSV cannot shift its values into the wrong columns or fail the insert. *)
+f=fitrow(row:@str;width:i64):@str{
+  let out=mut.@();
+  lp(let i=0;i<width;i=i+1){
+    if(i<row.len){out=out.push(row.get(i))}el{out=out.push("")}
+  };
+  <out
+};
+
+f=load(headers:@str;rows:@(@str)):bool{
+  exec(dropsql();@());
+  if(exec("CREATE TEMP TABLE \(quoteident(tablename())) (\(quotedheaders(headers)))";@())==false){ <false };
+  let ins="INSERT INTO temp.\(quoteident(tablename())) VALUES (\(placeholders(headers.len)))";
+  let ok=mut.true;
+  lp(let r=0;r<rows.len;r=r+1){
+    if(exec(ins;fitrow(rows.get(r);headers.len))==false){ok=false}el{}
+  };
+  <ok
+};
+
+f=failed(reason:str;sql:str):$artifactresult{
+  <$artifactresult{ok:false;err:reason;sql:sql;labels:@();values:@()}
+};
+
+(* The whole path: validate, build, load, run, drop. The dataset's rows exist in the TEMP
+   table only for the duration of this call. *)
+f=run(a:$artifact;headers:@str;rows:@(@str)):$artifactresult{
+  let reason=validate(a;headers);
+  if(str.len(reason)>0){ <failed(reason;"") };
+  let stmt=tosql(a);
+  if(load(headers;rows)==false){
+    exec(dropsql();@());
+    <failed("the dataset could not be loaded into the local table";stmt.sql)
+  };
+  let result=mt db.many(stmt.sql;stmt.params) {
+    $ok:found collect(found;stmt.sql);
+    $err:e failed("the query failed";stmt.sql)
+  };
+  exec(dropsql();@());
+  <result
+};
+
+f=collect(found:@$row;sql:str):$artifactresult{
+  let labels=mut.@();
+  let values=mut.@();
+  lp(let i=0;i<found.len;i=i+1){
+    let row:$row=found.get(i);
+    labels=labels.push(s.rowstr(row;"k"));
+    values=values.push(s.rowstr(row;"v"))
+  };
+  <$artifactresult{ok:true;err:"";sql:sql;labels:labels;values:values}
+};

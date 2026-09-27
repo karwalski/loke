@@ -60,6 +60,7 @@ ENFORCED = [
     "tests/unit/governance",
     "tests/unit/mcp",
     "tests/unit/memory",
+    "tests/unit/nocustody",
     "tests/unit/models",
     "tests/unit/optimiser",
     "tests/unit/policy",

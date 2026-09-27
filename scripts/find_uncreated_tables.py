@@ -51,7 +51,9 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # but case-insensitively, and still reported 33 tables because user-facing messages contain
 # phrases like "data from any source" and "check for available updates". Requiring `FROM` over
 # `from` removes every one of those without an allowlist.
-REF = re.compile(r"\b(?:FROM|INTO|UPDATE|JOIN)\s+([a-z_][a-z0-9_]*)")
+# A name followed by `.` is a schema qualifier (`temp.`, `main.`), not a table: the table name
+# is whatever follows it, and is skipped when it is concatenated in rather than literal (NC1.7).
+REF = re.compile(r"\b(?:FROM|INTO|UPDATE|JOIN)\s+(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)\b(?!\.)")
 # A literal is only treated as SQL if it contains a SQL verb in capitals.
 SQLISH = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|REPLACE)\b")
 CREATE = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)", re.I)

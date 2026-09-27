@@ -1,0 +1,146 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.nocustody.request;
+
+i=json:std.json;
+i=str:std.str;
+i=jx:shared.jsonobj;
+i=na:core.nocustody.artifact;
+
+(* NC1.7. The wire form of an artifact run, both directions, for POST /api/artifact.
+
+   Request:  {"artifact":{"op":"sum","column":"amount","groupby":"","agg":"",
+                          "filter_col":"region","filter_val":"north","limit":10},
+              "headers":["region","amount"],
+              "rows":[["north","12.5"],["south","3"]]}
+   Response: {"ok":true,"labels":[...],"values":[...]}  or  {"ok":false,"error":"..."}
+
+   The SQL is not in the response. It is built from the dataset's own headers and carries no
+   values, so it discloses nothing, but it is an implementation detail a caller should not
+   start depending on.
+
+   The readers below are the ones page.moke.api.ml measured (T-31, T-32): typed accessors only,
+   every match arm list $ok-first, and a bare array read by wrapping it in a one-field object.
+   They are repeated here rather than imported because that module is a moke page, which loke's
+   build does not compile. *)
+
+t=$artifactrequest{
+  artifact:$artifact;
+  headers:@str;
+  rows:@(@str);
+  err:str
+};
+
+f=defaultlimit():i64{
+  <100
+};
+
+f=rawof(o:$json):str{ <o.raw };
+
+(* Split on the escaped-backslash pair first so no segment holds half of one; see
+   page.moke.api.ml's unescapeseg for the case that makes the order matter. *)
+f=unescapeseg(s:str):str{
+  <str.replace(str.replace(str.replace(str.replace(s;"\\n";"
+");"\\t";"	");"\\r";"
+");"\\\"";"\"")
+};
+
+f=unquote(raw:str):str{
+  let t=str.trim(raw);
+  if(str.len(t) < 2){ <"" }el{};
+  let segs=str.split(str.trimsuffix(str.trimprefix(t;"\"");"\"");"\\\\");
+  let out=mut.@();
+  lp(let i=0;i<segs.len();i=i+1){
+    out=out.push(unescapeseg(segs.get(i)))
+  };
+  <str.join("\\";out)
+};
+
+f=wrapvalue(raw:str):$json{
+  <mt json.dec("{\"v\":\(raw)}") {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  }
+};
+
+f=strarrayat(o:$json;key:str):@str{
+  let arr=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<arr.len();i=i+1){
+    out=out.push(unquote(rawof(arr.get(i))))
+  };
+  <out
+};
+
+f=rowsat(o:$json;key:str):@(@str){
+  let outer=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<outer.len();i=i+1){
+    out=out.push(strarrayat(wrapvalue(rawof(outer.get(i)));"v"))
+  };
+  <out
+};
+
+f=strat(o:$json;key:str;fallback:str):str{
+  <mt json.str(o;key) {
+    $ok:v v;
+    $jsonerr:e fallback
+  }
+};
+
+f=i64at(o:$json;key:str;fallback:i64):i64{
+  <mt json.i64(o;key) {
+    $ok:v v;
+    $jsonerr:e fallback
+  }
+};
+
+f=refused(reason:str):$artifactrequest{
+  <$artifactrequest{artifact:$artifact{op:"";column:"";groupby:"";agg:"";filtercol:"";filterval:"";limit:0};headers:@();rows:@();err:reason}
+};
+
+(* A malformed body is refused here, before anything reaches the store. Whether the artifact
+   itself is acceptable is na.validate's question, asked inside na.run. *)
+f=parse(body:str):$artifactrequest{
+  let obj=mt json.dec(body) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  };
+  if(jx.hasnested(obj;"artifact")==false){ <refused("missing required field: artifact") };
+  let a=jx.nested(obj;"artifact");
+  let headers=strarrayat(obj;"headers");
+  if(headers.len==0){ <refused("missing required field: headers") };
+  <$artifactrequest{artifact:$artifact{
+    op:strat(a;"op";"");
+    column:strat(a;"column";"");
+    groupby:strat(a;"groupby";"");
+    agg:strat(a;"agg";"");
+    filtercol:strat(a;"filter_col";"");
+    filterval:strat(a;"filter_val";"");
+    limit:i64at(a;"limit";defaultlimit())
+  };headers:headers;rows:rowsat(obj;"rows");err:""}
+};
+
+f=strarrayjson(items:@str):str{
+  let parts=mut.@();
+  lp(let i=0;i<items.len;i=i+1){
+    parts=parts.push(json.enc(items.get(i)))
+  };
+  <str.join("";@("[";str.join(",";parts);"]"))
+};
+
+f=errorjson(reason:str):str{
+  <"{\"ok\":false,\"error\":\(json.enc(reason))}"
+};
+
+f=resultjson(r:$artifactresult):str{
+  if(r.ok==false){ <errorjson(r.err) };
+  <"{\"ok\":true,\"labels\":\(strarrayjson(r.labels)),\"values\":\(strarrayjson(r.values))}"
+};

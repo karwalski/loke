@@ -1,0 +1,181 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.artifact;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=na:core.nocustody.artifact;
+i=nr:core.nocustody.request;
+
+(* NC1.7 — the core execution target for no-custody artifacts.
+
+   The assertions that carry the story are the ones about what the SQL does NOT contain: the
+   filter value never appears in the statement text (it is a bound parameter), a column the
+   dataset does not have is refused before any SQL exists, and a header carrying a quote
+   stays one identifier. The arithmetic checks prove the statement also computes the right
+   answer, which a validator that rejected everything would not.
+
+   The store lives under /tmp/loke-tests, not ~/.loke: run_tests.sh does not isolate HOME,
+   and a test has no business next to a real settings.json. *)
+
+f=testdir():str{
+  <"/tmp/loke-tests/nocustody-artifact"
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* Byte-level, copied from tests/unit/privacy/test_mapping_deletion.tk. A str read of a SQLite
+   file stops at the NUL in its 16-byte header, so a str.contains over it asserts nothing. *)
+f=bytescontain(haystack:@byte;needle:str):bool{
+  let nb=str.bytes(needle);
+  let n=(nb.len as i64);
+  let h=(haystack.len as i64);
+  if(n==0){
+    <false
+  }el{};
+  if(h<n){
+    <false
+  }el{};
+  let limit=h-n;
+  let i=mut.0;
+  lp(let lv=0;true;lv=lv){
+    if(i>limit){
+      br
+    }el{
+      let j=mut.0;
+      let same=mut.true;
+      lp(let lv2=0;true;lv2=lv2){
+        if(j>=n){
+          br
+        }el{
+          if(haystack.get(i+j)==nb.get(j)){
+            j=j+1
+          }el{
+            same=false;
+            br
+          }
+        }
+      };
+      if(same){
+        <true
+      }el{};
+      i=i+1
+    }
+  };
+  <false
+};
+
+f=filecontains(path:str;needle:str):bool{
+  <mt file.readbytes(path) {
+    $ok:bytes bytescontain(bytes;needle);
+    $err:e false
+  }
+};
+
+f=headers():@str{
+  <@("region";"category";"amount";"note")
+};
+
+(* SENTINEL-7f3a is the planted value. It is a real cell, so a filter on it must match. *)
+f=rows():@(@str){
+  <@(
+    @("north";"food";"10";"SENTINEL-7f3a");
+    @("north";"rent";"100";"plain");
+    @("south";"food";"5";"plain");
+    @("south";"food";"7";"plain");
+    @("north";"food";"3";"plain")
+  )
+};
+
+f=art(op:str;column:str;groupby:str;agg:str;filtercol:str;filterval:str;limit:i64):$artifact{
+  <$artifact{op:op;column:column;groupby:groupby;agg:agg;filtercol:filtercol;filterval:filterval;limit:limit}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── Validation refuses before any SQL exists ─────────────────────────────── *)
+  let h=headers();
+  if(t.assert(str.len(na.validate(art("sum";"amount";"";"";"";"";10);h))==0;"a sum over a real column validates")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("drop";"amount";"";"";"";"";10);h);"allowlist");"an op off the allowlist is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("sum";"salary";"";"";"";"";10);h);"not in the dataset");"a column the dataset lacks is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("sum";"amount\" FROM sqlite_master --";"";"";"";"";10);h);"not in the dataset");"an injection shaped as a column name is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("group";"amount";"password";"sum";"";"";10);h);"groupby");"a groupby the dataset lacks is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("sum";"amount";"";"";"secret";"x";10);h);"filtercol");"a filter column the dataset lacks is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("group";"amount";"region";"sum";"";"";0);h);"limit");"a group with limit 0 is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("group";"amount";"region";"sum";"";"";1001);h);"limit");"a group over the limit ceiling is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(na.validate(art("group";"amount";"region";"median";"";"";10);h);"agg");"an agg off the allowlist is refused")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The value is a parameter, never text in the statement ──────────────────── *)
+  let fa=art("count";"";"";"";"note";"SENTINEL-7f3a' OR '1'='1";10);
+  let stmt=na.tosql(fa);
+  if(t.assert(str.contains(stmt.sql;"SENTINEL")==false;"the filter value does not appear in the SQL text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stmt.sql;"\"note\" = ?");"the filter is a placeholder on a quoted identifier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(stmt.params.len==1 && str.eq(stmt.params.get(0);"SENTINEL-7f3a' OR '1'='1");"the value travels as the one bound parameter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(na.quoteident("a\"b");"\"a\"\"b\"");"an embedded quote is doubled, keeping one identifier")){pass=pass+1}el{fail=fail+1};
+
+  (* ── It runs, against the caller's connection ─────────────────────────────── *)
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the test store opens")){pass=pass+1}el{fail=fail+1};
+  let r=rows();
+
+  let sum=na.run(art("sum";"amount";"";"";"";"";10);h;r);
+  if(t.assert(sum.ok && str.eq(sum.values.get(0);"125.0");"sum(amount) is 125")){pass=pass+1}el{fail=fail+1};
+
+  let filtered=na.run(art("sum";"amount";"";"";"region";"south";10);h;r);
+  if(t.assert(filtered.ok && str.eq(filtered.values.get(0);"12.0");"sum(amount) where region = south is 12")){pass=pass+1}el{fail=fail+1};
+
+  let hit=na.run(art("count";"";"";"";"note";"SENTINEL-7f3a";10);h;r);
+  if(t.assert(hit.ok && str.eq(hit.values.get(0);"1");"a bound filter matches the one planted cell")){pass=pass+1}el{fail=fail+1};
+
+  let inj=na.run(art("count";"";"";"";"note";"x' OR '1'='1";10);h;r);
+  if(t.assert(inj.ok && str.eq(inj.values.get(0);"0");"a quote-injection value matches nothing, because it is data")){pass=pass+1}el{fail=fail+1};
+
+  let grp=na.run(art("group";"amount";"category";"sum";"";"";10);h;r);
+  if(t.assert(grp.ok && grp.labels.len==2;"group by category has two groups")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(grp.ok && str.eq(grp.labels.get(0);"food") && str.eq(grp.values.get(0);"25.0");"food sums to 25")){pass=pass+1}el{fail=fail+1};
+
+  let top=na.run(art("topn";"amount";"region";"";"";"";1);h;r);
+  if(t.assert(top.ok && top.labels.len==1 && str.eq(top.labels.get(0);"north");"topn 1 by summed amount is north")){pass=pass+1}el{fail=fail+1};
+
+  let cb=na.run(art("count_by";"category";"";"";"";"";10);h;r);
+  if(t.assert(cb.ok && str.eq(cb.labels.get(0);"food") && str.eq(cb.values.get(0);"4");"count_by category puts food first with 4")){pass=pass+1}el{fail=fail+1};
+
+  let bad=na.run(art("sum";"salary";"";"";"";"";10);h;r);
+  if(t.assert(bad.ok==false && str.len(bad.sql)==0;"a refused artifact never produces SQL")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The rows do not persist in the main database file ─────────────────────── *)
+  let dbpath=str.concat(testdir();"/loke.db");
+  if(t.assert(filecontains(dbpath;"SENTINEL-7f3a")==false;"the planted cell is not in loke.db: the table was TEMP")){pass=pass+1}el{fail=fail+1};
+  (* The control. Without it the line above passes just as well if the file cannot be read. *)
+  mt db.exec("CREATE TABLE nc_control (v TEXT)";@()) {$ok:n 1;$err:e 0};
+  mt db.exec("INSERT INTO nc_control (v) VALUES (?)";@("CONTROL-91c2")) {$ok:n 1;$err:e 0};
+  if(t.assert(filecontains(dbpath;"CONTROL-91c2");"control: a row in a real table IS found by the same byte scan")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The wire form (core.nocustody.request), as POST /api/artifact reads it ──── *)
+  let body="{\"artifact\":{\"op\":\"group\",\"column\":\"amount\",\"groupby\":\"region\",\"agg\":\"sum\",\"filter_col\":\"note\",\"filter_val\":\"it\\\"s\",\"limit\":7},\"headers\":[\"region\",\"amount\"],\"rows\":[[\"north\",\"1\"],[\"south\",\"2\"]]}";
+  let req=nr.parse(body);
+  if(t.assert(str.len(req.err)==0 && str.eq(req.artifact.op;"group") && str.eq(req.artifact.groupby;"region") && req.artifact.limit==7;"a well-formed body parses into its artifact")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(req.artifact.filterval;"it\"s");"an escaped quote in the filter value is unescaped once")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(req.headers.len==2 && req.rows.len==2 && str.eq(req.rows.get(1).get(0);"south");"headers and rows are read as strings")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nr.parse("{\"headers\":[\"a\"]}").err;"artifact");"a body with no artifact is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nr.parse("not json").err;"artifact");"a body that is not JSON is refused")){pass=pass+1}el{fail=fail+1};
+  let okjson=nr.resultjson($artifactresult{ok:true;err:"";sql:"SELECT secret";labels:@("a\"b");values:@("1")});
+  if(t.assert(str.eq(okjson;"{\"ok\":true,\"labels\":[\"a\\\"b\"],\"values\":[\"1\"]}");"a result encodes with its labels escaped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(okjson;"SELECT")==false;"the SQL is not in the response")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

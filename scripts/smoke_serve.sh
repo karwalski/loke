@@ -78,6 +78,33 @@ for r in health models settings savings tabs privacy; do probe GET "/api/$r"; do
 probe POST /api/pipeline '{"text":"smoke test, no personal data"}'
 for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon; do probe GET "$p"; done
 
+# NC1.7: /api/artifact runs a returned artifact locally. Unlike the probes above, these judge
+# the body, because "it answered" says nothing about whether the value was bound or the
+# column was checked.
+artifact() {  # $1 label, $2 body, $3 expected status, $4 substring the body must contain
+  local out code body
+  out=$(curl -s -m 20 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+          -d "$2" "http://127.0.0.1:$PORT/api/artifact")
+  code=${out##*$'\n'}; body=${out%$'\n'*}
+  if [ "$code" != "$3" ] || [[ "$body" != *"$4"* ]]; then
+    echo "  FAIL POST /api/artifact ($1): got [$code] $body, expected [$3] containing $4" >&2
+    fail=1
+  else
+    echo "  ok   POST /api/artifact ($1) [$code]"
+  fi
+}
+DS='"headers":["region","amount"],"rows":[["north","10"],["south","2.5"],["north","5"]]'
+artifact "sum where region = north" \
+  "{\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"region\",\"filter_val\":\"north\"},$DS}" \
+  200 '"values":["15.0"]'
+artifact "a quote in the value is data" \
+  "{\"artifact\":{\"op\":\"count\",\"filter_col\":\"region\",\"filter_val\":\"x' OR '1'='1\"},$DS}" \
+  200 '"values":["0"]'
+artifact "a column the dataset lacks" \
+  "{\"artifact\":{\"op\":\"sum\",\"column\":\"salary\"},$DS}" \
+  422 'not in the dataset'
+artifact "no artifact" "{$DS}" 400 'missing required field: artifact'
+
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
@@ -95,7 +122,7 @@ xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
     echo "  ok   POST $1 from $2 [$code]"
   fi
 }
-for r in pipeline settings approve privacy savings tabs; do
+for r in pipeline settings approve privacy savings tabs artifact; do
   xorigin "/api/$r" "https://evil.example" refused
 done
 xorigin /api/pipeline "http://127.0.0.1:$PORT" allowed

@@ -1086,9 +1086,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | TOOLCHAIN | 1 | 49 | 37 | 2 | — | 4 | — | 1 | — | 5 |
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 37 | 17 | 4 | — | — | — | — | — | 16 |
 | AUDIT-DRIVEN GAPS | 5 | 43 | 38 | — | 3 | 2 | — | — | — | — |
-| NO-CUSTODY ARCHITECTURE | 4 | 37 | 28 | 1 | — | — | — | — | — | 8 |
+| NO-CUSTODY ARCHITECTURE | 4 | 37 | 29 | 1 | — | — | — | — | — | 7 |
 | VERIFICATION PROGRAMME | 14 | 128 | 90 | 10 | — | 7 | 3 | — | — | 18 |
-| **Total** | **88** | **712** | **584** | **32** | **8** | **36** | **3** | **1** | — | **48** |
+| **Total** | **88** | **712** | **585** | **32** | **8** | **36** | **3** | **1** | — | **47** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1164,7 +1164,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | GA3 | 1 | 7 | 7 | — | — | — | — | — | — | — |
 | GA4 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | T15 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| NC1 | 1 | 11 | 8 | — | — | — | — | — | — | 3 |
+| NC1 | 1 | 11 | 9 | — | — | — | — | — | — | 2 |
 | DA1 | 1 | 9 | 8 | 1 | — | — | — | — | — | — |
 | EM1 | 1 | 5 | 2 | — | — | — | — | — | — | 3 |
 | PL1 | 1 | 12 | 10 | — | — | — | — | — | — | 2 |
@@ -1182,7 +1182,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 29 | 23 | 4 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **712** | **584** | **32** | **8** | **36** | **3** | **1** | — | **48** |
+| **Total** | **88** | **712** | **585** | **32** | **8** | **36** | **3** | **1** | — | **47** |
 
 Rows parsed: **712**, across **88** epics and **16** level-1 headings.
 
@@ -1542,7 +1542,7 @@ never leaves, not even for categorisation.
 | NC1.4 | L | **Done** | **Send the schema on the dashboard path** — `packages/moke/templates/dashboard.tkt`'s `buildPhase1Prompt(question)` sends only the question while telling the model *"You have access to this dataset"*. It does not. Pass the NC1.2 profile. Remove the instruction `Use realistic sample values that match the dataset schema` from both system prompts (`:1019` and `:1095`), and the equivalent clause in `templates/chat.tkt:2527`. |
 | NC1.5 | M | **Done** | **Make fabricated values inadmissible** — Drop `normaliseDDL`'s ingestion of the model's `data` array into the render slot (`dashboard.tkt:448-468`) and the `Math.round(Math.random() * 900 + 100)` chart fallback (`:791-794`). A card with no locally-resolved value MUST NOT display a number. |
 | NC1.6 | M | **Done** | **Provenance state on every card** — Render one of `resolved` / `unresolved` / `no-data` per card. `renderMetricCard` (`dashboard.tkt:714`) currently emits `→ computed locally` **unconditionally**, including on values the model invented; the only honest signal today is a `console.info` no user sees. `resolveQueries` MUST record why each `continue` fired so the reason can be surfaced. |
-| NC1.7 | L |  | **Promote local execution into core** — `packages/moke/src/compute.tk::execute()` is a complete local query engine with no production caller. Make it (or a core equivalent) the execution target for artifacts, and add a second backend using toke's parameterised SQL (`std.db`'s `db.many` with bound parameters) so generated queries can run against the local store without string interpolation. |
+| NC1.7 | L | **Done** — 2026-09-27 | **Promote local execution into core** — `packages/moke/src/compute.tk::execute()` is a complete local query engine with no production caller. Make it (or a core equivalent) the execution target for artifacts, and add a second backend using toke's parameterised SQL (`std.db`'s `db.many` with bound parameters) so generated queries can run against the local store without string interpolation. **Done 2026-09-27.** Built as a core equivalent, `packages/core/src/nocustody/artifact.tk`, rather than by moving `moke.compute`: that module runs in moke, which holds no database connection. The executor validates the op against an allowlist and every named column against the dataset's headers, takes identifiers only from those headers (double-quoted), and binds the filter value as the one `db.many` parameter. The dataset is loaded into a TEMP table on the caller's connection, never into loke.db's file, and dropped before and after each run. Production caller: `POST /api/artifact` (`packages/browser/pages/api/artifact.tk`, wire form in `core.nocustody.request`), behind the GA2.6/GA2.7 origin check. Evidence: `tests/unit/nocustody/test_artifact.tk` (now enforced by `check_test_stubs.py`) asserts the value never appears in the SQL text, injection-shaped columns and values are refused or inert, the results are arithmetically right, and a planted cell is absent from loke.db's bytes, with a positive control. Two mutants were run and killed: inlining the filter value (4 assertions fail) and making the table persistent (the TEMP assertion fails). `smoke_serve.sh` checks the route's response bodies over real HTTP. **Not done here:** `moke.compute.execute` still has no production caller, and nothing yet sends a model-returned artifact to this route. Wiring the dashboard path to it belongs with NC1.8, and bounding what a sequence of artifacts can extract is NC1.10. |
 | NC1.8 | M |  | **Demote anonymise-and-send to a labelled fallback** — Keep the path for tasks that genuinely need prose, but make selecting it explicit, record it as a custody event (DA1), and state its residual risk at the point of use. Update the pipeline so no-custody is attempted first and the fallback is a deliberate, logged decision rather than the default. |
 | NC1.9 | M | **Done** | **Fail closed** — The defect is in **core, not the browser**: `packages/core/src/privacy/pipeline.tk:568` initialises `anonymisedtext` to the raw input and `:582` reassigns it from `anonymisetext(text; deduped)`. When the NER and Presidio layers are both unreachable the pipeline logs degraded mode (`:392`, `:523`, `:540`) and continues with an empty entity list, so `anonymisetext` returns the input unchanged and `packages/browser/pages/api/pipeline.tk:125-126,171` transmits it — while still reporting an `entities_found` count and a sensitivity label. A filter that fails open is worse than one that fails closed. Add a health gate: when no detection layer is healthy, return 503 and never dispatch. Fixing it in core fixes every caller at once; fixing it in the browser handler would leave the CLI path open.<br><br>**Status detail:** **Done** — `027e383`. The gate is a plain bool (`issafetoforward`), not a result, because T-18 makes a refusal returned as `$err` read as success to every caller. Asserted in `tests/unit/privacy/test_fail_closed.tk`, not by inspection |
 | NC1.10 | L |  | **Bound the query-shaped channel** — A returned artifact is itself an information channel. An adversary able to shape queries and observe results across several turns can extract cell values a piece at a time, including by binary search, without ever being sent a row. So "the model never receives data" is true at the byte level and not necessarily at the information level, and **no published benchmark tests this** (`docs/research/disclosure-measurement-findings.md` §11). Bound it: per-session limits on result cardinality and on repeated near-identical predicates, detection of value-probing query sequences, and disclosure accounting that counts *results returned to the model* as well as bytes sent. Until this is bounded, the no-custody claim must be stated with the limitation attached. |
