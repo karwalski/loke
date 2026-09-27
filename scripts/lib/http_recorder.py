@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A local HTTP server that records EVERY request it receives, whatever the method. (VM1.6e)
 
-Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent]
+Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo]
 
 It binds a port the OS hands out on 127.0.0.1 and writes the number to <port-file> once it
 is listening, so a test needs no fixed port and two runs cannot collide. Each request is
@@ -24,6 +24,12 @@ for (an error object where Presidio sends an array, prose where the NER model wa
 an array); `silent` answers 200 with an empty body. Both still record. `pfbroken` (F3b.3)
 answers everything as `answer` does except /detect, which claims two entities it does not
 deliver in readable form.
+
+`echo` (GA1.5) answers as `answer` does except in two places, so that the request path can be
+judged by what it sends: /compress keeps every word holding a `[` (a loke placeholder) and
+every other word, as a compressor that respects placeholders would, and /api/generate answers
+with the prompt it was given, as a model that repeats its input would. In `answer` mode
+/compress answers "short", which keeps no placeholder: a compressor that drops them.
 
 scripts/lib/fake_ollama.py is the Ollama stand-in smoke_e2e.sh uses; it logs POSTs only, and
 a GET that never arrives is precisely what VM1.6e is about, so this is a separate file.
@@ -81,6 +87,14 @@ OPENAI = {"id": "chatcmpl-recorder", "object": "chat.completion", "model": "gpt-
 # A policy set in the shape core.policy.loader reads from a file or a URL (VM1.6h).
 POLICY = {"name": "recorder-policy", "regulations": [{"name": "recorder-reg", "jurisdiction": "AU", "version": "1",
           "rules": [{"id": "r1", "description": "no secrets", "action": "block", "severity": "high"}]}]}
+
+
+def _field(body, key):
+    try:
+        v = json.loads(body).get(key, "") if body else ""
+    except ValueError:
+        v = ""
+    return v if isinstance(v, str) else ""
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -154,6 +168,9 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"nodes": [{"id": "n1", "device": "recorder", "memory_gb": 16.0, "models": ["m"]}]})
         elif p == "/api/pipeline":
             self._send({"response": "pipeline-answer"})
+        elif p == "/api/generate" and MODE == "echo":
+            self._send({"model": "fake", "response": "echo: " + _field(body, "prompt"), "done": True,
+                        "prompt_eval_count": 12, "eval_count": 9})
         elif p == "/api/generate":
             self._send({"model": "fake", "response": "generated-by-recorder", "done": True})
         elif p == "/api/pull":
@@ -171,6 +188,11 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == "/policy.json":
             # core.policy.loader.loadurl's enterprise policy document (VM1.6h).
             self._send(POLICY)
+        elif p == "/compress" and MODE == "echo":
+            words = _field(body, "prompt").split(" ")
+            kept = [w for i, w in enumerate(words) if i % 2 == 0 or "[" in w]
+            self._send({"compressed_prompt": " ".join(kept), "origin_tokens": len(words),
+                        "compressed_tokens": len(kept), "ratio": "echo"})
         elif p == "/compress":
             self._send({"compressed_prompt": "short", "origin_tokens": 10, "compressed_tokens": 5, "ratio": "2.0x"})
         else:

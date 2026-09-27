@@ -33,6 +33,7 @@ i=ag:core.governance.approvalgate;
 i=xport:core.providers.transport;
 i=nd:core.nocustody.dispatch;
 i=ns:core.nocustody.session;
+i=popt:core.optimiser.prompt;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -405,10 +406,13 @@ f=privacyrefusedtrace(store:i64;run:$pipelinerun;durationms:i64):bool{
    provider the router chose, whether that provider is local, the provider-reported token
    counts (0 on a failure), the router's cost for them, and the entity count - every entity
    the pipeline detected was replaced by a placeholder before dispatch, so found and blocked
-   are the same number here. tokens_saved and cost_saved are 0 because nothing on this path
-   optimises the prompt; writing an estimate there would publish a saving nobody measured.
+   are the same number here. tokens_saved and cost_saved are 0. Since GA1.5 the prompt may be
+   optimised before dispatch, but nothing here counts tokens: no tokeniser is named on this
+   path, and writing an estimate there would publish a saving nobody measured. What the
+   optimiser did goes in savings_by_stage instead, as MEASURED octets and characters before
+   and after (core.optimiser.prompt.stagesline), or why it did nothing.
    It never carries a value: no prompt, no response, no entity. *)
-f=metricevent(run:$pipelinerun;provider:str;modelid:str;routedlocal:bool;cachehit:bool;tin:i64;tout:i64;cost:f64):$metricevent{
+f=metricevent(run:$pipelinerun;provider:str;modelid:str;routedlocal:bool;cachehit:bool;tin:i64;tout:i64;cost:f64;stages:str):$metricevent{
   let ts:str=str.fromint(t.nowi64());
   let n=run.totalentities as i64;
   <$metricevent{
@@ -427,7 +431,7 @@ f=metricevent(run:$pipelinerun;provider:str;modelid:str;routedlocal:bool;cachehi
     cachehit:cachehit;
     modelid:modelid;
     providerid:provider;
-    savingsbystage:""
+    savingsbystage:stages
   }
 };
 
@@ -436,8 +440,8 @@ f=islocalprovider(provider:str):bool{
   <str.eq(provider;"local")
 };
 
-f=recordmetric(run:$pipelinerun;provider:str;modelid:str;tin:i64;tout:i64;cost:f64):bool{
-  let ok=mc.insert(metricevent(run;provider;modelid;islocalprovider(provider);false;tin;tout;cost));
+f=recordmetric(run:$pipelinerun;provider:str;modelid:str;tin:i64;tout:i64;cost:f64;optrec:str):bool{
+  let ok=mc.insert(metricevent(run;provider;modelid;islocalprovider(provider);false;tin;tout;cost;popt.stagesline(optrec;anonymisedof(run.result))));
   if(ok){}el{
     log.warn("metrics row was not written for this dispatch";"api.pipeline";run.requestid)
   };
@@ -476,11 +480,11 @@ f=auditrowwritten(cid:str;eventtype:str):bool{
   <dbmod.scalari64("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype);"n";0)>0
 };
 
-f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision):i64{
+f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision;optrec:str):i64{
   (* DA1.7 - the reserved disclosure row is completed as failed, in one transaction with the
      outcome's audit row (DA1.9). *)
   outcome(store;run;"llm_request_failed";false;provider;modelid;0;0;0;t.nowms()-startms;decision);
-  recordmetric(run;provider;modelid;0;0;0.0);
+  recordmetric(run;provider;modelid;0;0;0.0;optrec);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
 };
 
@@ -767,7 +771,7 @@ f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
   (* DA1.6 - a hit is not a dispatch and writes no disclosure record, but it IS a request the
      savings ledger has to count, or the hit rate is 0% by construction. provider "cache",
      no model, no tokens: nothing was sent and nothing was estimated. *)
-  if(mc.insert(metricevent(run;"cache";"";true;true;0;0;0.0))){}el{
+  if(mc.insert(metricevent(run;"cache";"";true;true;0;0;0.0;""))){}el{
     log.warn("metrics row was not written for this cache hit";"api.pipeline";run.requestid)
   };
   <http.res(200;"{\"ok\":true,\"response\":\(json.enc(restoretext(run;hit.response))),\"cached\":true,\"cache_age_seconds\":\(hit.ageseconds),\"audited\":false\(piifields)}")
@@ -776,7 +780,7 @@ f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
 (* One place for everything that happens AFTER a provider has answered: the cache is written
    with the anonymised response, the budget is accumulated and persisted, the audit row is
    inserted, and only then is the text restored for the user. *)
-f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision;rawbytes:i64):i64{
+f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision;rawbytes:i64;optrec:str):i64{
   let spec:$modelspec=route.model;
   let provstr=providerlabel(spec.provider);
   let elapsed=t.nowms()-startms;
@@ -794,7 +798,7 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
   (* DA1.7 - the reserved disclosure row is completed with what came back, in one
      transaction with the outcome's audit row (DA1.9). *)
   let logged=outcome(store;run;"llm_request";true;provstr;spec.id;rawbytes;tin;tout;elapsed;decision);
-  recordmetric(run;provstr;spec.id;tin;tout;requestcost(spec;tin;tout));
+  recordmetric(run;provstr;spec.id;tin;tout;requestcost(spec;tin;tout);optrec);
   if(logged){}el{
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
   };
@@ -827,21 +831,22 @@ f=pisolocal(p:$provider):bool{
 (* F5.11. `raw` is the body the transport answered, already known to be non-empty. A body
    with no completion text in it (Anthropic's error document, for one: the transport does
    not see the status code) is a provider failure, not a 200 with an empty answer. *)
-f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;raw:str;piifields:str;startms:i64;decision:$policydecision):i64{
+f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;raw:str;piifields:str;startms:i64;decision:$policydecision;optrec:str):i64{
   let spec:$modelspec=route.model;
   let anonresponse=anthropictext(raw);
   if(str.len(anonresponse)==0){
     log.warn("pipeline: anthropic answered with no completion text, treating as a provider failure";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"anthropic";spec.id;startms;decision)
+    <providerfailed(store;run;"anthropic";spec.id;startms;decision;optrec)
   }el{};
-  <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision;str.len(raw))
+  <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision;str.len(raw);optrec)
 };
 
 (* ── DA1.7: the disclosure record ─────────────────────────────────────────────────
    Reserved immediately before the body is handed to transport, from the body itself:
    bytes_body is str.len of the exact string passed to the transport, which counts octets,
-   not characters. bytes_question is the anonymised question as it appears in the body,
-   JSON-escaped, less its two quotes. Custody is redacted-data with the check not run: that is
+   not characters. bytes_question is the question as it appears in the body, JSON-escaped,
+   less its two quotes: since GA1.5 that is the OPTIMISED anonymised text when the optimiser
+   applied, because that is what was sent. Custody is redacted-data with the check not run: that is
    what this path sends, and it is passed rather than observed until NC1.2's sentinel check
    exists (spec C1-C3). The correlation id is the request id, which is also audit_log's, so
    the two rows join one-to-one. *)
@@ -852,7 +857,7 @@ f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;raw:str;piifi
    core.audit.disclosure). *)
 f=reservedispatch(store:i64;run:$pipelinerun;provider:str;providerclass:str;modelid:str;modelversion:str;host:str;sent:str;anonymised:str;fbreason:str;fbby:str;sid:str;decision:$policydecision):bool{
   if(store==0){ <false };
-  <dl.reserveaudited(auditeventfor(run;"llm_dispatch";provider;modelid;0;0;0);run.requestid;sid;providerclass;modelversion;host;str.len(sent);str.len(json.enc(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run";fbreason;fbby;store)
+  <dl.reserveaudited(auditeventfor(run;"llm_dispatch";provider;modelid;0;0;0);run.requestid;sid;providerclass;modelversion;host;str.len(sent);str.len(popt.jsonquoted(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run";fbreason;fbby;store)
 };
 
 (* "" for a missing session_id is `none`; anything else must be a valid id, and "" is the
@@ -879,9 +884,16 @@ f=unrecorded(store:i64;run:$pipelinerun;provider:str;modelid:str;piifields:str;s
 };
 
 (* The request body, built here so that a test can see exactly what is sent. Only the
-   anonymised text goes into it. *)
+   anonymised text goes into it.
+
+   GA1.5: the text and the system prompt are quoted with popt.jsonquoted, which is
+   shared.jsonobj.escape, not json.enc. json.enc escapes only the quote and the backslash
+   (T-45), so every multi-line prompt was sent to
+   Ollama and Anthropic with raw newlines inside a JSON string, which both reject. Found by
+   the GA1.5 recorder test: a TOON-encoded prompt is always multi-line, and the recorder's
+   Content-Length disagreed with the body it logged. The Ollama body below is the same. *)
 f=anthropicbody(modelid:str;sysprompt:str;anonymised:str):str{
-  <"{\"model\":\(json.enc(modelid)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}"
+  <"{\"model\":\(json.enc(modelid)),\"max_tokens\":4096,\"system\":\(popt.jsonquoted(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(popt.jsonquoted(anonymised))}]}"
 };
 
 (* F5.11. The one send. This was
@@ -898,18 +910,19 @@ f=anthropicsend(url:str;key:str;abody:str):str{
   <xport.post(url;abody;xport.anthropicheaders(key))
 };
 
-f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let spec:$modelspec=route.model;
-  let abody=anthropicbody(spec.id;sysprompt;anonymised);
-  if(reservedispatch(store;run;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;anonymised;fbreason;fbby;sid;decision)){}el{
+  let sent=popt.sentof(optrec);
+  let abody=anthropicbody(spec.id;sysprompt;sent);
+  if(reservedispatch(store;run;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;sent;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
   };
   let raw=anthropicsend(xport.anthropicurl();key;abody);
   if(str.len(raw)==0){
     log.warn("pipeline: anthropic returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"anthropic";spec.id;startms;decision)
+    <providerfailed(store;run;"anthropic";spec.id;startms;decision;optrec)
   }el{};
-  <anthropicreply(store;run;route;raw;piifields;startms;decision)
+  <anthropicreply(store;run;route;raw;piifields;startms;decision;optrec)
 };
 
 (* http.posturl answers with a bare str and no result, so a dead Ollama returns "" — and the
@@ -927,8 +940,18 @@ f=isinstalled(id:str;names:@str):bool{
   <found
 };
 
+(* GA1.5: the Ollama base is a parameter so that a test can stand a recorder in for it;
+   production passes ollamabase(), the one local endpoint. *)
+f=ollamabase():str{
+  <"http://127.0.0.1:11434"
+};
+
 f=installedmodels():@$ollamamodel{
-  <mt ollama.listmodels(ollama.new("http://127.0.0.1:11434")) {$ok:v v; $err:e @()}
+  <installedmodelsat(ollamabase())
+};
+
+f=installedmodelsat(base:str):@$ollamamodel{
+  <mt ollama.listmodels(ollama.new(base)) {$ok:v v; $err:e @()}
 };
 
 f=installednames():@str{
@@ -956,36 +979,37 @@ f=namesof(models:@$ollamamodel):@str{
   <names
 };
 
-f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):i64{
   let spec:$modelspec=route.model;
   (* F5.12. The router chooses from a static catalogue, not from what is installed, so it
      can route to a model Ollama does not have, and Ollama answers 404. This refuses with
      the names the user can act on. It does not substitute another model: a second routing
      decision taken here, out of the router's sight, is what GA1.7 removed. The routed model
      not being installed is still the router's defect, and F5.12 stays open for it. *)
-  let models=installedmodels();
+  let models=installedmodelsat(obase);
   let installed=namesof(models);
   if(installed.len>0 && !isinstalled(spec.id;installed)){
     recordevent(store;run;"llm_request_refused";"ollama";spec.id;0;0;t.nowms()-startms;decision);
     let msg="the router chose \(spec.id), which is not installed in Ollama. Installed: \(str.join(", ";installed))";
     <http.res(503;"{\"ok\":false,\"error\":\(json.enc(msg)),\"model_not_installed\":true\(piifields)}")
   }el{};
-  let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
-  if(reservedispatch(store;run;"ollama";"local";spec.id;digestof(spec.id;models);"127.0.0.1:11434";payload;anonymised;fbreason;fbby;sid;decision)){}el{
+  let sent=popt.sentof(optrec);
+  let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(popt.jsonquoted(sent)),\"stream\":false}";
+  if(reservedispatch(store;run;"ollama";"local";spec.id;digestof(spec.id;models);str.trimprefix(obase;"http://");payload;sent;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"ollama";spec.id;piifields;startms;decision)
   };
-  let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
+  let raw=http.posturl("\(obase)/api/generate";payload);
   if(str.len(raw)==0){
     log.warn("pipeline: ollama returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"ollama";spec.id;startms;decision)
+    <providerfailed(store;run;"ollama";spec.id;startms;decision;optrec)
   }el{};
   let anonresponse=json.str(json.dec(raw);"response");
   if(str.len(anonresponse)==0){
     log.warn("pipeline: ollama response carried no text";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"ollama";spec.id;startms;decision)
+    <providerfailed(store;run;"ollama";spec.id;startms;decision;optrec)
   }el{};
   (* Ollama's /api/generate reports prompt_eval_count and eval_count, not the OpenAI names. *)
-  <completed(store;run;route;anonresponse;usagetokens(raw;"prompt_eval_count");usagetokens(raw;"eval_count");piifields;startms;decision;str.len(raw))
+  <completed(store;run;route;anonresponse;usagetokens(raw;"prompt_eval_count");usagetokens(raw;"eval_count");piifields;startms;decision;str.len(raw);optrec)
 };
 
 (* A cloud provider the router can name but this endpoint has no client for. It refuses
@@ -994,7 +1018,7 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piif
 f=unsupportedprovider(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
   let spec:$modelspec=route.model;
   recordevent(store;run;"llm_request_refused";providerlabel(spec.provider);spec.id;0;0;t.nowms()-startms;decision);
-  <refusedroute(str.concat(str.concat("this endpoint has no client for provider ";providerlabel(spec.provider));str.concat(" (model ";str.concat(spec.id;")")));piifields)
+  <refusedroute("this endpoint has no client for provider \(providerlabel(spec.provider)) (model \(spec.id))";piifields)
 };
 
 f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
@@ -1003,31 +1027,82 @@ f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:
   <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
 };
 
-f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let key=anthropickey();
   if(str.len(key)>20){}el{
     <needsanthropickey(store;run;route;piifields;startms;decision)
   };
-  <toanthropic(store;run;route;anonymised;sysprompt;key;piifields;startms;decision;fbreason;fbby;sid)
+  <toanthropic(store;run;route;optrec;sysprompt;key;piifields;startms;decision;fbreason;fbby;sid)
 };
 
 (* All seven $provider variants are named. A match on a plain user sum DOES discriminate
    across a module boundary — it is only a result whose error side is a user sum that does
    not (T-18) — and listing every variant is what lets the refusal say WHICH provider was
    unsupported. *)
-f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
-  let res:$piidetectionresult=run.result;
+(* GA1.5: `optrec` is the optimiser's record (core.optimiser.prompt), and the text a provider
+   is sent is popt.sentof(optrec): the optimised anonymised text, or the anonymised text as it
+   was when the optimiser did nothing. Never res.original. *)
+f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):i64{
   let spec:$modelspec=route.model;
   let prov:$provider=spec.provider;
   <mt prov {
-    $anthropic:v toanthropicchecked(store;run;route;res.anonymised;sysprompt;piifields;startms;decision;fbreason;fbby;sid);
+    $anthropic:v toanthropicchecked(store;run;route;optrec;sysprompt;piifields;startms;decision;fbreason;fbby;sid);
     $openai:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $google:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $mistral:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $openrouter:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $ollama:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby;sid);
-    $local:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby;sid)
+    $ollama:v toollama(store;run;route;optrec;piifields;startms;decision;fbreason;fbby;sid;obase);
+    $local:v toollama(store;run;route;optrec;piifields;startms;decision;fbreason;fbby;sid;obase)
   }
+};
+
+(* ── GA1.5: token optimisation, between the privacy filter and dispatch ─────────────
+   The optimiser is handed res.anonymised and the entity list, so the only text it, or the
+   LLMLingua sidecar behind it, ever sees is text the privacy filter has already anonymised.
+   It runs after routing and the kill switch, which is the last point before a provider is
+   called, and only on the path that sends: a cache hit or a refusal spends nothing on it.
+
+   What it may do and what it refuses is in core.optimiser.prompt. It fails OPEN: a refused or
+   failed optimisation sends the anonymised text unchanged, because optimisation is not a
+   privacy control, and the reason is recorded three ways: in the reply's `optimisation`
+   field, in the log line below, and in this dispatch's metrics row (savings_by_stage). The
+   figures are measured octets and characters; no token count is reported. The disclosure
+   record needs nothing extra: reservedispatch counts the body actually built from the text
+   the optimiser chose, so bytes_body is the octets handed to transport (DA1).
+
+   LLMLingua is off until a sidecar is configured: the settings key
+   optimiser.llmlingua_url names it (a loopback URL; core.optimiser.llmlingua refuses any
+   other), and optimiser.llmlingua_min_chars the length above which prose is compressed, 0
+   meaning ll.shouldcompress's default of 2000 characters. TOON needs no sidecar. *)
+f=llmlinguaurl(store:i64):str{
+  if(store==0){ <"" }el{};
+  <settings.getstror(store;"optimiser.llmlingua_url";"")
+};
+
+f=llmlinguaminchars(store:i64):i64{
+  if(store==0){ <0 }el{};
+  <settings.getintor(store;"optimiser.llmlingua_min_chars";0)
+};
+
+f=optimisefor(run:$pipelinerun;llurl:str;minchars:i64):str{
+  let res:$piidetectionresult=run.result;
+  <popt.optimise(res.anonymised;res.entities;llurl;minchars)
+};
+
+f=anonymisedof(res:$piidetectionresult):str{
+  <res.anonymised
+};
+
+f=optimisationfield(run:$pipelinerun;optrec:str):str{
+  <",\"optimisation\":\(popt.reportjson(optrec;anonymisedof(run.result)))"
+};
+
+(* The production path from a routed, permitted request to a provider: forward() calls this
+   with the configured sidecar and ollamabase(). Tests call it with recorders. *)
+f=sendoptimised(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str):i64{
+  let optrec=optimisefor(run;llurl;minchars);
+  log.info("pipeline: \(popt.stagesline(optrec;anonymisedof(run.result)))";"api.pipeline";run.requestid);
+  <dispatch(store;run;route;optrec;sysprompt;str.concat(piifields;optimisationfield(run;optrec));startms;decision;fbreason;fbby;sid;obase)
 };
 
 (* NC1.8 - what every reply on this path says about itself. This endpoint IS the
@@ -1132,7 +1207,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
     <http.res(403;"{\"ok\":false,\"error\":\(json.enc(ks.refusalmessage(store;pname;"browser-chat"))),\"provider_blocked\":true,\"kill_switch_scope\":\(json.enc(ks.blockedscope(store;pname;"browser-chat")))\(piifields)}")
   }el{};
 
-  <dispatch(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby;sid)
+  <sendoptimised(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby;sid;llmlinguaurl(store);llmlinguaminchars(store);ollamabase())
 };
 
 (* ── GA5.26: hold until approved ─────────────────────────────────────────────────

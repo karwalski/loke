@@ -100,10 +100,12 @@ Asserted in `tests/unit/privacy/test_fail_closed.tk` rather than argued (NC1.9, 
 `docs/features-loke.md:52`, the path now has detection, anonymisation, the kill switch, the fail-closed
 refusal, **response restoration** (GA1.2), **audit logging** (GA1.4), **policy evaluation** (GA1.8),
 the **semantic cache** (GA1.6) and **intelligent routing** (GA1.7, four selectable strategies). The one
-that remains absent is **token optimisation** (GA1.5): nothing in `pipeline.tk` calls `toon.encode` or
-`llmlingua.compress`, and wiring it today would wire a fail-open, because `llmlingua.isavailable`
-returned TRUE for an absent sidecar until the T-31 sweep and `toon`'s savings measure is a character
-ratio (C1). A tenth thing is claimed nowhere and worth stating: the **pre-flight cost estimate** is
+that was absent, **token optimisation** (GA1.5), is wired as of 2026-09-28: after anonymisation the
+handler calls `core.optimiser.prompt`, which TOON-encodes JSON the codec accepts and, for prose, calls
+LLMLingua only when a loopback sidecar is configured (it is off by default and not bundled, C2). A
+refused or failed optimisation sends the anonymised text unchanged and says why; a result that loses a
+placeholder is refused. What it reports is measured bytes and characters per request. **No token
+reduction is measured or claimed** (C5). A tenth thing is claimed nowhere and worth stating: the **pre-flight cost estimate** is
 still `0.0` on every request (C4, GA1.5a), so governance decisions are taken as though requests were
 free.
 

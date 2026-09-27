@@ -1,0 +1,217 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.optimiser.prompt;
+
+i=str:std.str;
+i=t:shared.types;
+i=jx:shared.jsonobj;
+i=toon:core.optimiser.toon;
+i=ll:core.optimiser.llmlingua;
+
+(* GA1.5 — the token optimiser on the request path: what it is given, what it may do, and
+   what it must refuse.
+
+   It is given the ANONYMISED text and the entity list the anonymiser wrote placeholders for,
+   and nothing else. It never sees the original: page.api.pipeline calls it after the privacy
+   filter, and what the LLMLingua sidecar receives is therefore anonymised text too.
+
+   What it does, in order:
+     - a prompt that is JSON this codec reads is TOON-encoded (core.optimiser.toon.encodejson)
+       when the codec accepts its shape and the TOON is shorter; when the codec refuses the
+       shape, the JSON with its insignificant whitespace removed is sent if that is shorter.
+       Structured input is never given to LLMLingua, which would not keep it valid JSON.
+     - any other prompt is compressed by LLMLingua when a sidecar is configured, answers its
+       health check, and the prompt is longer than the threshold (ll.shouldcompress).
+   Every result is checked before it is used: each placeholder must appear in the output
+   exactly as many times as in the input, byte for byte, or restoration would give the user a
+   placeholder or drop a value. LLMLingua drops tokens by design and can drop or split a
+   placeholder, and when it does the request is sent uncompressed and the reason recorded.
+
+   It FAILS OPEN, deliberately and only here: optimisation is not a privacy control, so a
+   refused or failed optimisation sends the anonymised text as it was. It is never a reason to
+   refuse a request, and never a reason to send anything but anonymised text.
+
+   The answer is one string, a record: `method|reason`, a newline, then the text to send.
+   method is toon, json_minified, llmlingua or none; reason is empty when a method applied,
+   and says why not otherwise. A string rather than a struct because page.api.pipeline sees
+   the 64 struct types a compilation unit may hold (T-54). The figures reported from it are
+   MEASURED: octets (str.len) and UTF-8 characters of the text before and after. No token
+   count is reported, because no tokeniser is named here; LLMLingua's origin_tokens is its own
+   model's count and is not carried. *)
+
+f=cleanreason(reason:str):str{
+  <str.replace(str.replace(reason;"|";"/");"\n";" ")
+};
+
+f=header(method:str;reason:str):str{
+  <"\(method)|\(cleanreason(reason))"
+};
+
+f=record(method:str;reason:str;sent:str):str{
+  <"\(header(method;reason))\n\(sent)"
+};
+
+f=unchanged(reason:str;x:str):str{
+  <record("none";reason;x)
+};
+
+f=headerof(r:str):str{
+  let k=str.indexof(r;"\n");
+  if(k<0){ <"" }el{};
+  <jx.sliceor(r;0;k)
+};
+
+(* The text to send. For a refused optimisation it is the anonymised input, unchanged. *)
+f=sentof(r:str):str{
+  let k=str.indexof(r;"\n");
+  if(k<0){ <"" }el{};
+  <jx.sliceor(r;k+1;str.len(r) as i64)
+};
+
+f=partof(r:str;idx:i64):str{
+  let parts=str.split(headerof(r);"|");
+  if(idx<parts.len as i64){ <parts.get(idx) }el{};
+  <""
+};
+
+f=methodof(r:str):str{
+  <partof(r;0)
+};
+
+f=reasonof(r:str):str{
+  <partof(r;1)
+};
+
+f=isapplied(r:str):bool{
+  let mth=methodof(r);
+  <str.len(mth)>0 && !str.eq(mth;"none")
+};
+
+(* UTF-8 characters: every byte that is not a continuation byte (10xxxxxx) starts one.
+   str.bytes, not str.charat: charat measures the whole string on every call (T-55). *)
+f=charcount(s:str):i64{
+  let b=str.bytes(s);
+  let n=mut.0;
+  lp(let i=0;i<b.len;i=i+1){
+    let c=b.get(i) as i64;
+    if(c<128 || c>=192){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=occurrences(text:str;needle:str):i64{
+  if(str.len(needle)==0){ <0 }el{};
+  <(str.split(text;needle).len as i64)-1
+};
+
+(* Each placeholder the anonymiser wrote appears in `after` as often as in `before`. A count,
+   not a presence test: a compressor that drops one of two mentions changes the answer the
+   model gives about the second. *)
+f=placeholdersintact(before:str;after:str;entities:@$piientity):bool{
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.len(e.placeholder)>0){
+      if(occurrences(after;e.placeholder)==occurrences(before;e.placeholder)){}el{ <false }
+    }el{}
+  };
+  <true
+};
+
+(* JSON this codec can tokenise; prose that happens to start with a bracket, such as a
+   placeholder, is not. *)
+f=isstructured(x:str):bool{
+  <str.len(toon.jsonminified(x))>0
+};
+
+f=viaminified(x:str;entities:@$piientity;why:str):str{
+  let mn=toon.jsonminified(x);
+  if(str.len(mn)>0 && str.len(mn)<str.len(x) && placeholdersintact(x;mn;entities)){
+    <record("json_minified";"";mn)
+  }el{};
+  <unchanged(why;x)
+};
+
+f=viatoon(x:str;entities:@$piientity):str{
+  let p=toon.encodejson(x);
+  if(toon.isencoded(p)){}el{
+    <viaminified(x;entities;"toon_refused: \(p.failure)")
+  };
+  if(placeholdersintact(x;p.text;entities)){}el{
+    <unchanged("placeholder_lost: the TOON encoding did not carry every placeholder";x)
+  };
+  if(str.len(p.text)<str.len(x)){}el{
+    <viaminified(x;entities;"toon_not_smaller")
+  };
+  <record("toon";"";p.text)
+};
+
+(* The target ratio asked of LLMLingua. A request, not a result: what is reported is what
+   came back, measured. *)
+f=targetratio():f64{
+  <0.5
+};
+
+f=viallmlingua(x:str;entities:@$piientity;llurl:str;minchars:i64):str{
+  if(str.len(llurl)==0){ <unchanged("llmlingua_not_configured";x) }el{};
+  if(ll.shouldcompress(charcount(x) as u32;minchars as u32)){}el{
+    <unchanged("below_threshold";x)
+  };
+  let client=ll.new(llurl);
+  if(ll.isavailable(client)){}el{ <unchanged("llmlingua_unavailable";x) };
+  let c:$compressresult=ll.compress(client;x;targetratio());
+  if(ll.iscompressed(c)){}el{
+    <unchanged("llmlingua_failed: \(ll.compressfailure(c))";x)
+  };
+  if(placeholdersintact(x;c.compressed;entities)){}el{
+    <unchanged("placeholder_lost: LLMLingua dropped or altered a placeholder";x)
+  };
+  if(str.len(c.compressed)<str.len(x)){}el{
+    <unchanged("not_smaller";x)
+  };
+  <record("llmlingua";"";c.compressed)
+};
+
+(* The one entry point. `anonymised` is the privacy pipeline's output and `entities` the list
+   it anonymised with; `llurl` is the configured LLMLingua sidecar, "" for none, and
+   `minchars` the length above which prose is compressed (0 for ll.shouldcompress's default). *)
+f=optimise(anonymised:str;entities:@$piientity;llurl:str;minchars:i64):str{
+  if(isstructured(anonymised)){ <viatoon(anonymised;entities) }el{};
+  <viallmlingua(anonymised;entities;llurl;minchars)
+};
+
+f=octets(s:str):i64{
+  <str.len(s) as i64
+};
+
+(* ── Reporting. `before` is the anonymised text the record was made from. ── *)
+
+f=reportjson(r:str;before:str):str{
+  let sent=sentof(r);
+  let applied=mut."false";
+  if(isapplied(r)){ applied="true" }el{};
+  <"{\"method\":\(jx.escape(methodof(r))),\"applied\":\(applied),\"reason\":\(jx.escape(reasonof(r))),\"bytes_before\":\(octets(before)),\"bytes_after\":\(octets(sent)),\"chars_before\":\(charcount(before)),\"chars_after\":\(charcount(sent))}"
+};
+
+(* For metrics_raw.savings_by_stage: measured octets and characters, never a value. "" for no
+   record, which is a dispatch the optimiser was not asked about. *)
+f=stagesline(r:str;before:str):str{
+  if(str.len(r)==0){ <"" }el{};
+  let sent=sentof(r);
+  let bb=str.len(before) as i64;
+  let ba=str.len(sent) as i64;
+  let cb=charcount(before);
+  if(isapplied(r)){
+    <"optimiser=\(methodof(r));bytes=\(bb)>\(ba);chars=\(cb)>\(charcount(sent))"
+  }el{};
+  <"optimiser=none;bytes=\(bb);chars=\(cb);reason=\(reasonof(r))"
+};
+
+(* A string as a JSON string literal, quotes included, with newline, CR and tab escaped:
+   shared.jsonobj.escape, for page.api.pipeline's request bodies, which cannot import
+   shared.jsonobj itself without passing the compiler's function-table limit (max_funcs in
+   tkc.toml). std.json's json.enc leaves a newline raw (T-45), and every TOON document is
+   multi-line. *)
+f=jsonquoted(s:str):str{
+  <jx.escape(s)
+};

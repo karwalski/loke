@@ -113,6 +113,18 @@ case "$resp" in
   *"$EMAIL"*) echo "  ok   the user got the email address back, restored" ;;
   *) echo "  FAIL the response did not restore the placeholder: $resp" >&2; fail=1 ;;
 esac
+# GA1.5: no LLMLingua sidecar is configured here, and this prompt is prose, so nothing is
+# optimised; the answer says so and why, and moke's pipeline console carries the same line.
+case "$OUT" in
+  *'"optimisation":{"method":"none","applied":false,"reason":"llmlingua_not_configured"'*)
+    echo "  ok   the answer reports that the prompt was not optimised, and why" ;;
+  *) echo "  FAIL the answer does not report the optimiser's outcome: $(printf '%s' "$OUT" | head -c 300)" >&2; fail=1 ;;
+esac
+case "$OUT" in
+  *'"stage":"optimise","status":"skip","detail":"not optimised: llmlingua_not_configured"'*)
+    echo "  ok   and moke's pipeline console records it" ;;
+  *) echo "  FAIL moke's pipeline console has no optimiser line" >&2; fail=1 ;;
+esac
 
 # DA1.7: one disclosure_log row for the dispatch, completed, whose bytes_body is the exact
 # octet count of the body the model received (spec acceptance A7), and which holds the
@@ -585,6 +597,61 @@ else
   esac
   rm -f "$WORK/lk/home/.loke/config.toml"
 fi
+# GA1.5: the token optimiser, between the privacy filter and dispatch. scripts/lib/http_recorder.py
+# stands in for the LLMLingua sidecar: in `echo` mode it keeps every placeholder and every other
+# word; in `answer` mode it answers "short", dropping the placeholder. It is configured the way a
+# user would, by the settings rows the handler reads. Judged: what the sidecar was sent (never
+# the address), what the model received (compressed, or not), the restored answer, the answer's
+# own report, and that the disclosure record's bytes are the octets the model received.
+ll_start() {  # $1 mode; sets LLPORT and LLLOG
+  LLLOG="$WORK/lingua_$1.log"; rm -f "$WORK/lingua_$1.port"
+  python3 "$ROOT/scripts/lib/http_recorder.py" "$LLLOG" "$WORK/lingua_$1.port" "$1" >/dev/null 2>&1 & PIDS="$PIDS $!"
+  for _ in $(seq 1 40); do [ -s "$WORK/lingua_$1.port" ] && break; sleep 0.25; done
+  LLPORT=$(cat "$WORK/lingua_$1.port" 2>/dev/null)
+  sqlite3 "$DB" "INSERT OR REPLACE INTO settings (key,value,value_type,namespace,updated_at) VALUES ('optimiser.llmlingua_url','http://127.0.0.1:$LLPORT','str','optimiser',datetime('now'))"
+}
+model_body() {  # the body of the last /api/generate the model received
+  python3 -c 'import sys
+b=""
+for line in open(sys.argv[1],encoding="utf-8"):
+    if line.startswith("/api/generate "): b=line[len("/api/generate "):].rstrip("\n")
+print(b)' "$SEEN"
+}
+sqlite3 "$DB" "INSERT OR REPLACE INTO settings (key,value,value_type,namespace,updated_at) VALUES ('optimiser.llmlingua_min_chars','40','int','optimiser',datetime('now'))"
+LONGTEXT="please write to $EMAIL about the overdue invoice from last month and ask them to confirm the payment date"
+ll_start echo
+: > "$SEEN"
+pipe_post "$LONGTEXT" ""
+judge "GA1.5: with an LLMLingua sidecar configured, a long prompt is answered" 200 '"ok":true'
+judge "and the answer reports the compression it measured" 200 '"optimisation":{"method":"llmlingua","applied":true,"reason":"","bytes_before":'
+judge "and restores the address the model was given as a placeholder" 200 "$EMAIL"
+mb=$(model_body)
+if grep -q 'POST /compress .*invoice' "$LLLOG" && ! grep -q "$EMAIL" "$LLLOG"; then
+  echo "  ok   the sidecar was sent the anonymised prompt, never the address"
+else echo "  FAIL the sidecar was not sent the anonymised prompt, or was sent the address" >&2; fail=1; fi
+if [ -n "$mb" ] && [[ "$mb" != *invoice* ]] && [[ "$mb" != *payment* ]] && [[ "$mb" == *'[EMAIL_'* ]] && [[ "$mb" != *"$EMAIL"* ]]; then
+  echo "  ok   the model received the compressed prompt, placeholder intact"
+else echo "  FAIL the model did not receive the compressed prompt: $(printf '%s' "$mb" | head -c 200)" >&2; fail=1; fi
+mbytes=$(printf '%s' "$mb" | python3 -c 'import sys; print(len(sys.stdin.buffer.read()))')
+lastbytes=$(dl "SELECT bytes_body FROM disclosure_log ORDER BY occurred_at DESC, rowid DESC LIMIT 1")
+if [ "$lastbytes" = "$mbytes" ] && [[ "$BODY" == *"\"disclosure\":{\"bytes_body\":$mbytes,"* ]]; then
+  echo "  ok   its disclosure record and its answer both say $mbytes bytes, the octets the model received"
+else echo "  FAIL disclosure bytes '$lastbytes' do not match the $mbytes octets the model received" >&2; fail=1; fi
+stages=$(dl "SELECT savings_by_stage FROM metrics_raw ORDER BY rowid DESC LIMIT 1")
+case "$stages" in
+  optimiser=llmlingua\;bytes=*) echo "  ok   and its metrics row records the compression: $stages" ;;
+  *) echo "  FAIL the metrics row does not record the compression: '$stages'" >&2; fail=1 ;;
+esac
+ll_start answer
+: > "$SEEN"
+pipe_post "$LONGTEXT" ""
+judge "a sidecar that drops the placeholder is refused, and the request still answered" 200 '"optimisation":{"method":"none","applied":false,"reason":"placeholder_lost'
+judge "with the address restored" 200 "$EMAIL"
+mb=$(model_body)
+if [[ "$mb" == *invoice* ]] && [[ "$mb" == *'[EMAIL_'* ]] && [[ "$mb" != *'"prompt":"short"'* ]]; then
+  echo "  ok   and the model received the whole anonymised prompt, not the compression"
+else echo "  FAIL the model did not receive the uncompressed prompt: $(printf '%s' "$mb" | head -c 200)" >&2; fail=1; fi
+sqlite3 "$DB" "DELETE FROM settings WHERE key IN ('optimiser.llmlingua_url','optimiser.llmlingua_min_chars')"
 
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"

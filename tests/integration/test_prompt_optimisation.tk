@@ -1,0 +1,305 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testpromptoptimisation;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=popt:core.optimiser.prompt;
+i=h:page.api.pipeline;
+
+(* GA1.5 — the token optimiser on the request path, judged by what arrives.
+
+   Drives page.api.pipeline.sendoptimised, which is what forward() calls once a request has
+   been scanned, permitted, routed and checked against the kill switch: it optimises the
+   anonymised text and dispatches it. `post` is unreachable from a test (T-16), and forward()
+   reads the real settings and Ollama, so the sidecar URL and the Ollama base are passed in and
+   scripts/lib/http_recorder.py stands in for both:
+
+     - Ollama: a recorder in `echo` mode, listing the model `fake` and answering
+       /api/generate with the prompt it was given;
+     - LLMLingua: `echo` (compresses, keeping placeholders), `answer` ("short": drops every
+       placeholder), `garbage` (a 200 with no compressed_prompt) and nothing listening.
+
+   What is asserted, for each: what the LLMLingua sidecar was sent (anonymised text only),
+   what Ollama received (compressed or not), that every placeholder arrived byte for byte and
+   the text restores to the user's values, that the disclosure record's bytes are the octets
+   Ollama received (its Content-Length, and the length of the body it logged), and what the
+   metrics row records about the optimisation. *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:x x; $err:e @() };
+  if(!(hd == @())){ process.wait(hd); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-prompt-optimisation")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=fakeroute():$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:"fake";
+      provider:$provider{$ollama:0};
+      contextwindow:32768 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"test";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+(* The body of the last request logged for `prefix` (e.g. "POST /api/generate "), or "". *)
+f=lastbody(logp:str;prefix:str):str{
+  let lines=str.split(readfile(logp);"\n");
+  let found=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;prefix)){ found=str.trimprefix(ln;prefix) }el{}
+  };
+  <found
+};
+
+f=countlines(logp:str;prefix:str):i64{
+  let lines=str.split(readfile(logp);"\n");
+  let n=mut.0;
+  lp(let i=0;i<lines.len;i=i+1){
+    if(str.startswith(lines.get(i);prefix)){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* The Content-Length of the last `POST /api/generate` in the recorder's header log: the
+   octets it read off the socket. -1 when there is none. *)
+f=lastcontentlength(hdrp:str):i64{
+  let lines=str.split(readfile(hdrp);"\n");
+  let inblock=mut.false;
+  let none:i64=0-1;
+  let found=mut.none;
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.eq(ln;"POST /api/generate")){ inblock=true }el{
+      if(str.len(ln)==0){ inblock=false }el{
+        if(inblock && str.startswith(str.lower(ln);"content-length: ")){
+          found=mt str.toint(str.trimprefix(str.lower(ln);"content-length: ")) { $ok:n n; $parseerr:e 0-1 }
+        }el{}
+      }
+    }
+  };
+  <found
+};
+
+f=firststr(rs:@$row;col:str):str{
+  if(rs.len==0){ <"" }el{ <db.rowstr(rs.get(0);col) }
+};
+
+f=stagesof(rid:str):str{
+  <mt db.many("SELECT savings_by_stage AS v FROM metrics_raw WHERE request_id=?";@(rid)) {
+    $ok:rs firststr(rs;"v");
+    $err:e ""
+  }
+};
+
+f=placeholderof(run:$pipelinerun;idx:i64):str{
+  let res:$piidetectionresult=run.result;
+  if(idx<res.entities.len as i64){
+    let e:$piientity=res.entities.get(idx);
+    <e.placeholder
+  }el{};
+  <""
+};
+
+f=entity(ph:str):$piientity{
+  <$piientity{entitytype:"email";value:"x@example.com";start:0 as u32;end:0 as u32;confidence:1.0;placeholder:ph}
+};
+
+f=send(store:i64;run:$pipelinerun;llurl:str;obase:str):i64{
+  <h.sendoptimised(store;run;fakeroute();"";h.privacyfields(run);sh.nowms();h.decide(run);"task_requires_prose";"user";dl.nosession();llurl;20;obase)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── The optimiser's own rules, no sidecar ──────────────────────────────────── *)
+  let ents=@(entity("[EMAIL_ab12_1]");entity("[EMAIL_ab12_2]"));
+  if(t.assert(popt.placeholdersintact("a [EMAIL_ab12_1] b [EMAIL_ab12_2]";"[EMAIL_ab12_1] [EMAIL_ab12_2]";ents);"a text keeping every placeholder is intact")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!popt.placeholdersintact("a [EMAIL_ab12_1] b [EMAIL_ab12_2]";"a [EMAIL_ab12_1] b";ents);"dropping one placeholder is not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!popt.placeholdersintact("[EMAIL_ab12_1] and [EMAIL_ab12_1]";"[EMAIL_ab12_1]";ents);"nor is dropping one of two mentions of the same placeholder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!popt.placeholdersintact("x [EMAIL_ab12_1] y";"x [EMAIL_ab12_1 y";ents);"nor is splitting one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(popt.charcount("héllo")==5 && str.len("héllo")==6;"characters are counted as UTF-8 characters, octets as octets")){pass=pass+1}el{fail=fail+1};
+
+  let prose="Please write to [EMAIL_ab12_1] about the invoice.";
+  let off=popt.optimise(prose;ents;"";20);
+  if(t.asserteq(popt.methodof(off);"none";"with no LLMLingua sidecar configured, prose is not optimised")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(popt.reasonof(off);"llmlingua_not_configured";"and the record says why")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(popt.sentof(off);prose;"and the text to send is the input, unchanged")){pass=pass+1}el{fail=fail+1};
+
+  let rows="[\n  {\"id\": 1, \"email\": \"[EMAIL_ab12_1]\"},\n  {\"id\": 2, \"email\": \"[EMAIL_ab12_2]\"}\n]";
+  let tn=popt.optimise(rows;ents;"";20);
+  if(t.asserteq(popt.methodof(tn);"toon";"a JSON table is TOON-encoded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(popt.sentof(tn);"[2]{id,email}:\n  1,\"[EMAIL_ab12_1]\"\n  2,\"[EMAIL_ab12_2]\"";"as the tabular form, placeholders carried byte for byte")){pass=pass+1}el{fail=fail+1};
+  let nested="{\n  \"a\": {\"b\": \"[EMAIL_ab12_1]\"}\n}";
+  let mn=popt.optimise(nested;ents;"";20);
+  if(t.asserteq(popt.methodof(mn);"json_minified";"a JSON shape TOON refuses is sent minified")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(popt.sentof(mn);"{\"a\":{\"b\":\"[EMAIL_ab12_1]\"}}";"with only its insignificant whitespace removed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(popt.reportjson(tn;rows);"\"method\":\"toon\",\"applied\":true,\"reason\":\"\",\"bytes_before\":");"the report names the method and the measured bytes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(popt.reportjson(tn;rows);"token");"and reports no token count, because no tokeniser is named")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The request path, against recorders ────────────────────────────────────── *)
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let hex:str=str.randhex(8);
+  let base="/tmp/loke_ga15_\(hex)";
+  let olog="\(base).ollama.log";
+  let oport="\(base).ollama.port";
+  let elog="\(base).echo.log";
+  let eport="\(base).echo.port";
+  let alog="\(base).answer.log";
+  let aport="\(base).answer.port";
+  let glog="\(base).garbage.log";
+  let gport="\(base).garbage.port";
+  let recoll=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";olog;oport;"echo")) { $ok:x x; $err:e @() };
+  let rececho=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";elog;eport;"echo")) { $ok:x x; $err:e @() };
+  let recans=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";alog;aport)) { $ok:x x; $err:e @() };
+  let recgar=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";glog;gport;"garbage")) { $ok:x x; $err:e @() };
+  let op=waitport(oport);
+  let ep=waitport(eport);
+  let ap=waitport(aport);
+  let gp=waitport(gport);
+  if(t.assert(str.len(op)>0 && str.len(ep)>0 && str.len(ap)>0 && str.len(gp)>0;"the four recorders came up")){pass=pass+1}el{fail=fail+1};
+  let obase="http://127.0.0.1:\(op)";
+  let echourl="http://127.0.0.1:\(ep)";
+  let answerurl="http://127.0.0.1:\(ap)";
+  let garbageurl="http://127.0.0.1:\(gp)";
+  let ohdr="\(olog).headers";
+  let email="john.smith@example.com";
+  let text="Please email \(email) about the overdue invoice from last month and ask them to confirm the payment date before Friday so we can close the books.";
+
+  (* 1. A sidecar that compresses and keeps placeholders. *)
+  let run1=pipe.runforward(text;"";localonly());
+  let rid1=run1.requestid;
+  let ph1=placeholderof(run1;0);
+  if(t.assert(str.len(ph1)>0;"the privacy filter replaced the address with a placeholder")){pass=pass+1}el{fail=fail+1};
+  send(store;run1;echourl;obase);
+  let tolingua=lastbody(elog;"POST /compress ");
+  if(t.assert(str.contains(tolingua;ph1);"LLMLingua was sent the anonymised text, placeholder and all")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(readfile(elog);"john.smith");"and never the address: the optimiser sees only anonymised text")){pass=pass+1}el{fail=fail+1};
+  let body1=lastbody(olog;"POST /api/generate ");
+  if(t.assert(str.len(body1)>0;"Ollama received the request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body1;"overdue") && str.contains(body1;"invoice");"and it was the COMPRESSED text: the words the sidecar dropped did not arrive")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body1;ph1);"with the placeholder intact, byte for byte")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body1;"john.smith");"and never the address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.restoretext(run1;body1);email) && !str.contains(h.restoretext(run1;body1);ph1);"what the model was given restores to the user's own address")){pass=pass+1}el{fail=fail+1};
+  let sb1=dl.sentbytes(rid1);
+  if(t.assert(sb1>0 && sb1==lastcontentlength(ohdr);"the disclosure record's bytes are the octets Ollama read (its Content-Length)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sb1==str.len(body1) as i64;"and the length of the body it logged")){pass=pass+1}el{fail=fail+1};
+  let st1=stagesof(rid1);
+  if(t.assert(str.startswith(st1;"optimiser=llmlingua;bytes=");"the metrics row records that LLMLingua compressed it, in measured bytes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(st1;"john.smith") && !str.contains(st1;"invoice");"and carries no text")){pass=pass+1}el{fail=fail+1};
+
+  (* 2. A sidecar that drops placeholders: refused, sent uncompressed. *)
+  let run2=pipe.runforward(text;"";localonly());
+  let rid2=run2.requestid;
+  let ph2=placeholderof(run2;0);
+  send(store;run2;answerurl;obase);
+  if(t.assert(countlines(alog;"POST /compress ")==1;"the dropping sidecar was asked")){pass=pass+1}el{fail=fail+1};
+  let body2=lastbody(olog;"POST /api/generate ");
+  if(t.assert(str.contains(body2;"overdue") && str.contains(body2;ph2);"its answer was refused: Ollama received the whole anonymised text, placeholder intact")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body2;"\"prompt\":\"short\"");"and not the placeholder-less compression")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.restoretext(run2;body2);email);"which restores to the user's address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stagesof(rid2);"optimiser=none;") && str.contains(stagesof(rid2);"reason=placeholder_lost");"and the metrics row records why")){pass=pass+1}el{fail=fail+1};
+  let sb2=dl.sentbytes(rid2);
+  if(t.assert(sb2>0 && sb2==lastcontentlength(ohdr) && sb2==str.len(body2) as i64;"the disclosure bytes are the octets received, uncompressed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sb2>sb1;"and more of them than the compressed request sent")){pass=pass+1}el{fail=fail+1};
+
+  (* 3. A sidecar that answers garbage. *)
+  let run3=pipe.runforward(text;"";localonly());
+  send(store;run3;garbageurl;obase);
+  let body3=lastbody(olog;"POST /api/generate ");
+  if(t.assert(str.contains(body3;"overdue") && str.contains(body3;placeholderof(run3;0));"a garbage answer is not a compression: sent uncompressed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stagesof(run3.requestid);"reason=llmlingua_failed");"and recorded as a failed compression")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.sentbytes(run3.requestid)==lastcontentlength(ohdr);"with the octets received recorded")){pass=pass+1}el{fail=fail+1};
+
+  (* 4. No sidecar listening. *)
+  let run4=pipe.runforward(text;"";localonly());
+  send(store;run4;"http://127.0.0.1:59991";obase);
+  let body4=lastbody(olog;"POST /api/generate ");
+  if(t.assert(str.contains(body4;"overdue") && str.contains(body4;placeholderof(run4;0));"a sidecar that is down fails open to the uncompressed anonymised text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(stagesof(run4.requestid);"reason=llmlingua_unavailable");"and is recorded as unavailable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body4;"john.smith");"never the original")){pass=pass+1}el{fail=fail+1};
+
+  (* 5. A JSON table: TOON, and LLMLingua is not asked. *)
+  let compressbefore=countlines(elog;"POST /compress ");
+  let jtext="[\n  {\"id\": 1, \"email\": \"ann.jones@example.com\"},\n  {\"id\": 2, \"email\": \"bob.brown@example.com\"}\n]";
+  let run5=pipe.runforward(jtext;"";localonly());
+  send(store;run5;echourl;obase);
+  let body5=lastbody(olog;"POST /api/generate ");
+  if(t.assert(str.contains(body5;"[2]{id,email}:\\n  1,");"a JSON table reaches the model TOON-encoded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body5;placeholderof(run5;0)) && str.contains(body5;placeholderof(run5;1));"with both placeholders")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body5;"ann.jones") && !str.contains(body5;"bob.brown");"and neither address")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countlines(elog;"POST /compress ")==compressbefore;"structured input is never given to LLMLingua")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(stagesof(run5.requestid);"optimiser=toon;bytes=");"and the metrics row records TOON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.sentbytes(run5.requestid)==lastcontentlength(ohdr) && dl.sentbytes(run5.requestid)==str.len(body5) as i64;"with the octets received as its disclosure bytes")){pass=pass+1}el{fail=fail+1};
+
+  if(!(recoll == @())){ process.kill(recoll); process.wait(recoll); }el{};
+  if(!(rececho == @())){ process.kill(rececho); process.wait(rececho); }el{};
+  if(!(recans == @())){ process.kill(recans); process.wait(recans); }el{};
+  if(!(recgar == @())){ process.kill(recgar); process.wait(recgar); }el{};
+  file.delete(olog);
+  file.delete(ohdr);
+  file.delete(oport);
+  file.delete(elog);
+  file.delete("\(elog).headers");
+  file.delete(eport);
+  file.delete(alog);
+  file.delete("\(alog).headers");
+  file.delete(aport);
+  file.delete(glog);
+  file.delete("\(glog).headers");
+  file.delete(gport);
+  <fail
+};
