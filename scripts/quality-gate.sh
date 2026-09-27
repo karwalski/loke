@@ -110,6 +110,14 @@ step_checks() {
     [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  benchmarks/lib/test_result.py failed" >&2; failed=1; }
   fi
 
+  # VM1.3b: benchmarks/ad13/run.py --record, end to end on stubbed services: every row carries
+  # the BCa interval of the kept runs, unwidened, and one whose mean falls outside it is refused.
+  if [[ -f benchmarks/ad13/test_run.py ]]; then
+    echo "  AD1.3 recording path (benchmarks/ad13/test_run.py)"
+    python3 -m unittest -q benchmarks.ad13.test_run 2>&1 | tail -3 >&2
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  benchmarks/ad13/test_run.py failed" >&2; failed=1; }
+  fi
+
   if [[ -x ./scripts/check_claims.py ]] || [[ -f ./scripts/check_claims.py ]]; then
     echo "  claims register"
     python3 ./scripts/check_claims.py --check || failed=1

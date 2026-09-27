@@ -115,6 +115,14 @@ class ExhaustiveDistribution(unittest.TestCase):
         self.assertEqual((lo, hi), (4.0, 4.0))
         self.assertIn("degenerate", method)
 
+    def test_summarise_of_identical_runs_is_its_own_interval(self):
+        # fsum of three 0.8936 is 0.8935999999999998: the mean must be the value itself, or it
+        # falls outside its degenerate interval and validate refuses the row (VM1.3b).
+        m = r.summarise([0.5, 0.8936, 0.8936, 0.8936], metric="recall", units="ratio",
+                        workload="w", n=94)
+        self.assertEqual((m.value, m.ci_low, m.ci_high), (0.8936, 0.8936, 0.8936))
+        r.validate(m)
+
     def test_one_run_has_no_interval(self):
         with self.assertRaises(ValueError):
             r.bca_ci([1.0])

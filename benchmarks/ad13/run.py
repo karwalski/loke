@@ -24,11 +24,15 @@ Nothing here contacts a remote host: both services bind loopback, the sidecar ru
 and loke's clients refuse a non-loopback URL.
 
 The NER answer varies between runs (Ollama samples; loke does not pin a temperature), so the
-test is run --runs times and each figure is recorded with its spread.
+test is run --runs times (default 4). The first run is a warm-up and is discarded; every figure
+is recorded as the mean of the kept runs with their BCa bootstrap interval, through
+result.summarise (VM1.3). The interval is never widened to contain the mean: a row whose mean
+falls outside its interval is refused by result.validate and reported, not recorded (VM1.3b).
+Ports default to 11338/11339 and can be moved with --ollama-port/--pf-port.
 
 Usage (one command, after scripts/build_loke.sh and the moke/loke-cli trees are built):
 
-    TOKE_DIR=... BUILDDIR=... python3 benchmarks/ad13/run.py --ner-model qwen2.5:3b --record
+    TOKE_DIR=... BUILDDIR=... python3 benchmarks/ad13/run.py --ner-model qwen2.5:3b --runs 4 --record
 
 Only the services this script started are stopped, by process id.
 """
@@ -48,10 +52,16 @@ import time
 import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parent.parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from benchmarks.lib import result  # noqa: E402
+
 CORPUS = REPO / "tests" / "fixtures" / "pii-corpus" / "corpus.jsonl"
 TEST = "tests/integration/test_layer_marginal.tk"
 OLLAMA_PORT = 11338
 PF_PORT = 11339
+PF_SNAPSHOTS = pathlib.Path.home() / ".cache/huggingface/hub/models--openai--privacy-filter/snapshots"
 
 
 def get(url: str, timeout: float = 5.0) -> str:
@@ -119,14 +129,100 @@ def pct(s: str) -> float:
     return float(s.rstrip("%")) / 100.0
 
 
-def main() -> int:
+def run_test(env: dict) -> str:
+    """One run of the measurement test; its stdout."""
+    return subprocess.run(["scripts/run_tests.sh", TEST], cwd=REPO, env=env,
+                          capture_output=True, text=True).stdout
+
+
+def _layer_model(layer: str, layer_model: dict) -> tuple[str | None, str | None]:
+    model = version = None
+    for part, (mname, mver) in layer_model.items():
+        if part in layer.split("+") or layer == "all":
+            model = (model + " + " if model else "") + mname
+            version = (version + " + " if version else "") + str(mver)
+    return model, version
+
+
+def _write_one(values: list[float], fields: dict, written: list, refused: list) -> None:
+    """Summarise one metric over the runs (warm-up discarded, BCa interval) and write it.
+
+    The interval is the one BCa produced and is never widened to contain the mean. A BCa
+    interval can in principle exclude the mean of the runs it came from, because the bias
+    correction and the acceleration move both percentiles, and with three or four kept runs
+    both are estimated from very little. result.validate refuses such a row; it is then
+    reported with its figures and that reason, not published with an interval the bootstrap
+    did not produce.
+    """
+    note = fields.pop("notes", "")
+    m = result.summarise(values, **fields)
+    m.notes = f"per-run {values}, the first discarded as warm-up" + (f"; {note}" if note else "")
+    try:
+        result.write(m)
+        written.append(m)
+    except result.ResultRejected as e:
+        if m.ci_low is not None and not (m.ci_low <= m.value <= m.ci_high):
+            refused.append(
+                f"{m.metric} [{m.arm}]: the mean {m.value} of the kept runs {values[1:]} lies "
+                f"outside its {m.ci_method} interval [{m.ci_low}, {m.ci_high}]: the bias "
+                f"correction and acceleration, estimated from {m.runs} runs, moved both "
+                f"percentiles past it. Not recorded; re-measure with more runs.")
+        else:
+            refused.append(f"{m.metric} [{m.arm}]: {e}")
+
+
+def record(runs: list[dict], *, workload: str, caveat: str,
+           layer_model: dict) -> tuple[list, list[str]]:
+    """Write one row per layer metric and per marginal metric. Returns (written, refused).
+
+    runs[0] is the warm-up, discarded by result.summarise; each row is the mean of the kept
+    runs with their BCa interval (VM1.3, VM1.3b).
+    """
+    written: list = []
+    refused: list[str] = []
+    kept = runs[1] if len(runs) > 1 else runs[0]
+    for layer in runs[0]["layers"]:
+        model, version = _layer_model(layer, layer_model)
+        # n is each ratio's own denominator: labelled entities, labelled direct identifiers,
+        # or detection regions (which vary between NER runs; the first kept run's is
+        # recorded, and the notes carry every run's value).
+        for metric, key, nkey in (("pii_recall_entity", "recall", "labelled"),
+                                  ("pii_recall_direct_identifiers", "direct_recall", "direct_labelled"),
+                                  ("pii_precision_entity", "precision", "detections")):
+            vals = [pct(r["layers"][layer][key]) for r in runs]
+            _write_one(vals, dict(metric=metric, units="ratio", workload=workload,
+                                  n=max(1, int(kept["layers"][layer][nkey])),
+                                  arm=f"layers:{layer}", model=model, model_version=version,
+                                  caveat=caveat,
+                                  notes=f"scored by core.privacy.evaluation via {TEST}"),
+                       written, refused)
+    for name in runs[0]["marginal"]:
+        mname, mver = _layer_model(name, layer_model)
+        for metric, key, units in (("pii_marginal_recall_gain", "recall_gain", "entities"),
+                                   ("pii_marginal_direct_gain", "direct_gain", "entities"),
+                                   ("pii_marginal_false_positives_added", "fp_added", "regions")):
+            vals = [float(r["marginal"][name][key]) for r in runs]
+            _write_one(vals, dict(metric=metric, units=units, workload=workload,
+                                  n=int(kept["marginal"][name]["labelled"]),
+                                  arm=("all vs regex" if name == "all" else f"regex+{name} vs regex"),
+                                  model=mname, model_version=mver, caveat=caveat),
+                       written, refused)
+    return written, refused
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ner-model", default="qwen2.5:3b")
-    ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--runs", type=int, default=4,
+                    help="runs of the test; the first is a warm-up and is not recorded")
+    ap.add_argument("--ollama-port", type=int, default=OLLAMA_PORT)
+    ap.add_argument("--pf-port", type=int, default=PF_PORT)
     ap.add_argument("--no-ner", action="store_true")
     ap.add_argument("--no-pf", action="store_true")
     ap.add_argument("--record", action="store_true", help="write through benchmarks/lib/result.py")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if args.record and args.runs < 3:
+        ap.error("--record needs --runs of at least 3: the first is a warm-up, and an interval needs two more")
 
     subprocess.run([sys.executable, str(REPO / "tests/fixtures/pii-corpus/generate.py")], check=True, cwd=REPO)
     corpus_sha = hashlib.sha256(CORPUS.read_bytes()).hexdigest()[:12]
@@ -136,14 +232,14 @@ def main() -> int:
     logdir = pathlib.Path(os.environ.get("BUILDDIR", "/tmp")) / "ad13"
     logdir.mkdir(parents=True, exist_ok=True)
     ollama = pf = None
-    ollama_url = f"http://127.0.0.1:{OLLAMA_PORT}"
-    pf_url = f"http://127.0.0.1:{PF_PORT}"
+    ollama_url = f"http://127.0.0.1:{args.ollama_port}"
+    pf_url = f"http://127.0.0.1:{args.pf_port}"
     env = dict(os.environ)
     pf_rev = None
     digest = None
     try:
         if not args.no_ner:
-            ollama = start(["ollama", "serve"], {**os.environ, "OLLAMA_HOST": f"127.0.0.1:{OLLAMA_PORT}"}, logdir / "ollama.log")
+            ollama = start(["ollama", "serve"], {**os.environ, "OLLAMA_HOST": f"127.0.0.1:{args.ollama_port}"}, logdir / "ollama.log")
             if not wait_for(f"{ollama_url}/api/tags", 60):
                 print("ollama did not come up", file=sys.stderr)
                 return 1
@@ -157,13 +253,13 @@ def main() -> int:
             env["LOKE_AD13_OLLAMA_URL"] = ollama_url
             env["LOKE_AD13_NER_MODEL"] = args.ner_model
         if not args.no_pf:
-            snap = pathlib.Path.home() / ".cache/huggingface/hub/models--openai--privacy-filter/snapshots"
+            snap = PF_SNAPSHOTS
             revs = sorted(p.name for p in snap.iterdir()) if snap.is_dir() else []
             if len(revs) != 1:
                 print(f"expected one cached privacy-filter revision, found {revs}", file=sys.stderr)
                 return 1
             pf_rev = revs[0]
-            pf = start([sys.executable, str(REPO / "packages/privacy-filter/server.py"), str(PF_PORT)],
+            pf = start([sys.executable, str(REPO / "packages/privacy-filter/server.py"), str(args.pf_port)],
                        {**os.environ, "HF_HUB_OFFLINE": "1", "LOKE_PF_REVISION": pf_rev}, logdir / "pf.log")
             if not wait_for(f"{pf_url}/health", 300):
                 print("privacy-filter sidecar did not come up", file=sys.stderr)
@@ -173,8 +269,7 @@ def main() -> int:
         runs = []
         for i in range(args.runs):
             t0 = time.time()
-            out = subprocess.run(["scripts/run_tests.sh", TEST], cwd=REPO, env=env,
-                                 capture_output=True, text=True).stdout
+            out = run_test(env)
             r = parse(out)
             ok = f"PASS         {TEST}" in out
             print(f"run {i + 1}/{args.runs}: {'PASS' if ok else 'FAIL'} in {time.time() - t0:.0f}s")
@@ -194,51 +289,17 @@ def main() -> int:
         stop(pf)
 
     if args.record:
-        sys.path.insert(0, str(REPO))
-        from benchmarks.lib.result import Measurement, write, bootstrap_ci
         caveat = ("Synthetic 74-case corpus; entity-level, type-agnostic overlap. NER model is the one "
-                  "named, which may not be loke's default (qwen2.5:7b). The privacy-filter sidecar is a "
-                  "candidate layer pipeline.run does not call. Presidio not measured.")
+                  "named, which may not be loke's default (qwen2.5:7b). The privacy-filter sidecar is "
+                  "an opt-in layer of pipeline.run (F3b.3), off by default. Presidio not measured.")
         layer_model = {"ner": (f"ollama:{args.ner_model}", digest), "pf": ("openai/privacy-filter", pf_rev)}
-        for layer in runs[0]["layers"]:
-            # n is each ratio's own denominator: labelled entities, labelled direct
-            # identifiers, or detection regions (which vary between NER runs; the first
-            # run's is recorded and the notes carry every run).
-            for metric, key, nkey in (("pii_recall_entity", "recall", "labelled"),
-                                      ("pii_recall_direct_identifiers", "direct_recall", "direct_labelled"),
-                                      ("pii_precision_entity", "precision", "detections")):
-                vals = [pct(r["layers"][layer][key]) for r in runs]
-                model = version = None
-                for part, (mname, mver) in layer_model.items():
-                    if part in layer.split("+") or layer == "all":
-                        model = (model + " + " if model else "") + mname
-                        version = (version + " + " if version else "") + str(mver)
-                m = Measurement(metric=metric, value=round(sum(vals) / len(vals), 4), units="ratio",
-                                workload=workload, n=max(1, int(runs[0]["layers"][layer][nkey])),
-                                arm=f"layers:{layer}", model=model, model_version=version,
-                                runs=len(vals), caveat=caveat,
-                                notes=f"per-run {vals}; scored by core.privacy.evaluation via {TEST}")
-                if len(vals) >= 2:
-                    lo, hi, meth = bootstrap_ci(vals)
-                    m.ci_low, m.ci_high, m.ci_method = round(min(lo, m.value), 4), round(max(hi, m.value), 4), meth
-                write(m)
-        for name in runs[0]["marginal"]:
-            for metric, key, units in (("pii_marginal_recall_gain", "recall_gain", "entities"),
-                                       ("pii_marginal_direct_gain", "direct_gain", "entities"),
-                                       ("pii_marginal_false_positives_added", "fp_added", "regions")):
-                vals = [float(r["marginal"][name][key]) for r in runs]
-                mname, mver = layer_model.get(name, ("ollama:" + args.ner_model + " + openai/privacy-filter",
-                                                     f"{digest} + {pf_rev}"))
-                m = Measurement(metric=metric, value=round(sum(vals) / len(vals), 4), units=units,
-                                workload=workload, n=int(runs[0]["marginal"][name]["labelled"]),
-                                arm=("all vs regex" if name == "all" else f"regex+{name} vs regex"),
-                                model=mname, model_version=str(mver),
-                                runs=len(vals), caveat=caveat, notes=f"per-run {vals}")
-                if len(vals) >= 2:
-                    lo, hi, meth = bootstrap_ci(vals)
-                    m.ci_low, m.ci_high, m.ci_method = min(lo, m.value), max(hi, m.value), meth
-                write(m)
-        print("recorded to benchmarks/results/")
+        written, refused = record(runs, workload=workload, caveat=caveat, layer_model=layer_model)
+        print(f"recorded {len(written)} row(s) to {result.RESULTS_DIR}")
+        if refused:
+            print(f"NOT recorded, {len(refused)} row(s):", file=sys.stderr)
+            for line in refused:
+                print(f"  {line}", file=sys.stderr)
+            return 3
     return 0
 
 

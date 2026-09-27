@@ -356,7 +356,12 @@ def summarise(values: list[float], *, discard_first: bool = True, **fields) -> M
         runs = runs[1:]
     if not runs:
         raise ValueError("no runs left after discarding warm-up")
-    m = Measurement(value=_mean(runs), n=fields.pop("n", len(runs)), runs=len(runs), **fields)
+    # Identical runs: their mean IS the value. Summing three copies of 0.8936 in floating point
+    # gives 0.8935999999999998, which lies outside the degenerate interval [0.8936, 0.8936]
+    # that bca_ci returns, and validate would refuse the row (found by VM1.3b).
+    same = all(v == runs[0] for v in runs)
+    m = Measurement(value=runs[0] if same else _mean(runs), n=fields.pop("n", len(runs)),
+                    runs=len(runs), **fields)
     if len(runs) >= 2:
         m.ci_low, m.ci_high, m.ci_method = bca_ci(runs)
     return m
