@@ -103,6 +103,68 @@ python3 tests/fixtures/pii-corpus/generate.py
 ./scripts/run_tests.sh tests/integration/test_detection_recall.tk
 ```
 
+### PII detection, marginal value per layer — 2026-09-28
+
+**The first measurement of any detection layer other than regex.** Every earlier per-layer figure
+is void: until VM1.6e (2026-09-27) the NER and Presidio layers had never been reached at all.
+
+Recall over all 106 labelled entities loke claims to detect (so PERSON is in, Medicare is out);
+direct identifiers are the 74 of them that name a person (PERSON 18, EMAIL 28, PHONE_AU 12,
+AU_TFN 16). Precision and false positives are the utility cost, counted as merged masked regions.
+Where the NER layer is involved the figure varied between the three runs, and the range is given.
+
+| Layers | Recall | **Recall, direct identifiers** | Precision (cost) | False-positive regions |
+|---|---|---|---|---|
+| regex alone | 79.25% (84) | **70.27%** (52) | 89.36% | 10 |
+| NER alone | 77.36–80.19% (82–85) | 77.03–81.08% (57–60) | 65.43–66.67% | 50–56 |
+| privacy-filter alone | 88.68% (94) | 83.78% (62) | 92.44% | 18 |
+| regex + NER | 95.28–96.23% (101–102) | **93.24–94.59%** (69–70) | 66.47–67.48% | 53–57 |
+| regex + privacy-filter | 96.23% (102) | **94.59%** (70) | 90.53% | 16 |
+| all three | 97.17–98.11% (103–104) | **95.95–97.30%** (71–72) | 68.65–71.51% | 53–58 |
+
+| Added to regex | Entities gained | of which direct identifiers | False-positive regions added |
+|---|---|---|---|
+| + NER | 17–18 | 17–18 | 43–47 |
+| + privacy-filter | 18 | 18 | 6 |
+| + both | 19–20 | 19–20 | 43–48 |
+
+**What it says.** Every entity a model layer adds over regex is a direct identifier. NER and the
+privacy-filter sidecar each lift direct-identifier recall from 70% to about 94%, but NER pays seven
+to eight times the false-positive cost for it (43–47 regions against 6) and varies from run to
+run, where the sidecar gives the same answer every time. **The better of the two is the layer
+`pipeline.run` does not call** (AD1.4, B9). Adding both buys one or two more entities over either.
+Even with every layer that ran, 2 to 3 labelled entities are still missed.
+
+**Not measured, and why:**
+
+- **Presidio**, which `pipeline.run` does call. No Presidio analyser is installed on the measuring
+  machine and installing one needs the network. There is no figure for it.
+- **NER with loke's default model.** `pipeline.newconfig` names `qwen2.5:7b`, which is not installed
+  here; the model used is `qwen2.5:3b`. The NER rows describe that model, not the shipped default.
+- No latency, no per-type breakdown of NER's false positives, and none of research-proposal §5.2's
+  statistical tests (McNemar, Cochran's Q). Three runs is enough to show the spread, not to put an
+  interval on it.
+
+**Provenance.** toke `0b0bc4e`, ooke `v3.0.0-rc.1` (`c07c503`), loke branch `work/w20-ad1` on
+`535a909` with the AD1.2/AD1.3 change. Corpus `tests/fixtures/pii-corpus`, seed 20260919, 74 cases,
+`corpus.jsonl` sha256 `bece1023187d…`. NER: `core.privacy.ner.scan` against Ollama 0.22.0 on
+loopback, `qwen2.5:3b` (digest `357c53fb659c`, Q4_K_M), no temperature pinned because loke pins
+none. Privacy-filter: `core.privacy.sidecarclient.detect` against `packages/privacy-filter/server.py`
+on loopback, `openai/privacy-filter` revision `7ffa9a043d54d1be65afb281eddf0ffbe629385b` from the
+local Hugging Face cache with `HF_HUB_OFFLINE=1`, threshold 0.0 (the `models.json` default). Regex
+in process. Three runs, 2026-09-28, macOS arm64; recorded through `benchmarks/lib/result.py`
+(VM1.1). Scored by `core.privacy.evaluation` in `tests/integration/test_layer_marginal.tk`: entity
+level, type-agnostic overlap, NER values placed wherever the pipeline would mask them. Because
+false positives are merged regions, a union can count fewer than one of its parts (regex + sidecar
+16, sidecar alone 18): a spurious fragment that merges into a region covering real PII stops being
+spurious. Nothing was sent off the machine.
+
+Reproduce (after `scripts/build_loke.sh` and the moke and loke-cli trees are built):
+
+```sh
+TOKE_DIR=<toke at 0b0bc4e> BUILDDIR=<dir> python3 benchmarks/ad13/run.py --ner-model qwen2.5:3b --runs 3 --record
+```
+
 ### PII detection, regex layer, measured by loke's OWN compiled detector — 2026-09-23
 
 **The first detection figure this project has taken from the code it ships.** Every earlier
@@ -389,7 +451,7 @@ TOKE_DIR=<toke at 0b0bc4e> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2,
 
 ## Status: no *performance* figure is published
 
-Three measurements exist: detection recall for the regex layer, the serialisation baselines, and the
+The measurements are: detection recall for the regex layer and, since 2026-09-28, per detection layer (AD1.3), the serialisation baselines, and the
 regex detector's standalone throughput above. That throughput figure is still a **negative** result
 against its target (F3.1b made memory linear and 10 MB completes, but throughput is under 2 MB/s),
 and it covers one function on one host. **No figure for end-to-end latency, pipeline throughput, cache hit

@@ -1,0 +1,208 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testlayermarginal;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=json:std.json;
+i=env:std.env;
+i=io:std.io;
+i=rx:core.privacy.regex;
+i=ner:core.privacy.ner;
+i=sid:core.privacy.sidecarclient;
+i=pipe:core.privacy.pipeline;
+i=ev:core.privacy.evaluation;
+i=sh:shared.types;
+
+(* AD1.3 — the marginal value of each detection layer, measured on the PII corpus through
+   the layers' OWN clients and scored by core.privacy.evaluation.
+
+   research-proposal §5.2 asks what each added layer contributes in recall and what it costs
+   in false positives. This file answers it for every layer that can run on this machine:
+
+     regex     core.privacy.regex.detect, in process. Always run.
+     ner       core.privacy.ner.scan against a LOCAL Ollama, run when LOKE_AD13_OLLAMA_URL
+               names one. The model is LOKE_AD13_NER_MODEL, or the pipeline's own default
+               (pipeline.newconfig) when unset.
+     pf        core.privacy.sidecarclient.detect against the privacy-filter sidecar, run when
+               LOKE_AD13_PF_URL names one. NOT a layer pipeline.run calls today (AD1.4 says
+               so): measured as a candidate, and labelled that way.
+     presidio  NOT MEASURED. pipeline.run calls it, but no Presidio analyser is installed on
+               the machine this was written on and installing one needs the network. A
+               figure for it would be invented, so there is none.
+
+   Configurations scored: each layer alone, regex plus each other layer, and all of them.
+   Marginal value is (regex + X) minus (regex alone): the entities X catches that regex did
+   not, and the false-positive regions it adds.
+
+   Scoring is ev.scoretext: entity-level, type-agnostic overlap, recall over every labelled
+   entity loke claims to detect (expected_detected, so PERSON is in and Medicare is out),
+   false positives as merged regions overlapping no real PII. NER reports values without
+   spans, so its hits are placed with ev.valuespans, where the pipeline would mask them.
+
+   Without the environment variables this runs the regex configuration only and asserts the
+   instrument's invariants, which is what CI does. With them it is the measurement:
+   benchmarks/ad13/run.py starts the local services on isolated ports, runs this, and
+   records the AD13 lines through benchmarks/lib/result.py. A layer that failed to answer
+   for any text makes the run invalid (asserted): an unreached layer scored as finding
+   nothing would understate it silently. *)
+
+t=$marginal{
+  rxonly:$entityscore;
+  neronly:$entityscore;
+  pfonly:$entityscore;
+  rxner:$entityscore;
+  rxpf:$entityscore;
+  all:$entityscore;
+  nerfailures:i64;
+  pffailures:i64;
+  texts:i64
+};
+
+t=$layerhits{
+  ok:bool;
+  spans:@$labelspan
+};
+
+f=corpuspath():str{
+  <"tests/fixtures/pii-corpus/corpus.jsonl"
+};
+
+f=emptymarginal():$marginal{
+  let z=ev.emptyscore();
+  <$marginal{rxonly:z;neronly:z;pfonly:z;rxner:z;rxpf:z;all:z;nerfailures:0;pffailures:0;texts:0}
+};
+
+f=nermodel():str{
+  let m=env.getor("LOKE_AD13_NER_MODEL";"");
+  if(str.len(m)>0){ <m }el{};
+  <pipe.newconfig("";"").nermodelid
+};
+
+f=nerhits(url:str;text:str):$layerhits{
+  if(str.len(url)==0){ <$layerhits{ok:true;spans:@()} }el{};
+  let scan=ner.scan(ner.new(url;nermodel());text);
+  if(!scan.ok){ <$layerhits{ok:false;spans:@()} }el{};
+  <$layerhits{ok:true;spans:ev.valuespans(text;scan.nerhits)}
+};
+
+(* The sidecar reports code-point offsets, converted to bytes like the corpus's. *)
+f=pfspans(text:str;ents:@$json):@$labelspan{
+  let out=mut.@($labelspan);
+  lp(let i=0;i<ents.len;i=i+1){
+    let e=ents.get(i);
+    let kind=mt json.str(e;"type") { $ok:s s; $err:x "" };
+    let cstart=mt json.i64(e;"start") { $ok:n n; $err:x 0-1 };
+    let cend=mt json.i64(e;"end") { $ok:n n; $err:x 0-1 };
+    if(cstart>=0 && cend>cstart){
+      out=out.push($labelspan{kind:kind;start:ev.bytestart(text;cstart);end:ev.bytestart(text;cend)})
+    }el{}
+  };
+  <out
+};
+
+f=pfhits(url:str;text:str):$layerhits{
+  if(str.len(url)==0){ <$layerhits{ok:true;spans:@()} }el{};
+  let scan=sid.detect(sid.new(url;"");text);
+  if(!scan.ok){ <$layerhits{ok:false;spans:@()} }el{};
+  let obj=json.dec(scan.body);
+  let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
+  <$layerhits{ok:true;spans:pfspans(text;ents)}
+};
+
+f=failif(bad:bool):i64{
+  if(bad){ <1 }el{};
+  <0
+};
+
+f=scoreone(acc:$marginal;line:str;nerurl:str;pfurl:str):$marginal{
+  let obj=json.dec(line);
+  let text=mt json.str(obj;"text") { $ok:s s; $err:e "" };
+  if(str.len(text)==0){ <acc }el{};
+  let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
+  let scored=ev.corpuslabels(text;ents;true);
+  let realpii=ev.corpuslabels(text;ents;false);
+  let res:$piidetectionresult=rx.detect(text);
+  let rxd=ev.entityspans(res.entities);
+  let nh=nerhits(nerurl;text);
+  let ph=pfhits(pfurl;text);
+  <$marginal{
+    rxonly:ev.scoretext(scored;realpii;rxd;acc.rxonly);
+    neronly:ev.scoretext(scored;realpii;nh.spans;acc.neronly);
+    pfonly:ev.scoretext(scored;realpii;ph.spans;acc.pfonly);
+    rxner:ev.scoretext(scored;realpii;ev.joinspans(rxd;nh.spans);acc.rxner);
+    rxpf:ev.scoretext(scored;realpii;ev.joinspans(rxd;ph.spans);acc.rxpf);
+    all:ev.scoretext(scored;realpii;ev.joinspans(ev.joinspans(rxd;nh.spans);ph.spans);acc.all);
+    nerfailures:acc.nerfailures+failif(!nh.ok);
+    pffailures:acc.pffailures+failif(!ph.ok);
+    texts:acc.texts+1
+  }
+};
+
+f=scorecorpus(nerurl:str;pfurl:str):$marginal{
+  let raw=mt file.read(corpuspath()) { $ok:s s; $err:e "" };
+  let acc=mut.emptymarginal();
+  let lines=str.split(raw;"
+");
+  lp(let i=0;i<lines.len;i=i+1){
+    let line=lines.get(i);
+    if(str.len(line)>2){ acc=scoreone(acc;line;nerurl;pfurl) }el{}
+  };
+  <acc
+};
+
+(* The marginal line for regex + X against regex alone: entities gained, false-positive
+   regions added. Signed, because a layer can in principle cost more than it gains. *)
+f=marginalline(name:str;base:$entityscore;with:$entityscore):str{
+  let gain=with.matched-base.matched;
+  let dgain=with.directmatched-base.directmatched;
+  let fpcost=with.spurious-base.spurious;
+  <"AD13 marginal=\(name) recall_gain=\(ev.numtext(gain)) direct_gain=\(ev.numtext(dgain)) fp_added=\(ev.numtext(fpcost)) labelled=\(ev.numtext(base.labelled))"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let nerurl=env.getor("LOKE_AD13_OLLAMA_URL";"");
+  let pfurl=env.getor("LOKE_AD13_PF_URL";"");
+  let m=scorecorpus(nerurl;pfurl);
+
+  if(t.assert(m.texts>0;"the corpus was read (a missing corpus must fail, not score 0/0)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(m.rxonly.labelled>0;"the corpus carries labelled entities loke claims to detect")){pass=pass+1}el{fail=fail+1};
+
+  io.println("AD13 texts=\(ev.numtext(m.texts)) ner=\(nerurl) ner_model=\(nermodel()) pf=\(pfurl) ner_failures=\(ev.numtext(m.nerfailures)) pf_failures=\(ev.numtext(m.pffailures))");
+  io.println("AD13 \(ev.scoreline("regex";m.rxonly))");
+
+  (* Regex alone cannot reach PERSON, so it cannot reach every claimed entity: if it did,
+     the scorer would be ignoring the labels. *)
+  if(t.assert(m.rxonly.matched<m.rxonly.labelled;"regex alone misses the PERSON entities it has no pattern for")){pass=pass+1}el{fail=fail+1};
+
+  (* With no layer configured, a combination adds nothing: the join of regex with an empty
+     layer scores exactly as regex. *)
+  if(str.len(nerurl)==0){
+    if(t.assert(m.rxner.matched==m.rxonly.matched && m.rxner.spurious==m.rxonly.spurious;"with no NER layer, regex+ner scores exactly as regex")){pass=pass+1}el{fail=fail+1}
+  }el{
+    io.println("AD13 \(ev.scoreline("ner";m.neronly))");
+    io.println("AD13 \(ev.scoreline("regex+ner";m.rxner))");
+    io.println(marginalline("ner";m.rxonly;m.rxner));
+    if(t.assert(m.nerfailures==0;"LIVE: the NER layer answered for every text (failures=\(ev.numtext(m.nerfailures)))")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(m.rxner.matched>=m.rxonly.matched;"LIVE: adding NER cannot lose an entity regex caught")){pass=pass+1}el{fail=fail+1}
+  };
+  if(str.len(pfurl)>0){
+    io.println("AD13 \(ev.scoreline("pf";m.pfonly))");
+    io.println("AD13 \(ev.scoreline("regex+pf";m.rxpf))");
+    io.println(marginalline("pf";m.rxonly;m.rxpf));
+    if(t.assert(m.pffailures==0;"LIVE: the privacy-filter sidecar answered for every text (failures=\(ev.numtext(m.pffailures)))")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(m.rxpf.matched>=m.rxonly.matched;"LIVE: adding the sidecar cannot lose an entity regex caught")){pass=pass+1}el{fail=fail+1}
+  }el{};
+  if(str.len(nerurl)>0 && str.len(pfurl)>0){
+    io.println("AD13 \(ev.scoreline("all";m.all))");
+    io.println(marginalline("all";m.rxonly;m.all));
+    if(t.assert(m.all.matched>=m.rxner.matched && m.all.matched>=m.rxpf.matched;"LIVE: all layers catch at least what any pair does")){pass=pass+1}el{fail=fail+1}
+  }el{};
+
+  <fail
+};
