@@ -1,0 +1,107 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.models.ollamajson;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=ol:core.models.ollama;
+
+(* MK6.13 — the bodies core.models.ollama sends, judged by a strict JSON parser on what
+   ARRIVES at scripts/lib/http_recorder.py.
+
+   Every string in these bodies went through json.enc, which escapes a quote and leaves a
+   newline, a tab or any other control character raw. Ollama decodes with Go's encoding/json,
+   which refuses a raw control character inside a string: measured against Ollama 0.22.0 on a
+   port of its own, a generate body whose prompt held a raw newline was answered 400, "invalid
+   character '\n' in string literal", and a chat body with a raw tab likewise. So every
+   multi-line prompt to a local model failed, and a test that looked for the body with
+   str.contains could not see it, because the recorder's log writes a raw newline as the two
+   characters an escaped one is made of. scripts/lib/json_field.py reads the exact bodies
+   and parses them with Python's json module, which refuses what Go refuses, and then
+   compares the decoded field with the text that was sent, character for character. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_ollamajson_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* "ok" when the last body sent to `path` is strict JSON and its `field` is `want`; otherwise
+   the reason, which the assertion prints. *)
+f=judge(bodies:str;path:str;field:str;want:str):str{
+  let h=mt process.spawn(@("python3";"scripts/lib/json_field.py";bodies;path;field;want)) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+(* A newline, a tab, quotes, a backslash, a carriage return and ESC, the control character a
+   prompt pasted from a terminal carries. *)
+f=multiline():str{
+  <"first line\nsecond line\twith \"quotes\", a back\\slash,\r\na colour reset \x1b[0m and a form feed \x0c."
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let bodies="\(logp).bodies";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder standing in for Ollama came up")){pass=pass+1}el{fail=fail+1};
+  let c=ol.new("http://127.0.0.1:\(port)");
+  let text=multiline();
+
+  (* The validator itself, on bodies whose verdict is known: a raw newline refused, an
+     escaped one taken. Without this a validator that accepts everything passes every
+     assertion below. *)
+  let ctl="\(base).ctl";
+  let wrote=mt file.write(ctl;"[\"POST\",\"/raw\",\"{\\\"p\\\":\\\"a\\nb\\\"}\"]\n[\"POST\",\"/esc\",\"{\\\"p\\\":\\\"a\\\\nb\\\"}\"]\n") {$ok:v true; $err:e false};
+  if(t.assert(wrote && str.startswith(judge(ctl;"/raw";"p";"a\nb");"not strict JSON") && str.eq(judge(ctl;"/esc";"p";"a\nb");"ok");"control: the judge refuses a raw newline and takes an escaped one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── /api/generate: prompt and system ────────────────────────────────── *)
+  let g=ol.generateplain(c;$generateopts{model:"m1";prompt:text;system:"be brief.\nno lists.";numgpu:0 as i32});
+  if(t.asserteq(g;"generated-by-recorder";"a multi-line generate is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/api/generate";"prompt";text);"ok";"the generate body is strict JSON and its prompt arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/api/generate";"system";"be brief.\nno lists.");"ok";"and so does its multi-line system prompt")){pass=pass+1}el{fail=fail+1};
+
+  (* ── /api/chat: the system prompt, sent as the first message, and each message ── *)
+  let msgs=@($chatmessage{role:"user";content:text};$chatmessage{role:"assistant";content:"one\ttwo"});
+  let r=ol.sendchatplain(c;$chatopts{model:"m1";messages:msgs;system:"you are careful.\nbe brief.";numgpu:0 as i32});
+  if(t.assert(str.len(r)>0;"a multi-line chat is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/api/chat";"messages.0.content";"you are careful.\nbe brief.");"ok";"the chat body is strict JSON and its system message arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/api/chat";"messages.1.content";text);"ok";"the user's multi-line message arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/api/chat";"messages.2.content";"one\ttwo");"ok";"and the assistant's, with its tab")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/api/chat";"model";"m1");"ok";"the model is named")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(bodies);
+  file.delete("\(logp).headers");
+  file.delete(ctl);
+  file.delete("\(base).port");
+  <fail
+};

@@ -1,0 +1,63 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.jsonanswers;
+
+i=t:std.test;
+i=str:std.str;
+i=process:std.process;
+i=nb:core.nocustody.bound;
+i=nr:core.nocustody.request;
+i=ns:core.nocustody.session;
+
+(* MK6.13 — the answers the no-custody path builds, judged by a strict JSON parser.
+
+   core.nocustody.request's strarrayjson (the released labels and values, which are the
+   caller's own data and can hold anything a CSV cell can) and errorjson, core.nocustody.
+   bound's refusal and core.nocustody.session's issue and refusal answers all went through
+   json.enc, which escapes a quote and leaves a newline, a tab or any other control character
+   raw. So a released cell holding a line break made the whole answer something a strict
+   parser (a browser's JSON.parse, Python's json) refuses. scripts/lib/json_field.py --body
+   parses each answer with Python's json module and compares the decoded field with the text
+   that went in, character for character. *)
+
+f=judge(text:str;field:str;want:str):str{
+  let h=mt process.spawn(@("python3";"scripts/lib/json_field.py";"--body";text;field;want)) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+f=multiline():str{
+  <"Flat 2\n10 Example St\twith \"quotes\", a back\\slash and ESC \x1b[0m"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let text=multiline();
+
+  (* The judge's own control: a raw newline refused, an escaped one taken. *)
+  if(t.assert(str.startswith(judge("{\"a\":\"x\ny\"}";"a";"x\ny");"not strict JSON") && str.eq(judge("{\"a\":\"x\\ny\"}";"a";"x\ny");"ok");"control: the judge refuses a raw newline and takes an escaped one")){pass=pass+1}el{fail=fail+1};
+
+  let arr=nr.strarrayjson(@("plain";text));
+  if(t.asserteq(judge(arr;"1";text);"ok";"request.strarrayjson: a released value with a newline, a tab and quotes is strict JSON and exact")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(arr;"0";"plain");"ok";"and the plain value beside it is unchanged")){pass=pass+1}el{fail=fail+1};
+
+  let ej=nr.errorjson("bad artifact:\n\tcolumn \"x\" unknown");
+  if(t.asserteq(judge(ej;"error";"bad artifact:\n\tcolumn \"x\" unknown");"ok";"request.errorjson: a multi-line reason is strict JSON and exact")){pass=pass+1}el{fail=fail+1};
+
+  let ok=$boundedresult{ok:true;code:"";err:"";labels:@(text);values:@("1\n2");sessionrows:1;sessioncells:2};
+  let okj=nb.boundedjson(ok);
+  if(t.asserteq(judge(okj;"labels.0";text);"ok";"bound.boundedjson: a released label with a newline is strict JSON and exact")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(okj;"values.0";"1\n2");"ok";"and so is a released value")){pass=pass+1}el{fail=fail+1};
+
+  let no=$boundedresult{ok:false;code:"refused";err:"withheld:\n\t\"too many\"";labels:@();values:@();sessionrows:0;sessioncells:0};
+  if(t.asserteq(judge(nb.boundedjson(no);"error";"withheld:\n\t\"too many\"");"ok";"bound.boundedjson: a multi-line refusal is strict JSON and exact")){pass=pass+1}el{fail=fail+1};
+
+  if(t.asserteq(judge(ns.refusaljson("odd\ncode");"refusal";"odd\ncode");"ok";"session.refusaljson: an unknown code, echoed, is strict JSON and exact")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(ns.issuedjson("abc123");"session_id";"abc123");"ok";"session.issuedjson is strict JSON")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

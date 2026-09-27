@@ -1,0 +1,64 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.shared.jsonescape;
+
+i=t:std.test;
+i=json:std.json;
+i=str:std.str;
+i=process:std.process;
+i=jx:shared.jsonobj;
+
+(* MK6.13 — shared.jsonobj.escape, which every request body and answer that carries free text
+   now goes through in place of json.enc, and unescape, its inverse.
+
+   json.enc escapes a quote and a backslash and leaves every control character raw. escape
+   handled backslash, quote, newline, carriage return and tab, and left the other control
+   characters raw: a prompt pasted from a terminal carries ESC (0x1B), and text taken from a
+   PDF carries form feeds. JSON forbids every one of them raw inside a string, and Ollama's
+   decoder answers 400 to a body that holds one (measured at Ollama 0.22.0 with a raw tab).
+   The verdict here is Python's json module, which refuses exactly what Go's does. *)
+
+f=judge(text:str;want:str):str{
+  let h=mt process.spawn(@("python3";"scripts/lib/json_field.py";"--body";text;"";want)) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+(* Every control character but NUL, which a toke str cannot hold, between printable text. *)
+f=allcontrols():str{
+  <"a\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1fz"
+};
+
+(* The same without U+0001, which unescape leaves as written: it parks an escaped backslash
+   on that character. *)
+f=controlsbut1():str{
+  <"a\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1fz"
+};
+
+f=roundtrip(s:str):str{
+  let o=mt json.dec("{\"v\":\(jx.escape(s))}") { $ok:v v; $jsonerr:e jx.emptyobj() };
+  <jx.strvalue(o;"v";"<absent>")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(t.assert(str.startswith(judge("\"x\ny\"";"x\ny");"not strict JSON") && str.eq(judge("\"x\\ny\"";"x\ny");"ok");"control: the judge refuses a raw newline and takes an escaped one")){pass=pass+1}el{fail=fail+1};
+
+  let all=allcontrols();
+  if(t.asserteq(judge(jx.escape(all);all);"ok";"escape: every control character U+0001 to U+001F comes out as strict JSON that decodes to the input exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(jx.escape("\x1b[0m\x0c");"\"\\u001b[0m\\u000c\"";"escape: ESC and a form feed are written as \\u001b and \\u000c")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(jx.escape("a\nb\t\"c\"\\d");"\"a\\nb\\t\\\"c\\\"\\\\d\"";"escape: newline, tab, quote and backslash keep their short escapes")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(jx.escape("plain text");"\"plain text\"";"escape: text with nothing to escape is only quoted")){pass=pass+1}el{fail=fail+1};
+
+  let but1=controlsbut1();
+  if(t.asserteq(roundtrip(but1);but1;"unescape: U+0002 to U+001F come back exactly through escape and strvalue")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(roundtrip("x\\u001by");"x\\u001by";"unescape: an escaped backslash before u001b stays a backslash and the letters")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(roundtrip("x\x01y");"x\\u0001y";"unescape: U+0001 is left as written, as documented")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

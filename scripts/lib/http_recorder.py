@@ -39,6 +39,12 @@ F5.11: every request's headers are also appended to `<log-file>.headers`, as a
 duplicated header appears twice), and a blank line. The hosted-provider paths
 (/v1/messages, /v1/chat/completions) answer in Anthropic's and OpenAI's shapes, so the
 cloud dispatch can be judged by what arrives without a real key.
+
+MK6.13: the log line above writes a raw newline in a body as the two characters `\n`, which
+is exactly what an escaped one looks like, so it cannot tell a body a strict parser accepts
+from one it refuses. Every request is therefore also appended to `<log-file>.bodies` as one
+line, `json.dumps([method, path, body])`, which keeps the body's exact characters.
+scripts/lib/json_field.py reads that file and judges a body with Python's strict parser.
 """
 import http.server, json, os, sys
 
@@ -111,6 +117,8 @@ class H(http.server.BaseHTTPRequestHandler):
             for k, v in self.headers.items():
                 f.write("%s: %s\n" % (k, v))
             f.write("\n")
+        with open(LOG + ".bodies", "a") as f:
+            f.write(json.dumps([self.command, self.path, body]) + "\n")
         return body
 
     def _send(self, obj):

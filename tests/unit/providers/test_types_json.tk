@@ -1,0 +1,105 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.providers.typesjson;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pt:core.providers.types;
+i=ant:core.providers.anthropic;
+i=oai:core.providers.openai;
+
+(* MK6.13 — the hosted request bodies core.providers.types builds (pt.anthropicbody,
+   pt.openaibody), sent through core.providers.transport to scripts/lib/http_recorder.py on
+   loopback and judged by a strict JSON parser on what ARRIVES.
+
+   Every message's content and the system prompt went through json.enc, which escapes a quote
+   and leaves a newline or a tab raw, so every multi-line prompt went out as a body a strict
+   parser refuses. The judge, scripts/lib/json_field.py, parses the exact body with Python's
+   json module and compares the decoded field with the text that was sent, character for
+   character; tests/unit/models/test_ollama_json.tk carries the judge's own control. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_providersjson_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* "ok" when the last body sent to `path` is strict JSON and its `field` is `want`; otherwise
+   the reason, which the assertion prints. *)
+f=judge(bodies:str;path:str;field:str;want:str):str{
+  let h=mt process.spawn(@("python3";"scripts/lib/json_field.py";bodies;path;field;want)) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+(* A newline, a tab, quotes, a backslash, a carriage return and ESC, the control character a
+   prompt pasted from a terminal carries. *)
+f=multiline():str{
+  <"first line\nsecond line\twith \"quotes\", a back\\slash,\r\na colour reset \x1b[0m and a form feed \x0c."
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let bodies="\(logp).bodies";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  let url="http://127.0.0.1:\(port)";
+  let text=multiline();
+  let sys="be careful.\n\tno lists.";
+  let req=$completionrequest{
+    modelid:"model-under-test";
+    messages:@(pt.usermsg(text);pt.assistantmsg("one\ttwo"));
+    systemprompt:sys;
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  };
+
+  (* ── Anthropic: a top-level system string and the messages ─────────────── *)
+  let ar:$completionresponse=ant.completeplainat(ant.new("sk-ant-test-key");req;"\(url)/v1/messages");
+  if(t.assert(pt.iscompletion(ar);"a multi-line Anthropic request is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/v1/messages";"system";sys);"ok";"the Anthropic body is strict JSON and its system prompt arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/v1/messages";"messages.0.content";text);"ok";"the user's multi-line message arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/v1/messages";"messages.1.content";"one\ttwo");"ok";"and the assistant's, with its tab")){pass=pass+1}el{fail=fail+1};
+
+  (* ── OpenAI: the system prompt is the first message ──────────────────────── *)
+  let orr:$completionresponse=oai.completeplainat(oai.new("sk-oai-test-key");req;"\(url)/v1/chat/completions");
+  if(t.assert(pt.iscompletion(orr);"a multi-line OpenAI request is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/v1/chat/completions";"messages.0.content";sys);"ok";"the OpenAI body is strict JSON and its system message arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/v1/chat/completions";"messages.1.content";text);"ok";"the user's multi-line message arrives exactly")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(bodies;"/v1/chat/completions";"model";"model-under-test");"ok";"and the model is named")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(bodies);
+  file.delete("\(logp).headers");
+  file.delete("\(base).port");
+  <fail
+};

@@ -174,7 +174,13 @@ f=elemstr(o:$json;key:str;idx:i64;field:str;fallback:str):str{
    Order is load-bearing. BACKSLASH FIRST: escape the quotes first and the backslash you just
    inserted gets escaped a moment later, turning `\"` into `\\"`. Newlines and tabs matter
    because an error message quoting a prompt, or a memory drawer, is multi-line more often than
-   not, and a raw newline inside a JSON string is invalid. *)
+   not, and a raw newline inside a JSON string is invalid.
+
+   MK6.13: every other control character, U+0001 to U+001F, is written as \u00XX. JSON forbids
+   all of them raw, not only the three above, and Ollama's decoder (Go's encoding/json) answers
+   400 to a body holding one, measured at Ollama 0.22.0: "invalid character '\t' in string
+   literal". A prompt pasted from a terminal carries ESC (0x1B), and text extracted from a PDF
+   carries form feeds. NUL is not handled: a toke str cannot hold one. *)
 f=escape(s:str):str{
   let b=str.replace(s;"\\";"\\\\");
   let q=str.replace(b;"\"";"\\\"");
@@ -182,7 +188,26 @@ f=escape(s:str):str{
 ";"\\n");
   let r=str.replace(n;"\r";"\\r");
   let tb=str.replace(r;"\t";"\\t");
-  <str.concat("\"";str.concat(tb;"\""))
+  <"\"\(escapecontrols(tb))\""
+};
+
+(* The raw control characters escape leaves to this, and their escapes, index for index. *)
+f=controlchars():@str{
+  <@("\x01";"\x02";"\x03";"\x04";"\x05";"\x06";"\x07";"\x08";"\x0b";"\x0c";"\x0e";"\x0f";"\x10";"\x11";"\x12";"\x13";"\x14";"\x15";"\x16";"\x17";"\x18";"\x19";"\x1a";"\x1b";"\x1c";"\x1d";"\x1e";"\x1f")
+};
+
+f=controlescapes():@str{
+  <@("\\u0001";"\\u0002";"\\u0003";"\\u0004";"\\u0005";"\\u0006";"\\u0007";"\\u0008";"\\u000b";"\\u000c";"\\u000e";"\\u000f";"\\u0010";"\\u0011";"\\u0012";"\\u0013";"\\u0014";"\\u0015";"\\u0016";"\\u0017";"\\u0018";"\\u0019";"\\u001a";"\\u001b";"\\u001c";"\\u001d";"\\u001e";"\\u001f")
+};
+
+f=escapecontrols(s:str):str{
+  let raws=controlchars();
+  let escs=controlescapes();
+  let out=mut.s;
+  lp(let i=0;i<raws.len;i=i+1){
+    if(str.contains(out;raws.get(i))){ out=str.replace(out;raws.get(i);escs.get(i)) }el{}
+  };
+  <out
 };
 
 (* ── Decoding a string value, because std.json's accessor loses characters (T-47) ────
@@ -196,13 +221,26 @@ f=escape(s:str):str{
    here. `unescape` is the inverse of `escape`: an escaped backslash is parked on \x01 first,
    so `\\n` stays a backslash followed by `n` rather than becoming a newline. \x01 cannot
    occur raw inside a JSON string — control characters must be escaped — so parking on it is
-   exact. `\uXXXX` is left as written; `escape` never produces it. *)
+   exact. `\uXXXX` is left as written, except the control characters `escape` writes that way
+   (MK6.13): U+0002 to U+001F are decoded. U+0001 is not, because it would come back as the
+   parked backslash; `\u0001` is left as written. *)
 f=unescape(body:str):str{
   <str.replace(unescapecontrols(str.replace(str.replace(body;"\\\\";"\x01");"\\\"";"\""));"\x01";"\\")
 };
 
 f=unescapecontrols(s:str):str{
-  <str.replace(str.replace(str.replace(str.replace(s;"\\n";"\n");"\\r";"\r");"\\t";"\t");"\\/";"/")
+  <unescapeunicode(str.replace(str.replace(str.replace(str.replace(s;"\\n";"\n");"\\r";"\r");"\\t";"\t");"\\/";"/"))
+};
+
+f=unescapeunicode(s:str):str{
+  if(str.contains(s;"\\u00")==false){ <s }el{};
+  let raws=controlchars();
+  let escs=controlescapes();
+  let out=mut.s;
+  lp(let i=1;i<raws.len;i=i+1){
+    if(str.contains(out;escs.get(i))){ out=str.replace(out;escs.get(i);raws.get(i)) }el{}
+  };
+  <out
 };
 
 (* The raw JSON text of the value at `key`, or "" when the key is absent. *)

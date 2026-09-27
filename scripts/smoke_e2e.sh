@@ -241,6 +241,41 @@ esac
 sel=$(dl "SELECT fallback_reason||'/'||fallback_selected_by FROM disclosure_log ORDER BY occurred_at DESC, rowid DESC LIMIT 1")
 if [ "$sel" = "task_requires_prose/user" ]; then echo "  ok   and the disclosure record carries the fallback selection"
 else echo "  FAIL the disclosure record's fallback selection is '$sel'" >&2; fail=1; fi
+# MK6.13: a multi-line prompt reaches the model as strict JSON, with its newlines, tab and
+# quotes intact, and a multi-line answer comes back as strict JSON, restored and intact.
+# The fake decodes every body as Ollama does (Go's encoding/json refuses a raw control
+# character in a string: measured, Ollama 0.22.0 answers 400) and answers a multi-line reply.
+# Before MK6.13 the prompt was read with json.str, which turns \n into the letter n (T-47),
+# and the body was built with json.enc, which leaves a raw newline in place.
+pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
+: > "$SEEN"; rm -f "$SEEN.bodies"
+FAKE_OLLAMA_MULTILINE=1 FAKE_OLLAMA_MODELS="gemma3:4b" python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
+OUTML=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\",\"text\":\"hello there,\\nplease write to $EMAIL\\n\\tand say \\\"thanks\\\"\"}" http://127.0.0.1:11430/api/pipeline)
+mlprompt=$(python3 -c 'import json,sys
+try: rows=[json.loads(l) for l in open(sys.argv[1],encoding="utf-8")]
+except OSError: rows=[]
+gen=[r[2] for r in rows if r[1]=="/api/generate"]
+if not gen: print("no /api/generate request reached the model"); sys.exit()
+try: p=json.loads(gen[-1])["prompt"]
+except ValueError as e: print("not strict JSON: %s"%e); sys.exit()
+head="hello there,\nplease write to ["; tail="]\n\tand say \"thanks\""
+if sys.argv[2] in p: print("the address arrived in clear")
+elif p.startswith(head) and p.endswith(tail): print("ok")
+else: print("prompt differs: %r"%p)' "$SEEN.bodies" "$EMAIL" 2>&1)
+if [ "$mlprompt" = "ok" ]; then echo "  ok   a multi-line prompt reached the model as strict JSON, newlines, tab and quotes intact, address replaced"
+else echo "  FAIL the multi-line prompt did not reach the model intact: $mlprompt" >&2; fail=1; fi
+mlanswer=$(printf '%s' "$OUTML" | python3 -c 'import json,sys
+try: r=json.loads(sys.stdin.read())
+except ValueError as e: print("not strict JSON: %s"%e); sys.exit()
+want="Summary:\n\tthe user asked to contact \"%s\"."%sys.argv[1]
+print("ok" if r.get("response")==want else "response differs: %r"%(r.get("response"),))' "$EMAIL" 2>&1)
+if [ "$mlanswer" = "ok" ]; then echo "  ok   and the multi-line answer came back as strict JSON, restored, newline, tab and quotes intact"
+else echo "  FAIL the multi-line answer: $mlanswer: $(printf '%s' "$OUTML" | head -c 300)" >&2; fail=1; fi
+pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
+FAKE_OLLAMA_MODELS="gemma3:4b" python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
 # A request that does not select the fallback is refused before anything is scanned or sent.
 : > "$SEEN"
 rows_unsel=$(dl "SELECT COUNT() FROM disclosure_log")
@@ -687,6 +722,9 @@ if [ -x "$CLI_BIN" ]; then
     *) echo "  FAIL a deleted disclosure row was not reported (exit $avrc): $(printf '%s' "$AV" | head -c 600)" >&2; fail=1 ;;
   esac
 fi
+# MK6.13: no body loke sent to the model in this whole run was one Ollama's decoder refuses.
+if [ -s "$SEEN.badjson" ]; then echo "  FAIL the model was sent a body that is not strict JSON: $(head -c 300 "$SEEN.badjson")" >&2; fail=1
+else echo "  ok   every body sent to the model in this run was strict JSON"; fi
 
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"
