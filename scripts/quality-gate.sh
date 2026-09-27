@@ -115,6 +115,16 @@ step_checks() {
     python3 ./scripts/check_claims.py --check || failed=1
   fi
 
+  # VM1.3a: check_claims.py traces other pages' figures to metrics-baseline.md; this traces each
+  # figure in metrics-baseline.md to the recorded row it was read from (benchmarks/evidence/ledger.jsonl),
+  # re-validated, with matching value, N and BCa interval. A figure typed in by hand fails here.
+  if [[ -f ./scripts/check_figure_evidence.py ]]; then
+    echo "  every published figure cites a recorded row"
+    python3 ./scripts/check_figure_evidence.py || failed=1
+    python3 -m unittest -q benchmarks.lib.test_evidence 2>&1 | tail -3 >&2
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  benchmarks/lib/test_evidence.py failed" >&2; failed=1; }
+  fi
+
   # The register's own arithmetic. check_claims.py verifies that a verified claim carries an
   # evidence pointer and that every figure traces to metrics-baseline.md; it does not add the
   # verdicts up. On 2026-09-23 the hand-written Summary read verified 33 / total 95 while the

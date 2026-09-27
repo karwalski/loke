@@ -19,6 +19,10 @@ it is marketing.
 
 ### PII detection, regex layer only — 2026-09-19
 
+**Evidence: legacy, unverified.** Scored by `score_patterns.py`, which prints its figures; no row
+was recorded through `benchmarks/lib/result.py`, so there is none to cite. Superseded by the blocks
+below.
+
 The first measurement this project has recorded. **It is not loke's detection accuracy**, and the
 caveat travels with the number wherever it is quoted.
 
@@ -63,6 +67,10 @@ python3 tests/fixtures/pii-corpus/score_patterns.py
 
 ### PII detection, regex layer, entity-level with a direct-identifier recall floor — 2026-09-28
 
+**Evidence: legacy, unverified.** Read from the line `tests/integration/test_detection_recall.tk`
+prints; no row was recorded through the result sink, so there is none to cite. The floor is asserted
+by that test on every run, which is the evidence it has.
+
 **The headline is recall on direct identifiers**, because a missed one names a person to a third
 party. Precision is the utility cost of that recall, reported under it and not floored.
 
@@ -104,6 +112,11 @@ python3 tests/fixtures/pii-corpus/generate.py
 ```
 
 ### PII detection, marginal value per layer — 2026-09-28
+
+**Evidence: legacy, unverified.** `benchmarks/ad13/run.py --record` wrote its rows to the ignored
+`benchmarks/results/` directory on the measuring machine, and they were never committed, so there is
+nothing to cite. The figures are three-run ranges, not the BCa interval VM1.3 now requires of
+anything a model produced, and `--record` no longer runs (VM1.3b).
 
 **The first measurement of any detection layer other than regex.** Every earlier per-layer figure
 is void: until VM1.6e (2026-09-27) the NER and Presidio layers had never been reached at all.
@@ -167,6 +180,9 @@ TOKE_DIR=<toke at 0b0bc4e> BUILDDIR=<dir> python3 benchmarks/ad13/run.py --ner-m
 
 ### PII detection, regex layer, measured by loke's OWN compiled detector — 2026-09-23
 
+**Evidence: legacy, unverified.** Read from test output; no row was recorded through the result
+sink, so there is none to cite.
+
 **The first detection figure this project has taken from the code it ships.** Every earlier
 figure, including the block below, came from `score_patterns.py` reading the pattern strings
 and evaluating them with **Python's `re`**. This one calls `core.privacy.regex.detect`.
@@ -225,6 +241,9 @@ Reproduce:
 ```
 
 ### PII detection, regex layer with the PL1.10 filters — 2026-09-23
+
+**Evidence: legacy, unverified.** Scored by `score_patterns.py`, which prints its figures; no row
+was recorded through the result sink, so there is none to cite.
 
 **The figures above describe a detector that no longer ships.** PL1.7 and PL1.10 added two
 post-match filters, and this is the same corpus and the same ten pattern strings re-scored with
@@ -302,6 +321,9 @@ python3 tests/fixtures/pii-corpus/score_patterns.py
 
 ### Serialisation baselines, input tokens only — 2026-09-20
 
+**Evidence: verified.** Every figure in this section cites the recorded row it was read from; see
+the end of the section.
+
 The second measurement. It is a **baseline**, not a result for any compression technique: it says what
 deleting whitespace is worth, so that a later claim has something honest to beat.
 
@@ -310,23 +332,24 @@ Ratios are `tokens(indented JSON) / tokens(format)`, geometric mean over `cl100k
 
 | Payload | Minified JSON | YAML |
 |---|---|---|
-| Uniform tabular, 100 rows | **1.80x** | 1.50x |
-| Uniform tabular, 1000 rows | **1.80x** | 1.50x |
-| Nested, 100 | **1.78x** | 1.42x |
-| Mixed types, 100 | **1.66x** | 1.38x |
-| Wide, 40 columns | **1.35x** | 1.21x |
-| Sparse, 70% null | **1.54x** | 1.40x |
-| BITRE road fatalities, 500 rows — real data, CC BY | **1.59x** | 1.47x |
+| Uniform tabular, 100 rows | **1.80x** <sub>[ev:98f805d6d5a6 n=2]</sub> | 1.50x <sub>[ev:a0b160904a1a n=2]</sub> |
+| Uniform tabular, 1000 rows | **1.80x** <sub>[ev:dc91fb0462ec n=2]</sub> | 1.49x <sub>[ev:d72e6141382a n=2]</sub> |
+| Nested, 100 | **1.78x** <sub>[ev:494127ea3f20 n=2]</sub> | 1.42x <sub>[ev:ccbf49313072 n=2]</sub> |
+| Mixed types, 100 | **1.66x** <sub>[ev:3324e382af99 n=2]</sub> | 1.38x <sub>[ev:ffa28a7defce n=2]</sub> |
+| Wide, 40 columns | **1.35x** <sub>[ev:a5d0cdbc349c n=2]</sub> | 1.21x <sub>[ev:55b824c297aa n=2]</sub> |
+| Sparse, 70% null | **1.54x** <sub>[ev:5ee276ae98e3 n=2]</sub> | 1.40x <sub>[ev:6972265f2c2c n=2]</sub> |
+| BITRE road fatalities, 500 rows — real data, CC BY | **1.59x** <sub>[ev:4c287ad3c0f3 n=2]</sub> | 1.47x <sub>[ev:437f72427b98 n=2]</sub> |
 
-**What this changes for every future token claim.** Deleting whitespace alone is worth 1.35x to 1.80x
-— a 26% to 44% token reduction. So a figure quoted against pretty-printed JSON is mostly measuring
+**What this changes for every future token claim.** Deleting whitespace alone is worth
+1.35x <sub>[ev:a5d0cdbc349c n=2]</sub> to 1.80x <sub>[ev:dc91fb0462ec n=2]</sub> — a 26% <sub>[ev:a5d0cdbc349c /saving n=2]</sub> to
+44% <sub>[ev:dc91fb0462ec /saving n=2]</sub> token reduction. So a figure quoted against pretty-printed JSON is mostly measuring
 indentation. **The baseline for any token-optimisation claim in this project is minified JSON**, and a
 technique that only matches it has demonstrated `json.dumps(separators=(",",":"))`.
 
 YAML is worse than minified JSON on every payload measured. A less verbose markup does not get there on
 its own.
 
-The real dataset lands at 1.59x, inside the synthetic range, so the generated shapes are not flattering
+The real dataset lands at 1.59x <sub>[ev:4c287ad3c0f3 n=2]</sub>, inside the synthetic range, so the generated shapes are not flattering
 the result.
 
 **Caveat, which travels with the number:** input token count only. No model was called, so this says
@@ -339,7 +362,8 @@ figure for the provider this project sends most of its traffic to would be worse
 **TOON itself is not measured.** No faithful encoder is available here: the methodology specifies the
 `toon-format/toon` implementation, no package is installed, and loke's own encoder is toke and needs the
 compiler. An encoder written from the format's description would measure something of this harness's
-own invention under TOON's name. So the withdrawn "30-60% TOON" figure stays withdrawn.
+own invention under TOON's name. So the withdrawn TOON savings figure (see "Withdrawn figures" below)
+stays withdrawn.
 
 Reproduce:
 
@@ -351,7 +375,20 @@ python3 benchmarks/toon/run.py
 Harness and full method: [`benchmarks/toon/README.md`](../benchmarks/toon/README.md). Payload checksums
 are verified on every run.
 
+**Where the figures come from (VM1.3a).** Each figure above cites, by digest, the row it was read from in
+`benchmarks/evidence/ledger.jsonl`, the committed ledger `scripts/check_figure_evidence.py` resolves
+in the quality gate. The fourteen rows are the ones `run.py --record` wrote on 2026-09-20 at toke
+`8a9aafe`, ooke `b663797`, loke `f13bfa7`, copied verbatim. N is 2 because each ratio is the
+geometric mean over two tokenisers. Token counts are deterministic, so one run is the measurement
+(VM1.3); re-run on 2026-09-28 at toke `0b0bc4e`, the harness printed the same ratio for all fourteen.
+**Corrected 2026-09-28:** the YAML ratio for 1000 uniform rows was published one hundredth too
+high, rounded up from a recorded 1.4946. The check found the rounding error the first time it ran.
+
 ### Regex detector throughput, against F3.1's 10MB/s target — 2026-09-24
+
+**Evidence: legacy, unverified.** No row for it is in the ledger, and the table prints the median
+and range of five runs where the result sink recorded their mean with a percentile-bootstrap
+interval (before VM1.3), so no recorded row matches the figures as printed.
 
 **Superseded for memory by the 2026-09-27 section below (F3.1b); kept as the record of the
 defect.** **Result: the target is missed by more than an order of magnitude, and the detector never reaches
@@ -405,6 +442,12 @@ TOKE_DIR=<toke at fedd48d> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2 
 
 ### Regex detector throughput after F3.1b — 2026-09-27
 
+**Evidence: legacy, unverified.** Its rows (loke `0d29b5e`, recorded 2026-09-26 UTC) survive only in
+the measuring machine's ignored `benchmarks/results/` directory, and they record the mean with a
+percentile-bootstrap interval, which `result.validate` now refuses for a repeated measurement
+(VM1.3). The table prints median and range. It can be cited only once re-measured with a BCa
+interval.
+
 **Result: memory now grows linearly and a 10 MB input completes. Throughput is still far below the
 10MB/s target, and time still grows faster than the input.** F3.1b removed two allocations that grew
 with matches × text length: the span search copied the rest of the text for every match, and
@@ -451,6 +494,9 @@ TOKE_DIR=<toke at 0b0bc4e> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2,
 
 ## Status: no *performance* figure is published
 
+**Evidence: not a measurement.** Summarises the sections above and publishes no figure of its own;
+the rate named is the bound the F3.1b figures fall under.
+
 The measurements are: detection recall for the regex layer and, since 2026-09-28, per detection layer (AD1.3), the serialisation baselines, and the
 regex detector's standalone throughput above. That throughput figure is still a **negative** result
 against its target (F3.1b made memory linear and 10 MB completes, but throughput is under 2 MB/s),
@@ -480,6 +526,9 @@ it does not need redesigning.
 ---
 
 ## Withdrawn figures
+
+**Evidence: withdrawn.** Every figure in this section is listed so that nobody reinstates it; none
+is a measurement.
 
 These were published previously without a measurement behind them. They are withdrawn, and are listed
 so that nobody reinstates them from an older document or a slide. Each returns only as a measurement
@@ -525,6 +574,9 @@ What it does not measure: inference from context, provider-side retention or tra
 across accounts. The metric bounds disclosure, not consequence.
 
 ### "Reducing what is spent"
+
+**Evidence: not a measurement.** The table is provider list prices, read from the provider's pricing
+page, which are inputs to loke's cost tables and not measured by this project.
 
 **Tokens per completed task**, against a named baseline arm on a named benchmark, with the tokenizer
 stated. Completion is judged by the benchmark's own scoring, so a reduction that breaks the task does
@@ -578,3 +630,13 @@ Scoped precisely, because the unqualified version is not true:
    fixed corpus) may be a single observation, reported with its N and stated as one, never as a rate.
 4. The caveat travels with the number, everywhere the number appears.
 5. This file is updated first. Other pages cite it; they do not restate it independently.
+6. **The figure cites its row (VM1.3a).** Promote the rows it was read from into the committed,
+   append-only ledger with `python3 -m benchmarks.lib.evidence promote <results file> --metric …`,
+   which prints each row's citation, and put that citation after the number:
+   `1.80x <sub>[ev:<digest> n=<N>]</sub>`, `/ci` after an interval (required for a repeated
+   measurement), `/saving` for a ratio printed as a percentage saved. Open the section with
+   `**Evidence: verified.**` and name the rows' toke and loke commits in it; its heading's date is
+   the rows' recording date. `scripts/check_figure_evidence.py`, in the quality gate, resolves every
+   citation, re-validates the row, and fails on a figure with no citation or one that differs from
+   its row at the precision printed. `legacy, unverified` is only for sections published on or
+   before 2026-09-28.
