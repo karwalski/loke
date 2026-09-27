@@ -304,13 +304,21 @@ breach:
 
 The **Privacy Act 1988** (Cth), together with the **Australian Privacy Principles (APPs)**, governs the handling of personal information by Australian Government agencies and private sector organisations with annual turnover above AUD 3 million (with exceptions for health service providers, certain small businesses handling personal information, and those trading in personal information).
 
-The **Privacy and Other Legislation Amendment (Tranche 1) Act 2024**, which received Royal Assent in November 2024, introduced significant changes effective in stages through 2025-2026:
+The **Privacy and Other Legislation Amendment Act 2024** (No. 128, 2024; the "first tranche" of the reforms) received Royal Assent on 10 December 2024. It is **enacted**. Most of it has been in force since 11 December 2024:
 
-- A statutory tort for serious invasion of privacy (effective mid-2025)
-- A Children's Online Privacy Code (development commenced 2025, expected enforcement 2026)
-- Enhanced enforcement powers for the Office of the Australian Information Commissioner (OAIC)
-- Criminalisation of doxxing (malicious release of personal data)
-- Expanded definition of "personal information" to explicitly include inferred and technical data
+- APP 11.3: the reasonable steps APP 11 requires include technical and organisational measures (Schedule 1 Part 5)
+- A mechanism to prescribe countries and binding schemes with substantially similar protection, as an exception to APP 8.1 (Part 6). The sources read name none prescribed
+- Eligible data breach declarations by the Minister, permitting handling to prevent or reduce harm (Part 7)
+- A mid-tier civil penalty for interferences with privacy and infringement notices for specified breaches, such as a deficient privacy policy (Part 8)
+- Broader Federal Court orders, public inquiries, determinations and investigation powers for the Office of the Australian Information Commissioner (OAIC) (Parts 9 to 14)
+- A Children's Online Privacy Code, which the OAIC must register by 10 December 2026 (Part 4)
+- A statutory tort for serious invasions of privacy, in force from 10 June 2025 (Schedule 2)
+- Criminal Code offences for doxxing, the malicious release of personal data (Schedule 3)
+- A duty to describe substantially automated decisions that significantly affect individuals in the privacy policy, **from 10 December 2026** and so not yet in force when this was written (Schedule 1 Part 15)
+
+The 2024 Act did **not** change the definition of "personal information" and did not prohibit re-identification. Earlier versions of this section said it did; that was wrong. Both are among the **proposed** second-tranche reforms. The Privacy Amendment (Personal Data Protection) Bill 2026 was released as an exposure draft for consultation on 31 August 2026 and, in the sources read on 2026-09-27, had not been introduced. Proposals in it include a "relates to" definition of personal information, a fair and reasonable test, a controller and processor framework and 72-hour breach notification. None of that is law, and the preset records it as log-only rules.
+
+Sources, read 2026-09-27: the Act as made on the Federal Register of Legislation (C2024A00128), the OAIC's statement on the Bill's passage and its Children's Online Privacy Code page, and a law-firm summary of the exposure draft. loke has not read the exposure draft itself.
 
 The Privacy Act is enforced by the OAIC. Maximum penalties for serious or repeated interferences with privacy are AUD 50 million, three times the benefit obtained, or 30% of adjusted turnover, whichever is greatest (post-2022 amendments).
 
@@ -322,11 +330,11 @@ The Privacy Act is enforced by the OAIC. Maximum penalties for serious or repeat
 - **APP 11 — Security:** Entities must take reasonable steps to protect personal information from misuse, interference, loss, and unauthorised access or disclosure. loke's encryption and local-first architecture directly serve this.
 - **APP 12 — Access:** Individuals have the right to access their personal information. loke's audit trail supports this.
 - **APP 13 — Correction:** Individuals can request correction of inaccurate personal information.
-- **2024 amendments — Inferred data:** The expanded definition of "personal information" now explicitly covers data inferred or generated about an individual. This is relevant because LLM outputs may contain inferences about users.
+- **Opinions and inferences:** "Personal information" already includes "information or an opinion" about a reasonably identifiable individual (s 6(1)), so a model's statement about an identifiable person can be personal information today. This is relevant because LLM outputs may contain inferences about users. The 2024 Act did not change the definition; a broader "relates to" definition is a tranche 2 proposal (section 3.1).
 
 ### 3.3 PII Entity Types
 
-The Privacy Act defines "personal information" as information or an opinion about an identified individual, or an individual who is reasonably identifiable, whether or not the information is true and whether recorded in a material form or not. Post-2024 amendments, this explicitly includes technical and inferred data.
+The Privacy Act defines "personal information" as information or an opinion about an identified individual, or an individual who is reasonably identifiable, whether or not the information is true and whether recorded in a material form or not. The 2024 Act did not change this definition. Technical and inferred data are addressed by a proposed, not enacted, "relates to" definition (section 3.1).
 
 **Entities loke must detect under AU Privacy Act preset:**
 
@@ -345,7 +353,7 @@ The Privacy Act defines "personal information" as information or an opinion abou
 | **Sexual orientation** | Sexual orientation references (sensitive information) | SLM NER |
 | **Criminal record** | Criminal history (sensitive information) | SLM NER |
 | **Trade union membership** | Union membership (sensitive information) | SLM NER |
-| **Inferred information** | LLM-generated inferences about individuals (post-2024 amendments) | SLM NER (outbound response scanning) |
+| **Inferred information** | LLM-generated inferences or opinions about identifiable individuals (s 6(1) "information or an opinion") | SLM NER (outbound response scanning) |
 
 ### 3.4 Anonymisation Requirements
 
@@ -359,7 +367,7 @@ The Privacy Act does not prescribe specific anonymisation techniques. De-identif
   to assert. Note also that only two layers are enabled by default (regex and NER) — Presidio and the
   privacy-filter sidecar are optional and not bundled.
 - **Sensitive information:** Stronger protections apply. The preset applies the same irreversible redaction as EU GDPR for health, biometric, racial, political, religious, sexual orientation, criminal, and trade union data.
-- **Re-identification prohibition:** The Privacy Act 2024 amendments reinforce that re-identification of de-identified data is prohibited. loke's mapping tables must be secured accordingly.
+- **Re-identification:** No enacted provision prohibits re-identification as such, and the 2024 Act added none. loke's local mapping table is nonetheless a re-identification capability, so as a design choice under APP 11 and APP 11.2 it is secured and kept short-lived (section 3.5).
 
 ### 3.5 Data Retention
 
@@ -374,7 +382,7 @@ The Privacy Act does not prescribe specific anonymisation techniques. De-identif
 
 **loke AU Privacy Act preset behaviour:**
 
-- **No adequacy list:** Australia does not maintain an equivalence or adequacy list. The obligation is on the disclosing entity to satisfy itself about the recipient's practices.
+- **No adequacy list in force:** The 2024 Act created a mechanism to prescribe countries and binding schemes (section 3.1), and the sources read name none prescribed. Until a recipient is prescribed, the obligation is on the disclosing entity to satisfy itself about the recipient's practices. The built-in preset keeps cross-border disclosure off until the entity turns it on.
 - **Default:** All cloud LLM providers are permitted, but loke logs a compliance notice that the user/enterprise is responsible for assessing the provider's privacy practices.
 - **Enterprise override:** Enterprise administrators can restrict providers by jurisdiction or require specific contractual terms.
 - **Practical implication:** Anonymising before transmission reduces what is disclosed under APP 8. It does not place the data outside the Act's scope as a matter of course — de-identification is a question of whether re-identification is reasonably likely in context, and loke retains the mapping. Treat this as a factor in a deployment's own assessment, not as a conclusion loke can reach on its behalf.
@@ -435,7 +443,7 @@ privacy:
       - sexual_orientation
       - criminal_record
       - trade_union
-      - inferred_personal_info    # Post-2024 amendment coverage
+      - inferred_personal_info    # s 6(1) "information or an opinion"; not a 2024 change
     sensitive_info_handling: block_or_full_redact
   anonymisation:
     strength: de_identification   # "Reasonable steps" standard
@@ -1703,7 +1711,7 @@ The following table lists every PII entity type referenced across all presets, w
 
 \* HIPAA: 3-digit ZIP codes redacted if population < 20,000
 † CCPA: "precise geolocation" = within 1,850 feet / 564 metres
-‡ Australia: post-2024 amendment "inferred personal information"
+‡ Australia: an opinion about a reasonably identifiable individual is personal information under s 6(1). Not a 2024 amendment; a broader "relates to" definition is proposed, not enacted (section 3.1)
 
 ---
 
