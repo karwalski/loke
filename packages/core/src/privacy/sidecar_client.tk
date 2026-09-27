@@ -2,29 +2,164 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=core.privacy.sidecarclient;
-i=http:std.http;
-i=str:std.str;
+
 i=json:std.json;
+i=str:std.str;
+i=cfg:shared.config;
+i=jx:shared.jsonobj;
+i=reach:shared.reachability;
+
+(* The client of the privacy-filter sidecar, packages/privacy-filter/server.py.
+
+   AD1.4, operating-point control. The sidecar applies a confidence threshold to every span
+   on /detect and /anonymise, and answers with the threshold it applied and how many spans
+   it suppressed below it. This client used to send only the text, so the operating point
+   was whatever the sidecar was started with, and it returned the response string unparsed,
+   so nothing on the loke side could see which threshold had been applied.
+
+   It now sends the threshold configured as `privacy.privacy_filter_threshold`, and reads
+   back the threshold the sidecar reports applying. When nothing is configured it sends NO
+   threshold, so the sidecar's own default governs: `confidence_threshold` in
+   packages/privacy-filter/models.json, overridable at sidecar start by LOKE_PF_THRESHOLD
+   (server.py, DEFAULT_THRESHOLD). This client does not choose a number of its own. The
+   models.json note records why that default is 0.0: a missed entity leaks, a spurious one
+   only costs utility.
+
+   The threshold is carried as JSON number TEXT, never an f64: an f64 returned across a
+   module boundary is corrupted at this toolchain (T-20), and std.toml has no float
+   accessor, so the configured value is a TOML string. *)
+
+t=$pfclient{
+  baseurl:str;
+  threshold:str
+};
+
+(* What a caller reads from /detect or /anonymise.
+
+   ok is true only when the sidecar answered with the shape of a scan. A plain struct, not a
+   result, because a match on a result whose error side is a user sum takes its first arm
+   whatever the value is (T-18), and a failed scan read as a clean one is the fail-open
+   CLAUDE.md forbids.
+
+   requested is the threshold this client sent, "" when it sent none. applied is the
+   threshold the sidecar reports applying, "" when it reported none. asrequested is false
+   when a threshold was sent and the sidecar did not report applying that value, which is
+   what an older sidecar that ignores the field looks like. *)
+t=$pfscan{
+  ok:bool;
+  requested:str;
+  applied:str;
+  asrequested:bool;
+  suppressed:i64;
+  count:i64;
+  body:str
+};
 
 f=sidecarurl():str{
   <"http://127.0.0.1:11435"
 };
 
-f=isavailable():bool{
-  let resp=http.get(str.concat(sidecarurl();"/health"));
-  <str.contains(resp;"ok")
+(* A threshold the sidecar can apply, as JSON number text: "0", "1", "0.<digits>" or
+   "1.<zeros>". Anything else, including a negative, a value above one, a blank or an
+   exponent, is not sent, and the sidecar's own default governs. *)
+f=alldigits(s:str;from:i64;zerosonly:bool):bool{
+  let n=str.len(s) as i64;
+  if(from>=n){ <false }el{};
+  let good=mut.true;
+  lp(let k=from;k<n;k=k+1){
+    let c=str.charat(s;k);
+    if(zerosonly){
+      if(c==48){}el{ good=false }
+    }el{
+      if(c<48 || c>57){ good=false }el{}
+    }
+  };
+  <good
 };
 
-f=detect(text:str):str{
-  let body=str.concat("{\"text\":";str.concat(json.enc(text);"}"));
-  <http.posturl(str.concat(sidecarurl();"/detect");body)
+f=isthreshold(s:str):bool{
+  let n=str.len(s) as i64;
+  if(n==0){ <false }el{};
+  let lead=str.charat(s;0);
+  if(lead==48 || lead==49){}el{ <false };
+  if(n==1){ <true }el{};
+  if(str.charat(s;1)==46){}el{ <false };
+  <alldigits(s;2;lead==49)
 };
 
-f=anonymise(text:str):str{
-  let body=str.concat("{\"text\":";str.concat(json.enc(text);"}"));
-  <http.posturl(str.concat(sidecarurl();"/anonymise");body)
+(* The text Python prints for float(s), which is what the sidecar reports back: "0" is
+   "0.0", "0.50" is "0.5", "1" is "1.0". Only the forms isthreshold accepts reach this. *)
+f=trimzeros(s:str):str{
+  let end=mut.(str.len(s) as i64);
+  lp(let k=0;end>0 && str.charat(s;end-1)==48;k=k+1){
+    end=end-1
+  };
+  <str.slice(s;0;end)
 };
 
-f=listmodels():str{
-  <http.get(str.concat(sidecarurl();"/models"))
+f=normthreshold(s:str):str{
+  if(!isthreshold(s)){ <"" }el{};
+  if(str.len(s)==1){ <"\(s).0" }el{};
+  let t=trimzeros(s);
+  if(str.charat(t;(str.len(t) as i64)-1)==46){ <"\(t)0" }el{};
+  <t
+};
+
+f=new(baseurl:str;threshold:str):$pfclient{
+  <$pfclient{baseurl:baseurl;threshold:normthreshold(str.trim(threshold))}
+};
+
+f=fromconfig(c:$lokeconfig):$pfclient{
+  <new(sidecarurl();c.pfthreshold)
+};
+
+f=requestbody(client:$pfclient;text:str):str{
+  if(str.len(client.threshold)==0){ <"{\"text\":\(jx.escape(text))}" }el{};
+  <"{\"text\":\(jx.escape(text)),\"threshold\":\(client.threshold)}"
+};
+
+f=isavailable(client:$pfclient):bool{
+  <reach.isloopbackurl(client.baseurl) && str.contains(reach.localget(client.baseurl;"/health");"\"ok\"")
+};
+
+f=failedscan(client:$pfclient):$pfscan{
+  <$pfscan{ok:false;requested:client.threshold;applied:"";asrequested:false;suppressed:0;count:0;body:""}
+};
+
+f=readscan(client:$pfclient;raw:str;obj:$json;shapekey:str):$pfscan{
+  if(str.len(jx.rawvalue(obj;shapekey))==0){ <failedscan(client) }el{};
+  let applied=jx.numtext(obj;"threshold";"");
+  let asrequested=str.len(client.threshold)==0 || str.eq(applied;client.threshold);
+  <$pfscan{
+    ok:true;
+    requested:client.threshold;
+    applied:applied;
+    asrequested:asrequested;
+    suppressed:str.toint(jx.numtext(obj;"suppressed_below_threshold";"0"));
+    count:str.toint(jx.numtext(obj;"count";"0"));
+    body:raw
+  }
+};
+
+(* The text goes IN CLEAR, so only to a loopback host; see core.privacy.ner.scan. *)
+f=post(client:$pfclient;path:str;text:str;shapekey:str):$pfscan{
+  if(!reach.isloopbackurl(client.baseurl)){ <failedscan(client) }el{};
+  let raw=reach.localpost(client.baseurl;path;requestbody(client;text));
+  if(!str.startswith(str.trim(raw);"{")){ <failedscan(client) }el{};
+  <mt json.dec(raw) {
+    $ok:obj readscan(client;raw;obj;shapekey);
+    $jsonerr:e failedscan(client)
+  }
+};
+
+f=detect(client:$pfclient;text:str):$pfscan{
+  <post(client;"/detect";text;"entities")
+};
+
+f=anonymise(client:$pfclient;text:str):$pfscan{
+  <post(client;"/anonymise";text;"anonymised")
+};
+
+f=listmodels(client:$pfclient):str{
+  <reach.localget(client.baseurl;"/models")
 };

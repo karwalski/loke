@@ -12,7 +12,7 @@ that reads the log after a call returns sees exactly what arrived.
 
 It answers in the shape of the local sidecars loke talks to, enough for a client to parse:
 Ollama (/api/tags, /api/ps, /api/version, /api/chat, /api/generate, /api/pull, /api/delete),
-Presidio (/health, /analyze), LLMLingua (/health, /compress), and since VM1.6f an MCP server
+Presidio (/health, /analyze), the privacy-filter sidecar (/detect, /anonymise, AD1.4), LLMLingua (/health, /compress), and since VM1.6f an MCP server
 (/mcp), Exo (/v1/health, /v1/nodes, /v1/chat/completions), Ollama's /api/show and loke's own
 /api/pipeline, and since VM1.6h a policy document (/policy.json); any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
 compact (no spaces after `:`), as Ollama's are, because shared.jsonobj's nested lookup
@@ -43,6 +43,30 @@ SEPS = (",", ":")
 # reply, which Ollama wraps as message.content.
 PRESIDIO = [{"entity_type": "PERSON", "start": 0, "end": 12, "score": 0.85}]
 NER = '[{"type":"PERSON","value":"Jane Citizen"}]'
+
+# The privacy-filter sidecar's classifier output (AD1.4): one confident span and one weak
+# one, so a threshold between them visibly suppresses one. The recorder applies the
+# threshold the way packages/privacy-filter/server.py does, with that file's default of 0.0
+# when the request names none, and reports what it applied.
+PF_SPANS = [{"type": "private_person", "value": "Jane Citizen", "start": 0, "end": 12, "confidence": 0.95, "placeholder": "[NAME_1]"},
+            {"type": "private_date", "value": "Tuesday", "start": 20, "end": 27, "confidence": 0.4, "placeholder": "[DATE_1]"}]
+
+
+def pf_answer(body, path):
+    try:
+        req = json.loads(body) if body else {}
+    except ValueError:
+        req = {}
+    thr = req.get("threshold")
+    thr = 0.0 if thr is None else min(max(float(thr), 0.0), 1.0)
+    kept = [e for e in PF_SPANS if thr <= 0.0 or e["confidence"] >= thr]
+    out = {"count": len(kept), "threshold": thr, "suppressed_below_threshold": len(PF_SPANS) - len(kept)}
+    if path == "/detect":
+        out["entities"] = kept
+    else:
+        out["anonymised"] = "recorder-anonymised"
+        out["mappings"] = [{"placeholder": e["placeholder"], "type": e["type"]} for e in kept]
+    return out
 
 # The hosted providers' success shapes, trimmed to the fields loke reads (F5.11).
 ANTHROPIC = {"id": "msg_recorder", "type": "message", "role": "assistant", "model": "claude-recorder",
@@ -133,6 +157,8 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"status": "ok"})
         elif p == "/analyze":
             self._send(PRESIDIO)
+        elif p in ("/detect", "/anonymise"):
+            self._send(pf_answer(body, p))
         elif p == "/v1/messages":
             self._send(ANTHROPIC)
         elif p == "/policy.json":

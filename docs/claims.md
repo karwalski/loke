@@ -43,9 +43,9 @@ file merely *existing* for a module is not proof and is not recorded as such.
 | Verdict | Count |
 |---|---|
 | `verified` | 31 |
-| `partial` | 27 |
+| `partial` | 28 |
 | `stub` | 15 |
-| `absent` | 24 |
+| `absent` | 23 |
 | **Total** | **97** |
 
 By subsystem:
@@ -53,7 +53,7 @@ By subsystem:
 | Subsystem | `verified` | `partial` | `stub` | `absent` | Rows |
 |---|---|---|---|---|---|
 | [A. Privacy detection and anonymisation](#a-privacy-detection-and-anonymisation) | 7 | 5 | 0 | 2 | 14 |
-| [B. Multi-layer composition — epic F3b](#b-multi-layer-composition--epic-f3b) | 0 | 0 | 1 | 9 | 10 |
+| [B. Multi-layer composition — epic F3b](#b-multi-layer-composition--epic-f3b) | 0 | 1 | 1 | 8 | 10 |
 | [C. Token optimisation](#c-token-optimisation) | 2 | 2 | 1 | 1 | 6 |
 | [D. Routing](#d-routing) | 4 | 2 | 1 | 1 | 8 |
 | [E. Governance, audit and compliance](#e-governance-audit-and-compliance) | 5 | 3 | 5 | 1 | 14 |
@@ -163,8 +163,8 @@ uses its own de-duplication instead. Tracked as AD1.7 — wire them or withdraw 
 | B6 | "Metrics … detection count, processing time, average confidence, entity counts per layer" | `docs/features-loke.md:58` | `absent` | `packages/core/src/privacy/filter_metrics.tk` exists; zero importers | DA1.4, AD1.7 | Nothing records per-layer metrics |
 | B7 | Filter registry with `register`/`list`/`get`/`remove` | F3b.1 (backlog, **Done**) | `absent` | `packages/core/src/privacy/filter_registry.tk` exists; zero importers | AD1.7 | Layers are wired by direct import in `pipeline.tk:8-13`, not registered |
 | B8 | Organisation-managed layer policies overriding user settings | F3b.8 (backlog, **Done**); `packages/privacy-filter/sample-org-policy.json` | `absent` | `packages/core/src/privacy/org_policy.tk` exists; zero importers | AD1.7 | A sample policy file ships; no code enforces it |
-| B9 | Sidecar integration — the OpenAI Privacy Filter as a pipeline layer | `docs/features-loke.md:32`, `README.md:122` | `absent` | `packages/core/src/privacy/sidecar_client.tk` exists; zero importers | AD1.4 | The sidecar runs (A5) and nothing in loke calls it. The client also returns unparsed response strings with no timeout or retry |
-| B10 | The sidecar's declared operating point | `packages/privacy-filter/models.json:18` | `absent` | No application site. `server.py:57-77` (`/detect`) and `:98-127` (`/anonymise`) return every classifier span regardless of score | AD1.4 | `confidence_threshold` is stored in the registry and in `/models/add` (`server.py:163`) and never applied. There is no operating point to tune and no precision/recall curve to report |
+| B9 | Sidecar integration — the OpenAI Privacy Filter as a pipeline layer | `docs/features-loke.md:32`, `README.md:122` | `absent` | `packages/core/src/privacy/sidecar_client.tk` exists; zero importers | AD1.4 | The sidecar runs (A5) and nothing in loke calls it. The client parses the answer and reports a failed scan as one (AD1.4); it still has no retry, and its timeout is std.http's |
+| B10 | The sidecar's declared operating point | `packages/privacy-filter/models.json:18` | `partial` | `packages/privacy-filter/server.py` `_apply_threshold` on `/detect` and `/anonymise`, reporting `threshold` and `suppressed_below_threshold`; `packages/core/src/privacy/sidecar_client.tk` `requestbody` sends `privacy.privacy_filter_threshold` and `readscan` reads the applied value back | `tests/unit/privacy/test_sidecar_threshold.tk` (recorder; the real sidecar when `LOKE_PF_LIVE_URL` is set). AD1.4 | The threshold is applied, configurable and reported. It governs nothing loke sends yet, because nothing in loke calls the client (B9). No precision/recall curve has been measured (AD1.2) |
 
 ## C. Token optimisation
 

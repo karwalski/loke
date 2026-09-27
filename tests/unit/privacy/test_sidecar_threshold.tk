@@ -1,0 +1,169 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.sidecarthreshold;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=env:std.env;
+i=toml:std.toml;
+i=process:std.process;
+i=sid:core.privacy.sidecarclient;
+i=cfg:shared.config;
+
+(* AD1.4 — the privacy-filter sidecar's operating point, judged by what ARRIVES at a server
+   and by what the client reads back.
+
+   Before this story core.privacy.sidecarclient posted only the text, so the threshold was
+   whatever the sidecar had been started with, and returned the answer unparsed, so nothing
+   on the loke side could say which threshold had been applied or how much it withheld.
+
+   The recorder (scripts/lib/http_recorder.py) answers /detect and /anonymise as the sidecar
+   does: two spans scoring 0.95 and 0.4, the request's threshold applied, and 0.0 when the
+   request names none, which is the sidecar's own default (confidence_threshold in
+   packages/privacy-filter/models.json).
+
+   The real sidecar is exercised too when LOKE_PF_LIVE_URL names one; it needs the model in
+   the local Hugging Face cache, so CI does not set it. Its JSON has a space after every
+   colon, which the recorder's does not, so the live run also checks the read-back parses
+   the sidecar's own formatting. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_pfthr_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* The last line of the recorder's log, i.e. the request the last call sent. *)
+f=lastline(logp:str):str{
+  let all=str.trim(readfile(logp));
+  let lines=str.split(all;"\n");
+  let n=lines.len as i64;
+  if(n==0){ <"" }el{};
+  <lines.get(n-1)
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59996"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── The value that is sent ────────────────────────────────────────────── *)
+  (* Normalised to the text Python prints for float(value), which is what the sidecar
+     reports back, so a read-back can be compared as text. *)
+  if(t.asserteq(sid.normthreshold("0.5");"0.5";"0.5 is sent as 0.5")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("0.50");"0.5";"0.50 is sent as 0.5")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("0");"0.0";"0 is sent as 0.0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("1");"1.0";"1 is sent as 1.0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("0.000");"0.0";"0.000 is sent as 0.0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("1.00");"1.0";"1.00 is sent as 1.0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("1.5");"";"above one is not a threshold")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("-0.1");"";"nor is a negative")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("5e-1");"";"nor an exponent")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("0.");"";"nor a bare point")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sid.normthreshold("high");"";"nor a word")){pass=pass+1}el{fail=fail+1};
+
+  (* ── From config ──────────────────────────────────────────────────────── *)
+  if(t.asserteq(cfg.defaultconfig().pfthreshold;"";"no threshold is configured by default, so the sidecar's own default governs")){pass=pass+1}el{fail=fail+1};
+  let fromtoml=mt toml.load("[privacy]\nprivacy_filter_threshold = \"0.70\"\n") {
+    $ok:doc cfg.configfromtoml(doc).pfthreshold;
+    $err:e "unparsed"
+  };
+  if(t.asserteq(fromtoml;"0.70";"privacy.privacy_filter_threshold is read from the config file")){pass=pass+1}el{fail=fail+1};
+  let configured=sid.fromconfig(cfg.defaultconfig());
+  if(t.asserteq(configured.threshold;"";"the default config yields a client that sends no threshold")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(configured.baseurl;"http://127.0.0.1:11435";"and talks to the sidecar on loopback")){pass=pass+1}el{fail=fail+1};
+
+  (* ── What arrives, and what is read back ──────────────────────────────── *)
+  let base=scratch();
+  let logp="\(base).log";
+  let garblog="\(base)-g.log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let garb=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";garblog;"\(base)-g.port";"garbage")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let gport=waitport("\(base)-g.port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0 && str.len(gport)>0;"the recorders came up")){pass=pass+1}el{fail=fail+1};
+
+  let set=sid.new(url;"0.50");
+  let d=sid.detect(set;"Jane Citizen, seen Tuesday");
+  let sent=lastline(logp);
+  if(t.assert(str.startswith(sent;"POST /detect {");"the /detect request ARRIVED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sent;"\"threshold\":0.5");"and CARRIES the configured threshold (sent: \(sent))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(d.ok;"the answer is read as a scan")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(d.applied;"0.5";"the threshold the sidecar reports applying is read back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(d.asrequested;"and matches the one requested")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(d.count==1;"the span scoring below it is not reported")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(d.suppressed==1;"and is counted as suppressed, so a caller sees something was withheld")){pass=pass+1}el{fail=fail+1};
+
+  let a=sid.anonymise(set;"Jane Citizen, seen Tuesday");
+  let asent=lastline(logp);
+  if(t.assert(str.startswith(asent;"POST /anonymise {") && str.contains(asent;"\"threshold\":0.5");"/anonymise carries the threshold too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a.ok && str.eq(a.applied;"0.5") && a.suppressed==1;"and its applied threshold and suppression are read back")){pass=pass+1}el{fail=fail+1};
+
+  let unset=sid.detect(sid.new(url;"");"Jane Citizen, seen Tuesday");
+  let usent=lastline(logp);
+  if(t.assert(str.startswith(usent;"POST /detect {") && !str.contains(usent;"threshold");"with none configured, no threshold is sent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unset.ok && str.eq(unset.applied;"0.0");"and the sidecar's own default is what is read back as applied")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unset.count==2 && unset.suppressed==0;"at which every span is reported")){pass=pass+1}el{fail=fail+1};
+
+  let bad=sid.detect(sid.new(url;"1.5");"Jane");
+  if(t.assert(!str.contains(lastline(logp);"threshold") && bad.ok;"a threshold that is not one is not sent; the sidecar default governs")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(!sid.detect(sid.new(deadurl();"0.5");"Jane").ok;"with nothing listening the scan is not ok, never an empty clean one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sid.detect(sid.new("http://127.0.0.1.example.net:11435";"0.5");"Jane").ok;"a sidecar off this machine is not sent the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sid.detect(sid.new("http://127.0.0.1:\(gport)";"0.5");"Jane").ok;"an answer that is not a scan is not ok")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sid.isavailable(sid.new(url;"")) && !sid.isavailable(sid.new(deadurl();""));"isavailable follows whether /health answers")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(garb == @())){ process.kill(garb); process.wait(garb); }el{};
+  file.delete(logp);
+  file.delete("\(logp).headers");
+  file.delete(garblog);
+  file.delete("\(garblog).headers");
+  file.delete("\(base).port");
+  file.delete("\(base)-g.port");
+
+  (* ── The real sidecar, when one is named ────────────────────────────── *)
+  let live=env.getor("LOKE_PF_LIVE_URL";"");
+  if(str.len(live)>0){
+    (* Measured 2026-09-28: the classifier scores the two spans it finds in this text 0.85
+       and 0.91, so 0.9 lies between them. *)
+    let text="Ring Jo about the Tuesday meeting at the Kew office, ref 88213.";
+    let all=sid.detect(sid.new(live;"0");text);
+    let none=sid.detect(sid.new(live;"0.9");text);
+    let ac:str=str.fromint(all.count);
+    let nc:str=str.fromint(none.count);
+    let ns:str=str.fromint(none.suppressed);
+    if(t.assert(all.ok && str.eq(all.applied;"0.0") && all.count>0;"LIVE: at threshold 0 the sidecar applies 0.0 and reports spans (count=\(ac))")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(none.ok && str.eq(none.applied;"0.9") && none.asrequested;"LIVE: at threshold 0.9 the sidecar reports applying 0.9")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(none.count<all.count && none.suppressed>0 && none.count+none.suppressed==all.count;"LIVE: spans below it are dropped and counted (count=\(nc), suppressed=\(ns))")){pass=pass+1}el{fail=fail+1};
+    let dflt=sid.detect(sid.new(live;"");text);
+    let da:str=dflt.applied;
+    if(t.assert(dflt.ok && str.len(dflt.applied)>0;"LIVE: with none sent the sidecar reports its own default (\(da))")){pass=pass+1}el{fail=fail+1}
+  }el{};
+
+  <fail
+};

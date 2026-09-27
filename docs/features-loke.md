@@ -72,8 +72,9 @@ It reduces what is disclosed; it does not ensure that everything sensitive is fo
 > `loke privacy evaluate` command) and no labelled corpus to run against (**AD1.1**). No per-layer
 > metrics are recorded. And nothing calls the sidecar client, so the privacy-filter sidecar — which does
 > run a real published model — is not reachable from loke; the browser route talks to port 11435 over
-> raw HTTP instead. The sidecar's declared `confidence_threshold` is never applied, so there is no
-> operating point to tune (**AD1.4**).
+> raw HTTP instead. The sidecar applies its `confidence_threshold`, and the client sends the configured
+> `privacy.privacy_filter_threshold` and reads back the value applied (**AD1.4**), but since nothing calls
+> the client that operating point governs nothing loke sends.
 >
 > Wiring these or withdrawing the claim is **AD1.7**. Recorded as B1–B10 in [claims.md](claims.md).
 
