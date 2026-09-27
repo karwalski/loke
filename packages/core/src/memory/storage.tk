@@ -10,6 +10,7 @@ i=str:std.str;
 i=log:shared.log;
 i=t:shared.types;
 i=memtypes:core.memory.types;
+i=search:core.memory.search;
 
 
 f=storedrawerok(drawerid:str):i64!$lokeerr{
@@ -22,7 +23,20 @@ f=storeclosetok(closetid:str):i64!$lokeerr{
   <$ok(1)
 };
 
+(* MK6.6. storedrawer's `i64!$lokeerr` cannot tell its caller anything: a match on a result
+   with a user-declared error type always takes the first arm (T-18), so memory.diary_write
+   answered `{"ok":true}` when the palace's database had not even opened. writedrawer is the
+   same write as a bool, which a caller can branch on; storedrawer keeps its signature for the
+   callers that do not branch. *)
 f=storedrawer(palace:i64;drawer:$drawer):i64!$lokeerr{
+  if(writedrawer(drawer)){
+    <storedrawerok(drawer.id)
+  }el{
+    <drawerfail("failed to store drawer: ";drawer.id)
+  }
+};
+
+f=writedrawer(drawer:$drawer):bool{
   let tokenss=str.fromint(drawer.tokens);
   (* The subject is bound with a declared type before the match. toke emits duplicate
      basic-block labels for a 3+-arm `mt` on a struct field and clang then rejects the
@@ -52,7 +66,8 @@ f=storedrawer(palace:i64;drawer:$drawer):i64!$lokeerr{
   if(execok("BEGIN";@())){
     <storedrawertx(drawer;tokenss;sensitivitys;pii)
   }el{
-    <drawerfail("failed to begin drawer transaction: ";drawer.id)
+    log.warn("memory drawer write: BEGIN failed";"storage";"system");
+    <false
   }
 };
 
@@ -60,22 +75,30 @@ f=storedrawer(palace:i64;drawer:$drawer):i64!$lokeerr{
    palace recorded its creation time as five literal characters, which is why
    core.memory.decay had nothing to age: decay selects by created_at, and every row's was
    the same non-date string. *)
-f=storedrawertx(drawer:$drawer;tokenss:str;sensitivitys:str;pii:str):i64!$lokeerr{
+f=storedrawertx(drawer:$drawer;tokenss:str;sensitivitys:str;pii:str):bool{
   let drawerok=execok("INSERT INTO memory_drawers (id,wing,hall,room,role,content,session_id,model_id,tokens,sensitivity,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))";@(drawer.id;drawer.location.wing;drawer.location.hall;drawer.location.room;drawer.role;drawer.content;drawer.sessionid;drawer.modelid;tokenss;sensitivitys));
   let scoreok=mut.false;
   if(drawerok){
     scoreok=execok("INSERT INTO memory_scores (id,score,tags,pii_flagged,created_at) VALUES (?,1.0,'',?,?)";@(drawer.id;pii;nowsecs()))
   }el{};
+  (* MK6.6: and its search keywords, in the same transaction. Nothing indexed a drawer before,
+     so no stored memory could be found. *)
+  let indexok=mut.false;
   if(drawerok & scoreok){
+    indexok=search.indexkeywords(drawer.id;drawer.content)
+  }el{};
+  if(drawerok & scoreok & indexok){
     if(execok("COMMIT";@())){
-      <storedrawerok(drawer.id)
+      <true
     }el{
       execok("ROLLBACK";@());
-      <drawerfail("failed to commit drawer: ";drawer.id)
+      log.warn("memory drawer write: COMMIT failed";"storage";"system");
+      <false
     }
   }el{
     execok("ROLLBACK";@());
-    <drawerfail("failed to store drawer: ";drawer.id)
+    log.warn("memory drawer write: INSERT failed";"storage";"system");
+    <false
   }
 };
 
@@ -267,10 +290,12 @@ f=classifylocation(content:str;role:str):$palacelocation{
 };
 
 
-f=storeturn(palace:i64;role:str;content:str;sessionid:str;modelid:str;tokens:u32;sensitivity:$sensitivitylevel):$drawer!$lokeerr{
+(* The drawer storeturn writes, built but not written, so a caller that needs to know whether
+   the write succeeded can pass it to writedrawer (MK6.6). *)
+f=turndrawer(role:str;content:str;sessionid:str;modelid:str;tokens:u32;sensitivity:$sensitivitylevel):$drawer{
   let location=classifylocation(content;role);
   let id=str.randhex(16);
-  let drawer=$drawer{
+  <$drawer{
     id:id;
     location:location;
     role:role;
@@ -280,7 +305,11 @@ f=storeturn(palace:i64;role:str;content:str;sessionid:str;modelid:str;tokens:u32
     tokens:tokens;
     sensitivity:sensitivity;
     createdat:""
-  };
+  }
+};
+
+f=storeturn(palace:i64;role:str;content:str;sessionid:str;modelid:str;tokens:u32;sensitivity:$sensitivitylevel):$drawer!$lokeerr{
+  let drawer=turndrawer(role;content;sessionid;modelid;tokens;sensitivity);
   <mt storedrawer(palace;drawer) {
     $ok:v $ok(drawer);
     $err:e $err(e)

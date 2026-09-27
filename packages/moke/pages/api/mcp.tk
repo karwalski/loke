@@ -12,6 +12,7 @@ i=jx:shared.jsonobj;
 i=toolpanel:moke.mcp.toolpanel;
 i=broker:moke.mcp.brokerstatus;
 i=memory:moke.mcp.memorydemo;
+i=panellog:moke.panellog;
 
 (* These three panels are module-level state on purpose: an MCP tool panel is a running log of
    invocations and the page has to show what the previous request did. They used to be declared
@@ -26,7 +27,11 @@ i=memory:moke.mcp.memorydemo;
    whose result is discarded — a silent no-op, which is precisely the fix E2002 recommends and
    T-26 warns against. And nothing ever called initstate(): ooke.handlers does not import this
    module at all, so even if the globals had been global they would have started empty. The
-   broker panel is therefore seeded in its initialiser instead, where it cannot be skipped. *)
+   broker panel is therefore seeded in its initialiser instead, where it cannot be skipped.
+
+   MK6.6: module state is per worker process, so the two invocation histories are no longer kept
+   in it. They are appended to moke.panellog and read back from there; gtoolstate and
+   gmemorystate now supply only what every worker has the same copy of. *)
 let gtoolstate=mut.toolpanel.newpanelstate();
 let gbrokerstate=mut.seededbroker();
 let gmemorystate=mut.memory.newstate(memorydir());
@@ -82,9 +87,13 @@ f=argsraw(obj:$json):str{
   if(str.eq(raw;"null")){ <"{}" }el{ <raw }
 };
 
+(* MK6.6. The invocation history is read from moke.panellog, not from gtoolstate: moke serves
+   from several pre-forked workers, each with its own module state, so a history kept here was
+   seen by the worker that recorded it and by no other. gtoolstate still supplies the tool list,
+   which is the same in every worker. *)
 f=gettools(req:i64):i64{
-  let resp=toolpanel.panelstatetojson(gtoolstate);
-  <http.res(200;resp)
+  let all=panellog.lines("mcp-tools");
+  <http.res(200;toolpanel.panelstatejsonwith(gtoolstate;panellog.last(all;100);all.len as i64))
 };
 
 
@@ -118,9 +127,8 @@ f=postinvoke(req:i64):i64{
 
   let inv=toolpanel.invoketool(toolname;args;"";"";
     str.fromint(time.nowms()));
-  gtoolstate=toolpanel.addinvocation(gtoolstate;inv);
-
   let resp=toolpanel.invocationtojson(inv);
+  panellog.append("mcp-tools";toolpanel.historyjson(inv));
   <http.res(200;resp)
 };
 
@@ -132,8 +140,8 @@ f=getbroker(req:i64):i64{
 
 
 f=getmemory(req:i64):i64{
-  let resp=memory.statetojson(gmemorystate);
-  <http.res(200;resp)
+  let all=panellog.lines("mcp-memory");
+  <http.res(200;memory.statejsonwith(gmemorystate;panellog.last(all;50);all.len as i64))
 };
 
 
@@ -155,8 +163,7 @@ f=postmemory(req:i64):i64{
 
   let inv=memory.invoke(gmemorystate;toolname;args;
     str.fromint(time.nowms()));
-  gmemorystate=memory.recordinvocation(gmemorystate;inv);
-
   let resp=memory.invocationtojson(inv);
+  panellog.append("mcp-memory";memory.historyjson(inv));
   <http.res(200;resp)
 };

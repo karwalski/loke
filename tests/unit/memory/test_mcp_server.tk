@@ -1,0 +1,101 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.mcpserver;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=json:std.json;
+i=proto:core.mcp.protocol;
+i=mcpmem:core.memory.mcpserver;
+
+(* MK6.6 — core.memory.mcpserver, the memory palace's MCP tools, through handlememorytool, the
+   one entry point its callers use (moke's memory panel today).
+
+   Before MK6.6 this program did not reach its first assertion about the palace. memory.store
+   passed a bare `$public` (T-13) and died with SIGSEGV on every call. memory.status and
+   memory.context, handed a data directory whose database could not open, ran their success
+   arms with an error bound as the palace (T-18) and died the same way; memory.diary_write in
+   the same situation answered {"ok":true} for a drawer it had not written. memory.context's
+   answer, when it did answer, was not JSON: its newlines went out raw. Nothing indexed a stored
+   drawer, so memory.search and memory.facts never found one; and once they did, memory.facts
+   and memory.context crashed on aaak.defaultlevel's bare `$medium(0)` (T-13).
+
+   The missing-directory cases come FIRST, deliberately: that is the order moke met them in, and
+   a later successful open must still work after a failed one. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-mcp-server")
+};
+
+f=call(name:str;args:str;dir:str):$toolresult{
+  <mcpmem.handlememorytool(name;args;dir)
+};
+
+f=isjson(s:str):bool{
+  <mt json.dec(s) {
+    $ok:o true;
+    $jsonerr:e false
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  let missing=str.concat(dir;"/no-such-dir/palace");
+
+  let st0=call("memory.status";"{}";missing);
+  if(t.assert(st0.iserror;"memory.status on a palace that cannot open is an error result, not a crash")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(st0.text;"failed to open memory palace");"and it says the palace did not open")){pass=pass+1}el{fail=fail+1};
+
+  let cx0=call("memory.context";"{\"task\":\"project\",\"token_budget\":2000}";missing);
+  if(t.assert(cx0.iserror;"memory.context on a palace that cannot open is an error result, not a crash")){pass=pass+1}el{fail=fail+1};
+
+  let dw0=call("memory.diary_write";"{\"agent_id\":\"a1\",\"entry\":\"hello\"}";missing);
+  if(t.assert(dw0.iserror;"memory.diary_write does not report success for a drawer it could not write")){pass=pass+1}el{fail=fail+1};
+
+  let sto=call("memory.store";"{\"content\":\"a note about the project\",\"role\":\"user\"}";dir);
+  if(t.assert(sto.iserror == false;"memory.store succeeds on an open palace")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(sto.text;"\"ok\":true,\"drawer_id\":\"");"and names the drawer it wrote")){pass=pass+1}el{fail=fail+1};
+
+  let sr=call("memory.search";"{\"query\":\"project\",\"limit\":5}";dir);
+  if(t.assert(str.contains(sr.text;"a note about the project");"the stored note is found by memory.search")){pass=pass+1}el{fail=fail+1};
+  let reportedid=mt json.dec(sto.text) {
+    $ok:o mt json.str(o;"drawer_id") {
+      $ok:v v;
+      $jsonerr:e "none"
+    };
+    $jsonerr:e "none"
+  };
+  if(t.assert(str.len(reportedid) == 32 && str.contains(sr.text;reportedid);"and the drawer id memory.store reported is the one search finds")){pass=pass+1}el{fail=fail+1};
+
+  let fx=call("memory.facts";"{\"query\":\"project\"}";dir);
+  if(t.assert(fx.iserror == false && str.contains(fx.text;"[work/Projects]");"memory.facts finds the note and tags it with its wing and hall")){pass=pass+1}el{fail=fail+1};
+
+  let st=call("memory.status";"{}";dir);
+  if(t.assert(st.iserror == false;"memory.status succeeds on an open palace")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(st.text;"{\"total_drawers\":1,\"total_closets\":0,\"total_wings\":1}");"and counts the one drawer, no closets and one wing")){pass=pass+1}el{fail=fail+1};
+
+  let cx=call("memory.context";"{\"task\":\"project\",\"token_budget\":2000}";dir);
+  if(t.assert(cx.iserror == false;"memory.context succeeds on an open palace")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isjson(cx.text);"and its answer is JSON (the context's newlines are escaped)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(cx.text;"work(Projects)");"and the palace map names the wing and hall the note went to")){pass=pass+1}el{fail=fail+1};
+
+  let dw=call("memory.diary_write";"{\"agent_id\":\"a1\",\"entry\":\"hello\"}";dir);
+  if(t.assert(dw.iserror == false;"memory.diary_write succeeds on an open palace")){pass=pass+1}el{fail=fail+1};
+  let st2=call("memory.status";"{}";dir);
+  if(t.assert(str.contains(st2.text;"\"total_drawers\":2,");"and the diary entry is a second drawer")){pass=pass+1}el{fail=fail+1};
+
+  let bad=call("memory.store";"{\"role\":\"user\"}";dir);
+  if(t.assert(bad.iserror;"memory.store without content is refused")){pass=pass+1}el{fail=fail+1};
+  let st3=call("memory.status";"{}";dir);
+  if(t.assert(str.contains(st3.text;"\"total_drawers\":2,");"and writes nothing")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

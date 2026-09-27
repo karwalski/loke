@@ -110,6 +110,10 @@ api POST /api/pipeline  '{}'                            400 'missing required fi
 api POST /api/pipeline  '{"prompt":"hello"}'            502 'upstream error'        "and says so when loke is down"
 api POST /api/stream    '{}'                            400 'missing required field: prompt' "streaming requires a prompt"
 api POST /api/upload    ''                              400 'empty body'            "upload refuses an empty body"
+# MK6.6: ?name= reaches the handler (http.reqparam never saw a query string), and the preview
+# holds the cells, not their addresses.
+api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"filename":"sales_q3.csv"' "an upload takes its name from ?name="
+api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"preview_rows":[["north","10"]]' "and previews the rows it parsed"
 api POST /api/routing   '{"prompt":"hello"}'            200 '"routing":{'           "routing explains a decision"
 api GET  /api/agents    ""                              200 '"agents":['            "agents lists the agents"
 # NC1.3 / MK6.5: the proposal route exists, takes column names only, and with loke down says
@@ -118,19 +122,39 @@ api POST /api/ml/propose '{}'                            400 'at least one of'  
 api POST /api/ml/propose '{"num_cols":["revenue","orders","ltv"],"cat_cols":["region","plan"]}' 200 '"source":"heuristic"' "and proposes analyses from names alone, labelled heuristic"
 # MK6.5: the seven handlers that compiled with no route. Each check judges what the handler
 # computed, so a route that answers 404, or a handler that answers but ignores its input, fails.
-# The panels' state is per worker process (MK6.6), so nothing here reads back a previous POST.
+# MK6.6: the panels' histories are shared by every worker, which the repeated reads below check.
 api GET  /api/mcp/tools  ""                              200 '"name":"anonymise"'    "the MCP panel lists mcp-toke's tools"
 api POST /api/mcp/invoke '{}'                            400 'tool_name is required' "invoking needs a tool name"
 api POST /api/mcp/invoke '{"tool_name":"nosuchtool","args":{}}' 200 'unknown tool: nosuchtool' "and an unknown tool is reported as one"
 api GET  /api/mcp/broker ""                              200 '"name":"loke-memory"'  "the broker panel lists its servers"
 api GET  /api/mcp/memory ""                              200 '"available_tools":["memory.search"' "the memory panel lists its tools"
 api POST /api/mcp/memory '{"tool_name":"memory.diary_write","args":{"agent_id":"smoke","entry":"hello"}}' 200 '"success":true,"result_preview":"{\"ok\":true}"' "a memory tool runs and succeeds"
-api POST /api/mcp/memory '{"tool_name":"memory.status","args":{}}' 200 'crashes on it (MK6.6)' "and one that would crash the worker is refused, saying why"
+# MK6.6: store, status and context used to kill the worker (no response at all).
+api POST /api/mcp/memory '{"tool_name":"memory.store","args":{"content":"a note about the project","role":"user"}}' 200 '"success":true,"result_preview":"{\"ok\":true,\"drawer_id\":\"' "memory.store writes a drawer and names it"
+api POST /api/mcp/memory '{"tool_name":"memory.status","args":{}}' 200 '"success":true,"result_preview":"{\"total_drawers\":2,\"total_closets\":0,\"total_wings\":2}"' "memory.status counts the diary entry and the note"
+api POST /api/mcp/memory '{"tool_name":"memory.search","args":{"query":"project","limit":5}}' 200 'a note about the project' "memory.search finds the stored note"
+api POST /api/mcp/memory '{"tool_name":"memory.context","args":{"task":"project","token_budget":2000}}' 200 'PALACE: ' "memory.context answers with the palace map"
 api POST /api/agents/scan '{"dataset_id":"smoke","headers":["amount"],"rows_json":"[[\"10\"],[\"11\"],[\"10\"],[\"12\"],[\"9\"],[\"10\"],[\"11\"],[\"10\"],[\"9\"],[\"10\"],[\"11\"],[\"10\"],[\"1000\"]]"}' 200 '"column":"amount","kind":"iqr"' "the quality scan finds the planted outlier"
 api POST /api/agents/schema '{}'                         400 'old_csv and new_csv are required' "a schema comparison needs two files"
 api POST /api/agents/schema '{"dataset_id":"smoke","old_csv":"a,b\n1,2\n","new_csv":"a,c\n1,x\n"}' 200 '"summary":"2 changes: 1 added, 1 removed' "and reports the column that went and the one that came"
 api GET  '/api/agents/diary?agent_id=schema-change-detector' "" 200 '"agent_id":"schema-change-detector"' "the diary answers for the agent it is asked about"
 api GET  '/api/agents/diary?agent_id=nosuchagent' ""    404 'agent not found: nosuchagent' "and 404s an agent that does not exist"
+
+# MK6.6: state shared across moke's pre-forked workers. Each worker used to keep its own copy,
+# and eight reads after six invocations reported 0,0,0,1,0,0,1,1. Every read must now see all of
+# them: the nosuchtool invocation above and five more here; the five memory calls above.
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -m 20 -X POST -H 'Content-Type: application/json' \
+    -d '{"tool_name":"nosuchtool","args":{}}' "http://127.0.0.1:$PORT/api/mcp/invoke"
+done
+for i in 1 2 3 4 5 6 7 8; do
+  api GET /api/mcp/tools  "" 200 '"total_invocations":6}' "read $i of the tool log sees all six invocations"
+  api GET /api/mcp/memory "" 200 '"total_invocations":5}' "read $i of the memory log sees all five calls"
+  api GET '/api/agents/diary?agent_id=data-quality-scanner' "" 200 '"total_runs":1,' "read $i of the scanner sees its run"
+  api GET /api/agents     "" 200 '"output_summary":"2 changes: 1 added, 1 removed' "read $i of the agents panel sees the schema run"
+done
+# The shared log is a file that outlives the request, so it keeps no arguments or results.
+api GET /api/mcp/memory "" 200 '"tool_name":"memory.store","args_json":"",' "the memory log does not keep what was stored"
 
 [ "$fail" -eq 0 ] || { echo "smoke_serve_moke: failed (MK21.16)" >&2; exit 1; }
 echo "smoke_serve_moke: OK, every page rendered and every dataset loaded"

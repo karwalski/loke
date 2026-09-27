@@ -81,18 +81,68 @@ f=handlesearchresults(rs:@$searchresult):$toolresult{
 };
 
 
-f=handlesearchfail():$toolresult{
-  log.warn("memory.search failed";"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr("search failed");iserror:true}
+(* ── MK6.6: why memory.store, memory.status and memory.context killed their caller ──────────
+   Measured with one program per tool against this module, then through moke's
+   POST /api/mcp/memory. Three faults, none of them in the tools' logic:
+
+   1. memory.store passed a bare `$public` as the sensitivity. A bare variant in a value
+      position is not a value (T-13): storage.storedrawer matches on it and the process took
+      SIGSEGV on every call, whatever the palace held.
+   2. handlememorytool matched palace.open's `$palace!$lokeerr`, which always takes the first
+      arm (T-18). When the database did not open -- moke's data directory did not exist under a
+      fresh HOME -- the success arm ran with the ERROR bound as the palace. memory.status then
+      matched palace.status the same way and read three fields off the next error payload, and
+      memory.context walked the palace through a third (context.loadl1 on pal.walk). Both died.
+      memory.search and memory.facts happened to read that garbage as an empty result, and
+      memory.diary_write answered `{"ok":true}` for a drawer that was never written.
+   3. Every argument was bound straight from `json.str`/`json.i64`, which return results.
+      A present string happens to read through (T-33); a missing one is a null `str`.
+
+   So the palace is opened through palace.openok, a bool; each write goes through
+   storage.writedrawer, a bool; the status is palace.statusjson, formatted where it was
+   counted; and every argument is read through a match with `$ok` first (T-31). The
+   `mt` on search.search below is still a user-sum match whose `$err` arm cannot run (T-18);
+   with the palace known to be open, a failed search is a failed query, not a missing
+   database, and it is filed as MK6.6's remaining work rather than hidden here. *)
+
+f=strarg(obj:$json;key:str):str{
+  <mt json.str(obj;key) {
+    $ok:v v;
+    $jsonerr:e ""
+  }
 };
 
-f=handlesearchobj(p:i64;obj:i64):$toolresult{
-  let query=json.str(obj;"query");
-  let limit=json.i64(obj;"limit");
-  let wing=json.str(obj;"wing");
-  let results=mut.search.search(p;query;limit);
+(* A zero reads as an error from a std result (T-33), so 0 and "absent" both take the default.
+   Neither is a useful limit or budget. *)
+f=intarg(obj:$json;key:str;fallback:i64):i64{
+  <mt json.i64(obj;key) {
+    $ok:v v;
+    $jsonerr:e fallback
+  }
+};
+
+f=argerr(msg:str):$toolresult{
+  <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
+};
+
+f=badargs():$toolresult{
+  <argerr("invalid args JSON")
+};
+
+
+f=handlesearchfail():$toolresult{
+  log.warn("memory.search failed";"mcp_server";"system");
+  <argerr("search failed")
+};
+
+f=handlesearchobj(obj:$json):$toolresult{
+  let query=strarg(obj;"query");
+  let limit=intarg(obj;"limit";5) as u32;
+  let wing=strarg(obj;"wing");
+  if(str.len(query) == 0){ <argerr("query is required") }el{};
+  let results=mut.search.search(0;query;limit);
   if(str.len(wing) > 0){
-    results=search.searchinwing(p;query;wing;limit)
+    results=search.searchinwing(0;query;wing;limit)
   }el{};
   <mt results {
     $ok:rs handlesearchresults(rs);
@@ -100,95 +150,68 @@ f=handlesearchobj(p:i64;obj:i64):$toolresult{
   }
 };
 
-f=handlesearch(p:i64;argsjson:str):$toolresult{
-  let parsed=json.dec(argsjson);
-  <mt parsed {
-    $ok:obj handlesearchobj(p;obj);
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
+f=handlesearch(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj handlesearchobj(obj);
+    $jsonerr:e badargs()
   }
 };
 
-
-f=handlestoreok():$toolresult{
-  let drawerid=str.randhex(16);
-  let result=str.concat("{\"ok\":true,\"drawer_id\":\"";str.concat(drawerid;"\"}"));
-  <$toolresult{contenttype:"text";text:result;iserror:false}
-};
 
 f=handlestorefail():$toolresult{
   log.warn("memory.store failed";"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr("store failed");iserror:true}
+  <argerr("store failed")
 };
 
-f=handlestoreobj(p:i64;obj:i64):$toolresult{
-  let content=json.str(obj;"content");
-  let role=json.str(obj;"role");
-  <mt stor.storeturn(p;role;content;"manual";"user";0 as u32;$public) {
-    $ok:v handlestoreok();
-    $err:e handlestorefail()
+(* The drawer id reported is the one written. It used to be a second str.randhex, unrelated to
+   the drawer, so no id this tool ever returned named anything in the palace. *)
+f=handlestoreobj(obj:$json):$toolresult{
+  let content=strarg(obj;"content");
+  let role=strarg(obj;"role");
+  if(str.len(content) == 0){ <argerr("content is required") }el{};
+  if(str.len(role) == 0){ <argerr("role is required") }el{};
+  let drawer=stor.turndrawer(role;content;"manual";"user";0 as u32;$sensitivitylevel{$public:0});
+  if(stor.writedrawer(drawer)){
+    <$toolresult{contenttype:"text";text:"{\"ok\":true,\"drawer_id\":\(json.enc(drawer.id))}";iserror:false}
+  }el{
+    <handlestorefail()
   }
 };
 
-f=handlestore(p:i64;argsjson:str):$toolresult{
-  let parsed=json.dec(argsjson);
-  <mt parsed {
-    $ok:obj handlestoreobj(p;obj);
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
+f=handlestore(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj handlestoreobj(obj);
+    $jsonerr:e badargs()
   }
 };
 
 
-f=handlecontextobj(p:i64;obj:i64):$toolresult{
-  let task=json.str(obj;"task");
-  let tokenbudget=json.i64(obj;"token_budget");
-  let ctx=context.loadcontext(p;task;"user";tokenbudget);
+(* json.enc, not a replace of double quotes: the context is several lines, and a raw newline
+   inside a JSON string made every answer this tool gave unparseable. *)
+f=handlecontextobj(obj:$json):$toolresult{
+  let task=strarg(obj;"task");
+  let tokenbudget=intarg(obj;"token_budget";2000) as u32;
+  let ctx=context.loadcontext(0;task;"user";tokenbudget);
   let ctxstr=context.tocontextstring(ctx);
-  let ctxescaped=str.replace(ctxstr;"\"";"\\\"");
-  let tokenss=str.fromint(ctx.totaltokensestimate);
-  let result=str.concat(
-    "{\"context\":\"";str.concat(
-    ctxescaped;str.concat(
-    "\",\"tokens_estimate\":";str.concat(
-    tokenss;"}"
-  ))));
-  <$toolresult{contenttype:"text";text:result;iserror:false}
+  let tokens=ctx.totaltokensestimate as i64;
+  <$toolresult{contenttype:"text";text:"{\"context\":\(json.enc(ctxstr)),\"tokens_estimate\":\(tokens)}";iserror:false}
 };
 
-f=handlecontext(p:i64;argsjson:str):$toolresult{
-  let parsed=json.dec(argsjson);
-  <mt parsed {
-    $ok:obj handlecontextobj(p;obj);
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
+f=handlecontext(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj handlecontextobj(obj);
+    $jsonerr:e badargs()
   }
 };
 
 
-f=handlestatusok(s:i64):$toolresult{
-  let drawerss=str.fromint(s.totaldrawers);
-  let closetss=str.fromint(s.totalclosets);
-  let wingss=str.fromint(s.totalwings);
-  let result=str.concat(
-    "{\"total_drawers\":";str.concat(
-    drawerss;str.concat(
-    ",\"total_closets\":";str.concat(
-    closetss;str.concat(
-    ",\"total_wings\":";str.concat(
-    wingss;"}"
-  )))))
-  );
-  <$toolresult{contenttype:"text";text:result;iserror:false}
-};
-
-f=handlestatusfail():$toolresult{
-  log.warn("memory.status failed";"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr("status query failed");iserror:true}
-};
-
-f=handlestatus(p:i64):$toolresult{
-  <mt palace.status(p) {
-    $ok:s handlestatusok(s);
-    $err:e handlestatusfail()
-  }
+f=handlestatus():$toolresult{
+  let status=palace.statusjson();
+  if(str.len(status) == 0){
+    log.warn("memory.status failed";"mcp_server";"system");
+    <argerr("status query failed")
+  }el{};
+  <$toolresult{contenttype:"text";text:status;iserror:false}
 };
 
 
@@ -207,38 +230,38 @@ f=handlefactsresults(rs:@$searchresult):$toolresult{
   <$toolresult{contenttype:"text";text:"{\"facts\":\(json.enc(facts))}";iserror:false}
 };
 
-
 f=handlefactsfail():$toolresult{
   log.warn("memory.facts search failed";"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr("facts search failed");iserror:true}
+  <argerr("facts search failed")
 };
 
-f=handlefactsobj(p:i64;obj:i64):$toolresult{
-  let query=json.str(obj;"query");
-  <mt search.search(p;query;5) {
+f=handlefactsobj(obj:$json):$toolresult{
+  let query=strarg(obj;"query");
+  if(str.len(query) == 0){ <argerr("query is required") }el{};
+  <mt search.search(0;query;5) {
     $ok:rs handlefactsresults(rs);
     $err:e handlefactsfail()
   }
 };
 
-f=handlefacts(p:i64;argsjson:str):$toolresult{
-  let parsed=json.dec(argsjson);
-  <mt parsed {
-    $ok:obj handlefactsobj(p;obj);
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
+f=handlefacts(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj handlefactsobj(obj);
+    $jsonerr:e badargs()
   }
 };
 
 
-f=handlediarywritefail(agentid:str):$toolresult{
-  log.warn(str.concat("memory.diary_write failed for agent: ";agentid);"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr("diary write failed");iserror:true}
+f=handlediarywritefail():$toolresult{
+  log.warn("memory.diary_write failed";"mcp_server";"system");
+  <argerr("diary write failed")
 };
 
-f=handlediarywriteobj(p:i64;obj:i64):$toolresult{
-  let agentid=json.str(obj;"agent_id");
-  let entry=json.str(obj;"entry");
-
+f=handlediarywriteobj(obj:$json):$toolresult{
+  let agentid=strarg(obj;"agent_id");
+  let entry=strarg(obj;"entry");
+  if(str.len(agentid) == 0){ <argerr("agent_id is required") }el{};
+  if(str.len(entry) == 0){ <argerr("entry is required") }el{};
   let location=$palacelocation{wing:"agent-diaries";hall:agentid;room:"diary"};
   let drawerid=str.randhex(16);
   let drawer=$drawer{
@@ -252,17 +275,17 @@ f=handlediarywriteobj(p:i64;obj:i64):$toolresult{
     sensitivity:$sensitivitylevel{$internal:0};
     createdat:""
   };
-  <mt stor.storedrawer(p;drawer) {
-    $ok:v $toolresult{contenttype:"text";text:"{\"ok\":true}";iserror:false};
-    $err:e handlediarywritefail(agentid)
+  if(stor.writedrawer(drawer)){
+    <$toolresult{contenttype:"text";text:"{\"ok\":true}";iserror:false}
+  }el{
+    <handlediarywritefail()
   }
 };
 
-f=handlediarywrite(p:i64;argsjson:str):$toolresult{
-  let parsed=json.dec(argsjson);
-  <mt parsed {
-    $ok:obj handlediarywriteobj(p;obj);
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
+f=handlediarywrite(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj handlediarywriteobj(obj);
+    $jsonerr:e badargs()
   }
 };
 
@@ -272,46 +295,32 @@ f=handlediarywrite(p:i64;argsjson:str):$toolresult{
 f=unknownmemorytool(name:str):$toolresult{
   let msg=str.concat("unknown memory tool: ";name);
   log.warn(msg;"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
+  <argerr(msg)
 };
 
-f=dispatchmemorytool(name:str;argsjson:str;p:i64):$toolresult{
-  if(str.eq(name;"memory.search")){
-    <handlesearch(p;argsjson)
-  }el{
-    if(str.eq(name;"memory.store")){
-      <handlestore(p;argsjson)
-    }el{
-      if(str.eq(name;"memory.context")){
-        <handlecontext(p;argsjson)
-      }el{
-        if(str.eq(name;"memory.status")){
-          <handlestatus(p)
-        }el{
-          if(str.eq(name;"memory.facts")){
-            <handlefacts(p;argsjson)
-          }el{
-            if(str.eq(name;"memory.diary_write")){
-              <handlediarywrite(p;argsjson)
-            }el{
-              <unknownmemorytool(name)
-            }
-          }
-        }
-      }
-    }
-  }
+f=dispatchmemorytool(name:str;argsjson:str):$toolresult{
+  if(str.eq(name;"memory.search")){ <handlesearch(argsjson) }el{};
+  if(str.eq(name;"memory.store")){ <handlestore(argsjson) }el{};
+  if(str.eq(name;"memory.context")){ <handlecontext(argsjson) }el{};
+  if(str.eq(name;"memory.status")){ <handlestatus() }el{};
+  if(str.eq(name;"memory.facts")){ <handlefacts(argsjson) }el{};
+  if(str.eq(name;"memory.diary_write")){ <handlediarywrite(argsjson) }el{};
+  <unknownmemorytool(name)
 };
 
 f=memorytoolopenfail(datadir:str):$toolresult{
   let msg=str.concat("failed to open memory palace at: ";datadir);
   log.warn(msg;"mcp_server";"system");
-  <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
+  <argerr(msg)
 };
 
+(* The storage, search and context functions take a palace handle and never read it: std.db has
+   one process-wide connection (T-30), which openok has just pointed at the palace. So 0 is
+   passed for it, as the memory tests do. *)
 f=handlememorytool(name:str;argsjson:str;datadir:str):$toolresult{
-  <mt palace.open(datadir) {
-    $ok:p dispatchmemorytool(name;argsjson;p);
-    $err:e memorytoolopenfail(datadir)
+  if(palace.openok(datadir)){
+    <dispatchmemorytool(name;argsjson)
+  }el{
+    <memorytoolopenfail(datadir)
   }
 };

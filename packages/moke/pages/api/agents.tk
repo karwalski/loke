@@ -11,6 +11,7 @@ i=scanner:moke.agents.qualityscanner;
 i=detector:moke.agents.schemadetector;
 i=status:moke.agents.status;
 i=hooks:moke.hooks;
+i=panellog:moke.panellog;
 
 (* ── The three "globals" were FUNCTIONS ───────────────────────────────────────────
    This file used to declare
@@ -34,7 +35,6 @@ i=hooks:moke.hooks;
    glastreport and glastdiff are written on every scan and every schema comparison and READ
    nowhere: no route serves the last report or the last diff. They are kept because the diary
    endpoint below is plainly meant to grow into that, but nothing in moke reads them today. *)
-let gagents=mut.initialagents();
 let glastreport=mut.scanner.newreport("none";"never");
 let glastdiff=mut.emptydiff();
 
@@ -195,8 +195,54 @@ f=replaceagent(agents:@$agentstatus;idx:i64;updated:$agentstatus):@$agentstatus{
    $agentstatus fixes the type, and the ABI makes it free. *)
 f=agentidof(a:$agentstatus):str{ <a.agentid };
 
+(* ── MK6.6: the run history is a shared file, not this worker's state ──────────────
+   gagents was module-level state, and moke serves from several pre-forked workers, each with
+   its own copy: a scan recorded its run in the worker that served it, and /api/agents, served by
+   another, did not show it. A run is now one line of moke.panellog's "agent-runs" file, and the
+   agents are rebuilt from those lines on every read, by the same status.recordrun the handlers
+   used to call. The line holds the agent's index, the run's id, its start and finish times, its
+   finding count and its summary, separated by tabs: nothing from the dataset itself. Duration,
+   tokens and cost are not kept, because both handlers record them as zero. *)
+f=nospecials(s:str):str{
+  <str.replace(str.replace(s;"\t";" ");"\n";" ")
+};
+
+f=runline(idx:i64;run:$agentrunentry):str{
+  let findings=run.findingscount as i64;
+  <"\(idx)\t\(nospecials(run.runid))\t\(nospecials(run.startedat))\t\(nospecials(run.finishedat))\t\(findings)\t\(nospecials(run.outputsummary))"
+};
+
+(* A zero reads as a parse error (T-33), which is why the fallback is 0. *)
+f=intof(s:str):i64{
+  <mt str.toint(s) {
+    $ok:v v;
+    $parseerr:e 0
+  }
+};
+
+f=replayrun(agents:@$agentstatus;fields:@str):@$agentstatus{
+  let idx=intof(fields.get(0));
+  if(idx < 0 || idx >= agents.len()){ <agents }el{};
+  let agent:$agentstatus=agents.get(idx);
+  let summary=mut."";
+  if(fields.len() > 5){ summary=fields.get(5) }el{};
+  let started=status.newrunentry(fields.get(1);agent.agentid;fields.get(2));
+  let run=status.completerun(started;fields.get(3);0;0;0.0;intof(fields.get(4)) as i32;summary);
+  <replaceagent(agents;idx;status.recordrun(agent;run))
+};
+
+f=currentagents():@$agentstatus{
+  let agents=mut.initialagents();
+  let lines=panellog.lines("agent-runs");
+  lp(let li=0;li < lines.len();li=li + 1){
+    let fields=str.split(lines.get(li);"\t");
+    if(fields.len() >= 5){ agents=replayrun(agents;fields) }el{}
+  };
+  <agents
+};
+
 f=get(req:i64):i64{
-  let panel=status.buildpanelstate(gagents;nowstamp());
+  let panel=status.buildpanelstate(currentagents();nowstamp());
   <http.res(200;status.panelstatetojson(panel))
 };
 
@@ -251,9 +297,7 @@ f=postscan(req:i64):i64{
   let startedrun=status.newrunentry(scanid;"data-quality-scanner";startedat);
   let run=status.completerun(startedrun;nowstamp();0;0;0.0;report.totalfindings;
     str.concat(str.fromint(report.totalfindings as i64);" findings"));
-  if(gagents.len() > 0){
-    gagents=replaceagent(gagents;0;status.recordrun(gagents.get(0);run))
-  }el{};
+  panellog.append("agent-runs";runline(0;run));
 
   <http.res(200;scanner.reporttojson(report))
 };
@@ -291,9 +335,7 @@ f=postschema(req:i64):i64{
   let runid=str.concat("schema-";str.fromint(time.nowms()));
   let startedrun=status.newrunentry(runid;"schema-change-detector";startedat);
   let run=status.completerun(startedrun;nowstamp();0;0;0.0;diff.changes.len() as i32;diff.summary);
-  if(gagents.len() > 1){
-    gagents=replaceagent(gagents;1;status.recordrun(gagents.get(1);run))
-  }el{};
+  panellog.append("agent-runs";runline(1;run));
 
   <http.res(200;detector.difftojson(diff))
 };
@@ -334,12 +376,13 @@ f=getdiary(req:i64):i64{
   if(str.len(agentid) == 0){
     <errjson(400;"agent_id query param is required")
   };
+  let agents=currentagents();
   let found=mut.-1;
-  lp(let ai=0;ai < gagents.len();ai=ai + 1){
-    if(str.eq(agentidof(gagents.get(ai));agentid)){ found=ai }el{}
+  lp(let ai=0;ai < agents.len();ai=ai + 1){
+    if(str.eq(agentidof(agents.get(ai));agentid)){ found=ai }el{}
   };
   if(found < 0){
     <errjson(404;str.concat("agent not found: ";agentid))
   };
-  <http.res(200;status.agentstatustojson(gagents.get(found)))
+  <http.res(200;status.agentstatustojson(agents.get(found)))
 };

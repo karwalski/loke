@@ -59,6 +59,20 @@ f=open(datadir:str):$palace!$lokeerr{
 };
 
 
+(* MK6.6. `open`'s `$palace!$lokeerr` cannot be matched: a result with a user-declared error
+   type always takes the first arm (T-18), so a caller that matched it ran its success arm with
+   the error payload bound as the palace. moke's memory panel did exactly that whenever
+   `datadir` did not exist, and every tool that then read the database crashed the worker. This
+   answers, as a bool a caller can branch on, whether the palace's database opened and its
+   tables exist. It opens the same file as `open`. *)
+f=openok(datadir:str):bool{
+  <mt db.open(str.concat(datadir;"/loke.db")) {
+    $ok:conn schema.createtables(conn);
+    $err:e false
+  }
+};
+
+
 f=listwings(palace:$palace):@str!$lokeerr{
   let rows=mt db.many("SELECT DISTINCT wing FROM memory_drawers ORDER BY wing";@()) {
     $ok:rows rows;
@@ -123,43 +137,31 @@ f=listrooms(palace:$palace;wing:str;hall:str):@str!$lokeerr{
 };
 
 
-f=status(palace:$palace):i64!$lokeerr{
-  let drawerrows=mt db.many("SELECT COUNT(*) as n FROM memory_drawers";@()) {
-    $ok:drawerrows drawerrows;
-    $err:e $err($storageerr("failed to count drawers"))
+(* MK6.6. This was `status`, declared `i64!$lokeerr` while it returned a `$palacestatus`, and
+   its one caller, core.memory.mcpserver, matched it and read `.totaldrawers` off an `i64`. A
+   match on a result with a user-declared error type always takes the first arm (T-18), so a
+   failed count handed the ERROR payload to the success arm, which read three fields off it:
+   that is what killed moke's worker on `memory.status` whenever the palace had not opened. The
+   counts are now formatted here, in the module that computed them, and a failure is the empty
+   string rather than a value no caller can tell apart from success.
+
+   A COUNT without GROUP BY yields exactly one row, so no row at all means the query failed. *)
+f=countrows(sql:str):i64{
+  let rows=mt db.many(sql;@()) {
+    $ok:rows rows;
+    $err:e @()
   };
-  (* Guarded. An unaggregated COUNT always yields exactly one row, so .get(0) happened
-     to be safe here, but nothing in the type system says so and an out-of-range .get is
-     not a checked error. *)
-  let totaldrawers=mut.0;
-  if(drawerrows.len>0){
-    let drawerrow:$row=drawerrows.get(0);
-    totaldrawers=sdb.rowi64(drawerrow;"n")
-  }el{};
-  let closetrows=mt db.many("SELECT COUNT(*) as n FROM memory_closets";@()) {
-    $ok:closetrows closetrows;
-    $err:e $err($storageerr("failed to count closets"))
-  };
-  let totalclosets=mut.0;
-  if(closetrows.len>0){
-    let closetrow:$row=closetrows.get(0);
-    totalclosets=sdb.rowi64(closetrow;"n")
-  }el{};
-  let wingrows=mt db.many("SELECT COUNT(DISTINCT wing) as n FROM memory_drawers";@()) {
-    $ok:wingrows wingrows;
-    $err:e $err($storageerr("failed to count wings"))
-  };
-  let totalwings=mut.0;
-  if(wingrows.len>0){
-    let wingrow:$row=wingrows.get(0);
-    totalwings=sdb.rowi64(wingrow;"n")
-  }el{};
-  <$ok($palacestatus{
-    totaldrawers:totaldrawers as u32;
-    totalclosets:totalclosets as u32;
-    totalwings:totalwings as u32;
-    storagebytes:0
-  })
+  if(rows.len==0){ <-1 }el{};
+  let row:$row=rows.get(0);
+  <sdb.rowi64(row;"n")
+};
+
+f=statusjson():str{
+  let drawers=countrows("SELECT COUNT(*) as n FROM memory_drawers");
+  let closets=countrows("SELECT COUNT(*) as n FROM memory_closets");
+  let wings=countrows("SELECT COUNT(DISTINCT wing) as n FROM memory_drawers");
+  if(drawers<0 || closets<0 || wings<0){ <"" }el{};
+  <"{\"total_drawers\":\(drawers),\"total_closets\":\(closets),\"total_wings\":\(wings)}"
 };
 
 

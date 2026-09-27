@@ -627,9 +627,12 @@ concurrent rebuild of `/tmp/loke-tests/libloke.a` can fake a crash.
     test goes red when a real parser lands.
 33. **`core.memory.search.indexdrawer`** declares `drawer:i64` and then reads `drawer.content` and
     `drawer.id` (a segfault), and returns from inside its keyword loop, so it would index one keyword
-    per drawer. Not called; rows are inserted with SQL instead.
+    per drawer. Not called; rows are inserted with SQL instead. **Replaced 2026-09-27 (MK6.6)** by
+    `indexkeywords(drawerid;content):bool`, which `storage.storedrawertx` calls inside the drawer's
+    transaction; `tests/unit/memory/test_mcp_server.tk` finds a stored note through search.
 34. **`core.memory.palace.status`** — the interface says `return: i64` and the body returns
-    `$ok($palacestatus{…})`. Not called.
+    `$ok($palacestatus{…})`. Its one caller, `core.memory.mcpserver`, did call it and crashed.
+    **Replaced 2026-09-27 (MK6.6)** by `statusjson():str`, covered by `test_mcp_server.tk`.
 
 35. **`core.router.latencyrouter:62` logs a control that did not run.** `filterbylatency` logs
     "restricted to local models" and returns `t.filtermodels(candidates;true)`, but
@@ -857,11 +860,10 @@ because it will be wrong again tomorrow: the census is generated, a prose list i
 - sidecar_client.tk
 - web_meta.tk
 
-### packages/core/src/memory/ (9 untested of 14)
+### packages/core/src/memory/ (8 untested of 14)
 
 - context.tk
 - graph.tk
-- mcp_server.tk
 - mining.tk
 - privacy.tk
 - schema.tk
