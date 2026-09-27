@@ -107,6 +107,21 @@ api GET  /api/agents    ""                              200 '"agents":['        
 # its suggestions are heuristic rather than presenting them as a model's.
 api POST /api/ml/propose '{}'                            400 'at least one of'       "a proposal needs column names"
 api POST /api/ml/propose '{"num_cols":["revenue","orders","ltv"],"cat_cols":["region","plan"]}' 200 '"source":"heuristic"' "and proposes analyses from names alone, labelled heuristic"
+# MK6.5: the seven handlers that compiled with no route. Each check judges what the handler
+# computed, so a route that answers 404, or a handler that answers but ignores its input, fails.
+# The panels' state is per worker process (MK6.6), so nothing here reads back a previous POST.
+api GET  /api/mcp/tools  ""                              200 '"name":"anonymise"'    "the MCP panel lists mcp-toke's tools"
+api POST /api/mcp/invoke '{}'                            400 'tool_name is required' "invoking needs a tool name"
+api POST /api/mcp/invoke '{"tool_name":"nosuchtool","args":{}}' 200 'unknown tool: nosuchtool' "and an unknown tool is reported as one"
+api GET  /api/mcp/broker ""                              200 '"name":"loke-memory"'  "the broker panel lists its servers"
+api GET  /api/mcp/memory ""                              200 '"available_tools":["memory.search"' "the memory panel lists its tools"
+api POST /api/mcp/memory '{"tool_name":"memory.diary_write","args":{"agent_id":"smoke","entry":"hello"}}' 200 '"success":true,"result_preview":"{\"ok\":true}"' "a memory tool runs and succeeds"
+api POST /api/mcp/memory '{"tool_name":"memory.status","args":{}}' 200 'crashes on it (MK6.6)' "and one that would crash the worker is refused, saying why"
+api POST /api/agents/scan '{"dataset_id":"smoke","headers":["amount"],"rows_json":"[[\"10\"],[\"11\"],[\"10\"],[\"12\"],[\"9\"],[\"10\"],[\"11\"],[\"10\"],[\"9\"],[\"10\"],[\"11\"],[\"10\"],[\"1000\"]]"}' 200 '"column":"amount","kind":"iqr"' "the quality scan finds the planted outlier"
+api POST /api/agents/schema '{}'                         400 'old_csv and new_csv are required' "a schema comparison needs two files"
+api POST /api/agents/schema '{"dataset_id":"smoke","old_csv":"a,b\n1,2\n","new_csv":"a,c\n1,x\n"}' 200 '"summary":"2 changes: 1 added, 1 removed' "and reports the column that went and the one that came"
+api GET  '/api/agents/diary?agent_id=schema-change-detector' "" 200 '"agent_id":"schema-change-detector"' "the diary answers for the agent it is asked about"
+api GET  '/api/agents/diary?agent_id=nosuchagent' ""    404 'agent not found: nosuchagent' "and 404s an agent that does not exist"
 
 [ "$fail" -eq 0 ] || { echo "smoke_serve_moke: failed (MK21.16)" >&2; exit 1; }
 echo "smoke_serve_moke: OK, every page rendered and every dataset loaded"

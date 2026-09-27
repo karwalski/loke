@@ -268,14 +268,12 @@ f=postschema(req:i64):i64{
     $ok:v v;
     $jsonerr:e "unknown"
   };
-  let oldcsv=mt json.str(obj;"old_csv") {
-    $ok:v v;
-    $jsonerr:e ""
-  };
-  let newcsv=mt json.str(obj;"new_csv") {
-    $ok:v v;
-    $jsonerr:e ""
-  };
+  (* jx.strvalue, not json.str. A CSV is lines, and json.str reads the `\n` escape back as the
+     letter n (T-47), so every file arrived as one line: "a,b\n1,2" compared as the columns a,
+     bn1 and 2n, and every schema diff listed invented columns. Measured through the route
+     (MK6.5). jx.strvalue decodes the escapes. *)
+  let oldcsv=jx.strvalue(obj;"old_csv";"");
+  let newcsv=jx.strvalue(obj;"new_csv";"");
 
   (* errjson already supplies the {"ok":false,"error":...} envelope, so what it takes is a message
      and not a document. This site used to hand it a whole JSON object, which would have come back
@@ -300,6 +298,29 @@ f=postschema(req:i64):i64{
   <http.res(200;detector.difftojson(diff))
 };
 
+(* A query-string value from the raw request target, or "" when absent. MK6.5: this used to be
+   http.reqparam(req;"agent_id"), which reads the ROUTE's path parameters (tk_http_req_param walks
+   req->params, filled by pattern matching) and never the query string, so once the diary had a
+   route every request answered 400 "agent_id query param is required" whatever it sent.
+   http.reqpath is the raw target, query included; std.http strips the query only for routing
+   (http_path_only, story 127.100). No percent-decoding: the agent ids this looks up are
+   lower-case letters and hyphens, which encodeURIComponent leaves as they are. *)
+f=queryvalue(target:str;key:str):str{
+  let qi=str.indexof(target;"?");
+  if(qi < 0){ <"" }el{};
+  let query=mt str.slice(target;(qi + 1) as u64;str.len(target)) {
+    $ok:v v;
+    $sliceerr:e ""
+  };
+  let pairs=str.split(query;"&");
+  let prefix="\(key)=";
+  let found=mut."";
+  lp(let pi=0;pi < pairs.len();pi=pi + 1){
+    if(str.startswith(pairs.get(pi);prefix)){ found=str.trimprefix(pairs.get(pi);prefix) }el{}
+  };
+  <found
+};
+
 (* `lp`, not `if`. This search used to be
 
      let ai=mut.0;  if(ai < gagents.len()){ ... ai=ai + 1 }el{};
@@ -309,9 +330,7 @@ f=postschema(req:i64):i64{
    if-for-lp substitution moke.agents.status carried in four places. An `if` where a `lp` was meant
    type-checks and runs, so nothing objects to it. *)
 f=getdiary(req:i64):i64{
-  (* http.reqparam, not http.queryparam: queryparam is declared to take the `req` struct, while a
-     handler is given a raw i64 pointer, and http.reqparam is declared (i64, str) -> str for that. *)
-  let agentid=http.reqparam(req;"agent_id");
+  let agentid=queryvalue(http.reqpath(req);"agent_id");
   if(str.len(agentid) == 0){
     <errjson(400;"agent_id query param is required")
   };

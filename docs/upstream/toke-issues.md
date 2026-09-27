@@ -2046,6 +2046,12 @@ moke reached 28. Giving seven more handlers their own page files, which is the c
 scan, schema and diary) stay unrouted. **The ask:** raise the limit, or have `gen_handlers.sh`
 split the registry across modules.
 
+**Worked around 2026-09-27 (MK6.5).** The limit is configurable after all: `--max-imports=N`, or
+`max_imports` in `tkc.toml` (docs/upstream/repro-2026-09-27/T-56/). loke's `tkc.toml` sets
+`max_imports = 40` and moke's registry, at 35 imports, compiles; with the line removed the same
+file fails with E9010 on its 33rd import. What remains upstream is that the diagnostic does not
+name the setting, and that ooke does not set it (O-2).
+
 ## T-47 — `str.nowunix()` returns the time as a STRING and is declared `i64`
 
 **Severity: wrong value, silently. It reached a budget, a kill switch and an audit trail.**
