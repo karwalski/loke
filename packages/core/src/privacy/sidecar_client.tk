@@ -8,6 +8,7 @@ i=str:std.str;
 i=cfg:shared.config;
 i=jx:shared.jsonobj;
 i=reach:shared.reachability;
+i=t:shared.types;
 
 (* The client of the privacy-filter sidecar, packages/privacy-filter/server.py.
 
@@ -53,6 +54,24 @@ t=$pfscan{
   suppressed:i64;
   count:i64;
   body:str
+};
+
+(* F3b.3. What the pipeline reads from one /detect: the spans as $piientity, in the
+   pipeline's own entity taxonomy, with byte offsets into the text loke holds. A plain struct
+   for the same reason as $pfscan (T-18). ok is false when the scan failed, AND when the
+   sidecar said it found more entities than could be read out of its answer: an entity
+   counted and then lost in parsing would be a detection that is never anonymised, which is
+   a fail-open.
+
+   unplaced counts spans that could not be located in the text at all (neither their offsets
+   nor their value). There is nothing to substitute for those, so they cannot be anonymised
+   here; the count lets a caller see that it happened. *)
+t=$pfentities{
+  ok:bool;
+  hits:@$piientity;
+  unplaced:i64;
+  applied:str;
+  suppressed:i64
 };
 
 f=sidecarurl():str{
@@ -158,6 +177,129 @@ f=detect(client:$pfclient;text:str):$pfscan{
 
 f=anonymise(client:$pfclient;text:str):$pfscan{
   <post(client;"/anonymise";text;"anonymised")
+};
+
+(* F3b.3 -- the sidecar as a detection layer of core.privacy.pipeline. $pfentities, above,
+   is what the pipeline reads.
+
+   The sidecar's eight types (packages/privacy-filter/models.json, entity_mapping) in the
+   taxonomy the pipeline's other layers report, so maxsensitivity and the placeholder
+   prefixes treat a sidecar PERSON as they treat a Presidio or NER one. Where Presidio has a
+   name for the type it is used (PERSON, EMAIL_ADDRESS, PHONE_NUMBER, URL); an account number
+   is FINANCIAL, which the pipeline already rates confidential; the rest keep the sidecar's
+   own label. A type outside the eight is kept, upper-cased, never dropped: an entity with an
+   unfamiliar label is still an entity. *)
+f=lokeentitytype(pftype:str):str{
+  if(str.eq(pftype;"private_person")){ <"PERSON" }el{};
+  if(str.eq(pftype;"private_email")){ <"EMAIL_ADDRESS" }el{};
+  if(str.eq(pftype;"private_phone")){ <"PHONE_NUMBER" }el{};
+  if(str.eq(pftype;"private_address")){ <"ADDRESS" }el{};
+  if(str.eq(pftype;"private_url")){ <"URL" }el{};
+  if(str.eq(pftype;"private_date")){ <"DATE" }el{};
+  if(str.eq(pftype;"account_number")){ <"FINANCIAL" }el{};
+  if(str.eq(pftype;"secret")){ <"SECRET" }el{};
+  if(str.len(pftype)==0){ <"PII" }el{};
+  <str.toupper(pftype)
+};
+
+(* The byte offset at which code point number charoff begins: the sidecar counts Unicode
+   code points (Python str indices), loke's detectors count bytes. A UTF-8 continuation
+   byte (0x80-0xBF) does not start a code point. Past the end answers the byte length. The
+   same walk as core.privacy.evaluation.bytestart, which this module does not import. *)
+f=cpbyte(text:str;charoff:i64):i64{
+  let n=str.len(text) as i64;
+  let seen=mut.0;
+  let at=mut.n;
+  let done=mut.false;
+  lp(let b=0;b<n && !done;b=b+1){
+    let c=str.charat(text;b);
+    if(c>=128 && c<192){}el{
+      if(seen==charoff){
+        at=b;
+        done=true
+      }el{
+        seen=seen+1
+      }
+    }
+  };
+  <at
+};
+
+f=unplacedentity():$piientity{
+  <$piientity{entitytype:"";value:"";start:0 as u32;end:0 as u32;confidence:0.0;placeholder:""}
+};
+
+f=placedentity(kind:str;value:str;start:i64;conf:f64):$piientity{
+  <$piientity{
+    entitytype:lokeentitytype(kind);
+    value:value;
+    start:start as u32;
+    end:(start+(str.len(value) as i64)) as u32;
+    confidence:conf;
+    placeholder:""
+  }
+};
+
+(* Where the span is in loke's text. The sidecar reports offsets AND a value, and the two
+   can disagree: its value is the classifier's decoded tokens, stripped, which need not be
+   the exact characters at the offsets. Anonymisation substitutes by value, so the value
+   used must be text that is actually there:
+
+     the text at the offsets, when it is the reported value (the ordinary case);
+     else the reported value, when it occurs in the text;
+     else the text at the offsets, since the offsets index loke's own text;
+     else nothing can be placed, and value is "". *)
+f=toentity(text:str;e:$json):$piientity{
+  let kind=mt json.str(e;"type") { $ok:s s; $err:x "" };
+  let rawvalue=mt json.str(e;"value") { $ok:s s; $err:x "" };
+  let reported=str.trim(rawvalue);
+  let cstart=mt json.i64(e;"start") { $ok:n n; $err:x 0-1 };
+  let cend=mt json.i64(e;"end") { $ok:n n; $err:x 0-1 };
+  let conf=mt json.f64(e;"confidence") { $ok:c c; $err:x 0.0 };
+  let n=str.len(text) as i64;
+  let slice=mut."";
+  let sstart=mut.(0-1);
+  if(cstart>=0 && cend>cstart){
+    let bs=cpbyte(text;cstart);
+    let be=cpbyte(text;cend);
+    if(be>bs && be<=n){
+      let raw=t.strslice(text;bs;be);
+      slice=str.trim(raw);
+      sstart=bs+str.indexof(raw;slice)
+    }el{}
+  }el{};
+  if(str.len(slice)>0 && (str.len(reported)==0 || str.eq(slice;reported))){ <placedentity(kind;slice;sstart;conf) }el{};
+  let at=str.indexof(text;reported);
+  if(str.len(reported)>0 && at>=0){ <placedentity(kind;reported;at;conf) }el{};
+  if(str.len(slice)>0){ <placedentity(kind;slice;sstart;conf) }el{};
+  <unplacedentity()
+};
+
+f=failedentities(scan:$pfscan):$pfentities{
+  <$pfentities{ok:false;hits:@();unplaced:0;applied:scan.applied;suppressed:scan.suppressed}
+};
+
+f=entitiesof(scan:$pfscan;obj:$json;text:str):$pfentities{
+  let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
+  if((ents.len as i64)<scan.count){ <failedentities(scan) }el{};
+  let hits=mut.@($piientity);
+  let unplaced=mut.0;
+  lp(let i=0;i<ents.len;i=i+1){
+    let ent=toentity(text;ents.get(i));
+    if(str.len(ent.value)>0){ hits=hits.push(ent) }el{ unplaced=unplaced+1 }
+  };
+  <$pfentities{ok:true;hits:hits;unplaced:unplaced;applied:scan.applied;suppressed:scan.suppressed}
+};
+
+(* One /detect, read as detection-layer output. The text goes in clear, so post (above)
+   refuses any host that is not loopback. *)
+f=scanentities(client:$pfclient;text:str):$pfentities{
+  let scan=detect(client;text);
+  if(!scan.ok){ <failedentities(scan) }el{};
+  <mt json.dec(scan.body) {
+    $ok:obj entitiesof(scan;obj;text);
+    $jsonerr:e failedentities(scan)
+  }
 };
 
 f=listmodels(client:$pfclient):str{

@@ -21,7 +21,9 @@ matches `"key":` exactly.
 The optional mode is for testing what a client does with a service that is up but useless:
 `garbage` answers every request with 200 and a JSON object that is not what any caller asked
 for (an error object where Presidio sends an array, prose where the NER model was asked for
-an array); `silent` answers 200 with an empty body. Both still record.
+an array); `silent` answers 200 with an empty body. Both still record. `pfbroken` (F3b.3)
+answers everything as `answer` does except /detect, which claims two entities it does not
+deliver in readable form.
 
 scripts/lib/fake_ollama.py is the Ollama stand-in smoke_e2e.sh uses; it logs POSTs only, and
 a GET that never arrives is precisely what VM1.6e is about, so this is a separate file.
@@ -111,6 +113,11 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif MODE == "pfbroken" and p == "/detect":
+            # F3b.3: a sidecar that is up (/health answers) and says it found two entities,
+            # but whose entities cannot be read. The pipeline must count that layer degraded:
+            # entities counted and then lost in parsing are never anonymised.
+            self._send({"count": 2, "threshold": 0.0, "suppressed_below_threshold": 0, "entities": "unreadable"})
         elif MODE == "garbage":
             self._send({"error": "recorder in garbage mode", "message": {"role": "assistant", "content": "I could not find any entities."}})
         elif p == "/api/tags":

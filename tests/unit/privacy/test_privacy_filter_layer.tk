@@ -1,0 +1,271 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.privacyfilterlayer;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=toml:std.toml;
+i=env:std.env;
+i=process:std.process;
+i=pf:core.privacy.sidecarclient;
+i=pl:core.privacy.pipeline;
+i=pt:core.privacy.pipelinetypes;
+i=cfg:shared.config;
+i=sh:shared.types;
+
+(* F3b.3 — the privacy-filter sidecar as a detection layer of core.privacy.pipeline.run,
+   judged by what arrives at a server standing in for it and by what the pipeline does with
+   the answer.
+
+   Before this story core.privacy.sidecarclient had no importer: no request from loke ever
+   reached the sidecar, whatever was configured. AD1.3 measured the sidecar as the cheapest
+   layer to add to regex (docs/metrics-baseline.md) while pipeline.run did not call it.
+
+   scripts/lib/http_recorder.py answers /health and /detect as packages/privacy-filter/server.py
+   does, with two spans: "Jane Citizen" (private_person, 0.95, code points 0-12) and "Tuesday"
+   (private_date, 0.4, code points 20-27), the request's threshold applied. Regex finds
+   neither, so an anonymised name here can only have come from this layer. In `pfbroken`
+   mode it answers /health but its /detect claims two entities it does not deliver.
+
+   NER and Presidio are switched off in these runs so the layer counts are this layer's. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_pflayer_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+(* Regex, plus the sidecar at url; NER and Presidio off. *)
+f=pfonly(url:str;threshold:str):$pipelineconfig{
+  let base=pl.newconfig(deadurl();deadurl());
+  let quiet=$pipelineconfig{
+    presidiourl:base.presidiourl;
+    ollamaurl:base.ollamaurl;
+    nermodelid:base.nermodelid;
+    usepresidio:false;
+    usener:false;
+    dryrun:false;
+    usepf:false;
+    pfurl:"";
+    pfthreshold:""
+  };
+  <pl.withprivacyfilter(quiet;true;url;threshold)
+};
+
+(* Arms in the declaration order of $pipelinestage: `mt` binds by position (T-31). *)
+f=ispfstage(st:$pipelinestage):bool{
+  <mt st {
+    $regexscan:v false;
+    $nerscan:v false;
+    $presidioscan:v false;
+    $dedup:v false;
+    $anonymise:v false;
+    $guardianinject:v false;
+    $privacyfilterscan:v true
+  }
+};
+
+(* "completed", "skipped" or "absent": what the run recorded for the privacy-filter stage. *)
+f=pfstage(run:$pipelinerun):str{
+  let seen=mut."absent";
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    if(ispfstage(sr.stage)){
+      if(sr.skipped){ seen="skipped" }el{ seen="completed" }
+    }el{}
+  };
+  <seen
+};
+
+f=hastype(run:$pipelinerun;kind:str;value:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<run.result.entities.len;i=i+1){
+    let e:$piientity=run.result.entities.get(i);
+    if(str.eq(e.entitytype;kind) && str.eq(e.value;value)){ found=true }el{}
+  };
+  <found
+};
+
+(* The last /detect line in the recorder's log. *)
+f=lastdetect(logp:str):str{
+  let lines=str.split(readfile(logp);"\n");
+  let found=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let l=lines.get(i);
+    if(str.startswith(l;"POST /detect")){ found=l }el{}
+  };
+  <found
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── The taxonomy ─────────────────────────────────────────────────────── *)
+  if(t.asserteq(pf.lokeentitytype("private_person");"PERSON";"private_person is PERSON")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("private_email");"EMAIL_ADDRESS";"private_email is EMAIL_ADDRESS")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("private_phone");"PHONE_NUMBER";"private_phone is PHONE_NUMBER")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("private_address");"ADDRESS";"private_address is ADDRESS")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("private_url");"URL";"private_url is URL")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("private_date");"DATE";"private_date is DATE")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("account_number");"FINANCIAL";"account_number is FINANCIAL")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("secret");"SECRET";"secret is SECRET")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.lokeentitytype("private_thing");"PRIVATE_THING";"a type outside the eight is kept, not dropped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pf.cpbyte("Zoë x";4)==5;"code point 4 of a text with one two-byte character starts at byte 5")){pass=pass+1}el{fail=fail+1};
+
+  (* ── From config ──────────────────────────────────────────────────────── *)
+  if(t.assert(!cfg.defaultconfig().usepf;"the layer is off by default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.newconfig("";"").usepf;"and newconfig leaves it off")){pass=pass+1}el{fail=fail+1};
+  let on=mt toml.load("[privacy]\nprivacy_filter = true\nprivacy_filter_url = \"http://127.0.0.1:11288\"\nprivacy_filter_threshold = \"0.5\"\n") {
+    $ok:doc cfg.configfromtoml(doc);
+    $err:e cfg.defaultconfig()
+  };
+  if(t.assert(on.usepf;"privacy.privacy_filter = true turns it on")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(on.pfurl;"http://127.0.0.1:11288";"privacy.privacy_filter_url is read")){pass=pass+1}el{fail=fail+1};
+  let offdoc=mt toml.load("[privacy]\nprivacy_filter = false\n") {
+    $ok:doc cfg.configfromtoml(doc);
+    $err:e cfg.defaultconfig()
+  };
+  if(t.assert(!offdoc.usepf;"privacy.privacy_filter = false leaves it off")){pass=pass+1}el{fail=fail+1};
+  let carried=pl.withlokeconfig(pl.newconfig("";"");on);
+  if(t.assert(carried.usepf && str.eq(carried.pfurl;"http://127.0.0.1:11288") && str.eq(carried.pfthreshold;"0.5");"withlokeconfig carries switch, URL and threshold into the pipeline config")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A sidecar that answers ───────────────────────────────────────────── *)
+  let base=scratch();
+  let logp="\(base).log";
+  let brokenlog="\(base)-b.log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let brk=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";brokenlog;"\(base)-b.port";"pfbroken")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let bport=waitport("\(base)-b.port");
+  let url="http://127.0.0.1:\(port)";
+  let burl="http://127.0.0.1:\(bport)";
+  if(t.assert(str.len(port)>0 && str.len(bport)>0;"the recorders came up")){pass=pass+1}el{fail=fail+1};
+
+  let text="Jane Citizen called Tuesday";
+  let run=pl.runforward(text;"";pfonly(url;""));
+  let rc:str=str.fromint(run.layerscompleted as i64);
+  let rd:str=str.fromint(run.layersdegraded as i64);
+  if(t.assert(str.contains(readfile(logp);"GET /health");"the health check ARRIVED at the sidecar")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /detect {\"text\":\"Jane Citizen called Tuesday\"}");"and the /detect request, carrying the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(run.layerscompleted==2 as u32;"regex and the privacy filter both completed a scan (completed=\(rc))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(run.layersdegraded==0 as u32;"and nothing is degraded (degraded=\(rd))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pfstage(run);"completed";"the privacy-filter stage is recorded as a scan")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(run.result.anonymised;"Jane Citizen");"the name only the sidecar found is anonymised")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(run.result.anonymised;"Tuesday");"and so is the date, at the sidecar's default operating point")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hastype(run;"PERSON";"Jane Citizen") && hastype(run;"DATE";"Tuesday");"as PERSON and DATE, in the pipeline's taxonomy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sh.senseq(run.result.sensitivity;sh.confidential());"a PERSON makes the run confidential, as it does from any other layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(run);"the run may be forwarded")){pass=pass+1}el{fail=fail+1};
+
+  (* The configured operating point governs what the pipeline anonymises (AD1.4, claim B10). *)
+  let strict=pl.runforward(text;"";pfonly(url;"0.5"));
+  if(t.assert(str.contains(lastdetect(logp);"\"threshold\":0.5");"the configured threshold travels with the pipeline's /detect")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(strict.result.anonymised;"Jane Citizen") && str.contains(strict.result.anonymised;"Tuesday");"at 0.5 the 0.95 name is anonymised and the 0.4 date is not")){pass=pass+1}el{fail=fail+1};
+
+  (* The sidecar's offsets index its text, and its value may not sit there; the value that
+     IS in loke's text is what gets substituted. Here the offsets 0-12 cover "Tuesday: Jan". *)
+  let shifted=pl.runforward("Tuesday: Jane Citizen";"";pfonly(url;""));
+  if(t.assert(!str.contains(shifted.result.anonymised;"Jane Citizen") && !str.contains(shifted.result.anonymised;"Tuesday");"when the offsets do not match, the reported values are located and anonymised")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hastype(shifted;"PERSON";"Tuesday: Jan");"and the mismatched offsets are not taken as an entity")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Off means not consulted ──────────────────────────────────────────── *)
+  let before=countof(readfile(logp);"POST /detect");
+  let off=pl.runforward(text;"";pl.withprivacyfilter(pfonly(url;"");false;url;""));
+  if(t.assert(countof(readfile(logp);"POST /detect")==before;"with the layer off no request is sent")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pfstage(off);"skipped";"and the stage is recorded as skipped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(off.layerscompleted==1 as u32 && off.layersdegraded==0 as u32;"a layer the operator turned off is not degraded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Up but not scanning: degraded, never completed ──────────────────── *)
+  let broken=pl.runforward(text;"";pfonly(burl;""));
+  let bc:str=str.fromint(broken.layerscompleted as i64);
+  if(t.assert(str.contains(readfile(brokenlog);"POST /detect");"the broken sidecar was asked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(broken.layerscompleted==1 as u32;"a sidecar whose entities cannot be read is not a completed layer (completed=\(bc))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(broken.layersdegraded==1 as u32;"it is counted degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pfstage(broken);"skipped";"and its stage is recorded as skipped")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Down: degraded, and the gate reads layerscompleted alone ────────── *)
+  let down=pl.runforward(text;"";pfonly(deadurl();""));
+  if(t.assert(down.layerscompleted==1 as u32 && down.layersdegraded==1 as u32;"with nothing listening regex completes and the privacy filter is degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(down.result.anonymised;"Jane Citizen");"so the name it would have found is NOT anonymised, and the run says a layer was missing")){pass=pass+1}el{fail=fail+1};
+  let away=pl.runforward(text;"";pfonly("http://127.0.0.1.example.net:11435";""));
+  if(t.assert(away.layerscompleted==1 as u32 && away.layersdegraded==1 as u32;"a sidecar configured off this machine is a degraded layer, not a destination")){pass=pass+1}el{fail=fail+1};
+
+  (* NC1.9. The regex layer is in-process and always completes, so a zero-layer run cannot
+     be produced by taking sidecars down; it is built by hand, as test_fail_closed.tk does,
+     with the privacy filter among the degraded. What this asserts is that adding a fourth
+     layer did not move the gate off layerscompleted. *)
+  let nothing=$pipelinerun{
+    result:$piidetectionresult{
+      original:text;
+      anonymised:text;
+      entities:@();
+      sensitivity:sh.public()
+    };
+    stages:@();
+    totalentities:0 as u32;
+    finalsystemprompt:"";
+    requestid:"none";
+    layerscompleted:0 as u32;
+    layersdegraded:4 as u32
+  };
+  if(t.assert(!pl.issafetoforward(nothing);"a run in which no layer completed, the privacy filter included, is refused")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(brk == @())){ process.kill(brk); process.wait(brk); }el{};
+  file.delete(logp);
+  file.delete("\(logp).headers");
+  file.delete(brokenlog);
+  file.delete("\(brokenlog).headers");
+  file.delete("\(base).port");
+  file.delete("\(base)-b.port");
+
+  (* ── The real sidecar, when one is named ────────────────────────────── *)
+  (* LOKE_PF_LIVE_URL names a running packages/privacy-filter/server.py (the model from the
+     local Hugging Face cache); CI does not set it. Its JSON is spaced, its offsets are its
+     own, and what it finds in this text is not fixed here beyond "something". *)
+  let live=env.getor("LOKE_PF_LIVE_URL";"");
+  if(str.len(live)>0){
+    let ltext="Ring Jo about the Tuesday meeting at the Kew office, ref 88213.";
+    let lrun=pl.runforward(ltext;"";pfonly(live;""));
+    let lc:str=str.fromint(lrun.layerscompleted as i64);
+    let ln:str=str.fromint(lrun.totalentities as i64);
+    if(t.assert(lrun.layerscompleted==2 as u32 && lrun.layersdegraded==0 as u32;"LIVE: the real sidecar completed as a layer (completed=\(lc))")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(lrun.totalentities>0 as u32;"LIVE: and reported entities (entities=\(ln))")){pass=pass+1}el{fail=fail+1};
+    let leaked=mut.false;
+    lp(let i=0;i<lrun.result.entities.len;i=i+1){
+      let e:$piientity=lrun.result.entities.get(i);
+      if(str.contains(lrun.result.anonymised;e.value)){ leaked=true }el{}
+    };
+    if(t.assert(!leaked && !str.eq(lrun.result.anonymised;ltext);"LIVE: every entity it found is absent from the anonymised text")){pass=pass+1}el{fail=fail+1}
+  }el{};
+  <fail
+};

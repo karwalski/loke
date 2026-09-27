@@ -70,11 +70,12 @@ It reduces what is disclosed; it does not ensure that everything sensitive is fo
 > layer-priority configuration is read. No HEALTHY/DEGRADED status is aggregated — degradation happens
 > via each layer's own `isavailable()`. `Evaluation Mode` has no invocation point (there is no
 > `loke privacy evaluate` command) and no labelled corpus to run against (**AD1.1**). No per-layer
-> metrics are recorded. And nothing calls the sidecar client, so the privacy-filter sidecar — which does
-> run a real published model — is not reachable from loke; the browser route talks to port 11435 over
-> raw HTTP instead. The sidecar applies its `confidence_threshold`, and the client sends the configured
-> `privacy.privacy_filter_threshold` and reads back the value applied (**AD1.4**), but since nothing calls
-> the client that operating point governs nothing loke sends.
+> metrics are recorded. The privacy-filter sidecar — which runs a real published model — is a
+> detection layer of `pipeline.run` when `privacy.privacy_filter = true` is set in `config.toml`
+> (**F3b.3**; off by default, loopback only, counted completed or degraded like NER and Presidio). The
+> sidecar applies its `confidence_threshold`, and the client sends the configured
+> `privacy.privacy_filter_threshold` and reads back the value applied (**AD1.4**), so with the layer on,
+> that operating point governs what the pipeline anonymises.
 >
 > Wiring these or withdrawing the claim is **AD1.7**. Recorded as B1–B10 in [claims.md](claims.md).
 

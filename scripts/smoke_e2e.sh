@@ -531,5 +531,60 @@ else
   judge "released, the same request is answered again" 200 '"ok":true'
 fi
 
+# F3b.3: the privacy-filter sidecar as a detection layer of the pipeline. http_recorder.py
+# stands in for packages/privacy-filter/server.py (OS-assigned loopback port): it answers
+# /health, and /detect with "Jane Citizen" (private_person, 0.95) and "Tuesday" (0.4),
+# applying the request's threshold. Regex does not find a name and the fake NER model answers
+# [], so if the model does not receive the name it is because this layer found it. The layer
+# is switched on the way an operator would, in config.toml, which the /api/pipeline handler
+# reads per request; nothing before this point ran with it.
+PF_LOG="$WORK/pf.log"
+# The Ollama stand-in back to its starting model list (F5.12 above left it listing only
+# gemma3:4b), so the router's default choice is installed and the request is dispatched.
+pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
+FAKE_OLLAMA_DIGESTS="qwen2.5:7b=$QWEN_DIGEST,llama3:latest=$LLAMA_DIGEST" \
+  python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
+python3 "$ROOT/scripts/lib/http_recorder.py" "$PF_LOG" "$WORK/pf.port" >/dev/null 2>&1 & PF_PID=$!; PIDS="$PIDS $PF_PID"
+for _ in $(seq 1 40); do [ -s "$WORK/pf.port" ] && break; sleep 0.25; done
+PF_PORT=$(cat "$WORK/pf.port" 2>/dev/null)
+mkdir -p "$WORK/lk/home/.loke"
+if [ -z "$PF_PORT" ]; then echo "  FAIL the privacy-filter stand-in did not start" >&2; fail=1
+elif [ -e "$WORK/lk/home/.loke/config.toml" ]; then echo "  FAIL a config.toml already exists in the throwaway HOME; this check would not own it" >&2; fail=1
+else
+  printf '[privacy]\nprivacy_filter = true\nprivacy_filter_url = "http://127.0.0.1:%s"\nprivacy_filter_threshold = "0.5"\n' "$PF_PORT" > "$WORK/lk/home/.loke/config.toml"
+  PFNAME="Jane Citizen"
+  : > "$SEEN"; : > "$SEEN.ner"
+  pipe_post "summarise what $PFNAME asked about the invoice" ""
+  judge "with the privacy filter configured, the request is answered" 200 '"ok":true'
+  if grep -q '^GET /health' "$PF_LOG" && grep -q "^POST /detect .*$PFNAME.*\"threshold\":0.5" "$PF_LOG"; then
+    echo "  ok   the pipeline asked the privacy filter, at the configured operating point"
+  else echo "  FAIL the privacy filter was not asked: $(head -c 300 "$PF_LOG" 2>/dev/null)" >&2; fail=1; fi
+  if [ ! -s "$SEEN" ]; then echo "  FAIL the model received no request with the privacy filter on" >&2; fail=1
+  elif grep -q "$PFNAME" "$SEEN"; then echo "  FAIL the MODEL received the name the privacy filter found, in clear" >&2; fail=1
+  else echo "  ok   the model did not receive the name; it saw: $(grep -o '\[PERSON_[0-9a-f]*_[0-9]*\]' "$SEEN" | head -1)"; fi
+  if grep -q '\[PERSON_[0-9a-f]*_[0-9]*\]' "$SEEN"; then echo "  ok   in its place a PERSON placeholder, the pipeline's own type for the sidecar's private_person"
+  else echo "  FAIL no PERSON placeholder reached the model" >&2; fail=1; fi
+  case "$BODY" in
+    *"$PFNAME"*) echo "  ok   and the user got the name back, restored" ;;
+    *) echo "  FAIL the response did not restore the name: $(printf '%s' "$BODY" | head -c 300)" >&2; fail=1 ;;
+  esac
+  pflayers=$(dl "SELECT detection_layers FROM disclosure_log ORDER BY rowid DESC LIMIT 1")
+  case "$pflayers" in
+    scanned=*privacy_filter*\;skipped=*) echo "  ok   the disclosure record names privacy_filter among the layers that scanned: $pflayers" ;;
+    *) echo "  FAIL the disclosure record's detection layers are '$pflayers'" >&2; fail=1 ;;
+  esac
+  # The sidecar down: the layer is degraded, recorded as skipped, and nothing claims it scanned.
+  kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null
+  pipe_post "summarise what $PFNAME asked about the invoice" ""
+  judge "with the privacy filter down and other layers completing, the request is still answered (degraded)" 200 '"layers_degraded":'
+  pflayers=$(dl "SELECT detection_layers FROM disclosure_log ORDER BY rowid DESC LIMIT 1")
+  case "$pflayers" in
+    *skipped=*privacy_filter*) echo "  ok   and the record lists privacy_filter as skipped: $pflayers" ;;
+    *) echo "  FAIL with the sidecar down the detection layers are '$pflayers'" >&2; fail=1 ;;
+  esac
+  rm -f "$WORK/lk/home/.loke/config.toml"
+fi
+
 [ "$fail" -eq 0 ] || { echo "smoke_e2e: FAILED" >&2; exit 1; }
 echo "smoke_e2e: OK — anonymised on the way out, restored on the way back"

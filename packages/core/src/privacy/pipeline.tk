@@ -15,14 +15,23 @@ i=guardian:core.privacy.guardian;
 i=t:shared.types;
 i=ph:core.privacy.placeholder;
 i=pt:core.privacy.pipelinetypes;
+i=pf:core.privacy.sidecarclient;
+i=cfg:shared.config;
 
+(* F3b.3. usepf, pfurl and pfthreshold are the privacy-filter sidecar layer
+   (packages/privacy-filter/server.py). newconfig leaves it OFF, so a caller that says
+   nothing about it gets the three layers it had; withlokeconfig and configured turn it on
+   from privacy.privacy_filter in the user's config.toml. *)
 t=$pipelineconfig{
   presidiourl:str;
   ollamaurl:str;
   nermodelid:str;
   usepresidio:bool;
   usener:bool;
-  dryrun:bool
+  dryrun:bool;
+  usepf:bool;
+  pfurl:str;
+  pfthreshold:str
 };
 
 t=$stageresult{
@@ -56,8 +65,36 @@ f=newconfig(presidiourl:str;ollamaurl:str):$pipelineconfig{
     nermodelid:"qwen2.5:7b";
     usepresidio:true;
     usener:true;
-    dryrun:false
+    dryrun:false;
+    usepf:false;
+    pfurl:pf.sidecarurl();
+    pfthreshold:""
   }
+};
+
+(* The privacy-filter layer switched on (or off) at a sidecar URL and operating point. The
+   threshold is text, as core.privacy.sidecarclient.new takes it (AD1.4, T-20). *)
+f=withprivacyfilter(c:$pipelineconfig;enabled:bool;url:str;threshold:str):$pipelineconfig{
+  <$pipelineconfig{
+    presidiourl:c.presidiourl;
+    ollamaurl:c.ollamaurl;
+    nermodelid:c.nermodelid;
+    usepresidio:c.usepresidio;
+    usener:c.usener;
+    dryrun:c.dryrun;
+    usepf:enabled;
+    pfurl:url;
+    pfthreshold:threshold
+  }
+};
+
+f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
+  <withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold)
+};
+
+(* newconfig plus the privacy-filter settings from the user's config.toml, read now. *)
+f=configured(presidiourl:str;ollamaurl:str):$pipelineconfig{
+  <withlokeconfig(newconfig(presidiourl;ollamaurl);cfg.loaded())
 };
 
 
@@ -227,7 +264,7 @@ f=maxsensitivity(entities:@$piientity):$sensitivitylevel{
                 if(str.eq(entity.entitytype;"ssn_us")){
                   level=t.restricted()
                 }el{
-                  if(str.eq(entity.entitytype;"api_key")){
+                  if(str.eq(entity.entitytype;"api_key") || str.eq(entity.entitytype;"SECRET")){
                     level=t.restricted()
                   }el{
                     if(ishighersensitivity(t.confidential();level)){
@@ -243,7 +280,7 @@ f=maxsensitivity(entities:@$piientity):$sensitivitylevel{
                             if(str.eq(entity.entitytype;"MEDICAL")){
                               level=t.confidential()
                             }el{
-                              if(str.eq(entity.entitytype;"FINANCIAL")){
+                              if(str.eq(entity.entitytype;"FINANCIAL") || str.eq(entity.entitytype;"ADDRESS")){
                                 level=t.confidential()
                               }el{
                                 if(str.eq(entity.entitytype;"email")){
@@ -320,7 +357,7 @@ f=countrestricted(entities:@$piientity):u32{
                 if(str.eq(entity.entitytype;"ssn_us")){
                   n=n+1
                 }el{
-                  if(str.eq(entity.entitytype;"api_key")){
+                  if(str.eq(entity.entitytype;"api_key") || str.eq(entity.entitytype;"SECRET")){
                     n=n+1
                   }el{
                     
@@ -358,7 +395,7 @@ f=countconfidential(entities:@$piientity):u32{
             if(str.eq(entity.entitytype;"MEDICAL")){
               n=n+1
             }el{
-              if(str.eq(entity.entitytype;"FINANCIAL")){
+              if(str.eq(entity.entitytype;"FINANCIAL") || str.eq(entity.entitytype;"ADDRESS")){
                 n=n+1
               }el{
                 if(str.eq(entity.entitytype;"email")){
@@ -577,6 +614,72 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     stages=stages.push(presidiostage)
   };
 
+  (* F3b.3 -- the privacy-filter sidecar, the fourth layer. Counted exactly as NER and
+     Presidio are: completed only when /detect answered a scan whose entities could all be
+     read; degraded when it is enabled and either does not answer /health or does not scan;
+     a skipped stage either way, so detection_layers names it. Its health check is the
+     one-argument client GET and its scan a loopback-only POST (sidecarclient). AD1.3
+     measured this layer's marginal value on the PII corpus; see docs/metrics-baseline.md. *)
+  if(config.usepf){
+    let pfclient=pf.new(config.pfurl;config.pfthreshold);
+    if(pf.isavailable(pfclient)){
+      let pfscan=pf.scanentities(pfclient;text);
+      if(pfscan.ok){
+        let pfhits=pfscan.hits;
+        let pfcount=str.arraylen(pfhits);
+        let pfi=mut.0;
+        lp(let lv4=0;pfi<pfcount;lv4=lv4){
+          let entity=pfhits.get(pfi);
+          allentities=allentities.push(entity);
+          pfi=pfi+1
+        };
+        if(pfscan.unplaced>0){
+          log.warn("privacy filter reported \(pfscan.unplaced) span(s) that could not be located in the text";"pipeline";requestid)
+        }el{};
+        let pfstage=$stageresult{
+          stage:$pipelinestage{$privacyfilterscan:0};
+          entitiesfound:pfcount;
+          durationms:0;
+          skipped:false;
+          skipreason:""
+        };
+        stages=stages.push(pfstage);
+        completed=completed+1
+      }el{
+        degraded=degraded+1;
+        log.warn("privacy filter scan failed -- degraded mode";"pipeline";requestid);
+        let pfstage=$stageresult{
+          stage:$pipelinestage{$privacyfilterscan:0};
+          entitiesfound:0;
+          durationms:0;
+          skipped:true;
+          skipreason:"privacy-filter detect returned no scan"
+        };
+        stages=stages.push(pfstage)
+      }
+    }el{
+      degraded=degraded+1;
+      log.warn("privacy filter unavailable -- running in degraded mode";"pipeline";requestid);
+      let pfstage=$stageresult{
+        stage:$pipelinestage{$privacyfilterscan:0};
+        entitiesfound:0;
+        durationms:0;
+        skipped:true;
+        skipreason:"privacy-filter sidecar unreachable"
+      };
+      stages=stages.push(pfstage)
+    }
+  }el{
+    let pfstage=$stageresult{
+      stage:$pipelinestage{$privacyfilterscan:0};
+      entitiesfound:0;
+      durationms:0;
+      skipped:true;
+      skipreason:"use_privacy_filter=false"
+    };
+    stages=stages.push(pfstage)
+  };
+
   
   let dedupedraw=dedupentities(allentities);
   (* PL1.1 — placeholders are assigned HERE, after dedup and before anonymisation, and
@@ -715,7 +818,10 @@ f=rundry(text:str;config:$pipelineconfig):$pipelinerun{
     nermodelid:config.nermodelid;
     usepresidio:config.usepresidio;
     usener:config.usener;
-    dryrun:true
+    dryrun:true;
+    usepf:config.usepf;
+    pfurl:config.pfurl;
+    pfthreshold:config.pfthreshold
   };
   <run(text;"";dryconfig)
 };

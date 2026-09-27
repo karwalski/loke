@@ -17,11 +17,14 @@ Two scoping notes, so the rest of the document is read correctly:
 
 ## Architecture Overview
 
-> **What runs today (AD1.7).** The design below is not wired. `pipeline.run` calls the regex layer,
-> Ollama NER and Presidio by name in a fixed order and de-duplicates overlaps itself. The consensus,
-> layer-config, layer-health, entity-routing, filter-registry, org-policy, per-layer-metrics, evaluation
-> and sidecar-client modules exist with unit tests and have no importer in the product; the four
-> consensus strategies are not implemented. See [claims.md](claims.md) §B.
+> **What runs today (AD1.7, F3b.3).** The design below is not wired. `pipeline.run` calls the regex
+> layer, Ollama NER, Presidio and — when `privacy.privacy_filter = true` in `config.toml`, off by
+> default — the privacy-filter sidecar (through `core.privacy.sidecarclient`, loopback only) by name in
+> a fixed order, and de-duplicates overlaps itself. The consensus, layer-config, layer-health,
+> entity-routing, filter-registry, org-policy, per-layer-metrics and evaluation modules exist with unit
+> tests and have no importer in the product (the registry lists `openai-privacy-filter`, but the
+> pipeline does not read the registry); the four consensus strategies are not implemented. See
+> [claims.md](claims.md) §B.
 
 The privacy filter is a composable pipeline of detection layers. Each layer independently scans text for sensitive entities (PII, PHI, financial data, etc.) and produces detection results. A consensus strategy then merges all layer outputs into a final set of resolved entities, which are masked before the text leaves the device.
 
