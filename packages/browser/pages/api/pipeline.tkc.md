@@ -6,7 +6,7 @@ switch, treating an unreadable switch as ENGAGED; validate the input text; run t
 privacy pipeline through `core.privacy.pipeline.runforward`; refuse with 503 when
 `issafetoforward` reports that no detection layer scanned the text (NC1.9); evaluate
 governance policy via `core.governance.policy.classifyrisk` and `evaluate`, auditing and
-refusing with 403 on a deny (GA1.8); forward only the pipeline's anonymised text to
+refusing with 403 on a deny (GA1.8); hold a require-approval decision with 409 and an approval id, and proceed only when a re-submission carries a valid, unexpired, single-use approval for the same request (GA5.26, `core.governance.approvalgate`); forward only the pipeline's anonymised text to
 Anthropic or local Ollama; extract the provider's reply text with the typed `json.arr`
 accessor; restore placeholders into that plain text via `core.privacy.placeholder.restore`
 over a map derived from the deduped entity list with `mapfromentities` (GA1.2); and write one

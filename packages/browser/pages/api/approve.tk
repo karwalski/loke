@@ -5,20 +5,80 @@ m=page.api.approve;
 
 i=http:std.http;
 i=str:std.str;
+i=json:std.json;
+i=std:std;
+i=t:shared.types;
 i=org:shared.origin;
+i=dbmod:core.storage.db;
+i=ag:core.governance.approvalgate;
 
-(* The GET body is a constant. This endpoint is a STUB: it returns fixed JSON and
-   reads nothing. Exposing the body as a function lets tests/unit/browser cover the
-   response contract — those tests called str.mockhttpreq and str.httpbody, which
-   exist in no module, so they had never compiled — but a green test here means the
-   SHAPE is right, not that the endpoint does anything. Recorded in the backlog so a
-   passing test is not mistaken for a working feature. *)
-f=approvejson():str{
-  <"{\"ok\":true,\"action\":\"approved\"}"
+(* GA5.26 - the user's answer to a request /api/pipeline held for approval.
+
+   POST {"approval_id":"...","decision":"approve"|"decline"}. This used to be a STUB that
+   returned {"ok":true,"action":"approved"} and read nothing, so an approval page could
+   "approve" and the pipeline had nothing to check. It now decides a pending approval in
+   core.governance.approvalgate, once. Approving does not send anything: the page then
+   re-submits the request with the id, and the pipeline spends the approval only for the
+   request it was issued for. *)
+f=approvejson(action:str;aid:str):str{
+  <"{\"ok\":true,\"action\":\(json.enc(action)),\"approval_id\":\(json.enc(aid))}"
+};
+
+f=failurejson(aid:str;why:str):str{
+  <"{\"ok\":false,\"error\":\"this approval could not be decided: \(why)\",\"reason\":\(json.enc(why)),\"approval_id\":\(json.enc(aid))}"
+};
+
+(* "approve" when absent, so that a bare {"approval_id":...} approves, and anything else that
+   is not "decline" is refused rather than read as either. *)
+f=actionof(decision:str):str{
+  if(str.len(decision)==0){ <"approved" }el{};
+  if(str.eq(decision;"approve")){ <"approved" }el{};
+  if(str.eq(decision;"decline")){ <"declined" }el{};
+  <""
+};
+
+f=apply(aid:str;action:str;nowms:i64):bool{
+  if(str.eq(action;"approved")){ <ag.approve(aid;nowms) }el{};
+  <ag.decline(aid;nowms)
+};
+
+f=requestbody(req:i64):str{
+  <mt http.body(req) {$ok:v v; $err:e ""}
+};
+
+(* The store is opened for its connection and its migrations; approvalgate uses the one
+   process-wide connection (T-30). 0 when it cannot be opened. *)
+f=openstore():i64{
+  <mt dbmod.openstore(str.concat(std.homedir();"/.loke")) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+(* Decides and answers. Split from `post` so a test can drive it: toke gives no way to build
+   a request from source (T-16). *)
+f=respond(aid:str;decision:str;nowms:i64):i64{
+  let action=actionof(decision);
+  if(str.len(action)==0){
+    <http.res(400;"{\"ok\":false,\"error\":\"decision must be approve or decline\"}")
+  }el{};
+  if(apply(aid;action;nowms)){ <http.res(200;approvejson(action;aid)) }el{};
+  let why=ag.decidefailure(aid;nowms);
+  if(str.eq(why;"unknown")){ <http.res(404;failurejson(aid;why)) }el{};
+  <http.res(409;failurejson(aid;why))
 };
 
 f=post(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
-  <http.res(200;approvejson())
+  let parsed=json.dec(requestbody(req));
+  let aid=json.str(parsed;"approval_id");
+  if(str.len(aid)==0){
+    <http.res(400;"{\"ok\":false,\"error\":\"approval_id is required\"}")
+  }el{};
+  (* An unopenable store fails the decision, closed. *)
+  if(openstore()==0){
+    <http.res(503;"{\"ok\":false,\"error\":\"the approval store could not be opened\"}")
+  }el{};
+  <respond(aid;json.str(parsed;"decision");t.nowms())
 };

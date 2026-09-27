@@ -1,0 +1,129 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.governance.testapprovalgate;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=ag:core.governance.approvalgate;
+
+(* GA5.26 - the hold-until-approved gate, against the production module and a real store.
+
+   The property that matters is that consume answers true EXACTLY ONCE, and only for an
+   approval that exists, was approved by the user, has not expired and was issued for this
+   request. Each refusal below is one way a request could otherwise proceed unapproved:
+   before approval, with an id issued for another request, a second time, after expiry,
+   after a decline, and with an id nobody issued. The clock is a parameter, so expiry is
+   tested without waiting. *)
+
+f=teststore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-approval-gate");
+  file.mkdir(dir);
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=resetstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-approval-gate");
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <0
+};
+
+f=firststr(rs:@$row;col:str):str{
+  if(rs.len==0){ <"" }el{ <db.rowstr(rs.get(0);col) }
+};
+
+f=wholerow(id:str):str{
+  <mt db.many("SELECT approval_id||'|'||binding||'|'||state||'|'||created_at_ms||'|'||expires_at_ms AS v FROM approval_requests WHERE approval_id=?";@(id)) {
+    $ok:rs firststr(rs;"v");
+    $err:e ""
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  resetstore();
+  let store=teststore();
+  if(t.assert(store!=0;"the test store opens and migrates")){pass=pass+1}el{fail=fail+1};
+
+  (* The binding. *)
+  let unsalted="charge card [CREDIT_CARD_1] for the order";
+  let bind=ag.binding(unsalted;"require_approval";"user_choice";"user");
+  if(t.assert(str.len(bind)==64;"the binding is a sha256 digest in hex")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(bind;ag.binding(unsalted;"require_approval";"user_choice";"user"));"and is deterministic")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(bind;ag.binding("refund card [CREDIT_CARD_1] for the order";"require_approval";"user_choice";"user"));"a different text binds differently")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(bind;ag.binding(unsalted;"allow";"user_choice";"user"));"so does a different decision")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(bind;ag.binding(unsalted;"require_approval";"user_choice";"policy"));"and a different selector")){pass=pass+1}el{fail=fail+1};
+
+  let now=1000000;
+  let id=ag.create(bind;now);
+  if(t.assert(str.len(id)==32;"create returns a 32-hex id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.state(id);"pending";"a new approval is pending")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(id;ag.create(bind;now));"two approvals for the same request get different ids")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(ag.create("";now))==0;"an approval with no binding is not created")){pass=pass+1}el{fail=fail+1};
+
+  (* Not yet approved. *)
+  if(t.assert(ag.consume(id;bind;now+10)==false;"a pending approval does not let the request through")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.refusal(id;bind;now+10);"not_approved";"and the refusal says it was not approved")){pass=pass+1}el{fail=fail+1};
+
+  (* The user approves, once. *)
+  if(t.assert(ag.approve(id;now+20);"the user approves it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.state(id);"approved";"it is recorded as approved")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.approve(id;now+21)==false;"approving it again changes nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.decidefailure(id;now+21);"already_approved";"and says why")){pass=pass+1}el{fail=fail+1};
+
+  (* Mismatch: an approval for one request does not let another through, and the attempt
+     does not spend it. *)
+  let otherbind=ag.binding("refund card [CREDIT_CARD_1] for the order";"require_approval";"user_choice";"user");
+  if(t.assert(ag.consume(id;otherbind;now+30)==false;"an approval issued for another request is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.refusal(id;otherbind;now+30);"mismatch";"as a mismatch")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.state(id);"approved";"and the refused attempt did not spend it")){pass=pass+1}el{fail=fail+1};
+
+  (* Valid: passes exactly once. *)
+  if(t.assert(ag.consume(id;bind;now+40);"the approved request, re-submitted, proceeds")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.state(id);"consumed";"and the approval is spent")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.consume(id;bind;now+50)==false;"a second re-submission with the same id is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.refusal(id;bind;now+50);"already_used";"as already used")){pass=pass+1}el{fail=fail+1};
+
+  (* Forgery: an id nobody issued, and no id. *)
+  let forged=str.randhex(16);
+  if(t.assert(ag.consume(forged;bind;now+60)==false;"an id nobody issued is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.refusal(forged;bind;now+60);"unknown";"as unknown")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.approve(forged;now+60)==false;"and cannot be approved into existence")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.consume("";bind;now+60)==false;"an empty id is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.consume(id;"";now+60)==false;"an empty binding is refused")){pass=pass+1}el{fail=fail+1};
+
+  (* Expiry, with the clock as a parameter. *)
+  let late=ag.create(bind;now);
+  if(t.assert(ag.approve(late;now+100);"a second approval is approved")){pass=pass+1}el{fail=fail+1};
+  let after=now+ag.ttlms()+1;
+  if(t.assert(ag.consume(late;bind;after)==false;"once expired it no longer lets the request through")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.refusal(late;bind;after);"expired";"and the refusal says it expired")){pass=pass+1}el{fail=fail+1};
+  let stale=ag.create(bind;now);
+  if(t.assert(ag.approve(stale;after)==false;"an expired approval cannot be approved")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.decidefailure(stale;after);"expired";"and says it expired")){pass=pass+1}el{fail=fail+1};
+
+  (* Decline. *)
+  let declined=ag.create(bind;now);
+  if(t.assert(ag.decline(declined;now+5);"the user can decline")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.consume(declined;bind;now+6)==false;"a declined approval does not let the request through")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.refusal(declined;bind;now+6);"declined";"and the refusal says it was declined")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ag.approve(declined;now+7)==false;"and it cannot be approved afterwards")){pass=pass+1}el{fail=fail+1};
+
+  (* No text is stored. *)
+  let row=wholerow(id);
+  if(t.assert(str.len(row)>0;"the stored row can be read back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(row;"charge") && !str.contains(row;"CREDIT_CARD") && !str.contains(row;"4111");"and holds no text, placeholder or value")){pass=pass+1}el{fail=fail+1};
+
+  resetstore();
+  <fail
+};

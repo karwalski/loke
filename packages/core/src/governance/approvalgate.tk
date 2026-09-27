@@ -1,0 +1,135 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.governance.approvalgate;
+
+i=str:std.str;
+i=db:std.db;
+i=crypto:std.crypto;
+
+(* GA5.26 - the hold-until-approved gate for a policy decision of $requireapproval.
+
+   core.governance.policy returns that decision for HIGH risk over RESTRICTED data, and until
+   this module the request path logged it and forwarded anyway. Now a request needing approval
+   is HELD: the pipeline creates an approval here and refuses, the user approves it through
+   /api/approve, and the same request re-submitted with the approval id proceeds once.
+
+   What is stored, and what is not. A row in approval_requests (migration 36) holds an id, a
+   BINDING, a state and three times. It holds no text. The binding is a sha256 over the
+   decision, the fallback selection and the anonymised text in its UNSALTED form, the
+   `[CREDIT_CARD_1]` shape, which is what makes the same request produce the same binding on
+   re-submission, when the pipeline has salted its placeholders with a new request id. The
+   text a re-submission needs is held by the client, in the browser's sessionStorage, not
+   here. A digest of the ORIGINAL text was rejected: a card number is a small enough space
+   that its digest can be reversed by enumeration, and this database is plaintext on disk
+   (X8). The consequence is stated rather than hidden: two requests that differ ONLY in the
+   value of a detected identifier bind to the same approval. That approval is still single
+   use and expires in ttlms().
+
+   No struct type is declared here, and every function takes and returns scalars. This
+   module is imported by page.api.pipeline, whose compilation unit already sees the 64
+   struct types toke allows (T-54). Each function returns a bool or a str, never a result
+   whose error side is a user sum (T-18).
+
+   The clock is a parameter everywhere, so expiry can be tested without waiting. *)
+
+(* Ten minutes: long enough to read the approval page, short enough that an approval left
+   behind does not stand as a standing authorisation. *)
+f=ttlms():i64{
+  <600000
+};
+
+f=binding(unsalted:str;decision:str;fbreason:str;fbby:str):str{
+  <crypto.tohex(crypto.sha256(str.tobytes("ga5.26\n\(decision)\n\(fbreason)\n\(fbby)\n\(unsalted)")))
+};
+
+f=changedrows():i64{
+  <mt db.one("SELECT changes() AS n";@()) {
+    $ok:r db.rowi64(r;"n");
+    $err:e 0
+  }
+};
+
+f=execok(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* A new pending approval, or "" when it could not be recorded. A caller that gets "" must
+   still refuse the request: an approval that was never stored cannot be granted, and the
+   request must not proceed for want of one. *)
+f=create(bind:str;nowms:i64):str{
+  if(str.len(bind)==0){ <"" }el{};
+  let id=str.randhex(16);
+  if(execok("INSERT INTO approval_requests (approval_id,binding,state,created_at_ms,expires_at_ms,decided_at_ms,consumed_at_ms) VALUES (?,?,'pending',CAST(? AS INTEGER),CAST(? AS INTEGER),0,0)";@(id;bind;str.fromint(nowms);str.fromint(nowms+ttlms())))){ <id }el{ <"" }
+};
+
+(* The user's decision. Only a PENDING, unexpired approval can be decided, and only once:
+   approving twice, or approving one already declined or consumed, changes nothing and
+   answers false. *)
+f=decide(id:str;newstate:str;nowms:i64):bool{
+  if(str.len(id)==0){ <false }el{};
+  let sql="UPDATE approval_requests SET state=?, decided_at_ms=CAST(? AS INTEGER) WHERE approval_id=? AND state='pending' AND expires_at_ms>CAST(? AS INTEGER)";
+  let now=str.fromint(nowms);
+  if(execok(sql;@(newstate;now;id;now))){ <changedrows()==1 }el{ <false }
+};
+
+f=approve(id:str;nowms:i64):bool{
+  <decide(id;"approved";nowms)
+};
+
+f=decline(id:str;nowms:i64):bool{
+  <decide(id;"declined";nowms)
+};
+
+(* The gate. True exactly once, for an approval that exists, was APPROVED, has not expired
+   and was issued for this binding. The check and the spend are one UPDATE, so two
+   re-submissions racing with the same id cannot both see it unspent. *)
+f=consume(id:str;bind:str;nowms:i64):bool{
+  if(str.len(id)==0 || str.len(bind)==0){ <false }el{};
+  let sql="UPDATE approval_requests SET state='consumed', consumed_at_ms=CAST(? AS INTEGER) WHERE approval_id=? AND binding=? AND state='approved' AND expires_at_ms>CAST(? AS INTEGER)";
+  let now=str.fromint(nowms);
+  if(execok(sql;@(now;id;bind;now))){ <changedrows()==1 }el{ <false }
+};
+
+f=field(id:str;col:str):str{
+  <mt db.one("SELECT \(col) AS v FROM approval_requests WHERE approval_id=?";@(id)) {
+    $ok:r db.rowstr(r;"v");
+    $err:e ""
+  }
+};
+
+f=expiresat(id:str):i64{
+  <mt db.one("SELECT expires_at_ms AS n FROM approval_requests WHERE approval_id=?";@(id)) {
+    $ok:r db.rowi64(r;"n");
+    $err:e 0
+  }
+};
+
+f=state(id:str):str{
+  <field(id;"state")
+};
+
+(* Why approve or decline changed nothing. *)
+f=decidefailure(id:str;nowms:i64):str{
+  let st=state(id);
+  if(str.len(st)==0){ <"unknown" }el{};
+  if(str.eq(st;"pending")==false){ <"already_\(st)" }el{};
+  <"expired"
+};
+
+(* Why consume refused, for the refusal body and the audit trail. Read AFTER a refusal, so it
+   explains the decision and never makes it. Order matters: an id that exists but was issued
+   for another request is a mismatch whatever its state. *)
+f=refusal(id:str;bind:str;nowms:i64):str{
+  let st=state(id);
+  if(str.len(st)==0){ <"unknown" }el{};
+  if(str.eq(field(id;"binding");bind)==false){ <"mismatch" }el{};
+  if(str.eq(st;"consumed")){ <"already_used" }el{};
+  if(str.eq(st;"declined")){ <"declined" }el{};
+  if(expiresat(id)<=nowms){ <"expired" }el{};
+  if(str.eq(st;"pending")){ <"not_approved" }el{};
+  <"refused"
+};

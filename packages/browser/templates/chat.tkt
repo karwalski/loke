@@ -393,6 +393,30 @@
         body: JSON.stringify({ text: prompt, model, history: messages.slice(-10), fallback_reason: 'task_requires_prose', fallback_selected_by: 'user' }),
       });
 
+      // GA5.26: a request carrying restricted data is held until the user approves it. The
+      // server keeps no copy of the text, so the request is handed to the approval page in
+      // this tab's sessionStorage, with the approval id it must be re-sent with.
+      if (res.status === 409) {
+        const held = await res.clone().json().catch(() => ({}));
+        if (held.approval_required && held.approval_id) {
+          sessionStorage.setItem('loke_pending', JSON.stringify({
+            text: prompt,
+            model,
+            fallback_reason: 'task_requires_prose',
+            fallback_selected_by: 'user',
+            approval_id: held.approval_id,
+            sensitivity: held.sensitivity,
+            entity_types: held.entity_types,
+            policy_message: held.policy_message,
+            message: held.error,
+            expires_at: Date.now() + (held.approval_expires_in_seconds || 0) * 1000,
+            return_to: '/chat'
+          }));
+          window.location = held.approve_url || '/approve';
+          return;
+        }
+      }
+
       if (!res.ok) {
         const body = await res.text();
         throw new Error(`Pipeline error ${res.status}: ${body}`);
@@ -515,6 +539,23 @@
   // ── Init: show empty state ────────────────────────────────────────────────
   showEmpty(true);
   $('prompt-input').focus();
+
+  // GA5.26: the outcome of a request the user decided on /approve.
+  try {
+    const done = JSON.parse(sessionStorage.getItem('loke_result') || 'null');
+    if (done) {
+      sessionStorage.removeItem('loke_result');
+      showEmpty(false);
+      appendBubble('user', done.text || '', ++msgId);
+      const r = done.result || {};
+      if (r.ok) {
+        appendBubble('assistant', r.response || '', ++msgId);
+        messages.push({ role: 'user', content: done.text || '' }, { role: 'assistant', content: r.response || '' });
+      } else {
+        showError(done.declined ? 'You declined this request, so nothing was sent.' : 'The approved request was not completed: ' + (r.error || 'no response'));
+      }
+    }
+  } catch (_) {}
 </script>
 
 {! end !}

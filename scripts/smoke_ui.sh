@@ -64,5 +64,10 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/savings" "$ROOT/tests/ui/savings_da15.json"
   rc=$?
 fi
+# GA5.26: loke's own chat, a restricted prompt, the approval page, and back.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/chat" "$ROOT/tests/ui/approve_ga526.json"
+  rc=$?
+fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
 exit $rc

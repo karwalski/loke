@@ -198,6 +198,106 @@ if [ -s "$SEEN" ]; then echo "  FAIL the model received an unselected fallback r
 if [ "$(dl "SELECT COUNT() FROM disclosure_log")" = "$rows_unsel" ]; then echo "  ok   and it wrote no disclosure record"
 else echo "  FAIL an unselected fallback wrote a disclosure record" >&2; fail=1; fi
 
+# GA5.26: a request carrying restricted data is HELD for approval, not forwarded. The input is
+# a card number: core.privacy.pipeline.maxsensitivity classifies CREDIT_CARD as RESTRICTED,
+# core.governance.policy.classifyrisk makes RESTRICTED high risk, and evaluate answers
+# require-approval for high risk over RESTRICTED. The request is re-sent with the approval id
+# before approval, forged, after approval, for another text, and a second time; only the
+# approved re-send of the same request reaches the model, once.
+: > "$SEEN"
+CARD="4111 1111 1111 1111"
+CARDTEXT="please check card $CARD against the order"
+rows_ap=$(dl "SELECT COUNT() FROM disclosure_log")
+pipe_post() {  # $1 text, $2 approval id or ""; sets CODE and BODY
+  local out aidf=""
+  [ -n "$2" ] && aidf=",\"approval_id\":\"$2\""
+  out=$(curl -s -m 40 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+          -d "{\"fallback_reason\":\"user_choice\",\"fallback_selected_by\":\"user\",\"text\":\"$1\"$aidf}" \
+          http://127.0.0.1:11430/api/pipeline)
+  CODE=${out##*$'\n'}; BODY=${out%$'\n'*}
+}
+approve_post() {  # $1 approval id, $2 decision; sets CODE and BODY
+  local out
+  out=$(curl -s -m 20 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+          -d "{\"approval_id\":\"$1\",\"decision\":\"$2\"}" http://127.0.0.1:11430/api/approve)
+  CODE=${out##*$'\n'}; BODY=${out%$'\n'*}
+}
+judge() {  # $1 label, $2 expected status, $3 substring the body must contain
+  if [ "$CODE" = "$2" ] && [[ "$BODY" == *"$3"* ]]; then echo "  ok   $1 [$CODE]"
+  else echo "  FAIL $1: got [$CODE] $(printf '%s' "$BODY" | head -c 300), expected [$2] containing $3" >&2; fail=1; fi
+}
+pipe_post "$CARDTEXT" ""
+judge "a restricted request is held for approval, not forwarded" 409 '"approval_required":true'
+AID=$(printf '%s' "$BODY" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("approval_id",""))
+except Exception: print("")')
+if [[ "$AID" =~ ^[0-9a-f]{32}$ ]]; then echo "  ok   and it carries a 32-hex approval id"
+else echo "  FAIL the held response carries no usable approval id: '$AID'" >&2; fail=1; fi
+if [[ "$BODY" == *'"sensitivity":"restricted"'* ]] && [[ "$BODY" == *'"entity_types":"'*credit_card* || "$BODY" == *'"entity_types":"'*CREDIT_CARD* ]]; then
+  echo "  ok   and it names the sensitivity and the entity type"
+else echo "  FAIL the held response does not name the sensitivity and entity type: $(printf '%s' "$BODY" | head -c 300)" >&2; fail=1; fi
+case "$BODY" in *"$CARD"*|*4111*) echo "  FAIL the held response echoes the card number" >&2; fail=1 ;; esac
+if [ -s "$SEEN" ]; then echo "  FAIL the model received a request that was held for approval" >&2; fail=1
+else echo "  ok   and nothing reached the model"; fi
+if [ "$(dl "SELECT COUNT() FROM disclosure_log")" = "$rows_ap" ]; then echo "  ok   and it wrote no disclosure record"
+else echo "  FAIL a held request wrote a disclosure record" >&2; fail=1; fi
+if [ "$(dl "SELECT COUNT() FROM audit_log WHERE event_type='policy_require_approval'")" -ge 1 ] \
+   && [ "$(dl "SELECT approval_outcome FROM decision_trace WHERE outcome='policy_require_approval' ORDER BY created_at_ms DESC, rowid DESC LIMIT 1")" = "held_pending" ]; then
+  echo "  ok   the hold is audited as policy_require_approval and traced as held_pending"
+else echo "  FAIL the hold is not in the audit trail and decision trace" >&2; fail=1; fi
+if [ "$(dl "SELECT state FROM approval_requests WHERE approval_id='$AID'")" = "pending" ] \
+   && [ "$(dl "SELECT COUNT() FROM approval_requests WHERE instr(approval_id||binding||state, '4111')>0 OR instr(approval_id||binding||state, 'check')>0")" = "0" ]; then
+  echo "  ok   the approval is stored pending, with no text and no card number"
+else echo "  FAIL the stored approval is not pending, or holds text" >&2; fail=1; fi
+
+pipe_post "$CARDTEXT" "$AID"
+judge "re-sent before approval, it is refused" 403 '"approval_refusal":"not_approved"'
+pipe_post "$CARDTEXT" "0123456789abcdef0123456789abcdef"
+judge "re-sent with a forged id, it is refused" 403 '"approval_refusal":"unknown"'
+approve_post "$AID" approve
+judge "the user approves it through /api/approve" 200 '"action":"approved"'
+approve_post "$AID" approve
+judge "approving it twice changes nothing" 409 '"reason":"already_approved"'
+pipe_post "please check card $CARD against the invoice" "$AID"
+judge "the approval does not let a different request through" 403 '"approval_refusal":"mismatch"'
+if [ -s "$SEEN" ]; then echo "  FAIL the model received a request before a valid approval was spent" >&2; fail=1
+else echo "  ok   and none of those reached the model"; fi
+
+pipe_post "$CARDTEXT" "$AID"
+judge "the approved request, re-sent with its id, is answered" 200 '"ok":true'
+case "$BODY" in
+  *"$CARD"*) echo "  ok   and the user gets the card number back, restored" ;;
+  *) echo "  FAIL the approved answer was not restored: $(printf '%s' "$BODY" | head -c 300)" >&2; fail=1 ;;
+esac
+if grep -q '^/api/generate .*\[CREDIT_CARD_[0-9a-f]*_1\]' "$SEEN" && ! grep -q "$CARD" "$SEEN"; then
+  echo "  ok   the model received it once, anonymised"
+else echo "  FAIL the model did not receive the approved request anonymised" >&2; fail=1; fi
+if [ "$(dl "SELECT approval_outcome FROM decision_trace WHERE outcome='llm_request' ORDER BY created_at_ms DESC, rowid DESC LIMIT 1")" = "approved" ]; then
+  echo "  ok   and it is traced as approved"
+else echo "  FAIL the forwarded request is not traced as approved" >&2; fail=1; fi
+: > "$SEEN"
+pipe_post "$CARDTEXT" "$AID"
+judge "the same approval used a second time is refused" 403 '"approval_refusal":"already_used"'
+if [ -s "$SEEN" ]; then echo "  FAIL a reused approval reached the model" >&2; fail=1; fi
+
+pipe_post "$CARDTEXT" ""
+AID2=$(printf '%s' "$BODY" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("approval_id",""))
+except Exception: print("")')
+approve_post "$AID2" approve
+sqlite3 "$DB" "UPDATE approval_requests SET expires_at_ms=1 WHERE approval_id='$AID2'"
+pipe_post "$CARDTEXT" "$AID2"
+judge "an expired approval is refused" 403 '"approval_refusal":"expired"'
+pipe_post "$CARDTEXT" ""
+AID3=$(printf '%s' "$BODY" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("approval_id",""))
+except Exception: print("")')
+approve_post "$AID3" decline
+judge "the user can decline instead" 200 '"action":"declined"'
+pipe_post "$CARDTEXT" "$AID3"
+judge "and a declined approval is refused" 403 '"approval_refusal":"declined"'
+if [ -s "$SEEN" ]; then echo "  FAIL an expired or declined approval reached the model" >&2; fail=1; fi
+
 # T10.1: with the per-provider kill switch engaged for ollama, the same request is refused
 # with the fallback message and nothing reaches the model. The row is written as
 # killswitch.engageprovider writes it.

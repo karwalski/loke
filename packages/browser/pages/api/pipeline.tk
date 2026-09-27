@@ -29,6 +29,7 @@ i=mc:core.metrics.collector;
 i=tr:core.governance.trace;
 i=ptypes:core.privacy.pipelinetypes;
 i=dl:core.audit.disclosure;
+i=ag:core.governance.approvalgate;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -168,18 +169,15 @@ f=isdeny(d:$policydecision):bool{
    The exposure is bounded and it is worth being precise about why, because overstating it
    would be its own defect. RESTRICTED data cannot reach a cloud provider — the check
    thirty lines below refuses a cloud route for it, and core.router.router refuses to return
-   one — so what proceeds unapproved is LOCAL processing of high-risk restricted data. That
-   is a control doing nothing, not a disclosure.
+   one — so what proceeded unapproved was LOCAL processing of high-risk restricted data. That
+   was a control doing nothing, not a disclosure.
 
-   It is logged rather than refused, and the gate is filed as GA5.26 rather than improvised
-   here. Refusing would be the fail-closed reflex this project applies elsewhere, but there
-   is no approval surface anywhere in the product — core.governance.approval exists and has
-   no importers — so refusing would block the work with no way for the user to authorise it,
-   and "the user is the authority" is the principle that outranks the reflex when the user
-   has not been asked. What cannot be defended is silence, so the silence is what is fixed
-   now. The audit row still carries the request's OUTCOME (one row per request, so the
-   request count stays a request count); recording the policy DECISION alongside it needs a
-   column that $auditevent does not have, which is GA5.5. *)
+   Done 2026-09-27: the request is now HELD. `post` refuses it with 409 and an approval id
+   (heldforapproval), the user approves that id through /api/approve on the /approve page,
+   and the same request re-submitted with the id proceeds exactly once. A forged, reused,
+   expired, declined or mismatched id is refused (approvalrefused). The gate is
+   core.governance.approvalgate; what it stores, and why it stores no text, is explained
+   there. *)
 f=isrequireapproval(d:$policydecision):bool{
   <mt d {
     $allow:m false;
@@ -225,6 +223,10 @@ f=risktierof(run:$pipelinerun):$risktier{
    failed. The five values are eventtypes() below, and two of them are the names
    core.governance.report was already querying for and never finding. *)
 f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64;decision:$policydecision):bool{
+  <recordeventwith(store;run;eventtype;provider;modelid;tokensin;tokensout;durationms;decision;approvaloutcome(decision))
+};
+
+f=recordeventwith(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;tokensin:i64;tokensout:i64;durationms:i64;decision:$policydecision;approval:str):bool{
   if(store==0){
     <false
   }el{
@@ -246,7 +248,7 @@ f=recordevent(store:i64;run:$pipelinerun;eventtype:str;provider:str;modelid:str;
     (* GA5.5 - every audited outcome also persists its decision trace. The kill switch was
        read as disengaged at the top of `post`, because an engaged one returns before any
        event is recorded; killswitchtrace records that case itself. *)
-    let traced=persisttrace(store;run;eventtype;provider;modelid;durationms;decisionlabel(decision);approvaloutcome(decision);"disengaged");
+    let traced=persisttrace(store;run;eventtype;provider;modelid;durationms;decisionlabel(decision);approval;"disengaged");
     if(traced){}el{
       log.warn("decision trace was not persisted for this request";"api.pipeline";run.requestid)
     };
@@ -267,14 +269,15 @@ f=decisionlabel(d:$policydecision):str{
   }
 };
 
-(* There is no approval surface anywhere in the product (GA5.26), so a decision that requires
-   approval is recorded as required and not sought, rather than as approved or as not
-   applicable. *)
+(* GA5.26. A require-approval decision reaches `forward`, and so every recordevent below it,
+   only after ag.consume has spent a valid approval for it, so on those paths it IS approved.
+   The two paths where it is not, held and refused, write their own outcome through
+   recordeventwith and never call this. *)
 f=approvaloutcome(d:$policydecision):str{
   <mt d {
     $allow:m "not_required";
     $allowwithwarning:m "not_required";
-    $requireapproval:m "required_not_sought";
+    $requireapproval:m "approved";
     $deny:m "not_applicable"
   }
 };
@@ -1008,6 +1011,51 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
   <dispatch(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby)
 };
 
+(* ── GA5.26: hold until approved ─────────────────────────────────────────────────
+   The binding is computed from the text in its UNSALTED anonymised form: this run's
+   placeholders are salted with its request id, which a re-submission does not share, so
+   the salted form would never match. See core.governance.approvalgate on why a digest of
+   the original text is not used instead. *)
+f=unsaltedtext(run:$pipelinerun;text:str):str{
+  <unsaltedfrom(run.result;text)
+};
+
+f=unsaltedfrom(res:$piidetectionresult;text:str):str{
+  <ph.applytotext(text;ph.assignplaceholders(res.entities;""))
+};
+
+f=approvalbinding(run:$pipelinerun;text:str;decision:$policydecision;fbreason:str;fbby:str):str{
+  <ag.binding(unsaltedtext(run;text);decisionlabel(decision);fbreason;fbby)
+};
+
+(* 409, not 403: the request is not denied, it is waiting for the user. The body carries
+   what the approval page shows, entity TYPES and counts and never a value, and the id the
+   re-submission must carry. Nothing was sent and no disclosure record is written. If the
+   approval cannot be recorded the request is still refused: it cannot be approved, and it
+   must not proceed for want of an approval. *)
+f=heldforapproval(store:i64;run:$pipelinerun;decision:$policydecision;bind:str;startms:i64):i64{
+  let aid=ag.create(bind;t.nowms());
+  if(str.len(aid)==0){
+    recordeventwith(store;run;"policy_require_approval";"none";"none";0;0;t.nowms()-startms;decision;"held_unrecorded");
+    log.warn("pipeline: a request needing approval was held, and the approval could not be recorded (GA5.26)";"api.pipeline";run.requestid);
+    <http.res(503;"{\"ok\":false,\"error\":\"this request needs your approval, and the approval could not be recorded, so nothing was sent\",\"approval_required\":true\(privacyfields(run))}")
+  }el{};
+  recordeventwith(store;run;"policy_require_approval";"none";"none";0;0;t.nowms()-startms;decision;"held_pending");
+  log.info("pipeline: held for approval, high risk over restricted data (GA5.26)";"api.pipeline";run.requestid);
+  <http.res(409;"{\"ok\":false,\"error\":\"this request contains restricted data and needs your approval before it is processed. Nothing has been sent.\",\"approval_required\":true,\"approval_id\":\(json.enc(aid)),\"approval_expires_in_seconds\":\(ag.ttlms()/1000),\"approve_url\":\"/approve\",\"policy_message\":\(json.enc(policymessage(decision))),\"entity_types\":\(json.enc(entitysummary(run)))\(privacyfields(run))}")
+};
+
+(* An approval id was presented and did not pass. Why is read after the refusal, so it
+   explains it and never makes it. The request is not re-held: a new approval is asked for
+   by sending the request again without an id. *)
+f=approvalrefused(store:i64;run:$pipelinerun;decision:$policydecision;aid:str;bind:str;startms:i64):i64{
+  let why=ag.refusal(aid;bind;t.nowms());
+  recordeventwith(store;run;"policy_require_approval";"none";"none";0;0;t.nowms()-startms;decision;"refused_\(why)");
+  log.warn("pipeline: an approval was presented for a held request and refused: \(why) (GA5.26)";"api.pipeline";run.requestid);
+  (* `why` is from approvalgate's closed vocabulary, so it is written into the JSON as is. *)
+  <http.res(403;"{\"ok\":false,\"error\":\"the approval presented with this request was refused (\(why)), so nothing was sent. Send the request again without it to ask for a new approval.\",\"approval_required\":true,\"approval_refused\":true,\"approval_refusal\":\(json.enc(why))\(privacyfields(run))}")
+};
+
 (* If the store cannot be opened the switch cannot be read, and an unreadable kill switch
    is treated as ENGAGED, not as disengaged. The same reasoning as NC1.9: the unknown state
    is the unsafe one. The store is now opened once per request and threaded, because the
@@ -1075,8 +1123,19 @@ f=post(req:i64):i64{
       log.warn("pipeline denied by policy: \(why)";"api.pipeline";run.requestid);
       <http.res(403;"{\"ok\":false,\"error\":\(json.enc(why)),\"policy_denied\":true\(privacyfields(run))}")
     }el{};
+    (* GA5.26 - held until approved. With no approval id the request is refused with one;
+       with an id, it proceeds only if ag.consume spends a valid approval for THIS request. *)
     if(isrequireapproval(decision)){
-      log.warn("pipeline policy requires explicit approval and none was sought, so the request proceeds unapproved — high risk over restricted data, local processing only (GA5.26): \(policymessage(decision))";"api.pipeline";run.requestid)
+      let bind=approvalbinding(run;text;decision;fbreason;fbby);
+      let aid=json.str(parsed;"approval_id");
+      if(str.len(aid)==0){
+        <heldforapproval(store;run;decision;bind;startms)
+      }el{};
+      if(ag.consume(aid;bind;t.nowms())){
+        log.info("pipeline: a valid approval was presented and spent, so the held request proceeds (GA5.26)";"api.pipeline";run.requestid)
+      }el{
+        <approvalrefused(store;run;decision;aid;bind;startms)
+      }
     }el{};
     <forward(store;run;sysprompt;startms;decision;fbreason;fbby)
   }el{

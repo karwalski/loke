@@ -7,7 +7,8 @@
 //   node scripts/lib/ui_check.mjs <url> <checks.json>
 //
 // checks.json is [{"name": "...", "js": "<expression, may be async, returning true>"}],
-// or {"reload": true} to reload the page, or {"key": "Tab"} to press a key for real.
+// or {"reload": true} to reload the page, or {"key": "Tab"} to press a key for real,
+// or {"name": "...", "navigates": "<expression>"} for an action that loads another page.
 // Each check runs in the live page after load. Anything other than `true` fails it. The
 // DevTools protocol is driven directly over Node's built-in WebSocket, so there is no
 // dependency to install. It exists because the GA3 UI rows had been Done for months
@@ -69,6 +70,18 @@ try {
       for (let i = 0; i < 80 && !events.includes('Page.loadEventFired'); i++) await sleep(250);
       await sleep(500);
       console.log('  --   reloaded');
+      continue;
+    }
+    if (c.navigates) {
+      // A check whose action navigates the page (GA5.26: the chat opens /approve, which
+      // returns to /chat). Awaiting it would die with the old document, so it is fired, and
+      // it passes when the next page has loaded. The checks after it run on that page.
+      events.length = 0;
+      await send('Runtime.evaluate', { expression: c.navigates });
+      for (let i = 0; i < 80 && !events.includes('Page.loadEventFired'); i++) await sleep(250);
+      await sleep(500);
+      if (events.includes('Page.loadEventFired')) console.log(`  ok   ${c.name}`);
+      else { failed++; console.log(`  FAIL ${c.name} -> no page load followed`); }
       continue;
     }
     if (c.key) {
