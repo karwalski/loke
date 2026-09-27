@@ -34,8 +34,12 @@ $TOKE --emit-deps "$OLDPWD/$SRC" 2>/dev/null | grep -v '^---' | sort -u | \
   -o "$BUILDDIR/$NAME" -lm -lz 2>/dev/null
 cd "$OLDPWD"
 
-# Step 3: run
-"$BUILDDIR/$NAME"
+# Step 3: run, under a fresh throwaway HOME so the test cannot read or write the developer's
+# ~/.loke (F3b.13). The real-HOME guard lives in run_tests.sh, which is the runner the gate uses.
+TESTHOME="$BUILDDIR/home/$NAME"
+rm -rf "$TESTHOME"; mkdir -p "$TESTHOME"
+set +e
+HOME="$TESTHOME" "$BUILDDIR/$NAME"
 EXIT=$?
 
 if [ $EXIT -eq 0 ]; then

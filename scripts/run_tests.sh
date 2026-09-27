@@ -223,6 +223,73 @@ fi
 # tests/unit/privacy/test_mapping_{encryption,deletion}.tk pass a 64-character literal of
 # their own and never touch the keychain. See the X8.3 note in core.storage.db.
 
+# ── F3b.13: no test may depend on, or change, the developer's own ~/.loke ─────
+#
+# Every test binary used to run with the developer's HOME. std.homedir(), proc.homedir() and
+# os.getenv("HOME") all resolve through $HOME, so about sixty tests created their scratch
+# directories inside the real ~/.loke (~/.loke/test-mapping-deletion and friends), and
+# anything that loaded the user's configuration read the real thing: after F3b.3,
+# page.api.pipeline.pipelineconfig() reads ~/.loke/config.toml through shared.config.loaded(),
+# so a developer with privacy.privacy_filter = true silently changed what the pipeline tests
+# exercised. settings.json, loke.db, logs and the memory palace were in the same position.
+#
+# Two parts, as for the smokes (which already run the server under a throwaway HOME):
+#   1. each test binary gets its own FRESH, EMPTY HOME under $BUILDDIR/home/<test>, removed
+#      and recreated before it runs. The scratch directories the tests create move with it.
+#   2. a guard that makes a miss visible. scripts/lib/realhome_guard.c is injected into every
+#      test binary; it records each libc filesystem call (open, stat, access, opendir, mkdir,
+#      unlink, rename, ...) whose path is the REAL ~/.loke or under it — a read as much as a
+#      write. A test that touched it fails, whatever its own assertions said, and so does the
+#      run. That catches a hardcoded path or a getpwuid() fallback, which a HOME override
+#      alone would not.
+#
+# The keychain is the one exception, and it is named here rather than left implicit. The
+# Security framework finds the login keychain through $HOME/Library/Keychains; measured
+# 2026-09-28, test_keychain_e2e under an empty HOME blocks indefinitely (no keychain, so it
+# waits on a dialog nobody can answer) and passes when that one directory is linked in. The
+# three tests below still use the real login keychain (X8.7, a user decision), under
+# account names of their own that they delete afterwards, so their throwaway HOME gets a
+# link to the real Library/Keychains and nothing else: their ~/.loke is still throwaway and
+# the guard still applies to them. No other test gets the link. Keychain traffic itself goes
+# to securityd over IPC, not through a path, so the guard cannot see it.
+KEYCHAIN_TESTS="test_keychain test_keychain_e2e test_keychain_settings"
+REALHOME="${HOME:?HOME must be set}"
+GUARD_PREFIX="$REALHOME/.loke"
+TESTHOME_ROOT="$BUILDDIR/home"
+GUARD_SRC="$SCRIPTDIR/lib/realhome_guard.c"
+GUARD_DYLIB="$BUILDDIR/realhome_guard.dylib"
+case "$TESTHOME_ROOT" in
+  "$GUARD_PREFIX"|"$GUARD_PREFIX"/*)
+    echo "ERROR: BUILDDIR ($BUILDDIR) is inside the real ~/.loke; the test HOMEs must not be" >&2
+    exit 3 ;;
+esac
+if [ ! -f "$GUARD_DYLIB" ] || [ "$GUARD_SRC" -nt "$GUARD_DYLIB" ]; then
+  if ! clang -dynamiclib -O1 -o "$GUARD_DYLIB" "$GUARD_SRC"; then
+    echo "ERROR: could not build the real-HOME guard from $GUARD_SRC (F3b.13)" >&2
+    exit 3
+  fi
+fi
+# Prove the guard is live before trusting its silence. A guard that failed to load (a
+# hardened binary strips DYLD_INSERT_LIBRARIES, and so would a future linker flag) reports
+# nothing, which is indistinguishable from "nothing touched ~/.loke". The probe is linked
+# the same way as a test binary and only stat()s a name that does not exist: it reads
+# nothing and creates nothing in the real ~/.loke.
+GUARD_PROBE="$BUILDDIR/realhome_guard_probe"
+if [ ! -x "$GUARD_PROBE" ] || [ "$GUARD_SRC" -nt "$GUARD_PROBE" ]; then
+  printf '#include <sys/stat.h>\nint main(int c,char**v){struct stat s;(void)c;(void)stat(v[1],&s);return 0;}\n' \
+    | clang -x c -o "$GUARD_PROBE" - || { echo "ERROR: could not build the guard probe (F3b.13)" >&2; exit 3; }
+fi
+rm -f "$BUILDDIR/realhome_guard_probe.log"
+LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$BUILDDIR/realhome_guard_probe.log" \
+  DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" "$GUARD_PROBE" "$GUARD_PREFIX/.f3b13-guard-probe-does-not-exist"
+if ! grep -q 'f3b13-guard-probe' "$BUILDDIR/realhome_guard_probe.log" 2>/dev/null; then
+  echo "ERROR: the real-HOME guard did not record the probe's access, so it is not active and" >&2
+  echo "       a test reaching the real ~/.loke would pass unseen. Refusing to run (F3b.13)." >&2
+  exit 3
+fi
+mkdir -p "$TESTHOME_ROOT"
+GUARDED=0
+
 PASS=0
 FAIL=0
 ERRORS=""
@@ -275,12 +342,31 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
     continue
   fi
 
-  # Step 3: run
-  if "$BUILDDIR/$NAME" 2>/dev/null; then
+  # Step 3: run, under a fresh throwaway HOME and the real-HOME guard (F3b.13, above).
+  TESTHOME="$TESTHOME_ROOT/$NAME"
+  GUARD_LOG="$BUILDDIR/$NAME.realhome.log"
+  rm -rf "$TESTHOME" "$GUARD_LOG"
+  mkdir -p "$TESTHOME"
+  case " $KEYCHAIN_TESTS " in
+    *" $NAME "*)
+      mkdir -p "$TESTHOME/Library"
+      ln -s "$REALHOME/Library/Keychains" "$TESTHOME/Library/Keychains" ;;
+  esac
+  HOME="$TESTHOME" LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$GUARD_LOG" \
+    DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" "$BUILDDIR/$NAME" 2>/dev/null
+  EXIT=$?
+  GUARDED=$((GUARDED+1))
+  if [ -s "$GUARD_LOG" ]; then
+    # Judged before the test's own result: a test that passed by reading a developer's
+    # config has not passed.
+    echo "REAL_HOME    $SRC (touched the real ~/.loke; the test's own exit was $EXIT)"
+    sort -u "$GUARD_LOG" | head -5 | sed 's/^/               /'
+    FAIL=$((FAIL+1))
+    ERRORS="$ERRORS\n  $SRC (touched the real ~/.loke — see $GUARD_LOG)"
+  elif [ "$EXIT" -eq 0 ]; then
     echo "PASS         $SRC"
     PASS=$((PASS+1))
   else
-    EXIT=$?
     # A crash is not an assertion count. Printing the raw exit status as
     # "$EXIT failures" reported three segfaulting tests as "139 failures", which
     # reads as 139 assertions and is a completely different problem to diagnose.
@@ -308,6 +394,7 @@ echo "=== Results ==="
 echo "Pass: $PASS"
 echo "Fail: $FAIL"
 echo "Total: $((PASS+FAIL))"
+echo "Real-HOME guard: $GUARDED test binaries ran under a throwaway HOME with the guard on $GUARD_PREFIX (F3b.13)"
 if [ -n "$ERRORS" ]; then
   echo ""
   echo "Failures:$ERRORS"
