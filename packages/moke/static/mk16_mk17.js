@@ -32,8 +32,8 @@
     estimateCloudCost: function(modelId, tokensIn, tokensOut) {
       var m = (modelId || '').toLowerCase();
       var cin = 0.001, cout = 0.003;
-      if (m.indexOf('claude-3-5-sonnet') !== -1) { cin = 0.003; cout = 0.015; }
-      else if (m.indexOf('claude-3-5-haiku') !== -1) { cin = 0.001; cout = 0.005; }
+      if (m.indexOf('claude-sonnet-5') !== -1) { cin = 0.002; cout = 0.010; }
+      else if (m.indexOf('claude-haiku-4-5') !== -1) { cin = 0.001; cout = 0.005; }
       else if (m.indexOf('gpt-4o-mini') !== -1) { cin = 0.00015; cout = 0.0006; }
       else if (m.indexOf('gpt-4o') !== -1) { cin = 0.005; cout = 0.015; }
       else if (m.indexOf('llama') !== -1 || m.indexOf('qwen') !== -1) { cin = 0.0002; cout = 0.0002; }

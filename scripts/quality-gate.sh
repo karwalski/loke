@@ -276,6 +276,12 @@ step_checks() {
       || { python3 ./scripts/find_interp_abi_str.py packages tests >&2; failed=1; }
   fi
 
+  if [[ -f ./scripts/check_retired_models.py ]]; then
+    echo "  no retired Anthropic model id in product code (F5.11b)"
+    python3 ./scripts/check_retired_models.py --check packages >/dev/null \
+      || { python3 ./scripts/check_retired_models.py packages >&2; failed=1; }
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1

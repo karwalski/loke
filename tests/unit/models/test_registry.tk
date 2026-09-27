@@ -7,6 +7,8 @@ i=t:std.test;
 i=str:std.str;
 i=sh:shared.types;
 i=reg:core.models.registry;
+i=esc:core.router.escalation;
+i=adv:core.eval.advisor;
 
 (* X7.2 — this file used to declare its own model table and its own selection function and
    assert against them. The module's own comments record three separate defects that a
@@ -53,9 +55,49 @@ f=alllocal(caps:@$modelcapability):bool{
   <ok
 };
 
+(* F5.11b. Anthropic model ids that Anthropic's models overview and pricing page list as
+   retired on the Claude API (read 2026-09-27): every Claude 2 and Claude 3 id, which
+   includes Sonnet 3.5 (retired 2025-10-28) and Haiku 3.5 (2026-02-19) that this catalogue
+   used to route to, and the dated Sonnet 4, Opus 4 and Opus 4.1 ids. A request naming one
+   is refused by the provider, so none may appear where loke chooses a model. *)
+f=isretired(id:str):bool{
+  if(str.startswith(id;"claude-2") || str.startswith(id;"claude-3-") || str.startswith(id;"claude-3.")){ <true }el{};
+  if(str.eq(id;"claude-instant-1.2")){ <true }el{};
+  if(str.startswith(id;"claude-sonnet-4-2025") || str.startswith(id;"claude-opus-4-2025")){ <true }el{};
+  <str.eq(id;"claude-sonnet-4-0") || str.eq(id;"claude-opus-4-0") || str.startswith(id;"claude-opus-4-1")
+};
+
+f=anyretired(caps:@$modelcapability):str{
+  let found=mut."";
+  lp(let i=0;i<caps.len;i=i+1){
+    let c:$modelcapability=caps.get(i);
+    if(isretired(c.modelid)){ found=c.modelid }el{}
+  };
+  <found
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
+
+  (* ── F5.11b: no retired Anthropic model is routable ───────────────────────────
+     The denylist is checked against itself first, so a typo in isretired cannot make the
+     catalogue check vacuous. *)
+  if(t.assert(isretired("claude-3-5-sonnet-20241022") && isretired("claude-3-5-haiku-20241022") && isretired("claude-3-haiku-20240307");"the denylist recognises the ids the catalogue used to carry")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!isretired("claude-sonnet-5") && !isretired("claude-haiku-4-5-20251001") && !isretired("claude-opus-5-5");"and does not flag the current ones")){pass=pass+1}el{fail=fail+1};
+  let retiredentry=anyretired(reg.defaultentries());
+  if(t.asserteq(retiredentry;"";"no catalogue entry names a model Anthropic has retired")){pass=pass+1}el{fail=fail+1};
+  let cat=reg.newregistry();
+  let sonnet5:$modelcapability=reg.capabilitybyid(cat;"claude-sonnet-5");
+  let haiku45:$modelcapability=reg.capabilitybyid(cat;"claude-haiku-4-5-20251001");
+  if(t.assert(reg.iscapability(sonnet5) && reg.iscapability(haiku45);"the catalogue carries Sonnet 5 and Haiku 4.5 by their published ids")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((sonnet5.contextwindow as i64)==1000000 && (haiku45.contextwindow as i64)==200000;"with their published context windows, 1M and 200K")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sonnet5.qualityscore>haiku45.qualityscore && haiku45.speedtoks>sonnet5.speedtoks;"and the tiers rank as the retired pair did: Sonnet above on quality, Haiku faster")){pass=pass+1}el{fail=fail+1};
+  (* The escalation ladder and the advisor name models too, outside the catalogue. *)
+  if(t.assert(!isretired(esc.nextrung("llama3.1:8b")) && !isretired(esc.nextrung("qwen2.5:72b")) && !isretired(esc.nextrung(esc.nextrung("llama3.1:8b")));"no escalation rung is a retired model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(esc.nextrung("llama3.1:8b");"claude-haiku-4-5-20251001";"the ladder leaves the machine at Haiku 4.5")){pass=pass+1}el{fail=fail+1};
+  let complex:$localadvice=adv.advise("a complex multi-step analysis";"high");
+  if(t.assert(!isretired(complex.recommendedmodel) && str.startswith(complex.recommendedmodel;"claude-");"the advisor's hosted recommendation is a current Claude model")){pass=pass+1}el{fail=fail+1};
 
   (* ── The registry is populated ──────────────────────────────────────────────*)
   let r=reg.newregistry();
@@ -75,7 +117,7 @@ f=main():i64{
   (* ── findfortask: the function that used to return an empty array for everything ──*)
   let chat=reg.findfortask(r;$chat(0);false);
   if(t.assert(chat.len>0;"there is at least one model for chat — this returned an empty array for every task")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(hasmodel(chat;"claude-3-5-sonnet-20241022");"Sonnet is among the chat models")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasmodel(chat;"claude-sonnet-5");"Sonnet is among the chat models")){pass=pass+1}el{fail=fail+1};
   if(t.assert(hasmodel(chat;"qwen2.5:7b");"and so is a local model")){pass=pass+1}el{fail=fail+1};
 
   (* The task filter has to actually filter. Embedding is declared for fewer models than
@@ -92,7 +134,7 @@ f=main():i64{
   let localchat=reg.findfortask(r;$chat(0);true);
   if(t.assert(localchat.len>0;"there is a local model for chat")){pass=pass+1}el{fail=fail+1};
   if(t.assert(alllocal(localchat);"and EVERY model returned under localonly is local — one hosted entry here would route a sensitive prompt off-device")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!hasmodel(localchat;"claude-3-5-sonnet-20241022");"a hosted model is excluded by name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!hasmodel(localchat;"claude-sonnet-5");"a hosted model is excluded by name")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!hasmodel(localchat;"gpt-4o");"and so is the other one")){pass=pass+1}el{fail=fail+1};
   if(t.assert(localchat.len<chat.len;"and localonly returns strictly fewer models than an unconstrained search")){pass=pass+1}el{fail=fail+1};
 
@@ -156,7 +198,7 @@ f=main():i64{
      implementation returns the worse model. *)
   let best=reg.bestfortask(r;$chat(0);false;$interactive(0));
   if(t.assert(reg.iscapability(best);"a model is selected for interactive chat")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(best.modelid;"claude-3-5-sonnet-20241022";"and it is the highest-quality one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(best.modelid;"claude-sonnet-5";"and it is the highest-quality one")){pass=pass+1}el{fail=fail+1};
 
   (* The "best, not first" discrimination, at the CONSIDERED tier rather than background,
      because $background crashes — see the FINDING above. qwen2.5:72b runs at 8.0 tok/s,

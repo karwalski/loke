@@ -331,7 +331,7 @@ files with the reason for each.
 **A RESTRICTED request cannot reach a cloud provider through `core.router.selector` or
 `core.router.router`, and that is now asserted at both layers rather than assumed.** Measured, under a
 deliberately hostile configuration — `newconfigfull(url;false;0.05;bestquality())`, the setting that
-would otherwise prefer claude-3-5-sonnet at quality score 0.95:
+would otherwise prefer claude-sonnet-5 at quality score 0.95 (claude-3-5-sonnet before F5.11b):
 
 - `sensitivity.canusecloud` is false for `$restricted` and true for the other three, asserted per tag
   rather than in aggregate, because `$restricted` is the *first* arm of that match and would invert if

@@ -419,6 +419,21 @@ across accounts. The metric bounds disclosure, not consequence.
 stated. Completion is judged by the benchmark's own scoring, so a reduction that breaks the task does
 not count as a reduction. Cost figures additionally state the model and the price date.
 
+**Provider list prices used as inputs (F5.11b).** These are published prices, not measurements, and
+no figure on this page is derived from them yet. They are the rates loke's cost tables use
+(`core.providers.anthropic`, `core.router.router`, `selector`, `strategy`, moke's `cost_comparison`).
+Source: Anthropic's pricing page, `platform.claude.com/docs/en/about-claude/pricing`, read 2026-09-27.
+Base rates only; prompt-cache, batch and data-residency multipliers are not applied anywhere in loke.
+
+| Model | Model id | Input, USD per million tokens | Output, USD per million tokens |
+|---|---|---|---|
+| Claude Haiku 4.5 | `claude-haiku-4-5-20251001` | 1 | 5 |
+| Claude Sonnet 5 | `claude-sonnet-5` | 2 | 10 |
+| Claude Opus 5.5 | `claude-opus-5-5` | 4 | 20 |
+
+The OpenAI rates in the same tables were not re-checked, and they disagree with each other:
+`core.providers.openai` prices `gpt-4o` at 2.50 / 10, the router tables at 5 / 15.
+
 ### "Keeping the data on the device"
 
 Scoped precisely, because the unqualified version is not true:
