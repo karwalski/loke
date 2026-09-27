@@ -132,6 +132,27 @@ f=treecontains(dir:str;needle:str):bool{
   <false
 };
 
+(* One hex digit at `at` replaced by a different one, everything else unchanged. Uses the
+   typed str.slice (start, end); see the tamper assertion in main for why not str.substr. *)
+f=flipdigit(hex:str;at:u64):str{
+  let head=mt str.slice(hex;0;at) {
+    $ok:h h;
+    $err:e ""
+  };
+  let digit=mt str.slice(hex;at;at+1) {
+    $ok:d d;
+    $err:e ""
+  };
+  let tail=mt str.slice(hex;at+1;str.len(hex)) {
+    $ok:r r;
+    $err:e ""
+  };
+  if(str.eq(digit;"0")){
+    <"\(head)1\(tail)"
+  }el{};
+  <"\(head)0\(tail)"
+};
+
 f=samplemap():$placeholdermap{
   let m0=ph.newmap();
   let m1=ph.addentry(m0;"Alice Smith";"[PERSON_a3f1_1]";"PERSON");
@@ -254,10 +275,27 @@ f=main():i64{
   if(t.assert(!wrongrequest.openedok;"a payload moved to another request's row does not open")){pass=pass+1}el{fail=fail+1};
   if(t.assert((wrongrequest.openedentries.len as i64)==0;"and yields nothing")){pass=pass+1}el{fail=fail+1};
 
-  (* A single flipped hex digit in the stored ciphertext. GCM's tag covers it. *)
-  let tampered=str.concat(str.replace(str.substr(seal1.sealedhex;0;8);"a";"b");str.substr(seal1.sealedhex;8;(str.len(seal1.sealedhex) as i64)-8));
+  (* A single flipped hex digit in the BODY of the stored ciphertext, same length, tag
+     untouched. GCM's tag covers it.
+
+     This used to be spelled str.replace(str.substr(hex;0;8);"a";"b") + str.substr(hex;8;
+     len-8). str.substr is an untyped ABI name taking (start, END), not (start, length),
+     so the second half dropped the last eight hex characters — four bytes of the tag —
+     and the first half changed nothing whenever those eight characters held no "a",
+     which for random ciphertext is about 60% of runs. The assertion passed on a
+     truncation, not on tampering. The flip is now deterministic and the test checks it
+     happened. *)
+  let tampered=flipdigit(seal1.sealedhex;10 as u64);
+  if(t.assert(!str.eq(tampered;seal1.sealedhex);"the tamper fixture really differs from the stored ciphertext")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(tampered)==str.len(seal1.sealedhex);"and is the same length, so this is a flipped digit and not a truncation")){pass=pass+1}el{fail=fail+1};
   let tamperedopen=pstore.openpayload(secreta();"req-nonce";seal1.sealednonce;tampered);
   if(t.assert(!tamperedopen.openedok;"an altered ciphertext does not open")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((tamperedopen.openedentries.len as i64)==0;"and yields nothing")){pass=pass+1}el{fail=fail+1};
+  let truncated=mt str.slice(seal1.sealedhex;0;str.len(seal1.sealedhex)-(8 as u64)) {
+    $ok:cut cut;
+    $err:e ""
+  };
+  if(t.assert(!pstore.openpayload(secreta();"req-nonce";seal1.sealednonce;truncated).openedok;"a ciphertext with its tag cut short does not open either")){pass=pass+1}el{fail=fail+1};
 
   (* A truncated or non-hex column. encoding.hexdecode's declared error side is
      unreachable — its wrapper returns zero bytes through the ok arm — so the length
@@ -325,6 +363,30 @@ f=main():i64{
   let awkwardback:$placeholderentry=openawkward.openedentries.get(0);
   if(t.asserteq(awkwardback.original;"O'Brien | Smith\nsecond line";"with its bytes intact")){pass=pass+1}el{fail=fail+1};
 
+  (* ── X8.3: the key comes from the keychain, and its absence fails closed ─────
+     The keychain call itself cannot run here (a headless process cannot answer the
+     authorisation dialog SecItemCopyMatching may raise), so what is asserted is the
+     decision ensuredbkey takes on what the keychain returned, through the production
+     function, and the consequence of each branch for a stored mapping. *)
+  if(t.assert(sdb.dbkeyaction(true;secreta())==1;"a stored 64-character secret is used as it is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction(false;"")==2;"no keychain item means first use: generate and store one")){pass=pass+1}el{fail=fail+1};
+  (* The branch that used to be wrong: an item that exists but reads back unusable was
+     REPLACED, which silently rotated the key and orphaned every sealed row. *)
+  if(t.assert(sdb.dbkeyaction(true;"")==0;"an item that exists but cannot be read is refused, not overwritten")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction(true;"abc123")==0;"and so is one that reads back malformed")){pass=pass+1}el{fail=fail+1};
+
+  (* Removing the keychain entry. ensuredbkey then takes the generate branch, so the key
+     in use is a fresh one from the same generator first use calls — and a mapping sealed
+     under the removed key must be unreadable under it, not transparently readable. *)
+  let fresh=sdb.generatedbsecret();
+  if(t.assert((str.len(fresh) as i64)==64;"a generated secret is 64 hex characters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(fresh;sdb.generatedbsecret());"and two generated secrets differ")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pstore.readmappingwithsecret("req-store-1";fresh).openedok;"after the keychain entry is removed, a mapping sealed under the old key does not open")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pstore.restorewithsecret("req-store-1";anonymised;fresh);anonymised;"and restoration leaves the placeholders in place rather than substituting anything")){pass=pass+1}el{fail=fail+1};
+  (* No key at all — what ensuredbkey returns on refusal — reads nothing either. *)
+  if(t.assert(!pstore.readmappingwithsecret("req-store-1";"").openedok;"an empty secret opens nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pstore.restorewithsecret("req-store-1";anonymised;"");anonymised;"and restores nothing")){pass=pass+1}el{fail=fail+1};
+
   (* ── and the assertion that matters: nothing legible on disk ─────────────────
      The values were stored a few dozen assertions ago. They must not appear anywhere
      under the data directory, in any file, before any deletion — because the point of
@@ -340,6 +402,14 @@ f=main():i64{
   if(t.assert(!treecontains(testdir();"0400 111 222");"nor of the phone number")){pass=pass+1}el{fail=fail+1};
   (* The placeholder and the entity type are inside the payload too, so neither the
      surrogate nor the category census is readable from the file. *)
+  (* An encoding is not a seal. Inside the payload every field is hex-encoded, and the
+     row stores hex, so a regression that skipped the AEAD but kept the codec would write
+     hex(value) or hex(hex(value)) — neither of which the plain-text searches above can
+     see. Both forms are searched for, so "stored in the clear but encoded" fails here
+     rather than passing as ciphertext. *)
+  if(t.assert(!treecontains(testdir();pstore.hexof("Alice Smith"));"no hex encoding of the name is on disk")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();pstore.hexof(pstore.hexof("Alice Smith")));"nor a double hex encoding, which is how the payload codec would store it unsealed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!treecontains(testdir();pstore.hexof(pstore.hexof("bob.jones@example.com")));"nor of the email address")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!treecontains(testdir();"[PERSON_a3f1_1]");"nor of the placeholder, which carries the entity type and the ordinal")){pass=pass+1}el{fail=fail+1};
 
   (* The status sentence, in one place so nothing restates it. It must not claim the

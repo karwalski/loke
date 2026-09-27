@@ -7,7 +7,6 @@ m=core.storage.db;
 i=db:std.db;
 i=file:std.file;
 i=str:std.str;
-i=env:std.env;
 i=crypto:std.crypto;
 i=kc:core.storage.keychain;
 i=log:shared.log;
@@ -71,25 +70,58 @@ t=$msrange{
 
    What this costs, stated rather than hidden: the keychain read itself is not exercised
    by the automated suite, because a headless process cannot answer the dialog it may
-   raise. The suite covers everything on both sides of it — key shape, derivation,
-   sealing, opening, fail-closed behaviour on a wrong key — and not that one call.
+   raise. The suite covers everything on both sides of it — the decision taken on what the
+   keychain returned (dbkeyaction below), key shape, derivation, sealing, opening, and
+   fail-closed behaviour on a wrong or absent key — and not that one call.
+
+   dbkeyfromenv, which read LOKE_DB_KEY and was kept only so tests/unit/storage/test_db.tk
+   could assert that it did, is DELETED (2026-09-27). A function in the storage module that
+   returns a key from the environment is the fallback X8.3 forbids waiting for a caller;
+   nothing called it, and the next person looking for "the key" would have found it first.
 
    A failure returns "", not a result type. T-18 makes the error arm of a user-declared
    sum dead, so a `str!$lokeerr` here would report every failure as success; "" is a
    value no 64-character hex key can take and every caller has to test length before it
    can derive anything. *)
-(* Kept, and read by NOTHING in the product. tests/unit/storage/test_db.tk asserts that
-   the suite has a 64-character LOKE_DB_KEY in its environment, which is the only reason
-   this function still exists; scripts/run_tests.sh sets it for that assertion alone.
-   Do not call this from a key path. If you are looking for the key, it is ensuredbkey
-   below, and the keychain is the only place it comes from. *)
-f=dbkeyfromenv():str{
-  let fromenv=env.getor("LOKE_DB_KEY";"");
-  if(str.len(fromenv)==64){
-    <fromenv
-  }el{
-    <""
-  }
+
+(* X8.3 — what ensuredbkey does with what the keychain told it, as a pure function so the
+   decision is testable without touching the keychain.
+
+     1  use the stored secret: an item exists and reads back as 64 characters.
+     2  generate and store one: NO item exists. On first use that is simply first use. If
+        the item was REMOVED, rows sealed under the old key stay sealed and fail to open
+        under the new one, which is what X8.3 requires: removing the keychain entry makes
+        the store unreadable, never transparently readable.
+     0  refuse: an item EXISTS but did not read back as a usable secret — the read was
+        denied, the keychain is locked, or the item was altered.
+
+   The third case is the one that used to be wrong. ensuredbkey fell through to "generate
+   and store" whenever the read did not return 64 characters, and keychain.set is an
+   update-or-add, so a single failed read OVERWROTE the key that every stored mapping was
+   sealed under and made all of them permanently unreadable. That fails closed for
+   privacy — nothing leaks — but it destroys data silently and rotates the key on the
+   say-so of a transient error. Refusing is correct: the operation that wanted the key
+   fails, the key survives, and the next attempt can succeed.
+
+   What this cannot close at the pin: std.keychain.exists is a bool that is true only on
+   errSecSuccess, so "no such item" and "the query itself failed" are the same false, and
+   a failed EXISTS check still takes the generate branch. Distinguishing them needs the
+   OSStatus from std.keychain, which it does not return. *)
+f=dbkeyaction(present:bool;existing:str):i64{
+  if(present){
+    if(str.len(existing)==64){
+      <1
+    }el{};
+    <0
+  }el{};
+  <2
+};
+
+(* A fresh secret: 32 bytes from the OS CSPRNG, as 64 hex characters. Separate from
+   ensuredbkey so a test can obtain exactly what first use would store, without the
+   keychain write that follows it. *)
+f=generatedbsecret():str{
+  <crypto.tohex(crypto.randombytes(32))
 };
 
 (* The 64-character hex secret, from the keychain, generating and storing one on first
@@ -99,23 +131,28 @@ f=dbkeyfromenv():str{
    NOT called by openstore — see the note above. Call it only where a key is actually
    needed, so that no code path blocks on the keychain for a key it does not use. *)
 f=ensuredbkey():str{
-  if(kc.haskey("db_encryption_key")){
-    let existing=kc.getdbkey();
-    if(str.len(existing)==64){
-      <existing
-    }el{};
+  let present=kc.haskey("db_encryption_key");
+  let existing=mut."";
+  if(present){
+    existing=kc.getdbkey()
   }el{};
-  let keybytes=crypto.randombytes(32);
-  let hexkey=crypto.tohex(keybytes);
+  let action=dbkeyaction(present;existing);
+  if(action==1){
+    <existing
+  }el{};
+  if(action==0){
+    log.warn("db: a database key is in the keychain but could not be read as a 64-character secret; refusing rather than replacing it";"db";"system");
+    <""
+  }el{};
+  let hexkey=generatedbsecret();
   if(str.len(hexkey)!=64){
     log.warn("db: the generated database key is not 64 hex characters; refusing to store it";"db";"system");
     <""
   }el{};
-  let stored=kc.setdbkey(hexkey);
-  if(!stored){
+  if(kc.setdbkey(hexkey)){}el{
     log.warn("db: could not store the database key in the keychain; field encryption is unavailable";"db";"system");
     <""
-  }el{};
+  };
   log.info("db: generated new database encryption key";"db";"system");
   <hexkey
 };
