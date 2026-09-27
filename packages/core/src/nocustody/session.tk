@@ -1,0 +1,115 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.nocustody.session;
+
+i=db:std.db;
+i=str:std.str;
+i=crypto:std.crypto;
+i=json:std.json;
+i=t:shared.types;
+
+(* NC1.13. A session the caller cannot choose.
+
+   core.nocustody.bound (NC1.10) keys its per-session budgets on a session id. Before this
+   module that id was whatever the request named, so a caller that sent a new one got a fresh
+   cell budget and a fresh probe count each time (disclosure-accounting spec U1). Now loke
+   issues the id, through POST /api/session, and the artifact and pipeline routes accept only
+   an id loke issued that has not expired.
+
+   An id is "nc-" and 32 hex digits from crypto.randombytes(16), which is arc4random_buf at the
+   pinned toolchain: 128 bits a caller cannot guess or derive. It is not str.randhex, whose
+   value is an address when interpolated and which crashes inside an array literal (T-41,
+   T-46). It fits core.audit.disclosure.sessionidvalid, so the pipeline records it unchanged.
+
+   The id is stored with its issue and expiry times in nc_sessions (migration 37), and nothing
+   else: no origin, no dataset, no request content. It is a bearer value. Anything able to read
+   loke.db can already call /api/session, so it is not stored hashed.
+
+   WHAT ISSUING DOES NOT DO. It stops a caller from naming a session it was never given, and
+   from reusing one past its expiry. It does not stop a caller from asking for as many
+   sessions as it likes: /api/session is open to any loopback caller that passes the origin
+   check, and loke cannot tell one caller from another (shared.origin refuses a foreign Origin,
+   and every accepted request comes from this machine). Rotation is therefore bounded by the
+   installation-wide window in core.nocustody.bound, not here. *)
+
+(* SESSION_TTL: how long an issued id is accepted, in milliseconds. 24 hours, the same length
+   as core.nocustody.bound's installation window, so no session outlives one window. A
+   placeholder, like the contract's other budgets. *)
+f=ttlms():i64{
+  <86400000
+};
+
+f=prefix():str{
+  <"nc-"
+};
+
+f=newid():str{
+  <str.concat(prefix();crypto.tohex(crypto.randombytes(16)))
+};
+
+(* Issues a session at `nowms` and records it. "" when the record could not be written: an id
+   that is not recorded would be refused on first use, so it is not handed out. Expired rows
+   older than one more TTL are pruned here, so the table does not grow without end, while a
+   recently expired id is still answered as expired rather than as never issued. *)
+f=issueat(nowms:i64):str{
+  mt db.exec("DELETE FROM nc_sessions WHERE expires_ms < CAST(? AS INTEGER)";@(str.fromint(nowms-ttlms()))) {
+    $ok:n 0;
+    $err:e 0
+  };
+  let id=newid();
+  <mt db.exec("INSERT INTO nc_sessions (session_id, issued_ms, expires_ms) VALUES (?, CAST(? AS INTEGER), CAST(? AS INTEGER))";@(id;str.fromint(nowms);str.fromint(nowms+ttlms()))) {
+    $ok:n id;
+    $err:e ""
+  }
+};
+
+f=issue():str{
+  <issueat(t.nowms())
+};
+
+(* The expiry recorded for `id`: -1 when it was never issued, -2 when the store could not be
+   read. *)
+f=expiryof(id:str):i64{
+  <mt db.one("SELECT COALESCE((SELECT expires_ms FROM nc_sessions WHERE session_id=?), -1) AS n";@(id)) {
+    $ok:r db.rowi64(r;"n");
+    $err:e 0-2
+  }
+};
+
+(* "" when `id` is a session loke issued and it has not expired at `nowms`; otherwise the
+   refusal code. A code, not a result: a user sum on the error side of an mt always takes the
+   first arm at this toolchain (T-18). *)
+f=checkat(id:str;nowms:i64):str{
+  if(str.len(id)==0){ <"no_session" };
+  let exp=expiryof(id);
+  if(exp==0-2){ <"ledger_unavailable" };
+  if(exp<0){ <"session_unissued" };
+  if(nowms>=exp){ <"session_expired" };
+  <""
+};
+
+f=check(id:str):str{
+  <checkat(id;t.nowms())
+};
+
+(* Whether a refusal code is one of this module's. *)
+f=issessioncode(code:str):bool{
+  <str.eq(code;"no_session") || str.eq(code;"session_unissued") || str.eq(code;"session_expired")
+};
+
+f=reason(code:str):str{
+  if(str.eq(code;"no_session")){ <"missing required field: session_id (POST /api/session issues one)" };
+  if(str.eq(code;"session_unissued")){ <"session_id was not issued by loke; POST /api/session issues one (NC1.13)" };
+  if(str.eq(code;"session_expired")){ <"session_id has expired; POST /api/session issues a new one, and the installation-wide bound carries over (NC1.13)" };
+  if(str.eq(code;"ledger_unavailable")){ <"the session store could not be read, so nothing is released" };
+  <code
+};
+
+f=issuedjson(id:str):str{
+  <"{\"ok\":true,\"session_id\":\(json.enc(id)),\"expires_in_s\":\(str.fromint(ttlms()/1000))}"
+};
+
+f=refusaljson(code:str):str{
+  <"{\"ok\":false,\"refusal\":\(json.enc(code)),\"error\":\(json.enc(reason(code)))}"
+};

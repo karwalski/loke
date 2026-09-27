@@ -69,12 +69,24 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
+fail=0
+# NC1.13: loke issues the session. moke's pages cannot ask loke directly (a foreign Origin is
+# refused), so moke's POST /api/session asks on their behalf and hands back loke's id.
+E2ESID=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:11432/api/session \
+  | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); s=d.get("session_id","")
+  print(s if d.get("ok") and s.startswith("nc-") and len(s)==35 else "")
+except Exception: print("")')
+if [ -n "$E2ESID" ] && [ "$(sqlite3 "$WORK/lk/home/.loke/loke.db" "SELECT COUNT() FROM nc_sessions WHERE session_id='$E2ESID'" 2>/dev/null)" = "1" ]; then
+  echo "  ok   moke's POST /api/session returned a session loke issued and recorded"
+else echo "  FAIL moke did not obtain a session loke issued: '$E2ESID'" >&2; fail=1; fi
+
 EMAIL="e2e.probe.$$@example.com"
 OUT=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
-        -d "{\"prompt\":\"summarise: contact $EMAIL\",\"session_id\":\"e2e\",\"dataset_name\":\"demo\"}" \
+        -d "{\"prompt\":\"summarise: contact $EMAIL\",\"session_id\":\"$E2ESID\",\"dataset_name\":\"demo\"}" \
         http://127.0.0.1:11432/api/pipeline)
 
-fail=0
 ok=$(printf '%s' "$OUT" | python3 -c 'import json,sys
 try: d=json.load(sys.stdin); print("true" if d.get("ok") else "false"); print(d.get("response") or d.get("error") or "", file=sys.stderr)
 except Exception: print("unparseable")' 2>"$WORK/resp.txt")
@@ -129,7 +141,7 @@ esac
 # jurisdiction and retention are not measured, so NULL, NULL and unknown rather than a guess.
 ver=$(dl "SELECT session_id||' '||model_id||' '||model_version||' '||COALESCE(bytes_headers,'NULL')||' '||COALESCE(jurisdiction,'NULL')||' '||retention_class FROM disclosure_log")
 case "$ver" in
-  "e2e qwen2.5:7b $QWEN_DIGEST NULL NULL unknown"|"e2e llama3:latest $LLAMA_DIGEST NULL NULL unknown")
+  "$E2ESID qwen2.5:7b $QWEN_DIGEST NULL NULL unknown"|"$E2ESID llama3:latest $LLAMA_DIGEST NULL NULL unknown")
     echo "  ok   it carries the caller's session and the digest Ollama reported for its model: $ver" ;;
   *) echo "  FAIL the record's session, model version or unmeasured fields are '$ver'" >&2; fail=1 ;;
 esac
@@ -240,6 +252,23 @@ esac
 if [ -s "$SEEN" ] || [ "$(dl "SELECT COUNT() FROM disclosure_log")" != "$rows_unsel" ]; then
   echo "  FAIL a request with an invalid session id reached the model or wrote a record" >&2; fail=1
 else echo "  ok   and nothing was sent or recorded"; fi
+# NC1.13: a well-formed id loke did not issue is refused too, directly and through moke, and
+# nothing is sent or recorded under it.
+CODEF=$(curl -s -m 40 -o "$WORK/forged" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d '{"fallback_reason":"task_requires_prose","fallback_selected_by":"user","session_id":"e2e","text":"hello there"}' http://127.0.0.1:11430/api/pipeline)
+case "$CODEF $(cat "$WORK/forged")" in
+  '400 {"ok":false,"refusal":"session_unissued","error":"session_id was not issued by loke; POST /api/session issues one (NC1.13)"}') echo "  ok   a caller-chosen session id (as DA1.9 accepted) is refused as unissued" ;;
+  *) echo "  FAIL a caller-chosen session id was not refused: $CODEF $(head -c 200 "$WORK/forged")" >&2; fail=1 ;;
+esac
+OUTM=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d '{"prompt":"hello there","session_id":"nc-0123456789abcdef0123456789abcdef"}' http://127.0.0.1:11432/api/pipeline)
+case "$OUTM" in
+  '{"ok":false,"refusal":"session_unissued"'*) echo "  ok   moke's pipeline passes loke's refusal back for a session loke never issued" ;;
+  *) echo "  FAIL moke's pipeline with a session loke never issued: $(printf '%s' "$OUTM" | head -c 200)" >&2; fail=1 ;;
+esac
+if [ -s "$SEEN" ] || [ "$(dl "SELECT COUNT() FROM disclosure_log")" != "$rows_unsel" ]; then
+  echo "  FAIL a request with an unissued session id reached the model or wrote a record" >&2; fail=1
+else echo "  ok   and nothing was sent or recorded under either"; fi
 
 # GA5.26: a request carrying restricted data is HELD for approval, not forwarded. The input is
 # a card number: core.privacy.pipeline.maxsensitivity classifies CREDIT_CARD as RESTRICTED,
@@ -386,8 +415,11 @@ nc_seen_clean() {  # every cell of at least 4 bytes is absent from what the mode
 nc_last() { dl "SELECT $1 FROM disclosure_log WHERE correlation_id LIKE '%-nc' ORDER BY rowid DESC LIMIT 1"; }
 : > "$SEEN"
 rows_nc=$(dl "SELECT COUNT() FROM disclosure_log")
+NCSID=$(curl -s -m 20 -X POST -d '{}' http://127.0.0.1:11430/api/session | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("session_id",""))
+except Exception: print("")')
 OUTN=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
-        -d "{$NCDATA,\"profile\":\"$NCPROF\",\"text\":\"$NCPROF\\n\\nWhich region has the most customers?\",\"session_id\":\"e2e-nc\"}" http://127.0.0.1:11430/api/pipeline)
+        -d "{$NCDATA,\"profile\":\"$NCPROF\",\"text\":\"$NCPROF\\n\\nWhich region has the most customers?\",\"session_id\":\"$NCSID\"}" http://127.0.0.1:11430/api/pipeline)
 case "$OUTN" in
   *'"ok":true,"custody":"no-custody","custody_check":"sentinel_pass"'*) echo "  ok   a profile and a question with the dataset attached are answered no-custody, with no fallback selected" ;;
   *) echo "  FAIL the no-custody request was not answered no-custody: $(printf '%s' "$OUTN" | head -c 300)" >&2; fail=1 ;;
@@ -399,7 +431,7 @@ nc_bytes=$(python3 -c 'import sys
 for line in open(sys.argv[1],encoding="utf-8"):
     if line.startswith("/api/generate "): print(len(line[len("/api/generate "):].rstrip("\n").encode("utf-8"))); break' "$SEEN")
 ncrec=$(nc_last "custody||' '||custody_check||' '||state||' '||provider_class||' '||bytes_body||' '||session_id||' '||real_values_included")
-if [ -n "$nc_bytes" ] && [ "$ncrec" = "no-custody sentinel_pass completed local $nc_bytes e2e-nc 0" ]; then
+if [ -n "$nc_bytes" ] && [ -n "$NCSID" ] && [ "$ncrec" = "no-custody sentinel_pass completed local $nc_bytes $NCSID 0" ]; then
   echo "  ok   its disclosure row: $ncrec (bytes_body is what the model received)"
 else echo "  FAIL the no-custody disclosure row is '$ncrec' for $nc_bytes octets received" >&2; fail=1; fi
 if [ "$(dl "SELECT COUNT() FROM disclosure_log")" = "$((rows_nc + 1))" ]; then echo "  ok   and it is the only row the request wrote: the fallback was not taken"

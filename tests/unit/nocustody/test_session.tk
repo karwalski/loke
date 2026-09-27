@@ -1,0 +1,116 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.session;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=env:std.env;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=ns:core.nocustody.session;
+
+(* NC1.13 — the sessions loke issues.
+
+   core.nocustody.session is what makes the session id loke's rather than the caller's. The
+   assertions: an issued id is unguessable in form (128 random bits, hex) and differs every
+   time; it is accepted until its expiry and refused from that millisecond; an id loke never
+   issued is refused whatever its shape, including one that looks exactly like an issued id;
+   the refusals carry distinct codes; the table keeps the id and two times and nothing else;
+   and an issued id passes the alphabet /api/pipeline checks before recording it.
+
+   The store lives under $BUILDDIR (default /tmp/loke-tests), not ~/.loke. *)
+
+f=testdir():str{
+  <str.concat(env.getor("BUILDDIR";"/tmp/loke-tests");"/nocustody-session")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=count(sql:str;params:@str):i64{
+  <mt db.one(sql;params) {
+    $ok:r db.rowi64(r;"n");
+    $err:e 0-1
+  }
+};
+
+(* Every byte from `from` on is a lower-case hex digit. *)
+f=ishexfrom(s:str;from:i64):bool{
+  let ok=mut.true;
+  lp(let i=from;i<str.len(s);i=i+1){
+    let c=str.charat(s;i);
+    if((c>=48 && c<=57) || (c>=97 && c<=102)){}el{ ok=false }
+  };
+  <ok
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
+  let now=1790000000000;
+  let ttl=ns.ttlms();
+  if(t.assert(ttl==86400000;"SESSION_TTL is 24 hours")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The id ──────────────────────────────────────────────────────────────────────── *)
+  let a=ns.issueat(now);
+  let b=ns.issueat(now);
+  if(t.assert(str.len(a)==35 && str.startswith(a;"nc-");"an issued id is nc- and 32 characters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ishexfrom(a;3);"and those 32 are hex: 16 random bytes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(a;b)==false;"two ids issued in the same millisecond differ")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.sessionidvalid(a);"an issued id passes the alphabet /api/pipeline records (DA1.9 (4))")){pass=pass+1}el{fail=fail+1};
+  let distinct=count("SELECT COUNT(DISTINCT session_id) AS n FROM nc_sessions";@());
+  if(t.assert(distinct==2;"both are recorded, once each")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Accepted until it expires, and not a millisecond after ─────────────────────── *)
+  if(t.assert(str.len(ns.checkat(a;now))==0;"an issued id is accepted when issued")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(ns.checkat(a;now+ttl-1))==0;"and one millisecond before it expires")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(ns.checkat(a;now+ttl);"session_expired");"and is refused as expired from its expiry on")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Never issued ────────────────────────────────────────────────────────────────── *)
+  if(t.assert(str.eq(ns.checkat("";now);"no_session");"no id is no_session")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(ns.checkat("s-probe";now);"session_unissued");"a caller-chosen id is refused as unissued")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(ns.checkat("nc-0123456789abcdef0123456789abcdef";now);"session_unissued");"so is one shaped exactly like an issued id")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(ns.checkat(str.replace(a;"nc-";"nd-");now);"session_unissued") && str.eq(ns.checkat(str.concat(a;"0");now);"session_unissued");"and an issued id altered by one character")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(ns.checkat("nc-' OR '1'='1";now);"session_unissued");"an injection-shaped id is a bound parameter, and unissued")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The codes and what a caller is told ─────────────────────────────────────────── *)
+  if(t.assert(ns.issessioncode("session_unissued") && ns.issessioncode("session_expired") && ns.issessioncode("no_session") && ns.issessioncode("value_probing")==false;"the session codes are told apart from the bound's")){pass=pass+1}el{fail=fail+1};
+  let rj=ns.refusaljson("session_unissued");
+  if(t.assert(str.contains(rj;"\"ok\":false") && str.contains(rj;"\"refusal\":\"session_unissued\"") && str.contains(rj;"POST /api/session");"a refusal names its code and where to get a session")){pass=pass+1}el{fail=fail+1};
+  let ij=ns.issuedjson(a);
+  if(t.assert(str.contains(ij;"\"session_id\":\"\(a)\"") && str.contains(ij;"\"expires_in_s\":86400");"an issue answer carries the id and its lifetime")){pass=pass+1}el{fail=fail+1};
+
+  (* ── What is stored: the id and two times, nothing else ─────────────────────────── *)
+  let cols=count("SELECT COUNT() AS n FROM pragma_table_info('nc_sessions')";@());
+  let known=count("SELECT COUNT() AS n FROM pragma_table_info('nc_sessions') WHERE name IN ('session_id','issued_ms','expires_ms')";@());
+  if(t.assert(cols==3 && known==3;"nc_sessions has exactly session_id, issued_ms and expires_ms")){pass=pass+1}el{fail=fail+1};
+  let times=count("SELECT COUNT() AS n FROM nc_sessions WHERE session_id=? AND issued_ms=CAST(? AS INTEGER) AND expires_ms=CAST(? AS INTEGER)";@(a;str.fromint(now);str.fromint(now+ttl)));
+  if(t.assert(times==1;"with the issue time and the expiry one TTL later")){pass=pass+1}el{fail=fail+1};
+  let runsms=count("SELECT COUNT() AS n FROM pragma_table_info('nc_artifact_runs') WHERE name='occurred_ms'";@());
+  if(t.assert(runsms==1;"migration 38 gives the ledger a millisecond time to window on")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Pruning ─────────────────────────────────────────────────────────────────────── *)
+  (* Issuing prunes ids that expired more than one TTL ago: `a` is still answered as expired
+     one TTL after issue, and is gone after two. *)
+  let c=ns.issueat(now+ttl+1);
+  if(t.assert(str.eq(ns.checkat(a;now+ttl+1);"session_expired");"a recently expired id is still answered as expired")){pass=pass+1}el{fail=fail+1};
+  let d=ns.issueat(now+3*ttl);
+  if(t.assert(str.eq(ns.checkat(a;now+3*ttl);"session_unissued") && str.len(ns.checkat(d;now+3*ttl))==0;"one long expired is pruned, and the new one is accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(c)==35;"issuing after a prune still issues")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

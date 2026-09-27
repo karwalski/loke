@@ -421,6 +421,10 @@ the executor.
 | `MAX_JOIN_DATASETS` | 1 | `opjoin` takes exactly one other dataset |
 | `SESSION_CELL_BUDGET` | Configurable; default 50 000 | Cumulative across a session, per NC1.10 |
 | `SESSION_PREDICATE_REPEAT_LIMIT` | Configurable; default 20 | Distinct `filter_val` values against the same `filter_col` within a session |
+| `SESSION_TTL` | 24 hours | A session id is issued by loke (`POST /api/session`) and accepted until it expires; NC1.13 |
+| `INSTALLATION_WINDOW` | 24 hours, rolling | The window the two installation limits sum over; NC1.13 |
+| `INSTALLATION_CELL_BUDGET` | 50 000 per window | `SESSION_CELL_BUDGET` again, across every session on the installation; NC1.13 |
+| `INSTALLATION_PREDICATE_REPEAT_LIMIT` | 20 per `filter_col` per window | `SESSION_PREDICATE_REPEAT_LIMIT` again, across every session; NC1.13 |
 
 ### 8.1 The budgets are the contract's half of the NC1.10 bound
 
@@ -432,8 +436,13 @@ recover a single cell. Nothing in §4 prevents that; the budgets bound its rate.
 Being honest about what this achieves:
 
 - It **bounds** extraction. It does not prevent it.
-- A per-session cap is evadable by an adversary willing to use more sessions, and the cross-session
-  accounting that would close that is not specified here.
+- A per-session cap is evadable by an adversary willing to use more sessions. NC1.13 narrows this:
+  the session id is one loke issued, and the same two limits apply across every session on the
+  installation over a rolling window, so a probing sequence spread over rotated ids is refused at
+  the same count as one in a single session. It does not close it. The installation limits are a
+  rate: a caller that waits out the window starts again. They are per installation, not per caller,
+  because loke cannot tell loopback callers apart, so legitimate sessions share one budget. And the
+  probe key is the filter column's name, which the caller supplies with the dataset.
 - The budgets are a rate limit chosen without measurement. They are a placeholder for a measured
   operating point, and NC1.10 owns producing one.
 

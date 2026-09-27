@@ -6,11 +6,13 @@ m=test.nocustody.bound;
 i=t:std.test;
 i=str:std.str;
 i=file:std.file;
+i=env:std.env;
 i=db:std.db;
 i=sdb:core.storage.db;
 i=na:core.nocustody.artifact;
 i=nb:core.nocustody.bound;
 i=nr:core.nocustody.request;
+i=ns:core.nocustody.session;
 
 (* NC1.10 — the per-session bound on the query-shaped channel.
 
@@ -21,10 +23,17 @@ i=nr:core.nocustody.request;
    values, which are what the sequence is trying to learn, are in no byte of the store, with a
    control proving the same scan finds a value that is there.
 
-   The store lives under /tmp/loke-tests, not ~/.loke, as in test_artifact.tk. *)
+   NC1.13 adds the other half. Every session here is one core.nocustody.session issued; a
+   forged, caller-chosen or expired id is refused. And the same limits hold across sessions in
+   a rolling 24 hours: twenty probes spread over twenty issued ids run and the twenty-first is
+   refused, exactly as in one session, while three sessions of ordinary questions in that
+   window are not. The clock is a parameter (runat), so windows and expiry are crossed without
+   waiting.
+
+   The store lives under $BUILDDIR (default /tmp/loke-tests), not ~/.loke, as in test_artifact.tk. *)
 
 f=testdir():str{
-  <"/tmp/loke-tests/nocustody-bound"
+  <str.concat(env.getor("BUILDDIR";"/tmp/loke-tests");"/nocustody-bound")
 };
 
 f=openfreshstore():i64{
@@ -125,6 +134,16 @@ f=guess(i:i64):str{
   <"PROBE-VALUE-5b1e-\(str.fromint(i))"
 };
 
+(* A fixed clock, so the window and the expiry can be crossed without waiting. Each section
+   starts two windows after the last, so no section's releases count against another's. *)
+f=t0():i64{
+  <1790000000000
+};
+
+f=day():i64{
+  <nb.installwindowms()
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
@@ -132,31 +151,35 @@ f=main():i64{
   if(t.assert(opened==1;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
   let h=headers();
   let r=rows();
+  let now=t0();
 
   (* ── The limits are the named constants ──────────────────────────────────────── *)
   if(t.assert(nb.probelimit()==20 && nb.cellbudget()==50000;"the artifact contract's defaults: SESSION_PREDICATE_REPEAT_LIMIT 20, SESSION_CELL_BUDGET 50000")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.installprobelimit()==20 && nb.installcellbudget()==50000 && nb.installwindowms()==86400000;"NC1.13: the installation-wide limits are the same values, over 24 hours")){pass=pass+1}el{fail=fail+1};
 
   (* ── A value-probing sequence is refused at the bound ─────────────────────────── *)
+  let sp=ns.issueat(now);
   let admitted=mut.0;
   let hits=mut.0;
   lp(let i=0;i<nb.probelimit();i=i+1){
-    let p=nb.run("s-probe";art("count";"";"";"";"note";guess(i);10);h;r);
+    let p=nb.runat(sp;art("count";"";"";"";"note";guess(i);10);h;r;now);
     if(p.ok){admitted=admitted+1}el{};
     if(p.ok && str.eq(p.values.get(0);"1")){hits=hits+1}el{}
   };
   if(t.assert(admitted==nb.probelimit();"the first SESSION_PREDICATE_REPEAT_LIMIT filters on one column all run")){pass=pass+1}el{fail=fail+1};
   if(t.assert(hits==1;"and they are real answers: exactly one guess matched the planted cell")){pass=pass+1}el{fail=fail+1};
-  let over=nb.run("s-probe";art("count";"";"";"";"note";guess(99);10);h;r);
+  let over=nb.runat(sp;art("count";"";"";"";"note";guess(99);10);h;r;now);
   if(t.assert(over.ok==false && str.eq(over.code;"value_probing");"the next filter on the same column is refused as value probing")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(over.err;"value probing") && str.contains(over.err;"the limit is 20");"the refusal says why and names the limit")){pass=pass+1}el{fail=fail+1};
   if(t.assert(over.labels.len==0 && over.values.len==0;"a refused run releases nothing")){pass=pass+1}el{fail=fail+1};
-  let reshaped=nb.run("s-probe";art("sum";"amount";"";"";"note";guess(3);10);h;r);
+  let reshaped=nb.runat(sp;art("sum";"amount";"";"";"note";guess(3);10);h;r;now);
   if(t.assert(reshaped.ok==false && str.eq(reshaped.code;"value_probing");"changing the op does not reset the count: the key is the filter column")){pass=pass+1}el{fail=fail+1};
-  let othercol=nb.run("s-probe";art("sum";"amount";"";"";"region";"south";10);h;r);
+  let othercol=nb.runat(sp;art("sum";"amount";"";"";"region";"south";10);h;r;now);
   if(t.assert(othercol.ok && str.eq(othercol.values.get(0);"12.0");"a filter on a different column in the same session still runs")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(nb.refusalcount("s-probe")==2;"both refusals are in the ledger")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.refusalcount(sp)==2;"both refusals are in the ledger")){pass=pass+1}el{fail=fail+1};
 
   (* ── Ordinary distinct questions are not refused ───────────────────────────────── *)
+  let so=ns.issueat(now);
   let okcount=mut.0;
   let qs=@(
     art("sum";"amount";"";"";"";"";10);
@@ -173,57 +196,109 @@ f=main():i64{
     art("distinct";"region";"";"";"";"";10)
   );
   lp(let i=0;i<qs.len;i=i+1){
-    let q=nb.run("s-ordinary";qs.get(i);h;r);
+    let q=nb.runat(so;qs.get(i);h;r;now);
     if(q.ok){okcount=okcount+1}el{}
   };
   if(t.assert(okcount==12;"twelve ordinary distinct questions in one session all run")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(nb.refusalcount("s-ordinary")==0;"and none is recorded as a refusal")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.refusalcount(so)==0;"and none is recorded as a refusal")){pass=pass+1}el{fail=fail+1};
 
   (* ── Accounting: every release is counted (spec 5.5, C6) ───────────────────────── *)
-  (* s-ordinary released three scalars (3 rows, 3 cells), two category groups (2, 4), two topn
-     regions (2, 4), two count_by categories (2, 4), three filtered scalars (3, 3), two
+  (* The ordinary session released three scalars (3 rows, 3 cells), two category groups (2, 4),
+     two topn regions (2, 4), two count_by categories (2, 4), three filtered scalars (3, 3), two
      north-only category groups (2, 4), one max (1, 1) and two distinct regions (2, 2):
      17 rows, 25 cells. *)
-  if(t.assert(nb.sessionrows("s-ordinary")==17;"the session's released rows are summed: 17")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(nb.sessioncells("s-ordinary")==25;"the session's released cells are summed: 25")){pass=pass+1}el{fail=fail+1};
-  let last=nb.run("s-ordinary";art("sum";"amount";"";"";"";"";10);h;r);
+  if(t.assert(nb.sessionrows(so)==17;"the session's released rows are summed: 17")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.sessioncells(so)==25;"the session's released cells are summed: 25")){pass=pass+1}el{fail=fail+1};
+  let last=nb.runat(so;art("sum";"amount";"";"";"";"";10);h;r;now);
   if(t.assert(last.ok && last.sessionrows==18 && last.sessioncells==26;"an answer carries the session's cumulative totals")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(nb.repeatcount("s-ordinary";nb.fingerprint(art("sum";"amount";"";"";"";"";10)))==2;"predicate_repeat_count sees the same predicate twice")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(nb.sessioncells("s-nobody")==0;"a session with no runs has released nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.repeatcount(so;nb.fingerprint(art("sum";"amount";"";"";"";"";10)))==2;"predicate_repeat_count sees the same predicate twice")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.sessioncells(ns.issueat(now))==0;"a session with no runs has released nothing")){pass=pass+1}el{fail=fail+1};
+  (* 20 probes of one cell, the other-column filter (1) and the ordinary session (26). *)
+  if(t.assert(nb.installcells(now)==47;"NC1.13: the installation's window sums every session's cells: 47")){pass=pass+1}el{fail=fail+1};
 
-  (* ── The cell budget ────────────────────────────────────────────────────────────── *)
+  (* ── NC1.13: rotating issued ids does not reset the probe count ─────────────────── *)
+  let rotated=nb.runat(ns.issueat(now);art("count";"";"";"";"note";guess(3);10);h;r;now);
+  if(t.assert(rotated.ok==false && str.eq(rotated.code;"cross_session_probing");"a new issued session probing the same column in the window is refused across sessions")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rotated.err;"across all sessions") && str.contains(rotated.err;"the limit is 20") && str.contains(rotated.err;"a new session does not reset it");"and the refusal says so and names the limit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.boundedstatus(rotated)==429 && str.contains(nb.boundedjson(rotated);"\"refusal\":\"cross_session_probing\"");"as 429 with its code")){pass=pass+1}el{fail=fail+1};
+  (* A fresh window: the same sequence spread over twenty rotated ids, one probe each. *)
+  let w1=now+2*day();
+  let spread=mut.0;
+  let spreadhits=mut.0;
+  lp(let i=0;i<nb.probelimit();i=i+1){
+    let p=nb.runat(ns.issueat(w1);art("count";"";"";"";"note";guess(i);10);h;r;w1);
+    if(p.ok){spread=spread+1}el{};
+    if(p.ok && str.eq(p.values.get(0);"1")){spreadhits=spreadhits+1}el{}
+  };
+  if(t.assert(spread==20 && spreadhits==1;"twenty probes spread over twenty issued sessions all run, as twenty in one session do")){pass=pass+1}el{fail=fail+1};
+  let rot21=ns.issueat(w1);
+  let spreadover=nb.runat(rot21;art("count";"";"";"";"note";guess(99);10);h;r;w1);
+  if(t.assert(spreadover.ok==false && str.eq(spreadover.code;"cross_session_probing");"and the twenty-first, in a twenty-first session, is refused: the same bound as one session")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.probecount(rot21;nb.probekey(art("count";"";"";"";"note";"x";10)))==0;"although that session has filtered on the column zero times")){pass=pass+1}el{fail=fail+1};
+  let rotreshaped=nb.runat(ns.issueat(w1);art("sum";"amount";"";"";"note";guess(1);10);h;r;w1);
+  if(t.assert(rotreshaped.ok==false && str.eq(rotreshaped.code;"cross_session_probing");"a reshaped probe in another new session is refused too")){pass=pass+1}el{fail=fail+1};
+  (* Ordinary use across several sessions in the same window is not refused. *)
+  let many=mut.0;
+  lp(let s=0;s<3;s=s+1){
+    let sess=ns.issueat(w1);
+    lp(let i=0;i<qs.len;i=i+1){
+      let q=nb.runat(sess;qs.get(i);h;r;w1);
+      if(q.ok){many=many+1}el{}
+    }
+  };
+  if(t.assert(many==36;"three sessions asking the twelve ordinary questions in that window all run: 36")){pass=pass+1}el{fail=fail+1};
+  (* The window rolls: after 24 hours the column may be filtered again. *)
+  let w1b=w1+day()+1;
+  let rolled=nb.runat(ns.issueat(w1b);art("count";"";"";"";"note";guess(4);10);h;r;w1b);
+  if(t.assert(rolled.ok;"LIMITATION: the bound is a rate, so once the window has passed the column can be probed again")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The cell budget, per session and across sessions ───────────────────────────── *)
   (* A count_by over 1000 distinct labels releases 2000 cells, the most one artifact can (the
      executor's limit ceiling is 1000). 24 of them and one of 999 rows reach 49998. *)
+  let w2=now+6*day();
+  let cs=ns.issueat(w2);
   let w=wide(1000);
   let wh=@("label";"n");
   let fullruns=mut.0;
   lp(let i=0;i<24;i=i+1){
-    let b=nb.run("s-cells";art("count_by";"label";"";"";"";"";1000);wh;w);
+    let b=nb.runat(cs;art("count_by";"label";"";"";"";"";1000);wh;w;w2);
     if(b.ok && b.labels.len==1000){fullruns=fullruns+1}el{}
   };
   if(t.assert(fullruns==24;"24 count_by runs of 1000 labels each are released")){pass=pass+1}el{fail=fail+1};
-  let near=nb.run("s-cells";art("count_by";"label";"";"";"";"";999);wh;w);
+  let near=nb.runat(cs;art("count_by";"label";"";"";"";"";999);wh;w;w2);
   if(t.assert(near.ok && near.sessioncells==49998 && near.sessionrows==24999;"one of 999 more brings the session to 49998 cells and 24999 rows")){pass=pass+1}el{fail=fail+1};
-  let big2=nb.run("s-cells";art("count_by";"label";"";"";"";"";1000);wh;w);
-  if(t.assert(big2.ok==false && str.eq(big2.code;"cell_budget");"another 2000 cells would pass 50000, and is refused")){pass=pass+1}el{fail=fail+1};
+  let rotbig=nb.runat(ns.issueat(w2);art("count_by";"label";"";"";"";"";1000);wh;w;w2);
+  if(t.assert(rotbig.ok==false && str.eq(rotbig.code;"installation_cell_budget") && str.contains(rotbig.err;"withheld");"NC1.13: a new session's 2000 cells would take the installation past 50000, and are withheld")){pass=pass+1}el{fail=fail+1};
+  let big2=nb.runat(cs;art("count_by";"label";"";"";"";"";1000);wh;w;w2);
+  if(t.assert(big2.ok==false && str.eq(big2.code;"cell_budget");"another 2000 cells would pass the session's 50000, and is refused")){pass=pass+1}el{fail=fail+1};
   if(t.assert(big2.labels.len==0 && str.contains(big2.err;"withheld");"the over-budget result is withheld, and the refusal says so")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(nb.sessioncells("s-cells")==49998;"the withheld result is not counted as released")){pass=pass+1}el{fail=fail+1};
-  let small=nb.run("s-cells";art("count";"";"";"";"";"";10);wh;w);
-  let small2=nb.run("s-cells";art("sum";"n";"";"";"";"";10);wh;w);
+  if(t.assert(nb.sessioncells(cs)==49998;"the withheld result is not counted as released")){pass=pass+1}el{fail=fail+1};
+  let small=nb.runat(cs;art("count";"";"";"";"";"";10);wh;w;w2);
+  let small2=nb.runat(cs;art("sum";"n";"";"";"";"";10);wh;w;w2);
   if(t.assert(small.ok && small2.ok && small2.sessioncells==50000;"small questions under what is left still run, up to exactly the budget")){pass=pass+1}el{fail=fail+1};
-  let spent=nb.run("s-cells";art("count";"";"";"";"";"";10);wh;w);
+  let spent=nb.runat(cs;art("count";"";"";"";"";"";10);wh;w;w2);
   if(t.assert(spent.ok==false && str.eq(spent.code;"cell_budget") && str.contains(spent.err;"has used its budget");"a spent session is refused before anything runs")){pass=pass+1}el{fail=fail+1};
-  let other=nb.run("s-other";art("count";"";"";"";"";"";10);wh;w);
-  if(t.assert(other.ok && other.sessioncells==1;"another session's budget is untouched")){pass=pass+1}el{fail=fail+1};
+  let other=nb.runat(ns.issueat(w2);art("count";"";"";"";"";"";10);wh;w;w2);
+  if(t.assert(other.ok==false && str.eq(other.code;"installation_cell_budget") && str.contains(other.err;"a new session does not reset it");"NC1.13: a new session in the same window gets no cells: rotating ids buys nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.boundedstatus(other)==429;"as 429")){pass=pass+1}el{fail=fail+1};
+  let w2b=w2+day()+1;
+  let later=nb.runat(ns.issueat(w2b);art("count";"";"";"";"";"";10);wh;w;w2b);
+  if(t.assert(later.ok && later.sessioncells==1;"once the window has passed, a new session runs again")){pass=pass+1}el{fail=fail+1};
 
-  (* ── What the bound does not do, asserted so the limitation is not a surprise ──── *)
-  let fresh=nb.run("s-probe-2";art("count";"";"";"";"note";guess(3);10);h;r);
-  if(t.assert(fresh.ok;"LIMITATION (spec U1): a new session id starts with a fresh probe count")){pass=pass+1}el{fail=fail+1};
+  (* ── Only a session loke issued, and only until it expires ───────────────────────── *)
+  let stale=nb.runat(cs;art("count";"";"";"";"";"";10);wh;w;w2b);
+  if(t.assert(stale.ok==false && str.eq(stale.code;"session_expired");"a session used after its 24 hours is refused as expired")){pass=pass+1}el{fail=fail+1};
+  let forged=nb.runat("nc-00000000000000000000000000000000";art("sum";"amount";"";"";"";"";10);h;r;w2b);
+  if(t.assert(forged.ok==false && str.eq(forged.code;"session_unissued");"an id loke did not issue is refused, however it is shaped")){pass=pass+1}el{fail=fail+1};
+  let named=nb.runat("s-probe-2";art("count";"";"";"";"note";guess(3);10);h;r;w2b);
+  if(t.assert(named.ok==false && str.eq(named.code;"session_unissued");"a caller-chosen id, as NC1.10 accepted, is refused: the U1 hole is closed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.boundedstatus(forged)==400 && nb.boundedstatus(stale)==400 && str.contains(nb.boundedjson(forged);"POST /api/session");"as 400, pointing at POST /api/session")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nb.sessioncells("s-probe-2")==0 && nb.refusalcount("nc-00000000000000000000000000000000")==0;"and neither is written to the ledger")){pass=pass+1}el{fail=fail+1};
 
   (* ── Refusals before the ledger ─────────────────────────────────────────────────── *)
-  let nosess=nb.run("";art("sum";"amount";"";"";"";"";10);h;r);
+  let nosess=nb.runat("";art("sum";"amount";"";"";"";"";10);h;r;now);
   if(t.assert(nosess.ok==false && str.eq(nosess.code;"no_session");"an artifact with no session is refused: it could not be bounded")){pass=pass+1}el{fail=fail+1};
-  let invalid=nb.run("s-invalid";art("sum";"salary";"";"";"";"";10);h;r);
+  let invalid=nb.runat(ns.issueat(w2b);art("sum";"salary";"";"";"";"";10);h;r;w2b);
   if(t.assert(invalid.ok==false && str.eq(invalid.code;"invalid") && str.contains(invalid.err;"not in the dataset");"an invalid artifact is refused with the validator's reason")){pass=pass+1}el{fail=fail+1};
 
   (* ── The fingerprint excludes the value ──────────────────────────────────────────── *)
@@ -231,9 +306,9 @@ f=main():i64{
   if(t.assert(str.eq(nb.fingerprint(art("count";"";"";"";"note";"a";10));nb.fingerprint(art("count";"";"";"";"region";"a";10)))==false;"a different filter column is a different fingerprint")){pass=pass+1}el{fail=fail+1};
 
   (* ── No probe value is in the store ─────────────────────────────────────────────── *)
-  if(t.assert(storecontains("PROBE-VALUE-5b1e")==false;"no probe value, executed or refused, is in any byte of loke.db")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(storecontains("food")==false && storecontains("north")==false;"nor is a filter value or a result label from the ordinary session")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(storecontains("s-probe");"the ledger itself IS in the file: the session id is found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(storecontains("PROBE-VALUE-5b1e")==false;"no probe value, executed or refused, in any session, is in any byte of loke.db")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(storecontains("food")==false && storecontains("north")==false;"nor is a filter value or a result label from the ordinary sessions")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(storecontains(sp);"the ledger itself IS in the file: the issued session id is found")){pass=pass+1}el{fail=fail+1};
   mt db.exec("CREATE TABLE nc_control (v TEXT)";@()) {$ok:n 1;$err:e 0};
   mt db.exec("INSERT INTO nc_control (v) VALUES (?)";@("CONTROL-PROBE-77d0")) {$ok:n 1;$err:e 0};
   if(t.assert(storecontains("CONTROL-PROBE-77d0");"control: a value in a real table IS found by the same byte scan")){pass=pass+1}el{fail=fail+1};

@@ -7,8 +7,10 @@ i=db:std.db;
 i=str:std.str;
 i=crypto:std.crypto;
 i=json:std.json;
+i=t:shared.types;
 i=na:core.nocustody.artifact;
 i=nr:core.nocustody.request;
+i=ns:core.nocustody.session;
 
 (* NC1.10. A per-session bound on the query-shaped channel.
 
@@ -41,11 +43,38 @@ i=nr:core.nocustody.request;
    cannot be read or written, nothing is released. A bound whose own record failed is not a
    bound.
 
+   NC1.13 adds two things. First, the session is one loke issued (core.nocustody.session):
+   an id loke did not issue, or one that has expired, is refused before the ledger is read.
+   Second, a bound across sessions, because issuing ids does not stop a caller asking for
+   more of them. Over a rolling INSTALLATION_WINDOW (24 hours), across EVERY session on this
+   installation, the same two limits apply again at the same values:
+
+   3. INSTALLATION_CELL_BUDGET (installcellbudget): cells released in the window, all sessions
+      together, 50 000.
+   4. INSTALLATION_PREDICATE_REPEAT_LIMIT (installprobelimit): filtered runs per filter column
+      in the window, all sessions together, 20.
+
+   So a probing sequence spread over rotated ids is refused at the same count as one in a
+   single session, and a caller gains no cells by rotating. The session limits are checked
+   first, so a single session sees its own refusal codes (cell_budget, value_probing) and a
+   rotating caller sees the installation's (installation_cell_budget, cross_session_probing).
+   It is per installation, not per caller or per origin: loke cannot tell callers apart (every
+   accepted request is a loopback one with no foreign Origin), so one caller's use counts
+   against every other's. That is the cost: legitimate sessions share one budget per window,
+   and heavy ordinary use across many sessions is refused where it was not before.
+
    WHAT THIS DOES NOT BOUND, and the claim must say so:
-   - Another session. The session id is the caller's, and a caller that starts a new session
-     starts with a fresh budget (spec U1). Until a session is something loke issues rather
-     than something the request names, this bounds a cooperative caller's session, not an
-     adversary willing to rotate ids.
+   - Time. The installation limits are a rate, not a total: a caller that waits out the window
+     gets another 50 000 cells and another 20 guesses per column. Over a week that is seven
+     windows' worth.
+   - The dataset. The probe key is the filter column's NAME. The same name in two datasets
+     shares one count, and a column renamed by the caller (who supplies the headers) starts a
+     new one. The caller holds the rows anyway; the bound is on what a model shaping the
+     artifacts can learn through a caller that forwards them.
+   - Concurrency. The check reads the ledger and the record writes it, not in one transaction,
+     so requests racing on separate server workers can each pass a check the other would have
+     failed, overshooting by at most the number of concurrent requests. That was already true
+     of the per-session limits.
    - Information per cell. The budget counts cells, not bits: a SUM or COUNT over a filter
      that isolates one row is one cell and can carry that row's value exactly.
    - Probing a column without a filter, for example through group-by labels. That is bounded
@@ -76,6 +105,22 @@ f=cellbudget():i64{
    may execute against one filter column; the next is refused as value probing. *)
 f=probelimit():i64{
   <20
+};
+
+(* INSTALLATION_WINDOW, in milliseconds: the rolling window the installation-wide limits sum
+   over. 24 hours, the same as core.nocustody.session's TTL, so no session outlives one. *)
+f=installwindowms():i64{
+  <86400000
+};
+
+(* INSTALLATION_CELL_BUDGET and INSTALLATION_PREDICATE_REPEAT_LIMIT: the session limits'
+   values, applied across all sessions in the window, so rotating ids buys nothing. *)
+f=installcellbudget():i64{
+  <cellbudget()
+};
+
+f=installprobelimit():i64{
+  <probelimit()
 };
 
 (* The longest session id accepted. It is an opaque key, not content. *)
@@ -129,6 +174,17 @@ f=probecount(session:str;key:str):i64{
   <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE session_id=? AND probe_key=? AND verdict='executed'";@(session;key))
 };
 
+(* NC1.13. Cells released, and filtered runs on one column, in the window ending at `nowms`,
+   across every session. -1 when the ledger cannot be read. A row from before migration 38 has
+   no occurred_ms and is outside every window. *)
+f=installcells(nowms:i64):i64{
+  <scalar("SELECT COALESCE(SUM(cells_released),0) AS n FROM nc_artifact_runs WHERE occurred_ms > CAST(? AS INTEGER)";@(str.fromint(nowms-installwindowms())))
+};
+
+f=installprobecount(key:str;nowms:i64):i64{
+  <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE probe_key=? AND verdict='executed' AND occurred_ms > CAST(? AS INTEGER)";@(key;str.fromint(nowms-installwindowms())))
+};
+
 (* spec 5.5 predicate_repeat_count: executed runs of this exact fingerprint in the session. *)
 f=repeatcount(session:str;fp:str):i64{
   <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE session_id=? AND predicate_fingerprint=? AND verdict='executed'";@(session;fp))
@@ -139,8 +195,8 @@ f=refusalcount(session:str):i64{
   <scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE session_id=? AND verdict='refused'";@(session))
 };
 
-f=record(session:str;a:$artifact;verdict:str;code:str;rows:i64;cells:i64):bool{
-  <mt db.exec("INSERT INTO nc_artifact_runs (session_id, op, predicate_fingerprint, probe_key, verdict, refusal_code, rows_released, cells_released) VALUES (?, ?, ?, NULLIF(?,''), ?, NULLIF(?,''), CAST(? AS INTEGER), CAST(? AS INTEGER))";@(session;a.op;fingerprint(a);probekey(a);verdict;code;str.fromint(rows);str.fromint(cells))) {
+f=record(session:str;a:$artifact;verdict:str;code:str;rows:i64;cells:i64;nowms:i64):bool{
+  <mt db.exec("INSERT INTO nc_artifact_runs (session_id, op, predicate_fingerprint, probe_key, verdict, refusal_code, rows_released, cells_released, occurred_ms) VALUES (?, ?, ?, NULLIF(?,''), ?, NULLIF(?,''), CAST(? AS INTEGER), CAST(? AS INTEGER), CAST(? AS INTEGER))";@(session;a.op;fingerprint(a);probekey(a);verdict;code;str.fromint(rows);str.fromint(cells);str.fromint(nowms))) {
     $ok:n true;
     $err:e false
   }
@@ -152,40 +208,58 @@ f=refused(code:str;reason:str;srows:i64;scells:i64):$boundedresult{
 
 (* Records the refusal, then returns it. The refusal stands whether or not the record could
    be written: failing to record a refusal never turns it into a release. *)
-f=refuse(session:str;a:$artifact;verdict:str;code:str;reason:str;srows:i64;scells:i64):$boundedresult{
-  record(session;a;verdict;code;0;0);
+f=refuse(session:str;a:$artifact;verdict:str;code:str;reason:str;srows:i64;scells:i64;nowms:i64):$boundedresult{
+  record(session;a;verdict;code;0;0;nowms);
   <refused(code;reason;srows;scells)
 };
 
-(* The one entry point. Validate, check the session's ledger, run, check the result against
-   what is left, record, release. *)
+(* The one entry point, at the current time. *)
 f=run(session:str;a:$artifact;headers:@str;rows:@(@str)):$boundedresult{
-  if(str.len(session)==0){ <refused("no_session";"missing required field: session_id";0;0) };
-  if(str.len(session)>maxsessionlen()){ <refused("no_session";"session_id is longer than \(str.fromint(maxsessionlen())) characters";0;0) };
+  <runat(session;a;headers;rows;t.nowms())
+};
+
+(* Check the session is one loke issued, validate, check the session's ledger and then the
+   installation's window, run, check the result against what is left of both, record, release.
+   `nowms` is a parameter so a test can move the clock; production passes the time. *)
+f=runat(session:str;a:$artifact;headers:@str;rows:@(@str);nowms:i64):$boundedresult{
+  if(str.len(session)>maxsessionlen()){ <refused("session_unissued";ns.reason("session_unissued");0;0) };
+  let issued=ns.checkat(session;nowms);
+  if(str.len(issued)>0){ <refused(issued;ns.reason(issued);0;0) };
   let invalid=na.validate(a;headers);
-  if(str.len(invalid)>0){ <refuse(session;a;"rejected";"invalid";invalid;0;0) };
+  if(str.len(invalid)>0){ <refuse(session;a;"rejected";"invalid";invalid;0;0;nowms) };
   let usedrows=sessionrows(session);
   let usedcells=sessioncells(session);
-  if(usedrows<0 || usedcells<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";0;0) };
+  let allcells=installcells(nowms);
+  if(usedrows<0 || usedcells<0 || allcells<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";0;0) };
   if(usedcells>=cellbudget()){
-    <refuse(session;a;"refused";"cell_budget";"this session has used its budget of \(str.fromint(cellbudget())) result cells (NC1.10)";usedrows;usedcells)
+    <refuse(session;a;"refused";"cell_budget";"this session has used its budget of \(str.fromint(cellbudget())) result cells (NC1.10)";usedrows;usedcells;nowms)
+  };
+  if(allcells>=installcellbudget()){
+    <refuse(session;a;"refused";"installation_cell_budget";"this installation has released its budget of \(str.fromint(installcellbudget())) result cells across all sessions in the last 24 hours (NC1.13); a new session does not reset it";usedrows;usedcells;nowms)
   };
   let key=probekey(a);
   if(str.len(key)>0){
     let probes=probecount(session;key);
-    if(probes<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";usedrows;usedcells) };
+    let allprobes=installprobecount(key;nowms);
+    if(probes<0 || allprobes<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";usedrows;usedcells) };
     if(probes>=probelimit()){
-      <refuse(session;a;"refused";"value_probing";"refused as value probing: this session has already filtered on this column \(str.fromint(probes)) times, the limit is \(str.fromint(probelimit())) (NC1.10)";usedrows;usedcells)
+      <refuse(session;a;"refused";"value_probing";"refused as value probing: this session has already filtered on this column \(str.fromint(probes)) times, the limit is \(str.fromint(probelimit())) (NC1.10)";usedrows;usedcells;nowms)
+    }el{};
+    if(allprobes>=installprobelimit()){
+      <refuse(session;a;"refused";"cross_session_probing";"refused as value probing across sessions: this column has been filtered on \(str.fromint(allprobes)) times in the last 24 hours across all sessions, the limit is \(str.fromint(installprobelimit())) (NC1.13); a new session does not reset it";usedrows;usedcells;nowms)
     }el{}
   }el{};
   let result=na.run(a;headers;rows);
-  if(result.ok==false){ <refuse(session;a;"rejected";"query_failed";result.err;usedrows;usedcells) };
+  if(result.ok==false){ <refuse(session;a;"rejected";"query_failed";result.err;usedrows;usedcells;nowms) };
   let n=result.labels.len;
   let c=cellsof(a.op;n);
   if(usedcells+c>cellbudget()){
-    <refuse(session;a;"refused";"cell_budget";"this result has \(str.fromint(c)) cells and the session has \(str.fromint(cellbudget()-usedcells)) left of its \(str.fromint(cellbudget())) (NC1.10); it was computed locally and withheld";usedrows;usedcells)
+    <refuse(session;a;"refused";"cell_budget";"this result has \(str.fromint(c)) cells and the session has \(str.fromint(cellbudget()-usedcells)) left of its \(str.fromint(cellbudget())) (NC1.10); it was computed locally and withheld";usedrows;usedcells;nowms)
   };
-  if(record(session;a;"executed";"";n;c)==false){
+  if(allcells+c>installcellbudget()){
+    <refuse(session;a;"refused";"installation_cell_budget";"this result has \(str.fromint(c)) cells and the installation has \(str.fromint(installcellbudget()-allcells)) left of its \(str.fromint(installcellbudget())) across all sessions in the last 24 hours (NC1.13); it was computed locally and withheld";usedrows;usedcells;nowms)
+  };
+  if(record(session;a;"executed";"";n;c;nowms)==false){
     <refused("ledger_unavailable";"the release could not be recorded, so it was withheld";usedrows;usedcells)
   };
   <$boundedresult{ok:true;code:"";err:"";labels:result.labels;values:result.values;sessionrows:usedrows+n;sessioncells:usedcells+c}
@@ -198,12 +272,14 @@ f=boundedjson(b:$boundedresult):str{
   <"{\"ok\":true,\"labels\":\(nr.strarrayjson(b.labels)),\"values\":\(nr.strarrayjson(b.values)),\"session_rows_released\":\(str.fromint(b.sessionrows)),\"session_cells_released\":\(str.fromint(b.sessioncells))}"
 };
 
-(* The status for a refusal: 400 for a request that could not be bounded (no session), 429
-   for a spent budget or a probing sequence, 503 when the ledger failed, 422 otherwise. *)
+(* The status for a refusal: 400 for a request that could not be bounded (no session, or one
+   loke did not issue or that has expired), 429 for a spent budget or a probing sequence, in
+   one session or across them, 503 when the ledger failed, 422 otherwise. *)
 f=boundedstatus(b:$boundedresult):i64{
   if(b.ok){ <200 };
-  if(str.eq(b.code;"no_session")){ <400 };
+  if(ns.issessioncode(b.code)){ <400 };
   if(str.eq(b.code;"cell_budget") || str.eq(b.code;"value_probing")){ <429 };
+  if(str.eq(b.code;"installation_cell_budget") || str.eq(b.code;"cross_session_probing")){ <429 };
   if(str.eq(b.code;"ledger_unavailable")){ <503 };
   <422
 };

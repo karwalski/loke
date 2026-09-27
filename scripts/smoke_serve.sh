@@ -109,8 +109,25 @@ artifact() {  # $1 label, $2 body, $3 expected status, $4 substring the body mus
     echo "  ok   POST /api/artifact ($1) [$code]"
   fi
 }
-DS='"headers":["region","amount"],"rows":[["north","10"],["south","2.5"],["north","5"]]'
-SID='"session_id":"smoke-1"'
+# NC1.13: loke issues the session. Every artifact below runs under an id POST /api/session
+# handed out; a caller-chosen one is refused.
+issue_session() {
+  curl -s -m 20 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/session" \
+    | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); s=d.get("session_id","")
+  print(s if d.get("ok") and s.startswith("nc-") and len(s)==35 and d.get("expires_in_s")==86400 else "")
+except Exception: print("")'
+}
+S1=$(issue_session)
+S2=$(issue_session)
+if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
+  echo "  ok   POST /api/session issues distinct nc- ids with a 24 hour lifetime"
+else
+  echo "  FAIL POST /api/session did not issue two distinct session ids: '$S1' '$S2'" >&2; fail=1
+fi
+DS='"headers":["region","amount","note"],"rows":[["north","10","a"],["south","2.5","b"],["north","5","c"]]'
+SID="\"session_id\":\"$S1\""
 artifact "sum where region = north" \
   "{$SID,\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"region\",\"filter_val\":\"north\"},$DS}" \
   200 '"values":["15.0"]'
@@ -130,18 +147,42 @@ artifact "an answer carries the session cumulative" \
 artifact "no session_id" \
   "{\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DS}" \
   400 '"refusal":"no_session"'
-PID2='"session_id":"smoke-probe"'
+PID2="\"session_id\":\"$S2\""
 for g in $(seq 1 20); do
-  artifact "probe $g of 20 on region" \
-    "{$PID2,\"artifact\":{\"op\":\"count\",\"filter_col\":\"region\",\"filter_val\":\"guess-$g\"},$DS}" \
+  artifact "probe $g of 20 on note" \
+    "{$PID2,\"artifact\":{\"op\":\"count\",\"filter_col\":\"note\",\"filter_val\":\"guess-$g\"},$DS}" \
     200 '"values":["0"]'
 done
-artifact "probe 21 on region is refused as value probing" \
-  "{$PID2,\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"region\",\"filter_val\":\"north\"},$DS}" \
+artifact "probe 21 on note is refused as value probing" \
+  "{$PID2,\"artifact\":{\"op\":\"sum\",\"column\":\"amount\",\"filter_col\":\"note\",\"filter_val\":\"a\"},$DS}" \
   429 '"refusal":"value_probing","error":"refused as value probing: this session has already filtered on this column 20 times, the limit is 20'
 artifact "the same session filtering another column still runs" \
   "{$PID2,\"artifact\":{\"op\":\"count\",\"filter_col\":\"amount\",\"filter_val\":\"10\"},$DS}" \
   200 '"values":["1"]'
+
+# NC1.13: a new session does not reset the count. The next probe on note, from a freshly
+# issued id, is refused across sessions; a caller-chosen, forged or empty-shaped id is refused
+# before anything runs.
+S3=$(issue_session)
+artifact "a new issued session probing note is refused across sessions" \
+  "{\"session_id\":\"$S3\",\"artifact\":{\"op\":\"count\",\"filter_col\":\"note\",\"filter_val\":\"c\"},$DS}" \
+  429 '"refusal":"cross_session_probing","error":"refused as value probing across sessions: this column has been filtered on 20 times in the last 24 hours across all sessions, the limit is 20 (NC1.13); a new session does not reset it'
+artifact "while that session's ordinary question runs" \
+  "{\"session_id\":\"$S3\",\"artifact\":{\"op\":\"count_by\",\"column\":\"region\"},$DS}" \
+  200 '"labels":["north","south"],"values":["2","1"]'
+artifact "a caller-chosen session id is refused" \
+  "{\"session_id\":\"smoke-1\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DS}" \
+  400 '"refusal":"session_unissued","error":"session_id was not issued by loke; POST /api/session issues one (NC1.13)"'
+artifact "an id shaped like an issued one is refused" \
+  "{\"session_id\":\"nc-0123456789abcdef0123456789abcdef\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DS}" \
+  400 '"refusal":"session_unissued"'
+pl=$(curl -s -m 20 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+       -d '{"text":"smoke test, no personal data","fallback_reason":"user_choice","fallback_selected_by":"user","session_id":"smoke-1"}' \
+       "http://127.0.0.1:$PORT/api/pipeline")
+case "${pl##*$'\n'} ${pl%$'\n'*}" in
+  '400 {"ok":false,"refusal":"session_unissued"'*) echo "  ok   POST /api/pipeline refuses a session id loke did not issue [400]" ;;
+  *) echo "  FAIL POST /api/pipeline with a caller-chosen session id: $pl" >&2; fail=1 ;;
+esac
 
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
