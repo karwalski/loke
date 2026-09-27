@@ -557,6 +557,11 @@ step_build() {
     # comment above said it would.
     ./scripts/build_trees.sh moke || return 1
   fi
+  # F10.9: tkc.toml grants what its comments say (env_write refused, four classes granted),
+  # measured with a probe, and all three entry modules just built bake that grant set.
+  if [[ -x ./scripts/check_capabilities.sh ]]; then
+    ./scripts/check_capabilities.sh || return 1
+  fi
 }
 
 step_test() {

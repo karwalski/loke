@@ -1,22 +1,38 @@
-# tkc.toml — loke's capability manifest (story F10.9)
+# tkc.toml — loke's compiler limits and capability manifest (story F10.9)
 #
-# toke's capability broker is deny-by-default: a binary that has not been granted a
-# capability traps at run time with CAP001 rather than performing the operation. loke
-# declared nothing, so every path that writes a log line — which is most of them —
-# failed the moment it ran. A test found that, not a review.
+# toke's capability broker is deny-by-default (ADR-0010, toke 124.4g). A binary is born
+# with no filesystem, network, environment-write or process authority; a gated call that
+# was not granted aborts the program with
 #
-# WHAT THIS FILE DOES AND DOES NOT ENFORCE. Read this before treating it as a control.
-# toke's config parser accepts `true` or a single quoted string per capability, and
-# src/config.c says scoping is "coarsened to the whole class for now (124.4c refines
-# it)". So a path or host written here grants the WHOLE class: `read = "~/.loke"`
-# grants filesystem read everywhere, not just under ~/.loke. The scopes below are
-# therefore the intent, recorded for when upstream lands per-path enforcement, and the
-# strings are chosen so this file needs no edit when that happens.
+#     CAP001: capability 'fs.read' required but not granted
 #
-# Until then the honest claim is the coarse one: loke needs filesystem read and write,
-# network, environment and process spawn, and nothing else — no keychain, no clipboard,
-# no environment WRITE. That is still worth stating, because it is checkable and it
-# bounds what a future code path can do without a visible diff here.
+# Grants come from two places, and they ADD:
+#   1. this file's [capabilities] table, baked into the binary when its entry module is
+#      compiled (llvm.c emits @__tk_cap_baked_grants in the module that defines main);
+#   2. `--allow-read`, `--allow-write`, `--allow-net`, `--allow-env`, `--allow-run` or
+#      `--allow-all` on the compiled program's own command line, parsed by the runtime.
+# scripts/lib/build_tree.sh passes --config=<repo>/tkc.toml to every compile, so loke,
+# moke and loke-cli all carry the grants below. No launcher in this repository passes an
+# --allow-* flag, so these grants are the whole of what the three binaries can do.
+#
+# Measured at the pin (0b0bc4e), 2026-09-28, with a probe that exercises one gated call
+# per class: built with an empty manifest, all five classes trap CAP001; built with this
+# file, fs.read, fs.write, net and process.spawn succeed and env.set traps.
+#
+# WHAT THIS DOES NOT ENFORCE. Read this before treating it as a control.
+#   * Scoping. toke's parser accepts `true` or a quoted string, and src/config.c treats
+#     any non-empty string as `true` for the whole class ("coarsened to the whole class
+#     for now (124.4c refines it)"). `net = "127.0.0.1"` would grant every host, so the
+#     grants below are written as `true`: a string would read as a limit that does not
+#     exist. The intended scope of each is in its comment. Filed as T-59.
+#   * The launcher. Whoever starts the binary can add any class with an --allow-* flag,
+#     at any position on the command line. The manifest bounds what loke's CODE can do
+#     without a visible diff here, not what the person running it can grant. Also T-59.
+#   * `enforce`. Enforcement is the pin's default whether or not this key is set;
+#     tk_cap_init does not read the baked flag. It is set so that the intent survives if
+#     the default ever flips back.
+#   * Environment READS are not a capability in toke. env.get and os.getenv are ungated,
+#     which is how provider keys are read (core/providers/dispatcher.tk).
 
 # ── Compiler limits ──────────────────────────────────────────────────────────
 #
@@ -75,48 +91,61 @@ max_imports = 40
 
 [capabilities]
 
-# fs.read — configuration, policy files, the SQLite database, local model files.
-#   ~/.loke/config.toml     shared/config.tk
-#   ~/.loke/policies/*.json core/policy/loader.tk
-#   ~/.loke/loke.db         core/storage/db.tk
-#   ~/.loke/models/*.gguf   core/models/infer.tk
-# Intended scope: ~/.loke and the ooke project directory. Nothing in loke has a reason
-# to read the user's documents.
-read = "~/.loke"
+# Four of toke's five classes are granted, and each is needed by all three binaries.
+# Measured 2026-09-28 (F10.9 in docs/epics-and-stories.md): with ONE grant removed from
+# the entry module, each binary's own smoke fails and the binary prints CAP001 for that
+# class. A denied call exits the whole process, so inside a server it reads as a dropped
+# connection, not an error response. scripts/check_capabilities.sh (in the gate) checks
+# that this file still parses to exactly these four and that all three binaries carry it.
 
-# fs.write — three things, all under loke's own directory.
-#   ~/.loke/loke.log        shared/log.tk. Never PII: privacy/logsanitiser.tk redacts
-#                           first, and tests/unit/privacy/test_log_sanitiser.tk asserts
-#                           it for emails and phone numbers
-#   ~/.loke/loke.db         the audit trail and the memory palace
-#   ~/.loke/exports/        user-initiated exports (core/policy/export.tk)
-write = "~/.loke"
+# fs.read — configuration, policy files, the SQLite database, ooke's config and templates.
+#   ~/.loke/config.toml, ~/.loke/policies/, ~/.loke/loke.db   shared/config.tk,
+#                                                               core/policy/loader.tk,
+#                                                               core/storage/db.tk
+#   ooke.toml, templates/, static/ beside the binary           ooke
+#   ~/.loke/models/                                             core/models/infer.tk
+# std.db needs fs.read AND fs.write to open any database (db.c).
+# Without it: loke and moke abort at start-up; loke doctor and loke benchmark abort.
+# Intended scope: ~/.loke and the directory the server runs from. Not enforceable (T-59).
+fs_read = true
 
-# net — providers and the two local sidecars.
-#   127.0.0.1               Ollama 11434, Presidio 5000, LLMLingua 5001,
-#                           loke 11430, moke 11432
-#   api.anthropic.com       core/providers/anthropic.tk
-#   api.openai.com          core/providers/openai.tk
-#   api.github.com          core/feedback/report.tk, user-initiated issue reports
-# Intended scope: those hosts only. Note what this cannot yet do: once per-host
-# enforcement exists, an allow-list turns "every provider call traverses the privacy
-# filter" from a review convention (CLAUDE.md) into a runtime property. That is the
-# reason to keep this list enumerated in the comment even while the grant is coarse.
-net = "127.0.0.1"
+# fs.write — loke's own state.
+#   ~/.loke/loke.log     shared/log.tk. Never PII: privacy/logsanitiser.tk redacts first
+#   ~/.loke/loke.db      the audit trail, disclosure ledger and memory palace
+#   ~/.loke/exports/     user-initiated exports (core/policy/export.tk)
+#   benchmark results    loke benchmark's result file
+# Without it: many loke and moke routes lose their worker; loke doctor and loke
+# benchmark abort.
+# Intended scope: ~/.loke and a result path the user names. Not enforceable (T-59).
+fs_write = true
 
-# env — provider API keys come from the environment, not from a config file that gets
-# committed (core/providers/dispatcher.tk:getapikeys).
-env = true
+# net — both directions: the ooke server's listening socket (http.c bind_listen) and every
+# client connection (client_tcp_connect), one class for both.
+#   listen   loke 11430, moke 11432
+#   connect  Ollama 11434, Presidio 5000, LLMLingua 5001, loke 11430 from moke and loke-cli
+# Without it: loke and moke abort before listening; loke doctor and benchmark abort.
+# Intended scope: loopback only, both directions. Not enforceable: this grant lets code
+# connect to any host, and the servers bind every interface (T-43, T-59). What keeps a
+# request on the machine today is core.providers.transport, which refuses every
+# non-loopback send (the T-58 hold): a check in loke's code, not a property of this grant.
+net = true
 
-# process.spawn — the Ollama lifecycle only.
-#   ollama serve / pull / list   core/installer/{start,pull,updater,autostart}.tk
-run = "ollama"
+# process.spawn — fixed argv vectors, never a shell string.
+#   nc -z 127.0.0.1 <port>, curl (loopback DELETE)   shared/reachability.tk, all three
+#   sysctl, vm_stat, top, ps, curl localhost:11434    core/monitoring/sysmon.tk,
+#                                                      moke/pages/sysmon.tk
+#   ollama serve / pull / list                         core/installer/
+# Without it: loke's /api/health, /api/models, /api/pipeline, /installer and /sysmon, and
+# moke's /api/health, /api/pipeline and /api/ml/propose, lose their worker; loke doctor
+# aborts when a service is down (it confirms with nc).
+# Intended scope: those executables. Not enforceable (T-59).
+process_spawn = true
 
-# NOT GRANTED, each absence deliberate:
-#   env.write   nothing in loke sets an environment variable
-#
-# `enforce` is not set. Setting it bakes deny-by-default into the binary, which is
-# where this should end up — but it should be turned on deliberately, with the full
-# test suite green against it, rather than as a side effect of writing this file.
-# Tracked in F10.9.
+# env.write — NOT GRANTED. Nothing in loke, moke, loke-cli or ooke calls env.set or
+# os.setenv. From 2026-09-22 to 2026-09-28 this file said `env = true`, commented as
+# "provider API keys come from the environment". Reading the environment is not gated;
+# `env` is toke's short spelling of env_write, so that line granted the one class loke
+# does not use, while a later comment said env.write was not granted.
+env_write = false
 
+enforce = true

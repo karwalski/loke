@@ -2156,3 +2156,56 @@ they are (VM1.6g, F5.11).
 **The ask:** verify the peer by default (`SSL_VERIFY_PEER`, the system trust store, and
 `SSL_set1_host` for the name), fail closed when verification fails, and let a caller opt out
 only explicitly.
+
+## T-59 — a capability grant cannot be scoped, and anyone who launches the binary can widen it
+
+**Severity: a manifest cannot state the property a local-first program needs: network on
+loopback only, files under its own directory only. Not a defect in what the broker does; a
+gap in what it can express.**
+
+Measured 2026-09-28 at `0b0bc4e`, with a probe program that makes one gated call per class
+(`file.read`, `file.write`, `net.portavailable`, `process.spawn`, `env.set`), built with
+`--config=` pointing at each manifest below. The probe and its runner are recorded in F10.9
+in loke's `docs/epics-and-stories.md`.
+
+1. **A scope is accepted and ignored.** `src/config.c` treats any non-empty quoted string
+   as `true` for the whole class ("coarsened to the whole class for now (124.4c refines
+   it)"). A binary built with `fs_read = "/nonexistent-dir-only"` read `/etc/hosts`; one
+   built with `net = "10.255.255.1:9"` bound a loopback port. Nothing warns. The runtime
+   flags behave the same way: `flag_to_caps` matches a prefix, so `--allow-read=/srv/www`
+   grants all reads.
+2. **`net` is one class for listening and connecting, to any host.** `bind_listen` and
+   `client_tcp_connect` both gate on `TK_CAP_NET`. With T-43 (no bind address reachable
+   from source) a server granted `net` listens on every interface and can connect anywhere.
+3. **`process_spawn` covers every executable.**
+4. **The launcher can add any class.** `tk_cap_init` unions every `--allow-*` token in
+   `argv`, at any position, and `--allow-all` switches the process to `ALLOW_ALL`. A binary
+   built with loke's manifest (no `env_write`) ran `env.set` when started with
+   `--allow-env`. The manifest bounds what the code can do without a visible diff; it does
+   not bound what the person starting the process can grant, and there is no way to say it
+   should.
+5. **`env` is the short spelling of `env_write`.** loke's manifest carried `env = true`
+   from 2026-09-22 to 2026-09-28, commented as "provider API keys come from the
+   environment" — a READ, which toke does not gate. It granted environment WRITE, the one
+   class loke never uses. The parser accepted it silently.
+6. **`enforce = false` does not opt out**, contrary to `docs/reference/capabilities.md`.
+   `tk_cap_init` never reads `__tk_cap_baked_enforce`; a binary built with only
+   `enforce = false` trapped CAP001 on all five classes. The behaviour is the safe one; the
+   documentation is wrong.
+
+**The ask.**
+- Enforce the scope a string already carries: path prefixes for `fs_read`/`fs_write`
+  (checked on the resolved path at open), `host:port` patterns for `net`, split into
+  `net_listen` and `net_connect`, and an executable allow-list for `process_spawn`. Until
+  that lands, **reject** a quoted string with a diagnostic that says scoping is not
+  enforced, rather than silently widening it to the class.
+- A manifest key (for example `sealed = true`) that makes runtime `--allow-*` flags an
+  error, so a shipped binary's grants are exactly its manifest.
+- Drop the `env` alias, or warn on it: it reads as "environment access" and grants write.
+- Correct the `enforce` documentation, or make the key do what it says.
+
+**What loke does.** `tkc.toml` grants `fs_read`, `fs_write`, `net` and `process_spawn` as
+bare `true`, so no line reads as a limit that is not enforced, and states the intended
+scope of each in a comment. `env_write` is not granted. Keeping network traffic on the
+machine rests on `core.providers.transport` refusing every non-loopback send, a check in
+loke's code, not on this manifest.
