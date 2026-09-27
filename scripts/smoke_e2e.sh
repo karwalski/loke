@@ -370,6 +370,93 @@ opened=$(grep -c "the database could not be opened" "$WORK/lk/home/.loke/loke.lo
 if [ "${opened:-0}" = "0" ]; then echo "  ok   and no request found the database locked when it opened it"
 else echo "  FAIL loke logged 'the database could not be opened' $opened time(s): a connection met a lock with no busy timeout" >&2; fail=1; fi
 
+# NC1.12: the no-custody dispatch, over real HTTP. A request that carries its dataset
+# (headers and rows, which stay on this machine) is tried no-custody first. loke checks the
+# exact body it would send against every cell (spec C2), and only a body holding none is sent
+# and recorded no-custody with custody_check sentinel_pass. The dataset has a planted sentinel.
+NCSENT="ZQ-SENTINEL-$$"
+NCDATA="\"dataset_name\":\"accounts\",\"headers\":[\"customer\",\"region\",\"plan\"],\"rows\":[[\"$NCSENT\",\"northern\",\"gold\"],[\"Harriet Oyelaran\",\"southern\",\"silver\"]]"
+NCPROF="DATASET: accounts | ROWS: 2 | COLS: 3\\nCOLS: customer(text,nulls=0%,distinct=2,unique) region(text,nulls=0%,distinct=2,low) plan(text,nulls=0%,distinct=2,low)"
+nc_seen_clean() {  # every cell of at least 4 bytes is absent from what the model received
+  for v in "$NCSENT" "Harriet Oyelaran" northern southern gold silver; do
+    grep -qi -- "$v" "$SEEN" && return 1
+  done
+  return 0
+}
+nc_last() { dl "SELECT $1 FROM disclosure_log WHERE correlation_id LIKE '%-nc' ORDER BY rowid DESC LIMIT 1"; }
+: > "$SEEN"
+rows_nc=$(dl "SELECT COUNT() FROM disclosure_log")
+OUTN=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{$NCDATA,\"profile\":\"$NCPROF\",\"text\":\"$NCPROF\\n\\nWhich region has the most customers?\",\"session_id\":\"e2e-nc\"}" http://127.0.0.1:11430/api/pipeline)
+case "$OUTN" in
+  *'"ok":true,"custody":"no-custody","custody_check":"sentinel_pass"'*) echo "  ok   a profile and a question with the dataset attached are answered no-custody, with no fallback selected" ;;
+  *) echo "  FAIL the no-custody request was not answered no-custody: $(printf '%s' "$OUTN" | head -c 300)" >&2; fail=1 ;;
+esac
+if grep -q '^/api/generate .*Which region has the most customers' "$SEEN" && nc_seen_clean; then
+  echo "  ok   the model received the profile and question, and no cell of the dataset (the sentinel included)"
+else echo "  FAIL the model did not receive the question, or received a value from the dataset" >&2; fail=1; fi
+nc_bytes=$(python3 -c 'import sys
+for line in open(sys.argv[1],encoding="utf-8"):
+    if line.startswith("/api/generate "): print(len(line[len("/api/generate "):].rstrip("\n").encode("utf-8"))); break' "$SEEN")
+ncrec=$(nc_last "custody||' '||custody_check||' '||state||' '||provider_class||' '||bytes_body||' '||session_id||' '||real_values_included")
+if [ -n "$nc_bytes" ] && [ "$ncrec" = "no-custody sentinel_pass completed local $nc_bytes e2e-nc 0" ]; then
+  echo "  ok   its disclosure row: $ncrec (bytes_body is what the model received)"
+else echo "  FAIL the no-custody disclosure row is '$ncrec' for $nc_bytes octets received" >&2; fail=1; fi
+if [ "$(dl "SELECT COUNT() FROM disclosure_log")" = "$((rows_nc + 1))" ]; then echo "  ok   and it is the only row the request wrote: the fallback was not taken"
+else echo "  FAIL the no-custody request wrote $(( $(dl "SELECT COUNT() FROM disclosure_log") - rows_nc )) rows" >&2; fail=1; fi
+
+# A value from the dataset in the question: refused as sentinel_fail, recorded raw, nothing sent.
+: > "$SEEN"
+CODE=$(curl -s -m 40 -o "$WORK/ncfail" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d "{$NCDATA,\"profile\":\"$NCPROF\",\"text\":\"$NCPROF\\n\\nWhy is $NCSENT on the gold plan?\"}" http://127.0.0.1:11430/api/pipeline)
+BODY=$(cat "$WORK/ncfail")
+case "$CODE $BODY" in
+  "422 "*'"refusal":"sentinel_fail"'*'"fallback_unselected":true'*) echo "  ok   a body holding a dataset value is refused as sentinel_fail (422), and no fallback is taken unselected" ;;
+  *) echo "  FAIL a body holding a dataset value was not refused: $CODE $(printf '%s' "$BODY" | head -c 300)" >&2; fail=1 ;;
+esac
+if grep -q '^/api/generate' "$SEEN"; then echo "  FAIL the refused body reached the model" >&2; fail=1
+else echo "  ok   and nothing reached the model"; fi
+ncrec=$(nc_last "custody||' '||custody_check||' '||state||' '||outcome||' '||bytes_body")
+if [ "$ncrec" = "raw sentinel_fail failed rejected_locally 0" ]; then echo "  ok   its disclosure row: $ncrec"
+else echo "  FAIL the refused dispatch's row is '$ncrec'" >&2; fail=1; fi
+
+# The same with the fallback selected: no-custody is refused first, then the fallback runs,
+# and each is recorded as what it was.
+: > "$SEEN"
+OUTF=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{$NCDATA,\"profile\":\"$NCPROF\",\"text\":\"$NCPROF\\n\\nWhy is $NCSENT on the gold plan?\",\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\"}" http://127.0.0.1:11430/api/pipeline)
+fbrec=$(dl "SELECT custody||' '||fallback_reason FROM disclosure_log ORDER BY rowid DESC LIMIT 1")
+ncrec=$(nc_last "custody_check")
+case "$OUTF" in
+  *'"ok":true'*'"custody":"redacted-data"'*)
+    if [ "$fbrec" = "redacted-data task_requires_prose" ] && [ "$ncrec" = "sentinel_fail" ]; then
+      echo "  ok   with the fallback selected, the no-custody refusal is recorded and then the fallback is taken, recorded as redacted-data"
+    else echo "  FAIL the fallback's records are '$fbrec' after a no-custody check of '$ncrec'" >&2; fail=1; fi ;;
+  *) echo "  FAIL the selected fallback did not run after the no-custody refusal: $(printf '%s' "$OUTF" | head -c 300)" >&2; fail=1 ;;
+esac
+
+# A cloud route is refused citing T-58, and nothing is sent.
+: > "$SEEN"
+CODE=$(curl -s -m 40 -o "$WORK/nccloud" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -d "{$NCDATA,\"provider\":\"anthropic\",\"text\":\"Which region has the most customers?\"}" http://127.0.0.1:11430/api/pipeline)
+case "$CODE $(cat "$WORK/nccloud")" in
+  "403 "*'"refusal":"cloud_route_refused"'*T-58*) echo "  ok   a no-custody request for a cloud provider is refused (403), citing T-58" ;;
+  *) echo "  FAIL a cloud no-custody route was not refused: $CODE $(head -c 300 "$WORK/nccloud")" >&2; fail=1 ;;
+esac
+if grep -q '^/api/generate' "$SEEN"; then echo "  FAIL the cloud-routed request reached a model" >&2; fail=1
+else echo "  ok   and nothing was sent"; fi
+
+# moke's Insight Lab proposal, with the loaded dataset: moke sends column names only, and loke
+# dispatches it no-custody rather than to the fallback.
+: > "$SEEN"
+nc_before=$(dl "SELECT COUNT() FROM disclosure_log WHERE custody='no-custody'")
+OUTP2=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"num_cols\":[],\"cat_cols\":[\"region\",\"plan\"],$NCDATA}" http://127.0.0.1:11432/api/ml/propose)
+nc_after=$(dl "SELECT COUNT() FROM disclosure_log WHERE custody='no-custody'")
+if [ "$nc_after" = "$((nc_before + 1))" ] && grep -q '^/api/generate' "$SEEN" && nc_seen_clean; then
+  echo "  ok   the Insight Lab's proposal request is dispatched no-custody, and the model received no cell"
+else echo "  FAIL the proposal request was not dispatched no-custody ($nc_before -> $nc_after rows): $(printf '%s' "$OUTP2" | head -c 200)" >&2; fail=1; fi
+
 # T10.1: with the per-provider kill switch engaged for ollama, the same request is refused
 # with the fallback message and nothing reaches the model. The row is written as
 # killswitch.engageprovider writes it.

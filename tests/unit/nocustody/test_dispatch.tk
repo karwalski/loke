@@ -1,0 +1,202 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.dispatch;
+
+i=t:std.test;
+i=str:std.str;
+i=jx:shared.jsonobj;
+i=file:std.file;
+i=process:std.process;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=nd:core.nocustody.dispatch;
+
+(* NC1.12 - the no-custody dispatch, against the production module, a real migrated store and
+   scripts/lib/http_recorder.py standing in for Ollama on a loopback port the OS assigns.
+
+   What carries the story is what ARRIVES at the recorder, next to what is recorded. A dataset
+   has a planted sentinel. A body holding only a profile and a question is sent and recorded
+   no-custody with sentinel_pass, and the sentinel is not in what arrived. A body holding a
+   value from the dataset, in the question, in the system prompt, JSON-escaped or in another
+   case, is refused as sentinel_fail, recorded raw, and nothing arrives. A request whose check
+   cannot run is refused as unknown and nothing arrives. A cloud provider is refused citing
+   T-58 before anything is built.
+
+   The system-prompt case is the one that tells "the body is checked" from "the prompt is
+   checked": both hold the question, only the body holds the system prompt. *)
+
+f=testdir():str{
+  <"/tmp/loke-tests/nocustody-dispatch"
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s s;
+    $err:e 0
+  }
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=firststr(rs:@$row;col:str):str{
+  if(rs.len==0){ <"<no row>" }el{ <db.rowstr(rs.get(0);col) }
+};
+
+(* A disclosure_log column as text, NULL as "NULL". *)
+f=col(cid:str;c:str):str{
+  <mt db.many("SELECT COALESCE(CAST(\(c) AS TEXT),'NULL') AS v FROM disclosure_log WHERE correlation_id=?";@(cid)) {
+    $ok:rs firststr(rs;"v");
+    $err:e "<error>"
+  }
+};
+
+f=rowcount(cid:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM disclosure_log WHERE correlation_id=?";@(cid);"n";0-1)
+};
+
+f=auditcount(cid:str;ev:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;ev);"n";0-1)
+};
+
+f=occurrences(s:str;needle:str):i64{
+  <(str.split(s;needle).len as i64)-1
+};
+
+f=sentinel():str{
+  <"ZQ-SENTINEL-4417"
+};
+
+f=profile():str{
+  <"DATASET: accounts | ROWS: 4 | COLS: 4\nCOLS: customer(text,nulls=0%,distinct=4,unique) region(text,nulls=0%,distinct=3,low) plan(text,nulls=0%,distinct=2,low) churned(bool,nulls=0%,distinct=2,low)"
+};
+
+(* The dataset, as a caller sends it. The sentinel is one customer; `O"Brien-Vale` carries a
+   quote, so it reaches a JSON body escaped; `false` is a value the envelope also holds. *)
+f=datasetjson():str{
+  <"\"dataset_name\":\"accounts\",\"headers\":[\"customer\",\"region\",\"plan\",\"churned\"],\"rows\":[[\"\(sentinel())\",\"north\",\"gold\",\"false\"],[\"Harriet Oyelaran\",\"south\",\"silver\",\"true\"],[\"O\\\"Brien-Vale\",\"east\",\"gold\",\"false\"],[\"Bo\",\"north\",\"silver\",\"true\"]]"
+};
+
+f=request(extra:str):str{
+  <"{\(datasetjson())\(extra)}"
+};
+
+f=withprofile(q:str):str{
+  <"\(profile())\n\n\(q)"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=openfreshstore();
+  if(t.assert(store!=0;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
+
+  let base="/tmp/loke-tests/nocustody-dispatch/rec";
+  let logp="\(base).log";
+  file.delete(logp);
+  file.delete("\(base).port");
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder standing in for Ollama came up")){pass=pass+1}el{fail=fail+1};
+
+  let req=request(",\"profile\":\(jx.escape(profile()))");
+  if(t.assert(nd.applies(req);"a request carrying headers names its dataset")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nd.applies("{\"text\":\"hello\"}")==false;"one without them does not")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A profile and a question: sent, and recorded no-custody ───────────────────── *)
+  let q1=withprofile("Which region has the most customers who churned?");
+  let r1=nd.attempt(req;q1;"";store;url;"nc-pass";"rid-pass";"sess-1");
+  if(t.assert(nd.dispatched(r1);"a profile-only body is dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r1;"\"custody\":\"no-custody\"") && str.contains(r1;"\"custody_check\":\"sentinel_pass\"");"and the reply names its custody and check")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(nd.responseof(r1);"generated-by-recorder";"and carries the model's text")){pass=pass+1}el{fail=fail+1};
+  let seen1=readfile(logp);
+  let sent1=nd.ollamabody("fake:latest";"";q1);
+  if(t.assert(str.contains(seen1;str.concat("POST /api/generate ";sent1));"exactly the checked body arrived at the model, under the installed model's name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(seen1;sentinel())==false;"the planted sentinel is not in what the model received")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(seen1;"Harriet")==false && str.contains(seen1;"Brien")==false;"nor is any other customer")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq("\(col("nc-pass";"custody"))|\(col("nc-pass";"custody_check"))|\(col("nc-pass";"state"))|\(col("nc-pass";"provider_class"))";"no-custody|sentinel_pass|completed|local";"the record is no-custody, sentinel_pass, completed, local")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-pass";"bytes_body");str.fromint(str.len(sent1) as i64);"its bytes_body is the octet count of the body that arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-pass";"real_values_included");"0";"it records no real values")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-pass";"real_value_count");"0";"and counted none")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(col("nc-pass";"bytes_schema_profile");"0")==false;"the profile's share of the body is measured")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-pass";"fields_disclosed");"[\"customer\",\"region\",\"plan\",\"churned\"]";"the fields disclosed are the column names the body carries")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-pass";"model_version");"d1";"the model version is the digest Ollama listed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-pass";"session_id");"sess-1";"and the caller's session is recorded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditcount("nc-pass";"llm_dispatch")==1 && auditcount("nc-pass";"llm_request")==1;"with one llm_dispatch audit row and one outcome row")){pass=pass+1}el{fail=fail+1};
+
+  (* `false` is in the envelope ("stream":false) and in the data. It is loke's framing, so it
+     does not fail a clean body; in the question it does. *)
+  if(t.assert(str.contains(sent1;"false");"the envelope itself holds false, a value in the data")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A value in the body: refused, recorded raw, nothing sent ─────────────────── *)
+  let before=occurrences(readfile(logp);"POST /api/generate");
+  let r2=nd.attempt(req;withprofile("Why did Harriet Oyelaran churn?");"";store;url;"nc-fail";"rid-fail";"sess-1");
+  if(t.assert(nd.dispatched(r2)==false;"a body holding a sample value is not dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(nd.refusalof(r2);"sentinel_fail";"it is refused as sentinel_fail")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(nd.statusof(r2)==422;"with 422")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(readfile(logp);"POST /api/generate")==before;"and nothing reached the model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq("\(col("nc-fail";"custody"))|\(col("nc-fail";"custody_check"))|\(col("nc-fail";"state"))|\(col("nc-fail";"outcome"))";"raw|sentinel_fail|failed|rejected_locally";"the refusal is recorded as raw, sentinel_fail, rejected locally")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-fail";"bytes_body");"0";"with no bytes sent, because none were")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(col("nc-fail";"real_values_included");"1";"and real values included")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(auditcount("nc-fail";"llm_request_refused")==1 && auditcount("nc-fail";"llm_dispatch")==0;"audited as refused, never as dispatched")){pass=pass+1}el{fail=fail+1};
+
+  let r3=nd.attempt(req;withprofile("Tell me about zq-sentinel-4417");"";store;url;"nc-case";"rid-case";"sess-1");
+  if(t.asserteq(nd.refusalof(r3);"sentinel_fail";"the sentinel in another case is still found")){pass=pass+1}el{fail=fail+1};
+
+  let r4=nd.attempt(req;withprofile("Which region has the most customers?");"Customer of interest: \(sentinel())";store;url;"nc-sys";"rid-sys";"sess-1");
+  if(t.asserteq(nd.refusalof(r4);"sentinel_fail";"a value in the system prompt fails: the whole body is checked, not the prompt")){pass=pass+1}el{fail=fail+1};
+
+  let r5=nd.attempt(req;withprofile("Summarise O\"Brien-Vale");"";store;url;"nc-esc";"rid-esc";"sess-1");
+  if(t.asserteq(nd.refusalof(r5);"sentinel_fail";"a value that reaches the body JSON-escaped is found")){pass=pass+1}el{fail=fail+1};
+
+  let r6=nd.attempt(req;withprofile("List accounts where churned is false and plan is gold");"";store;url;"nc-bool";"rid-bool";"sess-1");
+  if(t.asserteq(nd.refusalof(r6);"sentinel_fail";"false in the question is a value from the data, whatever the envelope holds")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(readfile(logp);"POST /api/generate")==before;"none of the refused bodies reached the model")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A check that cannot run: refused, recorded unknown ──────────────────────── *)
+  let r7=nd.attempt("{\"headers\":[\"customer\"]}";"Which region?";"";store;url;"nc-norows";"rid-norows";"sess-1");
+  if(t.asserteq(nd.refusalof(r7);"custody_unknown";"a request with no rows cannot be checked, and is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq("\(col("nc-norows";"custody"))|\(col("nc-norows";"custody_check"))|\(col("nc-norows";"real_value_count"))";"unknown|not_run|NULL";"recorded as unknown, not_run, nothing counted")){pass=pass+1}el{fail=fail+1};
+  let r8=nd.attempt("{\"headers\":[\"st\",\"n\"],\"rows\":[[\"NSW\",\"12\"],[\"VIC\",\"7\"]]}";"Which state?";"";store;url;"nc-short";"rid-short";"sess-1");
+  if(t.asserteq(nd.refusalof(r8);"custody_unknown";"nor can one whose every cell is too short to look for")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(readfile(logp);"POST /api/generate")==before;"and neither reached the model")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A cloud route: refused before anything is built (T-58) ──────────────────── *)
+  let r9=nd.attempt(request(",\"provider\":\"anthropic\"");withprofile("Which region?");"";store;url;"nc-cloud";"rid-cloud";"sess-1");
+  if(t.asserteq(nd.refusalof(r9);"cloud_route_refused";"a cloud provider is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r9;"T-58") && nd.statusof(r9)==403;"citing T-58, with 403")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rowcount("nc-cloud")==0 && occurrences(readfile(logp);"POST /api/generate")==before;"nothing is sent and no dispatch is recorded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The reply a restoring caller rewrites ──────────────────────────────────────── *)
+  let fin=nd.finish(r1;"restored text";",\"extra\":1");
+  if(t.assert(str.contains(fin;"\"response\":\"restored text\",\"extra\":1}") && str.startswith(fin;"{\"ok\":true");"finish replaces the response and appends fields")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(str.concat(logp;".headers"));
+  file.delete("\(base).port");
+  <fail
+}

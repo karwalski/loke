@@ -1,0 +1,416 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.nocustody.dispatch;
+
+i=str:std.str;
+i=json:std.json;
+i=jx:shared.jsonobj;
+i=t:shared.types;
+i=log:shared.log;
+i=audit:core.storage.audit;
+i=dl:core.audit.disclosure;
+i=ks:core.governance.killswitch;
+i=ollama:core.models.ollama;
+i=xport:core.providers.transport;
+
+(* NC1.12. The no-custody dispatch: a model call that carries a schema profile and a question,
+   and that is recorded `no-custody` only when the payload has been checked and found to hold no
+   value drawn from the data (docs/specifications/disclosure-accounting.md 3.2).
+
+   The request names the dataset it is about, as /api/artifact's does: `headers` and `rows`.
+   The rows are the check's reference and nothing else. They never go into the body; they are
+   what the body is checked against.
+
+   The check (spec C2) runs on the body string itself, the one `sendchecked` then hands to
+   transport, after it has been built and immediately before the reserve. Every cell of at
+   least `minvaluelen` bytes is looked for in that body, case-insensitively, both as written
+   and in its JSON-escaped form, since a value with a quote or a non-ASCII letter reaches the
+   body escaped. One found is `sentinel_fail`: the body is not sent and the refusal is
+   recorded as `raw`. None checkable (no rows, or only short cells) is `not_run`: the class
+   cannot be determined, so the refusal is recorded as `unknown` and nothing is sent (C3).
+   Only `sentinel_pass` writes a `no-custody` reserve and reaches transport. The caller never
+   states the custody; it is read off the check (C1), in core.audit.disclosure.custodyof.
+
+   The only text subtracted is loke's own framing: the Ollama request envelope for the chosen
+   model with an empty prompt. A boolean column holding `false` would otherwise fail every
+   check on `"stream":false`. An occurrence counts as found when the body holds more of it than
+   the envelope does, so a `false` in the question still fails. The profile is NOT subtracted:
+   the check exists to catch a profile that carries values, which is the defect NC1.2 fixed.
+
+   What the check does not see, stated rather than implied:
+     - cells shorter than 4 bytes (`NSW`, `12`). They cannot be told apart from ordinary words
+       and numbers in the framing and the question, so they are not looked for. A dataset whose
+       every cell is that short cannot be checked, and is refused as not_run.
+     - a value computed from the data, such as a mean, which is not a cell. The profile is the
+       caller's text; a profile built by the NC1.2 emitters carries none.
+     - the rows are the caller's. A caller that sends other rows than it holds is checked
+       against those. The check says the body holds none of the values it was given.
+   A false match (a cell that happens to be a word of the question) refuses a body that was in
+   fact clean. That is the direction C4 asks for, and the caller can fall back explicitly.
+
+   Local only. The destination is Ollama on loopback, chosen from the models it lists. A
+   request naming any other provider is refused before anything is built, because toke's https
+   client verifies no certificate (T-58), and the send goes through core.providers.transport,
+   which refuses every non-loopback URL whatever this module is given.
+
+   Every string in a body is escaped with shared.jsonobj.escape, not json.enc, which escapes
+   only the quote and the backslash (T-45): a profile is several lines, and a raw newline in a
+   JSON string is a body Ollama rejects.
+
+   No struct type is declared here, and every answer is a JSON string, because
+   page.api.pipeline imports this module and already sees toke's limit of 64 struct types
+   (T-54). *)
+
+f=ollamabase():str{
+  <"http://127.0.0.1:11434"
+};
+
+f=minvaluelen():i64{
+  <4
+};
+
+(* ── Reading the request ───────────────────────────────────────────────────────────
+   The readers core.nocustody.request measured (T-31, T-32), repeated rather than imported:
+   that module declares struct types, and this one must add none to page.api.pipeline. *)
+f=rawof(o:$json):str{ <o.raw };
+
+f=unescapeseg(s:str):str{
+  <str.replace(str.replace(str.replace(str.replace(s;"\\n";"
+");"\\t";"	");"\\r";"
+");"\\\"";"\"")
+};
+
+f=unquote(raw:str):str{
+  let tr=str.trim(raw);
+  if(str.len(tr) < 2){ <tr }el{};
+  if(str.startswith(tr;"\"")==false){ <tr }el{};
+  let segs=str.split(str.trimsuffix(str.trimprefix(tr;"\"");"\"");"\\\\");
+  let out=mut.@();
+  lp(let i=0;i<segs.len();i=i+1){
+    out=out.push(unescapeseg(segs.get(i)))
+  };
+  <str.join("\\";out)
+};
+
+f=decode(raw:str):$json{
+  <mt json.dec(raw) {
+    $ok:o o;
+    $jsonerr:e jx.emptyobj()
+  }
+};
+
+f=strarrayat(o:$json;key:str):@str{
+  let arr=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<arr.len();i=i+1){
+    out=out.push(unquote(rawof(arr.get(i))))
+  };
+  <out
+};
+
+f=rowsat(o:$json;key:str):@(@str){
+  let outer=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  let out=mut.@();
+  lp(let i=0;i<outer.len();i=i+1){
+    out=out.push(strarrayat(decode("{\"v\":\(rawof(outer.get(i)))}");"v"))
+  };
+  <out
+};
+
+(* shared.jsonobj.strvalue, not json.str, which drops every backslash and so reads `\n` back
+   as the letter n (T-47). *)
+f=strat(o:$json;key:str;fallback:str):str{
+  <jx.strvalue(o;key;fallback)
+};
+
+(* Whether a request names a dataset, which is what makes a no-custody attempt possible. *)
+f=applies(req:str):bool{
+  <strarrayat(decode(req);"headers").len>0
+};
+
+(* ── The body ──────────────────────────────────────────────────────────────────────── *)
+f=ollamabody(model:str;system:str;prompt:str):str{
+  if(str.len(system)==0){
+    <"{\"model\":\(jx.escape(model)),\"prompt\":\(jx.escape(prompt)),\"stream\":false}"
+  };
+  <"{\"model\":\(jx.escape(model)),\"system\":\(jx.escape(system)),\"prompt\":\(jx.escape(prompt)),\"stream\":false}"
+};
+
+(* loke's framing: the envelope with nothing of the caller's in it. *)
+f=framingof(model:str):str{
+  <ollamabody(model;"";"")
+};
+
+(* Octets a string occupies inside the JSON body: its escaped form less the two quotes. *)
+f=escapedbytes(s:str):i64{
+  <(str.len(jx.escape(s)) as i64)-2
+};
+
+(* The profile's share of the body, when the caller marked it: `profile` must appear verbatim
+   in the text. Otherwise 0, because no profile can be told apart in the body. *)
+f=profilebytes(profile:str;text:str):i64{
+  if(str.len(profile)==0){ <0 };
+  if(str.contains(text;profile)){ <escapedbytes(profile) };
+  <0
+};
+
+(* ── The check ─────────────────────────────────────────────────────────────────────── *)
+
+(* `str.count` does not exist. n occurrences of a separator split a string into n+1 parts. *)
+f=occurrences(s:str;needle:str):i64{
+  <(str.split(s;needle).len as i64)-1
+};
+
+f=unaccounted(lbody:str;lframe:str;needle:str):bool{
+  if(str.contains(lbody;needle)==false){ <false };
+  <occurrences(lbody;needle)>occurrences(lframe;needle)
+};
+
+f=valuepresent(lbody:str;lframe:str;value:str):bool{
+  let lv=str.tolower(value);
+  if(unaccounted(lbody;lframe;lv)){ <true };
+  let enc=jx.escape(value);
+  let inner=str.tolower(jx.sliceor(enc;1;(str.len(enc) as i64)-1));
+  if(str.eq(inner;lv)){ <false };
+  <unaccounted(lbody;lframe;inner)
+};
+
+(* How many cells of the dataset the body holds, or -1 when no cell could be checked. `body`
+   is the string that will be sent; see sendchecked. *)
+f=valuesfound(body:str;framing:str;rows:@(@str)):i64{
+  let lbody=str.tolower(body);
+  let lframe=str.tolower(framing);
+  let checked=mut.0;
+  let found=mut.0;
+  lp(let i=0;i<rows.len;i=i+1){
+    let row:@str=rows.get(i);
+    lp(let j=0;j<row.len;j=j+1){
+      let v=str.trim(row.get(j));
+      if((str.len(v) as i64)>=minvaluelen()){
+        checked=checked+1;
+        if(valuepresent(lbody;lframe;v)){ found=found+1 }el{}
+      }el{}
+    }
+  };
+  if(checked==0){ <0-1 };
+  <found
+};
+
+f=checkname(found:i64):str{
+  if(found<0){ <"not_run" };
+  if(found==0){ <"sentinel_pass" };
+  <"sentinel_fail"
+};
+
+(* Spec 5.4 fields_disclosed: the dataset's column names that the body carries, in their own
+   spelling, once each. *)
+f=fieldsin(body:str;headers:@str):@str{
+  let out=mut.@();
+  lp(let i=0;i<headers.len;i=i+1){
+    let h=headers.get(i);
+    let seen=mut.false;
+    lp(let j=0;j<out.len;j=j+1){
+      if(str.eq(out.get(j);h)){ seen=true }el{}
+    };
+    if(seen==false && str.len(h)>0 && str.contains(body;h)){ out=out.push(h) }el{}
+  };
+  <out
+};
+
+f=jsonarray(items:@str):str{
+  let parts=mut.@();
+  lp(let i=0;i<items.len;i=i+1){
+    parts=parts.push(jx.escape(items.get(i)))
+  };
+  <"[\(str.join(",";parts))]"
+};
+
+(* ── The destination ───────────────────────────────────────────────────────────────── *)
+f=islocalprovider(p:str):bool{
+  <str.len(p)==0 || str.eq(p;"ollama") || str.eq(p;"local")
+};
+
+f=installed(base:str):@$ollamamodel{
+  <mt ollama.listmodels(ollama.new(base)) {$ok:v v; $err:e @()}
+};
+
+f=samemodel(name:str;wanted:str):bool{
+  <str.eq(name;wanted) || str.eq(name;"\(wanted):latest")
+};
+
+f=isembedding(name:str):bool{
+  <str.contains(str.tolower(name);"embed")
+};
+
+(* The model the caller named when Ollama has it, otherwise the first one Ollama lists that is
+   not an embedding model. "" when there is none. No model is substituted for a missing one
+   silently: the chosen name is in the reply and the record. *)
+f=choosemodel(models:@$ollamamodel;wanted:str):str{
+  let first=mut."";
+  let named=mut."";
+  lp(let i=0;i<models.len;i=i+1){
+    let m:$ollamamodel=models.get(i);
+    if(str.len(wanted)>0 && samemodel(m.name;wanted)){ named=m.name }el{};
+    if(str.len(first)==0 && isembedding(m.name)==false){ first=m.name }el{}
+  };
+  if(str.len(named)>0){ <named };
+  <first
+};
+
+(* DA1.9 (3): the model version is the digest Ollama reports for the model it will run. *)
+f=digestof(models:@$ollamamodel;name:str):str{
+  let d=mut."";
+  lp(let i=0;i<models.len;i=i+1){
+    let m:$ollamamodel=models.get(i);
+    if(str.eq(m.name;name)){ d=m.digest }el{}
+  };
+  <d
+};
+
+f=hostof(base:str):str{
+  <str.trimprefix(str.trimprefix(base;"http://");"https://")
+};
+
+(* ── Answers ───────────────────────────────────────────────────────────────────────── *)
+f=refusal(code:str;check:str;reason:str):str{
+  <"{\"ok\":false,\"refusal\":\(jx.escape(code)),\"custody\":\(jx.escape(dl.custodyof(check))),\"custody_check\":\(jx.escape(dl.checkof(check))),\"error\":\(jx.escape(reason))}"
+};
+
+(* `response` is the last field so that a caller restoring placeholders can replace it
+   (finish). *)
+f=answered(model:str;bodybytes:i64;sid:str;response:str):str{
+  <"{\"ok\":true,\"custody\":\"no-custody\",\"custody_check\":\"sentinel_pass\",\"model\":\(jx.escape(model)),\"provider\":\"ollama\",\"session_id\":\(jx.escape(sid)),\"disclosure\":{\"bytes_body\":\(bodybytes),\"destination\":\"local\",\"custody\":\"no-custody\"},\"response\":\(jx.escape(response))}"
+};
+
+f=dispatched(reply:str):bool{
+  <str.startswith(reply;"{\"ok\":true")
+};
+
+f=refusalof(reply:str):str{
+  <strat(decode(reply);"refusal";"")
+};
+
+f=responseof(reply:str):str{
+  <strat(decode(reply);"response";"")
+};
+
+(* The reply with its response replaced and `extra` (fields starting with a comma) added. *)
+f=finish(reply:str;response:str;extra:str):str{
+  let cut=str.indexof(reply;",\"response\":");
+  if(cut<0){ <reply };
+  <"\(jx.sliceor(reply;0;cut)),\"response\":\(jx.escape(response))\(extra)}"
+};
+
+f=statusof(reply:str):i64{
+  if(dispatched(reply)){ <200 };
+  let code=refusalof(reply);
+  if(str.eq(code;"cloud_route_refused") || str.eq(code;"provider_blocked")){ <403 };
+  if(str.eq(code;"sentinel_fail") || str.eq(code;"custody_unknown")){ <422 };
+  if(str.eq(code;"model_failed")){ <502 };
+  <503
+};
+
+f=auditev(eventtype:str;model:str;cid:str;durationms:i64;tin:i64;tout:i64):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:"no-custody";
+    modelid:model;
+    provider:"ollama";
+    sensitivity:"";
+    risktier:"";
+    tokensin:tin as u32;
+    tokensout:tout as u32;
+    costusd:0.0;
+    durationms:durationms as u32;
+    correlationid:cid
+  }
+};
+
+f=tokens(raw:str;field:str):i64{
+  <mt json.i64(decode(raw);field) {
+    $ok:v v;
+    $jsonerr:e 0
+  }
+};
+
+f=refusedreason(check:str;found:i64):str{
+  if(str.eq(check;"sentinel_fail")){
+    <"the body held \(found) value(s) drawn from the dataset, so it is not a no-custody payload and was not sent"
+  };
+  <"the no-custody check could not run: the request carried no dataset cell of at least \(minvaluelen()) bytes to check the body against, so its custody is unknown and it was not sent"
+};
+
+f=refusedcode(check:str):str{
+  if(str.eq(check;"sentinel_fail")){ <"sentinel_fail" };
+  <"custody_unknown"
+};
+
+(* The one place the body is checked and the one place it is sent, with the same string. The
+   reserve sits between them, so a refused body is recorded and never reaches transport, and a
+   passed one is recorded before it does (spec L1). *)
+f=sendchecked(store:i64;base:str;cid:str;requestid:str;sid:str;model:str;version:str;body:str;rows:@(@str);profile:str;question:str;headers:@str;dsname:str):str{
+  let found=valuesfound(body;framingof(model);rows);
+  let check=checkname(found);
+  let pbytes=profilebytes(profile;question);
+  let qbytes=escapedbytes(question)-pbytes;
+  let fields=fieldsin(body;headers);
+  let dsets=mut.@();
+  if(str.len(dsname)>0 && str.contains(body;dsname)){ dsets=dsets.push(dsname) }el{};
+  let host=hostof(base);
+  let bytes=str.len(body) as i64;
+  if(str.eq(check;"sentinel_pass")==false){
+    if(dl.reservenocustody(auditev("llm_request_refused";model;cid;0;0;0);requestid;sid;version;host;bytes;pbytes;qbytes;jsonarray(dsets);jsonarray(fields);fields.len as i64;check;found;store)==false){
+      log.warn("no-custody: a refused dispatch could not be recorded; nothing was sent";"nocustody.dispatch";requestid)
+    }el{};
+    log.warn("no-custody dispatch refused: \(check)";"nocustody.dispatch";requestid);
+    <refusal(refusedcode(check);check;refusedreason(check;found))
+  }el{};
+  if(dl.reservenocustody(auditev("llm_dispatch";model;cid;0;0;0);requestid;sid;version;host;bytes;pbytes;qbytes;jsonarray(dsets);jsonarray(fields);fields.len as i64;check;found;store)==false){
+    <refusal("unrecorded";"";"the disclosure record could not be written, so the request was not sent")
+  };
+  let start=t.nowms();
+  let raw=xport.post("\(base)/api/generate";body;"{}");
+  let text=responseof(raw);
+  if(str.len(raw)==0 || str.len(text)==0){
+    dl.completeaudited(cid;false;str.len(raw) as i64;0;0;t.nowms()-start;store;auditev("llm_request_failed";model;cid;t.nowms()-start;0;0));
+    log.warn("no-custody: the local model returned no text";"nocustody.dispatch";requestid);
+    <refusal("model_failed";check;"the local model returned no text")
+  }el{};
+  let tin=tokens(raw;"prompt_eval_count");
+  let tout=tokens(raw;"eval_count");
+  let dur=t.nowms()-start;
+  dl.completeaudited(cid;true;str.len(raw) as i64;tin;tout;dur;store;auditev("llm_request";model;cid;dur;tin;tout));
+  <answered(model;bytes;sid;text)
+};
+
+(* One attempt. `req` is the raw request, read for the dataset (headers, rows, dataset_name),
+   the profile, the model and the provider. `question` and `system` are passed apart because a
+   caller may have transformed them (page.api.pipeline passes the anonymised text). `cid` is the
+   disclosure row's correlation id and must not be one another row holds. `base` is Ollama's
+   address: ollamabase() in production, a loopback recorder in tests. *)
+f=attempt(req:str;question:str;system:str;store:i64;base:str;cid:str;requestid:str;sid:str):str{
+  let o=decode(req);
+  if(islocalprovider(strat(o;"provider";""))==false){
+    log.warn("no-custody dispatch refused a cloud route (T-58)";"nocustody.dispatch";requestid);
+    <refusal("cloud_route_refused";"";"the no-custody dispatch reaches local models only: toke's https client does not verify certificates (T-58), so nothing is sent to a cloud provider")
+  }el{};
+  if(store==0){
+    <refusal("unrecorded";"";"the local store could not be opened, so the dispatch could not be recorded and was not made")
+  }el{};
+  if(ks.isblocked(store;"ollama";"no-custody")){
+    <refusal("provider_blocked";"";ks.fallbackmessage("ollama"))
+  }el{};
+  let models=installed(base);
+  let model=choosemodel(models;strat(o;"model";""));
+  if(str.len(model)==0){
+    <refusal("no_local_model";"";"no local model is installed in Ollama, so there is nothing to dispatch to")
+  }el{};
+  <sendchecked(store;base;cid;requestid;sid;model;digestof(models;model);ollamabody(model;system;question);rowsat(o;"rows");strat(o;"profile";"");question;strarrayat(o;"headers");strat(o;"dataset_name";""))
+}

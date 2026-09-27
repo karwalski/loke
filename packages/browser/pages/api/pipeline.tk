@@ -31,6 +31,7 @@ i=ptypes:core.privacy.pipelinetypes;
 i=dl:core.audit.disclosure;
 i=ag:core.governance.approvalgate;
 i=xport:core.providers.transport;
+i=nd:core.nocustody.dispatch;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -1038,7 +1039,31 @@ f=custodyfields(fbreason:str;fbby:str):str{
 (* The refusal a caller gets when it did not select the fallback. It says where the primary
    path is, so a caller holding a dataset has somewhere to go. *)
 f=fallbackunselected():i64{
-  <http.res(400;"{\"ok\":false,\"error\":\"this endpoint is the redact-and-forward fallback and must be selected explicitly: send fallback_reason (task_requires_prose, artifact_inexpressible, user_choice or policy_directed) and fallback_selected_by (user or policy). Questions over a dataset go to the no-custody path, POST /api/artifact\",\"fallback_unselected\":true,\"no_custody\":\"/api/artifact\"}")
+  <http.res(400;"{\"ok\":false,\"error\":\"this endpoint is the redact-and-forward fallback and must be selected explicitly: send fallback_reason (task_requires_prose, artifact_inexpressible, user_choice or policy_directed) and fallback_selected_by (user or policy). A request that carries its dataset (headers and rows) is tried as a no-custody dispatch first, and a returned artifact runs at POST /api/artifact\",\"fallback_unselected\":true,\"no_custody\":\"/api/artifact\"}")
+};
+
+(* ── NC1.12: no-custody first ───────────────────────────────────────────────────────
+   A request that carries its dataset (`headers` and `rows`, which stay on this machine) is
+   first tried as a no-custody dispatch, core.nocustody.dispatch. The text sent is the
+   anonymised text, the privacy scan, the policy decision and any approval having already run.
+   The dispatch checks the exact body it would send against every cell of the dataset (spec C2)
+   and records `no-custody` only on a pass; it reaches a local model only (T-58).
+
+   Its correlation id is the request id with `-nc`, so that when it is refused and the
+   selected fallback runs, the fallback's own record does not collide with the refusal's. A
+   refusal with no fallback selected is returned as it is, marked `fallback_unselected`, so a
+   caller learns why the no-custody path refused before it chooses the fallback. *)
+f=nocustodyfirst(store:i64;run:$pipelinerun;rawbody:str;sysprompt:str;sid:str):str{
+  let res:$piidetectionresult=run.result;
+  <nd.attempt(rawbody;res.anonymised;sysprompt;store;nd.ollamabase();"\(run.requestid)-nc";run.requestid;sid)
+};
+
+f=nocustodyanswer(run:$pipelinerun;reply:str):i64{
+  <http.res(200;nd.finish(reply;restoretext(run;nd.responseof(reply));privacyfields(run)))
+};
+
+f=nocustodyunselected(reply:str):i64{
+  <http.res(nd.statusof(reply);"\(str.trimsuffix(reply;"}")),\"fallback_unselected\":true}")
 };
 
 (* Forwards the pipeline's anonymised text, never the original.
@@ -1200,7 +1225,11 @@ f=post(req:i64):i64{
      rule again at the last point before transport. *)
   let fbreason=json.str(parsed;"fallback_reason");
   let fbby=json.str(parsed;"fallback_selected_by");
-  if(dl.fallbackreasonvalid(fbreason) && dl.fallbackselectorvalid(fbby)){}el{
+  (* NC1.12 - a request that names its dataset is tried as a no-custody dispatch first, so it
+     may arrive without a fallback selected. It is refused later, only if that attempt is. *)
+  let selected=dl.fallbackreasonvalid(fbreason) && dl.fallbackselectorvalid(fbby);
+  let nocustody=nd.applies(rawbody);
+  if(selected || nocustody){}el{
     <fallbackunselected()
   };
   (* DA1.9 (4) - the caller's session, recorded on the disclosure row. Optional: a request
@@ -1243,6 +1272,17 @@ f=post(req:i64):i64{
         log.info("pipeline: a valid approval was presented and spent, so the held request proceeds (GA5.26)";"api.pipeline";run.requestid)
       }el{
         <approvalrefused(store;run;decision;aid;bind;startms)
+      }
+    }el{};
+    if(nocustody){
+      let ncreply=nocustodyfirst(store;run;rawbody;sysprompt;sid);
+      if(nd.dispatched(ncreply)){
+        <nocustodyanswer(run;ncreply)
+      }el{};
+      if(selected){
+        log.info("pipeline: the no-custody attempt was refused (\(nd.refusalof(ncreply))), so the selected fallback is taken (NC1.12)";"api.pipeline";run.requestid)
+      }el{
+        <nocustodyunselected(ncreply)
       }
     }el{};
     <forward(store;run;sysprompt;startms;decision;fbreason;fbby;sid)

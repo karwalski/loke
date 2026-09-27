@@ -665,6 +665,26 @@ function formatSchemaProfile(profile) {
   return lines.join('\n');
 }
 
+// NC1.12. The fields that let loke dispatch this request no-custody. The rows go to loke,
+// on this machine, as the reference its check reads: loke looks for every cell in the
+// exact body it would send to the model, and sends it, recorded no-custody, only when it
+// finds none (disclosure-accounting spec 3.2 C2). The rows are never put in that body.
+// `profile` marks which part of the text is the schema profile, so its size is recorded.
+// With no dataset loaded there is nothing to check against, so none of this is sent and
+// the request goes to the fallback it selects.
+function noCustodyFields(dataset, profileText) {
+  if (!dataset || !Array.isArray(dataset.headers) || !dataset.headers.length) return {};
+  var rows = Array.isArray(dataset.rows) ? dataset.rows : [];
+  return {
+    dataset_name: String(dataset.name || dataset.id || 'dataset'),
+    headers: dataset.headers.map(String),
+    rows: rows.map(function(r) {
+      return (r || []).map(function(v) { return (v === null || v === undefined) ? '' : String(v); });
+    }),
+    profile: profileText || '',
+  };
+}
+
 // ── Phase 2, in one place ──────────────────────────────────────────────────
 // Strips anything this browser did not compute, resolves what it can against the
 // loaded rows, and leaves every card carrying the state it actually reached.
@@ -1414,22 +1434,24 @@ async function generateDashboard() {
     // Phase 1 — ask the model to design the dashboard. NC1.4: it is given a
     // schema profile (names, types, cardinality, null rate, row count) and no
     // data values, so it can reference real columns instead of guessing them.
-    const schemaProfileText = formatSchemaProfile(buildSchemaProfile(readActiveDataset()));
+    const activeDataset = readActiveDataset();
+    const schemaProfileText = formatSchemaProfile(buildSchemaProfile(activeDataset));
     const rid = 'dash-' + Date.now();
     var LOKE_URL = window.LOKE_URL || 'http://127.0.0.1:11430';
     const res = await fetch(LOKE_URL + '/api/pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.assign({
         text: buildPhase1Prompt(question, schemaProfileText),
         system_prompt: DASHBOARD_SYSTEM_PROMPT,
         tolerance: 'patient',
-        // NC1.8: schema and intent only, but no no-custody dispatch exists yet (NC1.12).
+        // NC1.12: loke tries this as a no-custody dispatch first (see noCustodyFields).
+        // The fallback below is taken only if loke refuses that, and is recorded as such.
         fallback_reason: 'policy_directed',
         fallback_selected_by: 'policy',
         mode: 'dashboard',
         request_id: rid,
-      }),
+      }, noCustodyFields(activeDataset, schemaProfileText))),
     });
     const data = await res.json();
     phaseDone('ph1');
@@ -1491,7 +1513,8 @@ async function refineDashboard() {
     // before it leaves the device.
     const skeleton = stripUnverifiedValues(JSON.parse(JSON.stringify(currentDDL)));
     const currentJSON = JSON.stringify(skeleton);
-    const schemaProfileText = formatSchemaProfile(buildSchemaProfile(readActiveDataset()));
+    const activeDataset = readActiveDataset();
+    const schemaProfileText = formatSchemaProfile(buildSchemaProfile(activeDataset));
     const prompt = `Refine this dashboard specification: ${currentJSON}\n\nInstruction: ${instruction}\n\n`
       + (schemaProfileText
           ? `The dataset stays on the user's device. This is its schema profile, which contains no data values:\n${schemaProfileText}\n\n`
@@ -1501,15 +1524,16 @@ async function refineDashboard() {
     const res = await fetch(LOKE_URL + '/api/pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.assign({
         text: prompt,
         system_prompt: DASHBOARD_SYSTEM_PROMPT,
         tolerance: 'patient',
-        // NC1.8: schema and intent only, but no no-custody dispatch exists yet (NC1.12).
+        // NC1.12: no-custody first, as in generateDashboard. The skeleton is meant to carry
+        // no value; if stripping missed one, loke's check finds it and refuses.
         fallback_reason: 'policy_directed',
         fallback_selected_by: 'policy',
         mode: 'dashboard',
-      }),
+      }, noCustodyFields(activeDataset, schemaProfileText))),
     });
     const data = await res.json();
     phaseDone('ph1');

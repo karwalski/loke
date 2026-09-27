@@ -22,9 +22,11 @@ i=audit:core.storage.audit;
 
    What is NOT here yet, and is recorded as open against DA1.7 rather than filled with a
    guess:
-     - custody is passed in, not observed. The spec requires it computed from the payload
-       (C1), which needs NC1.2's sentinel check. On the redact-and-forward path the honest
-       value is redacted-data with custody_check = not_run, and that is what callers pass
+     - on the redact-and-forward path custody is passed in, not observed. The spec requires
+       it computed from the payload (C1), which needs NC1.2's sentinel check. There the honest
+       value is redacted-data with custody_check = not_run, and that is what callers pass. The
+       no-custody row (NC1.12, reservenocustody below) is the observed one: its class is read
+       off the sentinel check run on the body about to be sent
      - tokens_estimated and tokeniser_id stay NULL: no tokeniser runs before dispatch.
        tokens_source is set to provider_reported by `complete` only when the provider
        reported a count, and is otherwise left NULL rather than labelled an estimate
@@ -264,4 +266,77 @@ f=sentbytes(correlationid:str):i64{
     $ok:r db.rowi64(r;"n");
     $err:e 0-1
   }
+};
+
+(* ── NC1.12: the no-custody record ─────────────────────────────────────────────────
+   Spec 3.2. Custody here is not a parameter. The caller hands over the outcome of the C2
+   sentinel check it ran on the body it is about to send, and the class is read off that:
+
+     sentinel_pass  no-custody   the body is sent, and this row is its reserve
+     sentinel_fail  raw          a value drawn from the data, untransformed, was in the body
+     anything else  unknown      the check could not run (C3)
+
+   Only a pass is a dispatch. A fail or an unknown is a refusal, and the row says so: state
+   `failed`, outcome `rejected_locally`, and every volume 0, because nothing was handed to
+   transport and bytes_body counts only what was (spec 5.3, 5.7 C1). Writing the would-be
+   body's size there would count bytes that never left in every bytes-sent total. *)
+f=custodyof(check:str):str{
+  if(str.eq(check;"sentinel_pass")){ <"no-custody" };
+  if(str.eq(check;"sentinel_fail")){ <"raw" };
+  <"unknown"
+};
+
+f=checkof(check:str):str{
+  if(str.eq(check;"sentinel_pass") || str.eq(check;"sentinel_fail")){ <check };
+  <"not_run"
+};
+
+f=orzero(keep:bool;n:i64):str{
+  if(keep){ <str.fromint(n) };
+  <"0"
+};
+
+(* `valuecount` is how many of the dataset's values the check found in the body: 0 on a
+   pass, and NULL when the check did not run, since then nothing was counted. The profile
+   flags are C4's reading of a caller-built profile, which loke cannot take apart: a profile
+   that reached the body is taken to carry cardinality and a row count. sample_values_included
+   and aggregates_included are not observed by the check (a mean is not a cell), so a pass
+   writes 0 for them and a refusal writes the more disclosing 1. *)
+f=insertnocustody(ev:$auditevent;requestid:str;sessionid:str;modelversion:str;endpointhost:str;bodybytes:i64;profilebytes:i64;questionbytes:i64;datasetsjson:str;fieldsjson:str;fieldcount:i64;check:str;valuecount:i64):bool{
+  let chk=checkof(check);
+  let custody=custodyof(chk);
+  let pass=str.eq(chk;"sentinel_pass");
+  let st=mut."failed";
+  let oc=mut."rejected_locally";
+  if(pass){ st="dispatched"; oc="" }el{};
+  let counted=mut."";
+  if(str.eq(chk;"not_run")==false){ counted=str.fromint(valuecount) }el{};
+  let real=realvaluesincluded(custody;chk);
+  let profiled=pass && profilebytes>0;
+  let ds=mut."[]";
+  let fs=mut."[]";
+  let fc=mut.0;
+  if(pass){ ds=datasetsjson; fs=fieldsjson; fc=fieldcount }el{};
+  let sql="INSERT INTO disclosure_log (record_id,correlation_id,request_id,session_id,parent_record_id,occurred_at,state,dispatch_kind,pipeline_disabled,provider,provider_class,model_id,model_version,endpoint_host,jurisdiction,retention_class,bytes_body,bytes_headers,bytes_schema_profile,bytes_question,bytes_other,tokens_estimated,tokeniser_id,tokens_source,custody,custody_check,fallback_reason,fallback_selected_by,datasets_disclosed,fields_disclosed,fields_disclosed_count,field_types_disclosed,cardinality_disclosed,row_count_disclosed,entity_types,entities_total,detection_layers,real_values_included,real_value_count,sample_values_included,aggregates_included,qi_combination_present,qi_combination_fields,outcome) VALUES (?,?,?,?,NULL,?,?,'initial',0,?,'local',?,?,?,NULL,'unknown',CAST(? AS INTEGER),NULL,CAST(? AS INTEGER),CAST(? AS INTEGER),CAST(? AS INTEGER),NULL,NULL,NULL,?,?,NULL,NULL,?,?,CAST(? AS INTEGER),'',CAST(? AS INTEGER),CAST(? AS INTEGER),'',0,'',CAST(? AS INTEGER),CAST(NULLIF(?,'') AS INTEGER),CAST(? AS INTEGER),CAST(? AS INTEGER),NULL,'',NULLIF(?,''))";
+  let body=orzero(pass;bodybytes);
+  let prof=orzero(pass;profilebytes);
+  let ques=orzero(pass;questionbytes);
+  let other=orzero(pass;bodybytes-profilebytes-questionbytes);
+  let flag=boolint(profiled);
+  let realflag=boolint(real);
+  <mt db.exec(sql;@(str.randhex(16);ev.correlationid;requestid;sessionid;str.nowiso8601();st;ev.provider;ev.modelid;versionor(modelversion);endpointhost;body;prof;ques;other;custody;chk;ds;fs;str.fromint(fc);flag;flag;realflag;counted;realflag;realflag;oc)) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* The row and its audit row in one transaction, as reserveaudited does (DA1.9, spec P2).
+   `ev` is `llm_dispatch` for a pass and `llm_request_refused` for a refusal. False means
+   neither row exists, and a pass that is not recorded must not be sent (spec L1). *)
+f=reservenocustody(ev:$auditevent;requestid:str;sessionid:str;modelversion:str;endpointhost:str;bodybytes:i64;profilebytes:i64;questionbytes:i64;datasetsjson:str;fieldsjson:str;fieldcount:i64;check:str;valuecount:i64;store:i64):bool{
+  if(sqlok("BEGIN IMMEDIATE")==false){ <false };
+  let reserved=insertnocustody(ev;requestid;sessionid;modelversion;endpointhost;bodybytes;profilebytes;questionbytes;datasetsjson;fieldsjson;fieldcount;check;valuecount);
+  let audited=mut.false;
+  if(reserved){ audited=audit.insertevent(store;ev) }el{};
+  <endtx(reserved && audited)
 }
