@@ -431,6 +431,16 @@ step_checks() {
                 "them would be scored against a lie" >&2; failed=1; }
   fi
 
+  # MK21.12: the committed CSV, XLSX, PDF and scan fixtures are exactly what the seeded
+  # generator writes, read back to their ground truth (the workbook also through toke's
+  # std.xlsx when TOKE_DIR is set), still carry their named difficulties, and contain nothing
+  # loke's PII patterns or the stricter BSB/account/card checks would flag.
+  if [[ -f tests/fixtures/bank-statements/test_fixtures.py ]]; then
+    echo "  bank statement fixtures regenerate identically and name no real person"
+    python3 tests/fixtures/bank-statements/test_fixtures.py 2>&1 | tail -3 >&2
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  tests/fixtures/bank-statements/test_fixtures.py failed" >&2; failed=1; }
+  fi
+
   if [[ -f packages/moke/static/js/tests/test-moke-data.js ]] && command -v node >/dev/null; then
     echo "  dataset data layer"
     node packages/moke/static/js/tests/test-moke-data.js >/dev/null \
