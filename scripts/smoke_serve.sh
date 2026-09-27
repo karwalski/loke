@@ -75,7 +75,7 @@ probe() {  # $1 method, $2 path, $3 optional body
 }
 
 for r in health models settings savings tabs privacy; do probe GET "/api/$r"; done
-probe POST /api/pipeline '{"text":"smoke test, no personal data"}'
+probe POST /api/pipeline '{"text":"smoke test, no personal data","fallback_reason":"user_choice","fallback_selected_by":"user"}'
 for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon; do probe GET "$p"; done
 
 # NC1.7: /api/artifact runs a returned artifact locally. Unlike the probes above, these judge
@@ -110,7 +110,7 @@ artifact "no artifact" "{$DS}" 400 'missing required field: artifact'
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 -X POST -H "Origin: $2" \
-           -H 'Content-Type: text/plain' -d '{"text":"smoke test, no personal data"}' \
+           -H 'Content-Type: text/plain' -d '{"text":"smoke test, no personal data","fallback_reason":"user_choice","fallback_selected_by":"user"}' \
            "http://127.0.0.1:$PORT$1")
   if [ "$3" = refused ] && [ "$code" != 403 ]; then
     echo "  FAIL POST $1 from $2: got [$code], a cross-origin request must be refused (GA2.6)" >&2

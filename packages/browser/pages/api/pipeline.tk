@@ -805,8 +805,8 @@ f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;r:$httpresp;p
    what this path sends, and it is passed rather than observed until NC1.2's sentinel check
    exists (spec C1-C3). The correlation id is the request id, which is also audit_log's, so
    the two rows join one-to-one. *)
-f=reservedispatch(run:$pipelinerun;provider:str;providerclass:str;modelid:str;host:str;sent:str;anonymised:str):bool{
-  <dl.reserve(run.requestid;run.requestid;"none";provider;providerclass;modelid;host;str.len(sent);str.len(json.enc(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run")
+f=reservedispatch(run:$pipelinerun;provider:str;providerclass:str;modelid:str;host:str;sent:str;anonymised:str;fbreason:str;fbby:str):bool{
+  <dl.reserve(run.requestid;run.requestid;"none";provider;providerclass;modelid;host;str.len(sent);str.len(json.enc(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run";fbreason;fbby)
 };
 
 (* A dispatch that cannot be recorded does not happen (spec section 4). It is refused and
@@ -817,11 +817,11 @@ f=unrecorded(store:i64;run:$pipelinerun;provider:str;modelid:str;piifields:str;s
   <http.res(503;"{\"ok\":false,\"error\":\"the disclosure record could not be written, so the request was not sent\",\"disclosure_unrecorded\":true\(piifields)}")
 };
 
-f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision):i64{
+f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
   let spec:$modelspec=route.model;
   let abody="{\"model\":\(json.enc(spec.id)),\"max_tokens\":4096,\"system\":\(json.enc(sysprompt)),\"messages\":[{\"role\":\"user\",\"content\":\(json.enc(anonymised))}]}";
   let headers="{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\",\"content-type\":\"application/json\"}";
-  if(reservedispatch(run;"anthropic";"cloud";spec.id;"api.anthropic.com";abody;anonymised)){}el{
+  if(reservedispatch(run;"anthropic";"cloud";spec.id;"api.anthropic.com";abody;anonymised;fbreason;fbby)){}el{
     <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
   };
   <mt http.postheaders(http.client("https://api.anthropic.com/v1/messages");"";str.tobytes(abody);headers) {
@@ -855,7 +855,7 @@ f=installednames():@str{
   <names
 };
 
-f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision):i64{
+f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
   let spec:$modelspec=route.model;
   (* F5.12. The router chooses from a static catalogue, not from what is installed, so it
      can route to a model Ollama does not have, and Ollama answers 404. This refuses with
@@ -869,7 +869,7 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;piif
     <http.res(503;"{\"ok\":false,\"error\":\(json.enc(msg)),\"model_not_installed\":true\(piifields)}")
   }el{};
   let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(json.enc(anonymised)),\"stream\":false}";
-  if(reservedispatch(run;"ollama";"local";spec.id;"127.0.0.1:11434";payload;anonymised)){}el{
+  if(reservedispatch(run;"ollama";"local";spec.id;"127.0.0.1:11434";payload;anonymised;fbreason;fbby)){}el{
     <unrecorded(store;run;"ollama";spec.id;piifields;startms;decision)
   };
   let raw=http.posturl("http://127.0.0.1:11434/api/generate";payload);
@@ -901,31 +901,50 @@ f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:
   <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
 };
 
-f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision):i64{
+f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;anonymised:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
   let key=anthropickey();
   if(str.len(key)>20){}el{
     <needsanthropickey(store;run;route;piifields;startms;decision)
   };
-  <toanthropic(store;run;route;anonymised;sysprompt;key;piifields;startms;decision)
+  <toanthropic(store;run;route;anonymised;sysprompt;key;piifields;startms;decision;fbreason;fbby)
 };
 
 (* All seven $provider variants are named. A match on a plain user sum DOES discriminate
    across a module boundary — it is only a result whose error side is a user sum that does
    not (T-18) — and listing every variant is what lets the refusal say WHICH provider was
    unsupported. *)
-f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision):i64{
+f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
   let res:$piidetectionresult=run.result;
   let spec:$modelspec=route.model;
   let prov:$provider=spec.provider;
   <mt prov {
-    $anthropic:v toanthropicchecked(store;run;route;res.anonymised;sysprompt;piifields;startms;decision);
+    $anthropic:v toanthropicchecked(store;run;route;res.anonymised;sysprompt;piifields;startms;decision;fbreason;fbby);
     $openai:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $google:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $mistral:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $openrouter:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $ollama:v toollama(store;run;route;res.anonymised;piifields;startms;decision);
-    $local:v toollama(store;run;route;res.anonymised;piifields;startms;decision)
+    $ollama:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby);
+    $local:v toollama(store;run;route;res.anonymised;piifields;startms;decision;fbreason;fbby)
   }
+};
+
+(* NC1.8 - what every reply on this path says about itself. This endpoint IS the
+   redact-and-forward fallback: the text is scanned, detected identifiers are replaced with
+   placeholders, and the rest goes to the model as written. The residual risk is stated in the
+   reply so the surface showing the answer can show it beside it, at the point of use. It names
+   what redaction does not cover rather than claiming what it does. *)
+f=residualrisk():str{
+  <"Sent by the redact-and-forward fallback. Detected identifiers were replaced with placeholders before sending; anything the detectors did not recognise, and the rest of your text, reached the model as written."
+};
+
+f=custodyfields(fbreason:str;fbby:str):str{
+  <",\"custody\":\"redacted-data\",\"fallback_reason\":\(json.enc(fbreason)),\"fallback_selected_by\":\(json.enc(fbby)),\"residual_risk\":\(json.enc(residualrisk()))"
+};
+
+(* The refusal a caller gets when it did not select the fallback. It says where the primary
+   path is, so a caller holding a dataset has somewhere to go. *)
+f=fallbackunselected():i64{
+  <http.res(400;"{\"ok\":false,\"error\":\"this endpoint is the redact-and-forward fallback and must be selected explicitly: send fallback_reason (task_requires_prose, artifact_inexpressible, user_choice or policy_directed) and fallback_selected_by (user or policy). Questions over a dataset go to the no-custody path, POST /api/artifact\",\"fallback_unselected\":true,\"no_custody\":\"/api/artifact\"}")
 };
 
 (* Forwards the pipeline's anonymised text, never the original.
@@ -933,9 +952,9 @@ f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifi
    The order is the story: cache, then budget, then route, then dispatch. A hit spends
    nothing; an exhausted budget refuses before a provider is paid; and the route is what
    decides where the text is allowed to go. *)
-f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision):i64{
+f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str):i64{
   let res:$piidetectionresult=run.result;
-  let piifields=privacyfields(run);
+  let piifields=str.concat(privacyfields(run);custodyfields(fbreason;fbby));
 
   let hit:$cachehit=cachelookup(run;res.anonymised);
   if(cache.ishit(hit)){
@@ -986,7 +1005,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
     <http.res(403;"{\"ok\":false,\"error\":\(json.enc(ks.fallbackmessage(pname))),\"provider_blocked\":true\(piifields)}")
   }el{};
 
-  <dispatch(store;run;route;sysprompt;piifields;startms;decision)
+  <dispatch(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby)
 };
 
 (* If the store cannot be opened the switch cannot be read, and an unreadable kill switch
@@ -1028,6 +1047,15 @@ f=post(req:i64):i64{
     <http.res(400;"{\"ok\":false,\"error\":\"text field is required\"}")
   }el{};
 
+  (* NC1.8 - the fallback is never the default. Checked before the scan, so an unselected
+     request costs nothing and records nothing. core.audit.disclosure.reserve enforces the same
+     rule again at the last point before transport. *)
+  let fbreason=json.str(parsed;"fallback_reason");
+  let fbby=json.str(parsed;"fallback_selected_by");
+  if(dl.fallbackreasonvalid(fbreason) && dl.fallbackselectorvalid(fbby)){}el{
+    <fallbackunselected()
+  };
+
   (* The only path to a provider. A refusal here is the point of NC1.9: no detection
      layer scanned this text, so it does not leave the machine. *)
   (* A bool, not a result arm: toke matches the first arm of an X!$lokeerr whatever
@@ -1050,7 +1078,7 @@ f=post(req:i64):i64{
     if(isrequireapproval(decision)){
       log.warn("pipeline policy requires explicit approval and none was sought, so the request proceeds unapproved — high risk over restricted data, local processing only (GA5.26): \(policymessage(decision))";"api.pipeline";run.requestid)
     }el{};
-    <forward(store;run;sysprompt;startms;decision)
+    <forward(store;run;sysprompt;startms;decision;fbreason;fbby)
   }el{
     privacyrefusedtrace(store;run;t.nowms()-startms);
     <refused("no privacy detection layer is available")

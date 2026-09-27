@@ -142,7 +142,7 @@ pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
 FAKE_OLLAMA_MODELS="llama3:latest" python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
 for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
 OUT2=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
-        -d "{\"text\":\"summarise: contact $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+        -d "{\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\",\"text\":\"summarise: contact $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
 case "$OUT2" in
   *model_not_installed*llama3:latest*|*llama3:latest*model_not_installed*)
     echo "  ok   a routed model that is not installed is refused, naming what is installed" ;;
@@ -159,7 +159,7 @@ pkill -f "scripts/lib/fake_ollama.py $SEEN" 2>/dev/null; sleep 0.5
 FAKE_OLLAMA_MODELS="gemma3:4b" python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
 for _ in $(seq 1 20); do nc -z -G 1 127.0.0.1 11434 2>/dev/null && break; sleep 0.25; done
 OUT3=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
-        -d "{\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+        -d "{\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\",\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
 case "$OUT3" in
   *'"ok":true'*'"model":"gemma3:4b"'*) echo "  ok   the router chose the installed gemma3:4b, and the request was answered" ;;
   *) echo "  FAIL the installed model was not chosen: $(printf '%s' "$OUT3" | head -c 200)" >&2; fail=1 ;;
@@ -175,13 +175,36 @@ case "$OUT3" in
   *) echo "  FAIL the answer does not report its disclosure ($g_bytes bytes sent): $(printf '%s' "$OUT3" | head -c 300)" >&2; fail=1 ;;
 esac
 
+# NC1.8: the answer names its custody and what the fallback does not protect, and the
+# disclosure record carries the selection.
+case "$OUT3" in
+  *'"custody":"redacted-data","fallback_reason":"task_requires_prose","fallback_selected_by":"user","residual_risk":"'*)
+    echo "  ok   and it names its custody, the fallback selection and the residual risk" ;;
+  *) echo "  FAIL the answer does not state its custody and residual risk: $(printf '%s' "$OUT3" | head -c 300)" >&2; fail=1 ;;
+esac
+sel=$(dl "SELECT fallback_reason||'/'||fallback_selected_by FROM disclosure_log ORDER BY occurred_at DESC, rowid DESC LIMIT 1")
+if [ "$sel" = "task_requires_prose/user" ]; then echo "  ok   and the disclosure record carries the fallback selection"
+else echo "  FAIL the disclosure record's fallback selection is '$sel'" >&2; fail=1; fi
+# A request that does not select the fallback is refused before anything is scanned or sent.
+: > "$SEEN"
+rows_unsel=$(dl "SELECT COUNT() FROM disclosure_log")
+OUTU=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
+        -d "{\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+case "$OUTU" in
+  *'"fallback_unselected":true'*'"no_custody":"/api/artifact"'*) echo "  ok   an unselected fallback is refused and pointed at the no-custody path" ;;
+  *) echo "  FAIL an unselected fallback was not refused: $(printf '%s' "$OUTU" | head -c 200)" >&2; fail=1 ;;
+esac
+if [ -s "$SEEN" ]; then echo "  FAIL the model received an unselected fallback request" >&2; fail=1; fi
+if [ "$(dl "SELECT COUNT() FROM disclosure_log")" = "$rows_unsel" ]; then echo "  ok   and it wrote no disclosure record"
+else echo "  FAIL an unselected fallback wrote a disclosure record" >&2; fail=1; fi
+
 # T10.1: with the per-provider kill switch engaged for ollama, the same request is refused
 # with the fallback message and nothing reaches the model. The row is written as
 # killswitch.engageprovider writes it.
 : > "$SEEN"
 sqlite3 "$DB" "INSERT OR REPLACE INTO settings (key,value,value_type,namespace,updated_at) VALUES ('governance.kill_switch.provider.ollama','true','bool','governance',datetime('now'))"
 OUT4=$(curl -s -m 40 -X POST -H 'Content-Type: application/json' \
-        -d "{\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
+        -d "{\"fallback_reason\":\"task_requires_prose\",\"fallback_selected_by\":\"user\",\"text\":\"hello there, please write to $EMAIL\"}" http://127.0.0.1:11430/api/pipeline)
 case "$OUT4" in
   *'"provider_blocked":true'*) echo "  ok   with ollama switched off, the request is refused with the fallback message" ;;
   *) echo "  FAIL a switched-off provider was not refused: $(printf '%s' "$OUT4" | head -c 200)" >&2; fail=1 ;;
