@@ -1,0 +1,89 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.optimiser.tooncodec;
+
+i=t:std.test;
+i=str:std.str;
+i=toon:core.optimiser.toon;
+
+(* MK6.7 — core.optimiser.toon's jsontotoon and toontojson, the codec mcp-toke's compress and
+   decompress call. They went through $toonvalue, which keeps only the kind of a value, so every
+   JSON object or array encoded to `~` and mcp-toke answered `{"toon":"~","savings_pct":94}` for
+   `[{"a":1},{"a":2}]`.
+
+   Each case is a ROUND TRIP: the TOON written for a JSON input is asserted exactly, and decoding
+   it must give back the input without its insignificant whitespace, byte for byte. Then the
+   shapes the codec does not encode must be refused with a reason, and malformed TOON must not
+   decode. *)
+
+f=trip(json:str;want:str;back:str;what:str):i64{
+  let enc=toon.jsontotoon(json;toon.defaultopts());
+  let dec=toon.toontojson(enc);
+  let a=t.asserteq(enc;want;"\(what): encodes to the expected TOON");
+  let b=t.asserteq(dec;back;"\(what): and decodes back to the input");
+  if(a && b){ <0 }el{ <1 }
+};
+
+f=refused(json:str;why:str;what:str):i64{
+  let p=toon.encodejson(json);
+  let a=t.assert(!toon.isencoded(p) && str.len(p.text)==0;"\(what): is refused, not approximated");
+  let b=t.assert(str.contains(p.failure;why);"\(what): and the refusal says why");
+  let c=t.assert(!toon.isconverted(toon.jsontotoon(json;toon.defaultopts()));"\(what): and jsontotoon answers the not-converted sentinel");
+  if(a && b && c){ <0 }el{ <1 }
+};
+
+f=undecodable(toonstr:str;why:str;what:str):i64{
+  let p=toon.decodetoon(toonstr);
+  let a=t.assert(!toon.isencoded(p);"\(what): does not decode");
+  let b=t.assert(str.contains(p.failure;why);"\(what): and the refusal says why");
+  let c=t.assert(!toon.isconverted(toon.toontojson(toonstr));"\(what): and toontojson answers the not-converted sentinel");
+  if(a && b && c){ <0 }el{ <1 }
+};
+
+f=main():i64{
+  let fail=mut.0;
+
+  (* The input MK6.6 found answering `~`. *)
+  fail=fail+trip("[{\"a\":1},{\"a\":2}]";"[2]{a}:\n  1\n  2";"[{\"a\":1},{\"a\":2}]";"a two-row array of objects");
+
+  fail=fail+trip("{\"name\":\"test\",\"n\":42}";"name: test\nn: 42";"{\"name\":\"test\",\"n\":42}";"a flat object");
+
+  fail=fail+trip(" {\n \"users\" : [ {\"id\":1,\"name\":\"Alice Smith\",\"ok\":true} , {\"id\":2,\"name\":\"Bob, Jr.\",\"ok\":null} ],\n \"tags\":[\"x\",\"y z\"], \"none\":[] }\n";"users[2]{id,name,ok}:\n  1,Alice Smith,true\n  2,\"Bob, Jr.\",null\ntags[2]: x,y z\nnone[0]:";"{\"users\":[{\"id\":1,\"name\":\"Alice Smith\",\"ok\":true},{\"id\":2,\"name\":\"Bob, Jr.\",\"ok\":null}],\"tags\":[\"x\",\"y z\"],\"none\":[]}";"an object holding a table, a list and an empty list, written with whitespace");
+
+  fail=fail+trip("[\"\",\" pad\",\"true\",\"42\",\"-x\",\"a:b\",\"q\\\"uote\",\"line\\nbreak\",\"plain words\"]";"[9]: \"\",\" pad\",\"true\",\"42\",\"-x\",\"a:b\",\"q\\\"uote\",\"line\\nbreak\",plain words";"[\"\",\" pad\",\"true\",\"42\",\"-x\",\"a:b\",\"q\\\"uote\",\"line\\nbreak\",\"plain words\"]";"strings TOON must quote, and one it need not");
+
+  fail=fail+trip("[0,-1.50,3,true,false,null]";"[6]: 0,-1.50,3,true,false,null";"[0,-1.50,3,true,false,null]";"numbers as written, and the literals");
+
+  fail=fail+trip("{\"first name\":\"x\",\"a.b\":\"y\",\"_k2\":\"z\"}";"\"first name\": x\na.b: y\n_k2: z";"{\"first name\":\"x\",\"a.b\":\"y\",\"_k2\":\"z\"}";"keys, quoted only when they are not identifiers");
+
+  fail=fail+trip("\"hello world\"";"hello world";"\"hello world\"";"a single string");
+  fail=fail+trip("42";"42";"42";"a single number");
+  fail=fail+trip("[]";"[0]:";"[]";"an empty array");
+
+  (* The shapes it does not encode are refused by name. *)
+  fail=fail+refused("{\"a\":{\"b\":1}}";"nested object";"a nested object");
+  fail=fail+refused("[[1,2]]";"array of arrays";"an array of arrays");
+  fail=fail+refused("[{\"a\":1},{\"b\":2}]";"keys differ";"rows with different keys");
+  fail=fail+refused("[{\"a\":1,\"b\":2},{\"b\":2,\"a\":1}]";"different order";"rows with the same keys in another order");
+  fail=fail+refused("[1,{\"a\":1}]";"mixing";"an array mixing values and objects");
+  fail=fail+refused("{}";"empty object";"an empty object");
+  fail=fail+refused("[1e5]";"exponent";"a number in exponent form");
+  fail=fail+refused("[\"caf\\u00e9\"]";"escape";"a \\u escape");
+  fail=fail+refused("{not json";"not JSON";"text that is not JSON");
+  fail=fail+refused("[1,2";"not JSON";"a truncated array");
+  fail=fail+refused("[1] 2";"not JSON";"JSON followed by more text");
+  fail=fail+refused("";"empty";"empty input");
+
+  (* Malformed TOON does not decode. *)
+  fail=fail+undecodable("[3]: 1,2";"count";"a list shorter than its count");
+  fail=fail+undecodable("[2]{a}:\n  1";"fewer rows";"a table shorter than its count");
+  fail=fail+undecodable("[1]{a,b}:\n  1";"row";"a row with fewer cells than fields");
+  fail=fail+undecodable("[1]{a}:\n   1";"row";"a row indented too far");
+  fail=fail+undecodable("a:\n  b: 1";"nested object";"a nested object");
+  fail=fail+undecodable("HDR[a|b]";"count";"the classifier's old table header");
+  fail=fail+undecodable("[1]: 42abc,";"count";"stray text after a value");
+  fail=fail+undecodable("k: a:b";"not TOON";"a bare value TOON would have quoted");
+
+  <fail
+};

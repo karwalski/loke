@@ -134,6 +134,10 @@ api POST /api/ml/propose '{"num_cols":["revenue","orders","ltv"],"cat_cols":["re
 api GET  /api/mcp/tools  ""                              200 '"name":"anonymise"'    "the MCP panel lists mcp-toke's tools"
 api POST /api/mcp/invoke '{}'                            400 'tool_name is required' "invoking needs a tool name"
 api POST /api/mcp/invoke '{"tool_name":"nosuchtool","args":{}}' 200 'unknown tool: nosuchtool' "and an unknown tool is reported as one"
+# MK6.7: compress answered {"toon":"~","savings_pct":94} for this input. It must carry both rows
+# as TOON's table and measure the saving from the two lengths (17 characters to 15, 11%).
+api POST /api/mcp/invoke '{"tool_name":"compress","args":{"json":"[{\"a\":1},{\"a\":2}]"}}' 200 '[2]{a}:' "compress writes the two rows as a TOON table, not ~"
+api POST /api/mcp/invoke '{"tool_name":"compress","args":{"json":"[{\"a\":1},{\"a\":2}]"}}' 200 'toon_chars\\\":15,\\\"savings_pct\\\":11,' "and measures the saving from the lengths, 17 characters to 15"
 api GET  /api/mcp/broker ""                              200 '"name":"loke-memory"'  "the broker panel lists its servers"
 api GET  /api/mcp/memory ""                              200 '"available_tools":["memory.search"' "the memory panel lists its tools"
 api POST /api/mcp/memory '{"tool_name":"memory.diary_write","args":{"agent_id":"smoke","entry":"hello"}}' 200 '"success":true,"result_preview":"{\"ok\":true}"' "a memory tool runs and succeeds"
@@ -150,13 +154,14 @@ api GET  '/api/agents/diary?agent_id=nosuchagent' ""    404 'agent not found: no
 
 # MK6.6: state shared across moke's pre-forked workers. Each worker used to keep its own copy,
 # and eight reads after six invocations reported 0,0,0,1,0,0,1,1. Every read must now see all of
-# them: the nosuchtool invocation above and five more here; the five memory calls above.
+# them: the nosuchtool and two compress invocations above and five more here (MK6.7 added the
+# compress pair); the five memory calls above.
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -m 20 -X POST -H 'Content-Type: application/json' \
     -d '{"tool_name":"nosuchtool","args":{}}' "http://127.0.0.1:$PORT/api/mcp/invoke"
 done
 for i in 1 2 3 4 5 6 7 8; do
-  api GET /api/mcp/tools  "" 200 '"total_invocations":6}' "read $i of the tool log sees all six invocations"
+  api GET /api/mcp/tools  "" 200 '"total_invocations":8}' "read $i of the tool log sees all eight invocations"
   api GET /api/mcp/memory "" 200 '"total_invocations":5}' "read $i of the memory log sees all five calls"
   api GET '/api/agents/diary?agent_id=data-quality-scanner' "" 200 '"total_runs":1,' "read $i of the scanner sees its run"
   api GET /api/agents     "" 200 '"output_summary":"2 changes: 1 added, 1 removed' "read $i of the agents panel sees the schema run"

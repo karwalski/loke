@@ -1113,11 +1113,10 @@ because it will be wrong again tomorrow: the census is generated, a prose list i
 - updater.tk
 - verbose.tk
 
-### packages/mcp-toke/src/ (4 untested of 4)
+### packages/mcp-toke/src/ (3 untested of 4)
 
 - main.tk
 - server.tk
-- tools.tk
 - transport.tk
 
 ### packages/mcp-broker/src/ (6 untested of 6)

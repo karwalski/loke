@@ -6,10 +6,45 @@ m=core.optimiser.toon;
 i=str:std.str;
 i=json:std.json;
 i=tt:core.optimiser.toontypes;
+i=jx:shared.jsonobj;
 
 (* LS1.1x: what fromjsonstr and decode answer; see isparsed. *)
 t=$toonparsed{
   tvalue:$toonvalue;
+  failure:str
+};
+
+(* MK6.7: the codec's working values; see the codec section below encodetable. A JSON token
+   (`kind` is one of the jk* codes, `text` a string's body as written or a bare word), a token
+   list, one converted piece and the next token or line after it, a tabular row, and a
+   tabular header. A non-empty `failure` means the value is not to be used. *)
+t=$jtok{
+  kind:i64;
+  text:str
+};
+
+t=$jtoks{
+  toks:@$jtok;
+  failure:str
+};
+
+t=$jpart{
+  text:str;
+  next:i64;
+  failure:str
+};
+
+t=$jrow{
+  keys:@str;
+  cells:str;
+  next:i64;
+  failure:str
+};
+
+t=$jhead{
+  count:i64;
+  fields:@str;
+  rest:str;
   failure:str
 };
 
@@ -132,6 +167,10 @@ f=encodebool(v:bool):str{
 
 (* GA1.5 — READ THIS BEFORE WIRING toon.encode INTO ANYTHING.
 
+   (MK6.7: jsontotoon and toontojson no longer go through encode and decode; they are the codec
+   further down, which reads the JSON text and carries every value. What follows is still true
+   of encode, decode and $toonvalue.)
+
    This is not a codec. It is a type-tag classifier, and it cannot be made into a codec
    without changing $toonvalue.
 
@@ -153,8 +192,9 @@ f=encodebool(v:bool):str{
    needs to enumerate an object's keys, and the typed std.json API is entirely KEYED —
    json.str(Json, key) — with no key enumeration. Neither route is available today.
 
-   tests/integration/test_toon_roundtrip.tk does not catch any of this: its round-trip
-   assertion checks only that the output is non-empty, which "~" satisfies. *)
+   tests/integration/test_toon_roundtrip.tk did not catch any of this: its round-trip
+   assertion checks only that the output is non-empty, which "~" satisfies. MK6.7's
+   tests/unit/optimiser/test_toon_codec.tk asserts the TOON and the round trip exactly. *)
 f=encodeinner(val:$toonvalue;opts:$toonopts;nested:bool):str{
   <mt val {
     $tvnull:v "~";
@@ -179,13 +219,13 @@ f=encodetable(rows:@$toonvalue;opts:$toonopts):str{
   }
 };
 
-(* LS1.1x. "" when the input is not JSON; encode never answers "" for a value (its smallest
-   outputs are "~", "y", "n" and "0"), so isconverted reads the sentinel. It was
-   str!$lokeerr, which a caller could not see fail (T-18). *)
+(* The TOON for a JSON text, or "" when it is not JSON or has a shape the codec below refuses;
+   encodejson says why. A TOON document this codec writes is never empty, so isconverted reads
+   the sentinel (LS1.1x: it was str!$lokeerr, which a caller could not see fail, T-18). Until
+   MK6.7 it went through encode, and answered "~" for every object and array. `opts` is
+   unused: nothing is truncated or abbreviated, because the output must decode to the input. *)
 f=jsontotoon(rawjson:str;opts:$toonopts):str{
-  let p=fromjsonstr(rawjson);
-  if(!isparsed(p)){ <"" }el{};
-  <encode(p.tvalue;opts)
+  <encodejson(rawjson).text
 };
 
 f=isconverted(s:str):bool{
@@ -334,12 +374,11 @@ f=toonvaltojson(val:$toonvalue):str{
   }
 };
 
-(* LS1.1x. "" when the TOON did not decode; a decoded value always has non-empty JSON, so
-   isconverted reads the sentinel. It was str!$lokeerr (T-18). *)
+(* The JSON for a TOON text, or "" when it did not decode; decodetoon says why. Decoded JSON is
+   never empty, so isconverted reads the sentinel (LS1.1x, T-18). Until MK6.7 it went through
+   decode, which kept only the kind of the value: `[]`, `{}` or `""` for anything structured. *)
 f=toontojson(toonstr:str):str{
-  let d=decode(toonstr);
-  if(!isparsed(d)){ <"" }el{};
-  <toonvaltojson(d.tvalue)
+  <decodetoon(toonstr).text
 };
 
 (* A CHARACTER ratio, not a token saving, and it must never be reported as one.
@@ -390,4 +429,658 @@ f=measuresavingsbp(originaljson:str;toonstr:str):i64{
 (* Kept for callers inside this module, where the f64 return is intact. *)
 f=measuresavings(originaljson:str;toonstr:str):f64{
   <(measuresavingsbp(originaljson;toonstr) as f64)/100.0
+};
+
+(* ── MK6.7: a TOON codec that carries the values ──────────────────────────────────
+   jsontotoon and toontojson went through $toonvalue, which records only the KIND of a value
+   (see the GA1.5 note above encodeinner), so every JSON object or array came out as `~`, and
+   mcp-toke's `compress` answered `{"toon":"~","savings_pct":94}` for `[{"a":1},{"a":2}]`: a
+   94% "saving" measured against a tilde. The note is right that $toonvalue cannot become a
+   codec at this pin. This one does not use it: it reads the JSON text itself, token by token,
+   and writes TOON (toon-format/toon) from the tokens, so no value is ever held in a type that
+   cannot carry it.
+
+   What it encodes, and it refuses everything else by name rather than approximating:
+     - a single value:                          42      true      "x y"      null
+     - an object whose values are single values or arrays below, one `key: value` per line
+     - an array of single values:               [3]: 1,2,3        tags[2]: a,b
+     - an array of objects that all have the same keys in the same order, each holding
+       single values (TOON's tabular form):     [2]{a}:  then one indented row per object
+     - an empty array:                          [0]:
+   Refused: a nested object, an array of arrays, an array mixing objects with values, rows
+   whose keys differ, an empty object (TOON writes it as an empty document, which this module
+   uses to mean "not converted"), a number in exponent form (TOON writes numbers in decimal),
+   and a string escape TOON cannot carry (TOON has \" \\ \n \r \t; JSON also has \/ \b \f and
+   \uXXXX).
+
+   Numbers and strings are carried AS WRITTEN: a string's escapes pass through unchanged,
+   because TOON's five escapes are JSON's, and 1.50 stays 1.50. So decoding what this encodes
+   gives back the input minus its insignificant whitespace, byte for byte; that is what
+   tests/unit/optimiser/test_toon_codec.tk asserts. A string is quoted when TOON requires it
+   (empty, padded, true/false/null, starting with a digit or `-`, or holding : " \ [ ] { } or
+   a comma) and otherwise written bare.
+
+   toontojson decodes the forms above and nothing else, and it is strict: a row count or a
+   cell count that disagrees with its header, an indentation other than two spaces, or a bare
+   value that TOON would have quoted is refused. A failure never quotes the input, which may
+   hold anything. *)
+
+f=jfail(why:str):$jtoks{
+  <$jtoks{toks:@();failure:why}
+};
+
+f=partfail(why:str):$jpart{
+  <$jpart{text:"";next:0;failure:why}
+};
+
+f=rowfail(why:str):$jrow{
+  <$jrow{keys:@();cells:"";next:0;failure:why}
+};
+
+f=headfail(why:str):$jhead{
+  <$jhead{count:0;fields:@();rest:"";failure:why}
+};
+
+f=isencoded(p:$jpart):bool{
+  <str.len(p.failure)==0
+};
+
+f=isdigitc(c:i64):bool{
+  <c>=48 && c<=57
+};
+
+f=iswsc(c:i64):bool{
+  <c==32 || c==9 || c==10 || c==13
+};
+
+(* 1 { 2 } 3 [ 4 ] 5 : 6 , and 0 for anything else. *)
+f=punctkind(c:i64):i64{
+  if(c==123){ <1 }el{};
+  if(c==125){ <2 }el{};
+  if(c==91){ <3 }el{};
+  if(c==93){ <4 }el{};
+  if(c==58){ <5 }el{};
+  if(c==44){ <6 }el{};
+  <0
+};
+
+(* 7 string, 8 number, 9 true, 10 false, 11 null: the single values. *)
+f=isprimkind(kind:i64):bool{
+  <kind>=7
+};
+
+f=tokat(toks:@$jtok;i:i64):$jtok{
+  if(i>=(toks.len as i64)){ <$jtok{kind:0;text:""} }el{};
+  <toks.get(i)
+};
+
+f=digitsend(s:str;n:i64;from:i64):i64{
+  let k=mut.from;
+  lp(let g=0;k<n;g=g){
+    if(isdigitc(str.charat(s;k))){ k=k+1 }el{ <k }
+  };
+  <k
+};
+
+f=charis(s:str;n:i64;k:i64;c:i64):bool{
+  if(k>=n){ <false }el{};
+  <str.charat(s;k)==c
+};
+
+(* JSON's number grammar: an optional minus; 0, or a digit 1-9 followed by digits; optionally a
+   point and one or more digits; optionally e or E, an optional sign and one or more digits. *)
+f=isjsonnumber(s:str):bool{
+  let n=str.len(s) as i64;
+  let k=mut.0;
+  if(charis(s;n;0;45)){ k=1 }el{};
+  if(k>=n){ <false }el{};
+  if(!isdigitc(str.charat(s;k))){ <false }el{};
+  if(str.charat(s;k)==48){ k=k+1 }el{ k=digitsend(s;n;k) };
+  if(charis(s;n;k;46)){
+    let fe=digitsend(s;n;k+1);
+    if(fe==k+1){ <false }el{};
+    k=fe
+  }el{};
+  if(charis(s;n;k;101) || charis(s;n;k;69)){
+    let j=mut.k+1;
+    if(charis(s;n;j;43) || charis(s;n;j;45)){ j=j+1 }el{};
+    let ee=digitsend(s;n;j);
+    if(ee==j){ <false }el{};
+    k=ee
+  }el{};
+  <k==n
+};
+
+(* The index of the quote that closes the string opened at `at`, or -1. *)
+f=strclose(s:str;n:i64;at:i64):i64{
+  let k=mut.at+1;
+  lp(let g=0;k<n;g=g){
+    let c=str.charat(s;k);
+    if(c==92){ k=k+2 }el{
+      if(c==34){ <k }el{ k=k+1 }
+    }
+  };
+  <-1
+};
+
+(* "" when a JSON string body can be written in TOON unchanged, or why it cannot. *)
+f=bodyproblem(b:str):str{
+  let n=str.len(b) as i64;
+  let k=mut.0;
+  lp(let g=0;k<n;g=g){
+    let c=str.charat(b;k);
+    if(c>=0 && c<32){ <"a string holding a raw control character, which is not JSON" }el{};
+    if(c==92){
+      if(k+1>=n){ <"input is not JSON" }el{};
+      let e=str.charat(b;k+1);
+      if(e==34 || e==92 || e==110 || e==114 || e==116){ k=k+2 }el{
+        <"a string escape TOON cannot carry (TOON has only \\\" \\\\ \\n \\r \\t)"
+      }
+    }el{ k=k+1 }
+  };
+  <""
+};
+
+(* The end of a bare word: the first whitespace, punctuation or quote at or after `from`. *)
+f=wordend(s:str;n:i64;from:i64):i64{
+  let k=mut.from;
+  lp(let g=0;k<n;g=g){
+    let c=str.charat(s;k);
+    if(iswsc(c) || punctkind(c)>0 || c==34){ <k }el{ k=k+1 }
+  };
+  <k
+};
+
+f=wordkind(w:str):i64{
+  if(str.eq(w;"true")){ <9 }el{};
+  if(str.eq(w;"false")){ <10 }el{};
+  if(str.eq(w;"null")){ <11 }el{};
+  if(isjsonnumber(w)){ <8 }el{};
+  <0
+};
+
+f=jsontokens(raw:str):$jtoks{
+  let n=str.len(raw) as i64;
+  let toks=mut.@($jtok);
+  let k=mut.0;
+  lp(let g=0;k<n;g=g){
+    let c=str.charat(raw;k);
+    let pk=punctkind(c);
+    if(iswsc(c)){ k=k+1 }el{
+      if(pk>0){
+        toks=toks.push($jtok{kind:pk;text:""});
+        k=k+1
+      }el{
+        if(c==34){
+          let close=strclose(raw;n;k);
+          if(close<0){ <jfail("input is not JSON") }el{};
+          let body=jx.sliceor(raw;k+1;close);
+          let why=bodyproblem(body);
+          if(str.len(why)>0){ <jfail(why) }el{};
+          toks=toks.push($jtok{kind:7;text:body});
+          k=close+1
+        }el{
+          let we=wordend(raw;n;k);
+          let word=jx.sliceor(raw;k;we);
+          let wk=wordkind(word);
+          if(wk==0){ <jfail("input is not JSON") }el{};
+          if(wk==8 && (str.contains(word;"e") || str.contains(word;"E"))){ <jfail("a number in exponent form (TOON writes numbers in decimal)") }el{};
+          toks=toks.push($jtok{kind:wk;text:word});
+          k=we
+        }
+      }
+    }
+  };
+  <$jtoks{toks:toks;failure:""}
+};
+
+(* The input with its insignificant whitespace removed, or "" when it is not JSON this codec
+   reads. What toontojson gives back for what jsontotoon wrote. *)
+f=jsonminified(raw:str):str{
+  let t=jsontokens(raw);
+  if(str.len(t.failure)>0){ <"" }el{};
+  let out=mut."";
+  lp(let i=0;i<t.toks.len;i=i+1){
+    out=str.concat(out;tokjson(t.toks.get(i)))
+  };
+  <out
+};
+
+f=tokjson(tk:$jtok):str{
+  if(tk.kind==1){ <"{" }el{};
+  if(tk.kind==2){ <"}" }el{};
+  if(tk.kind==3){ <"[" }el{};
+  if(tk.kind==4){ <"]" }el{};
+  if(tk.kind==5){ <":" }el{};
+  if(tk.kind==6){ <"," }el{};
+  if(tk.kind==7){ <"\"\(tk.text)\"" }el{};
+  <tk.text
+};
+
+(* TOON quotes a string that is empty, padded, true/false/null, number-like or list-like
+   (a leading digit or `-`), or that holds a colon, quote, backslash, bracket, brace or the
+   comma delimiter. *)
+f=needsquotes(r:str):bool{
+  let n=str.len(r) as i64;
+  if(n==0){ <true }el{};
+  if(str.eq(r;"true") || str.eq(r;"false") || str.eq(r;"null")){ <true }el{};
+  let c0=str.charat(r;0);
+  if(isdigitc(c0) || c0==45 || c0==32){ <true }el{};
+  if(str.charat(r;n-1)==32){ <true }el{};
+  lp(let k=0;k<n;k=k+1){
+    let c=str.charat(r;k);
+    if(c==58 || c==34 || c==92 || c==91 || c==93 || c==123 || c==125 || c==44){ <true }el{}
+  };
+  <false
+};
+
+f=encstr(r:str):str{
+  if(needsquotes(r)){ <"\"\(r)\"" }el{};
+  <r
+};
+
+f=encprim(tk:$jtok):str{
+  if(tk.kind==7){ <encstr(tk.text) }el{};
+  <tk.text
+};
+
+(* A key is written bare when it matches [A-Za-z_][A-Za-z0-9_.]*, and quoted otherwise. *)
+f=iskeyc(c:i64;first:bool):bool{
+  if((c>=65 && c<=90) || (c>=97 && c<=122) || c==95){ <true }el{};
+  if(first){ <false }el{};
+  <isdigitc(c) || c==46
+};
+
+f=plainkey(r:str):bool{
+  let n=str.len(r) as i64;
+  if(n==0){ <false }el{};
+  lp(let k=0;k<n;k=k+1){
+    if(!iskeyc(str.charat(r;k);k==0)){ <false }el{}
+  };
+  <true
+};
+
+f=enckey(r:str):str{
+  if(plainkey(r)){ <r }el{};
+  <"\"\(r)\""
+};
+
+f=samekeys(a:@str;b:@str):bool{
+  if(!(a.len==b.len)){ <false }el{};
+  lp(let i=0;i<a.len;i=i+1){
+    if(!str.eq(a.get(i);b.get(i))){ <false }el{}
+  };
+  <true
+};
+
+f=encprimarray(toks:@$jtok;at:i64;key:str):$jpart{
+  let n=toks.len as i64;
+  let vals=mut.@();
+  let k=mut.at+1;
+  lp(let g=0;k<n;g=g){
+    let v=tokat(toks;k);
+    if(!isprimkind(v.kind)){ <partfail("an array mixing single values with objects or arrays") }el{};
+    vals=vals.push(encprim(v));
+    let sep=tokat(toks;k+1);
+    if(sep.kind==4){
+      <$jpart{text:"\(key)[\(vals.len as i64)]: \(str.join(",";vals))";next:k+2;failure:""}
+    }el{};
+    if(!(sep.kind==6)){ <partfail("input is not JSON") }el{};
+    k=k+2
+  };
+  <partfail("input is not JSON")
+};
+
+(* One object of a tabular array, starting at its `{`. `expect` is the first row's keys; the
+   first row itself passes `first`. *)
+f=encrow(toks:@$jtok;at:i64;expect:@str;first:bool):$jrow{
+  let n=toks.len as i64;
+  let keys=mut.@();
+  let cells=mut.@();
+  if(tokat(toks;at+1).kind==2){ <rowfail("an empty object in an array") }el{};
+  let k=mut.at+1;
+  lp(let g=0;k<n;g=g){
+    let kt=tokat(toks;k);
+    if(!(kt.kind==7)){ <rowfail("input is not JSON") }el{};
+    if(!(tokat(toks;k+1).kind==5)){ <rowfail("input is not JSON") }el{};
+    let v=tokat(toks;k+2);
+    if(!isprimkind(v.kind)){ <rowfail("an array of objects holding nested objects or arrays") }el{};
+    keys=keys.push(enckey(kt.text));
+    cells=cells.push(encprim(v));
+    let sep=tokat(toks;k+3);
+    if(sep.kind==2){
+      if(!first && !samekeys(keys;expect)){ <rowfail("an array of objects whose keys differ, or are in a different order") }el{};
+      <$jrow{keys:keys;cells:str.join(",";cells);next:k+4;failure:""}
+    }el{};
+    if(!(sep.kind==6)){ <rowfail("input is not JSON") }el{};
+    k=k+4
+  };
+  <rowfail("input is not JSON")
+};
+
+(* `fields` are the first row's keys, already written as TOON keys by encrow. *)
+f=tableblock(key:str;fields:@str;rows:@str):str{
+  <"\(key)[\(rows.len as i64)]{\(str.join(",";fields))}:\n  \(str.join("\n  ";rows))"
+};
+
+f=enctable(toks:@$jtok;at:i64;key:str):$jpart{
+  let n=toks.len as i64;
+  let fields=mut.@();
+  let rows=mut.@();
+  let k=mut.at+1;
+  lp(let g=0;k<n;g=g){
+    if(!(tokat(toks;k).kind==1)){ <partfail("an array mixing objects with single values or arrays") }el{};
+    let r=encrow(toks;k;fields;rows.len==0);
+    if(str.len(r.failure)>0){ <partfail(r.failure) }el{};
+    if(rows.len==0){ fields=r.keys }el{};
+    rows=rows.push(r.cells);
+    let sep=tokat(toks;r.next);
+    if(sep.kind==4){
+      <$jpart{text:tableblock(key;fields;rows);next:r.next+1;failure:""}
+    }el{};
+    if(!(sep.kind==6)){ <partfail("input is not JSON") }el{};
+    k=r.next+1
+  };
+  <partfail("input is not JSON")
+};
+
+(* The array whose `[` is token `at`, written under `key` ("" at the root). *)
+f=encarray(toks:@$jtok;at:i64;key:str):$jpart{
+  let first=tokat(toks;at+1);
+  if(first.kind==4){ <$jpart{text:"\(key)[0]:";next:at+2;failure:""} }el{};
+  if(isprimkind(first.kind)){ <encprimarray(toks;at;key) }el{};
+  if(first.kind==1){ <enctable(toks;at;key) }el{};
+  if(first.kind==3){ <partfail("an array of arrays") }el{};
+  <partfail("input is not JSON")
+};
+
+f=encobject(toks:@$jtok):$jpart{
+  let n=toks.len as i64;
+  if(tokat(toks;1).kind==2){ <partfail("an empty object") }el{};
+  let lines=mut.@();
+  let k=mut.1;
+  lp(let g=0;k<n;g=g){
+    let kt=tokat(toks;k);
+    if(!(kt.kind==7)){ <partfail("input is not JSON") }el{};
+    if(!(tokat(toks;k+1).kind==5)){ <partfail("input is not JSON") }el{};
+    let key=enckey(kt.text);
+    let v=tokat(toks;k+2);
+    let next=mut.0;
+    if(isprimkind(v.kind)){
+      lines=lines.push("\(key): \(encprim(v))");
+      next=k+3
+    }el{
+      if(!(v.kind==3)){ <partfail("a nested object") }el{};
+      let a=encarray(toks;k+2;key);
+      if(str.len(a.failure)>0){ <a }el{};
+      lines=lines.push(a.text);
+      next=a.next
+    };
+    let sep=tokat(toks;next);
+    if(sep.kind==2){ <$jpart{text:str.join("\n";lines);next:next+1;failure:""} }el{};
+    if(!(sep.kind==6)){ <partfail("input is not JSON") }el{};
+    k=next+1
+  };
+  <partfail("input is not JSON")
+};
+
+(* The whole conversion, with the reason when there is none. `text` is the TOON. *)
+f=encodejson(raw:str):$jpart{
+  let t=jsontokens(raw);
+  if(str.len(t.failure)>0){ <partfail(t.failure) }el{};
+  let n=t.toks.len as i64;
+  if(n==0){ <partfail("empty input") }el{};
+  let first=tokat(t.toks;0);
+  let r=mut.partfail("input is not JSON");
+  if(isprimkind(first.kind)){
+    r=$jpart{text:encprim(first);next:1;failure:""}
+  }el{
+    if(first.kind==3){ r=encarray(t.toks;0;"") }el{
+      if(first.kind==1){ r=encobject(t.toks) }el{}
+    }
+  };
+  if(str.len(r.failure)>0){ <r }el{};
+  if(!(r.next==n)){ <partfail("input is not JSON") }el{};
+  <r
+};
+
+(* ── Decoding ── *)
+
+(* A cell list split on the commas that are not inside a quoted string. *)
+f=splitcells(s:str):@str{
+  let n=str.len(s) as i64;
+  let out=mut.@();
+  let start=mut.0;
+  let inq=mut.false;
+  let k=mut.0;
+  lp(let g=0;k<n;g=g){
+    let c=str.charat(s;k);
+    if(inq){
+      if(c==92){ k=k+1 }el{
+        if(c==34){ inq=false }el{}
+      }
+    }el{
+      if(c==34){ inq=true }el{
+        if(c==44){
+          out=out.push(jx.sliceor(s;start;k));
+          start=k+1
+        }el{}
+      }
+    };
+    k=k+1
+  };
+  <out.push(jx.sliceor(s;start;n))
+};
+
+(* One TOON value as JSON, or "" when it is not one this codec writes. A quoted TOON string
+   is already a JSON string: the two share their five escapes. *)
+f=decprim(v:str):str{
+  let n=str.len(v) as i64;
+  if(n==0){ <"" }el{};
+  if(str.charat(v;0)==34){
+    if(!(strclose(v;n;0)==n-1)){ <"" }el{};
+    if(str.len(bodyproblem(jx.sliceor(v;1;n-1)))>0){ <"" }el{};
+    <v
+  }el{};
+  if(str.eq(v;"true") || str.eq(v;"false") || str.eq(v;"null")){ <v }el{};
+  if(isjsonnumber(v)){ <v }el{};
+  if(needsquotes(v)){ <"" }el{};
+  <"\"\(v)\""
+};
+
+(* A key as a JSON string, or "". *)
+f=deckey(k:str):str{
+  let n=str.len(k) as i64;
+  if(n==0){ <"" }el{};
+  if(str.charat(k;0)==34){
+    if(!(strclose(k;n;0)==n-1)){ <"" }el{};
+    if(str.len(bodyproblem(jx.sliceor(k;1;n-1)))>0){ <"" }el{};
+    <k
+  }el{};
+  if(!plainkey(k)){ <"" }el{};
+  <"\"\(k)\""
+};
+
+(* The length of the key a line opens with, when a `:` or `[` follows it, or -1. *)
+f=keylen(line:str):i64{
+  let n=str.len(line) as i64;
+  if(n==0){ <-1 }el{};
+  if(str.charat(line;0)==34){
+    let close=strclose(line;n;0);
+    if(close<0){ <-1 }el{};
+    <keyfollowed(line;n;close+1)
+  }el{};
+  let k=mut.0;
+  lp(let g=0;k<n;g=g){
+    if(iskeyc(str.charat(line;k);k==0)){ k=k+1 }el{ <keyfollowed(line;n;k) }
+  };
+  <keyfollowed(line;n;k)
+};
+
+f=keyfollowed(line:str;n:i64;keyend:i64):i64{
+  if(keyend==0){ <-1 }el{};
+  if(charis(line;n;keyend;58) || charis(line;n;keyend;91)){ <keyend }el{};
+  <-1
+};
+
+f=parsecount(s:str):i64{
+  let n=str.len(s) as i64;
+  if(n==0){ <-1 }el{};
+  let v=mut.0;
+  lp(let k=0;k<n;k=k+1){
+    let c=str.charat(s;k);
+    if(!isdigitc(c)){ <-1 }el{};
+    v=v*10+(c-48)
+  };
+  <v
+};
+
+(* The first `}` at or after `from` that is not inside a quoted string, or -1. *)
+f=braceclose(s:str;n:i64;from:i64):i64{
+  let k=mut.from;
+  lp(let g=0;k<n;g=g){
+    let c=str.charat(s;k);
+    if(c==34){
+      let close=strclose(s;n;k);
+      if(close<0){ <-1 }el{};
+      k=close+1
+    }el{
+      if(c==125){ <k }el{ k=k+1 }
+    }
+  };
+  <-1
+};
+
+(* `[N]`, then `{f1,f2}` for a table, then `:`; `rest` is what follows the colon. *)
+f=dechead(h:str):$jhead{
+  let n=str.len(h) as i64;
+  if(!charis(h;n;0;91)){ <headfail("a header that does not open with [") }el{};
+  let close=str.indexof(h;"]");
+  if(close<1){ <headfail("a header with no ]") }el{};
+  let count=parsecount(jx.sliceor(h;1;close));
+  if(count<0){ <headfail("a header whose count is not a number") }el{};
+  let k=mut.close+1;
+  let fields=mut.@();
+  if(charis(h;n;k;123)){
+    let fe=braceclose(h;n;k+1);
+    if(fe<0){ <headfail("a header whose fields are not closed") }el{};
+    let raw=splitcells(jx.sliceor(h;k+1;fe));
+    lp(let i=0;i<raw.len;i=i+1){
+      let fk=deckey(raw.get(i));
+      if(str.len(fk)==0){ <headfail("a header field that is not a key") }el{};
+      fields=fields.push(fk)
+    };
+    k=fe+1
+  }el{};
+  if(!charis(h;n;k;58)){ <headfail("a header with no colon") }el{};
+  <$jhead{count:count;fields:fields;rest:jx.sliceor(h;k+1;n);failure:""}
+};
+
+f=decprimlist(cells:@str):str{
+  let vals=mut.@();
+  lp(let i=0;i<cells.len;i=i+1){
+    let v=decprim(cells.get(i));
+    if(str.len(v)==0){ <"" }el{};
+    vals=vals.push(v)
+  };
+  <str.join(",";vals)
+};
+
+(* One `"key":value` member. The key arrives as a parameter, which types it for the
+   interpolation: an array element does not carry its type and would interpolate as an address. *)
+f=member(k:str;v:str):str{
+  <"\(k):\(v)"
+};
+
+(* A tabular row: two spaces, then one cell per field. "" when it is not one. *)
+f=decrow(line:str;fields:@str):str{
+  if(!str.startswith(line;"  ")){ <"" }el{};
+  let body=jx.sliceor(line;2;str.len(line) as i64);
+  if(str.startswith(body;" ")){ <"" }el{};
+  let cells=splitcells(body);
+  if(!(cells.len==fields.len)){ <"" }el{};
+  let members=mut.@();
+  lp(let i=0;i<cells.len;i=i+1){
+    let v=decprim(cells.get(i));
+    if(str.len(v)==0){ <"" }el{};
+    members=members.push(member(fields.get(i);v))
+  };
+  <"{\(str.join(",";members))}"
+};
+
+(* The array whose header is `head`, on line `at`; its rows, if any, follow it. *)
+f=decarray(lines:@str;at:i64;head:str):$jpart{
+  let h=dechead(head);
+  if(str.len(h.failure)>0){ <partfail(h.failure) }el{};
+  if(h.fields.len==0){
+    if(h.count==0){
+      if(str.len(h.rest)>0){ <partfail("an empty array followed by values") }el{};
+      <$jpart{text:"[]";next:at+1;failure:""}
+    }el{};
+    if(!str.startswith(h.rest;" ")){ <partfail("an array whose values do not follow its colon") }el{};
+    let cells=splitcells(jx.sliceor(h.rest;1;str.len(h.rest) as i64));
+    if(!((cells.len as i64)==h.count)){ <partfail("an array whose count does not match its values") }el{};
+    let vals=decprimlist(cells);
+    if(str.len(vals)==0){ <partfail("a value that is not TOON") }el{};
+    <$jpart{text:"[\(vals)]";next:at+1;failure:""}
+  }el{};
+  if(str.len(h.rest)>0){ <partfail("a table header followed by values") }el{};
+  let rows=mut.@();
+  lp(let r=0;r<h.count;r=r+1){
+    let li=at+1+r;
+    if(li>=(lines.len as i64)){ <partfail("a table with fewer rows than its header counts") }el{};
+    let obj=decrow(lines.get(li);h.fields);
+    if(str.len(obj)==0){ <partfail("a table row that does not match its header") }el{};
+    rows=rows.push(obj)
+  };
+  <$jpart{text:"[\(str.join(",";rows))]";next:at+1+h.count;failure:""}
+};
+
+f=decobject(lines:@str):$jpart{
+  let n=lines.len as i64;
+  let members=mut.@();
+  let li=mut.0;
+  lp(let g=0;li<n;g=g){
+    let line:str=lines.get(li);
+    let kl=keylen(line);
+    if(kl<0){ <partfail("a line that is neither a key nor a table row") }el{};
+    let kj=deckey(jx.sliceor(line;0;kl));
+    if(str.len(kj)==0){ <partfail("a key that is not TOON") }el{};
+    let rest=jx.sliceor(line;kl;str.len(line) as i64);
+    if(str.startswith(rest;"[")){
+      let a=decarray(lines;li;rest);
+      if(str.len(a.failure)>0){ <a }el{};
+      members=members.push(member(kj;a.text));
+      li=a.next
+    }el{
+      if(!str.startswith(rest;": ")){ <partfail("a key with no value on its line (a nested object)") }el{};
+      let v=decprim(jx.sliceor(rest;2;str.len(rest) as i64));
+      if(str.len(v)==0){ <partfail("a value that is not TOON") }el{};
+      members=members.push(member(kj;v));
+      li=li+1
+    }
+  };
+  <$jpart{text:"{\(str.join(",";members))}";next:n;failure:""}
+};
+
+(* The whole decoding, with the reason when there is none. `text` is the JSON. *)
+f=decodetoon(toonstr:str):$jpart{
+  let s=str.trimws(toonstr);
+  if(str.len(s)==0){ <partfail("empty input") }el{};
+  let lines=str.split(s;"\n");
+  let n=lines.len as i64;
+  let l0:str=lines.get(0);
+  if(str.startswith(l0;"[")){
+    let a=decarray(lines;0;l0);
+    if(str.len(a.failure)>0){ <a }el{};
+    if(!(a.next==n)){ <partfail("lines after the root array") }el{};
+    <a
+  }el{};
+  if(keylen(l0)<0){
+    if(!(n==1)){ <partfail("a line that is neither a key nor a table row") }el{};
+    let v=decprim(l0);
+    if(str.len(v)==0){ <partfail("a value that is not TOON") }el{};
+    <$jpart{text:v;next:1;failure:""}
+  }el{};
+  <decobject(lines)
 };

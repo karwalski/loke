@@ -10,6 +10,7 @@ i=t:shared.types;
 i=proto:core.mcp.protocol;
 i=privacy:core.privacy.pipeline;
 i=toon:core.optimiser.toon;
+i=jx:shared.jsonobj;
 i=profiler:core.optimiser.profiler;
 i=json:std.json;
 i=str:std.str;
@@ -46,7 +47,7 @@ f=toolcompress():$mcptool{
   <$mcptool{
     name:"compress";
     description:"Convert JSON data to TOON format for token-efficient LLM context.";
-    inputschema:"{\"type\":\"object\",\"properties\":{\"json\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"table\",\"object\"]}},\"required\":[\"json\"]}"
+    inputschema:"{\"type\":\"object\",\"properties\":{\"json\":{\"type\":\"string\"}},\"required\":[\"json\"]}"
   }
 };
 
@@ -147,40 +148,53 @@ f=handleanonymise(argsjson:str;presidiourl:str;ollamaurl:str):$toolresult{
 };
 
 
-f=handlecompress(argsjson:str):$toolresult{
-  let cid=log.newcorrelationid();
-  let parsed=json.dec(argsjson);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
-  };
-      let rawjson=json.getstr(obj;"json");
-      let format=getstror(obj;"format";"auto");
-      let opts=toon.defaultopts();
-      (* LS1.1x: jsontotoon answers "" on failure, read by isconverted. The match it replaces
-         was on a str!$lokeerr and took its first arm whatever the value (T-18). *)
-      let toonstr=toon.jsontotoon(rawjson;opts);
-      if(!toon.isconverted(toonstr)){
-        <$toolresult{contenttype:"text";text:proto.toolresulterr("compress: failed to convert JSON to TOON");iserror:true}
-      }el{};
-          (* Basis points, not a percentage f64: measuresavings returns a bare f64 and
-             this is another module, so the value arrived as a denormal (T-20). *)
-          let savingsbp=toon.measuresavingsbp(rawjson;toonstr);
-          (* Whole percent from basis points by integer division — the field is named
-             savings_pct and the old code truncated an f64 to i64 for the same reason. *)
-          let savingsint=savingsbp/100;
-          let savingsstr=str.fromint(savingsint);
-          let toonescaped=str.replace(toonstr;"\"";"\\\"");
-          let resultp1=str.concat("{\"toon\":\"";toonescaped);
-          let resultp2=str.concat(resultp1;"\",\"savings_pct\":");
-          let resultjson=str.concat(resultp2;str.concat(savingsstr;"}"));
-          log.info(str.concat("compress: ";str.concat(savingsstr;"% savings"));"mcp-tools";cid);
-          <$toolresult{
-            contenttype:"text";
-            text:proto.toolresultok(resultjson);
-            iserror:false
-          }
+(* MK6.7. compress answered `{"toon":"~","savings_pct":94}` for `[{"a":1},{"a":2}]`: the
+   encoder kept only the kind of each value (see core.optimiser.toon's MK6.7 note), and the
+   saving was measured against the tilde. It now writes real TOON or refuses with the reason,
+   and every figure it reports is a length it measured: the input as sent, the same JSON
+   without its insignificant whitespace, and the TOON. The savings are CHARACTER savings, which
+   are not token savings (docs/claims.md C1), and the one over minified JSON is the one worth
+   reading (docs/metrics-baseline.md: minifying alone already saves). Both are integer percent,
+   truncated, from integer basis points computed where the lengths were (T-20).
 
+   The arguments are read with jx.strvalue: `json.str` drops a backslash and keeps the next
+   character (T-47), so a TOON's `\n` arrived as the letter n and no multi-line TOON could have
+   been decompressed; `json.getstr` is an untyped ABI name. The unused `format` argument is
+   gone from the schema: the encoder picks the form the data has. The TOON is quoted with
+   jx.escape, not json.enc: measured, json.enc leaves a newline raw, and every multi-line TOON
+   made the answer invalid JSON. *)
+f=toolerr(msg:str):$toolresult{
+  <$toolresult{contenttype:"text";text:proto.toolresulterr(msg);iserror:true}
+};
+
+f=compressobj(obj:$json):$toolresult{
+  let cid=log.newcorrelationid();
+  let rawjson=jx.strvalue(obj;"json";"");
+  let enc=toon.encodejson(rawjson);
+  if(!toon.isencoded(enc)){
+    let why=enc.failure;
+    <toolerr("compress: cannot encode \(why)")
+  }el{};
+  let minified=toon.jsonminified(rawjson);
+  let jsonchars=str.len(rawjson) as i64;
+  let minchars=str.len(minified) as i64;
+  let toonchars=str.len(enc.text) as i64;
+  let savingspct=toon.measuresavingsbp(rawjson;enc.text)/100;
+  let minpct=toon.measuresavingsbp(minified;enc.text)/100;
+  let toonjson=jx.escape(enc.text);
+  log.info("compress: \(savingspct)% fewer characters, \(minpct)% against minified JSON";"mcp-tools";cid);
+  <$toolresult{
+    contenttype:"text";
+    text:proto.toolresultok("{\"toon\":\(toonjson),\"json_chars\":\(jsonchars),\"minified_json_chars\":\(minchars),\"toon_chars\":\(toonchars),\"savings_pct\":\(savingspct),\"savings_vs_minified_pct\":\(minpct)}");
+    iserror:false
+  }
+};
+
+f=handlecompress(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj compressobj(obj);
+    $jsonerr:e toolerr("invalid args JSON")
+  }
 };
 
 
@@ -210,29 +224,28 @@ f=handleprofile(argsjson:str):$toolresult{
 };
 
 
-f=handledecompress(argsjson:str):$toolresult{
+(* MK6.7: decodes the TOON compress writes, or refuses with the reason. *)
+f=decompressobj(obj:$json):$toolresult{
   let cid=log.newcorrelationid();
-  let parsed=json.dec(argsjson);
-  let obj=mt parsed {
-    $ok:obj obj;
-    $jsonerr:e $toolresult{contenttype:"text";text:proto.toolresulterr("invalid args JSON");iserror:true}
-  };
-      let toonstr=json.getstr(obj;"toon");
-      (* LS1.1x: toontojson answers "" on failure, read by isconverted (was str!$lokeerr, T-18). *)
-      let recoveredjson=toon.toontojson(toonstr);
-      if(!toon.isconverted(recoveredjson)){
-        <$toolresult{contenttype:"text";text:proto.toolresulterr("decompress: failed to decode TOON");iserror:true}
-      }el{};
-          let jsonescaped=str.replace(recoveredjson;"\"";"\\\"");
-          let resultp1=str.concat("{\"json\":\"";jsonescaped);
-          let resultjson=str.concat(resultp1;"\"}");
-          log.debug("decompress: TOON decoded";"mcp-tools";cid);
-          <$toolresult{
-            contenttype:"text";
-            text:proto.toolresultok(resultjson);
-            iserror:false
-          }
+  let dec=toon.decodetoon(jx.strvalue(obj;"toon";""));
+  if(!toon.isencoded(dec)){
+    let why=dec.failure;
+    <toolerr("decompress: cannot decode \(why)")
+  }el{};
+  let jsontext=jx.escape(dec.text);
+  log.debug("decompress: TOON decoded";"mcp-tools";cid);
+  <$toolresult{
+    contenttype:"text";
+    text:proto.toolresultok("{\"json\":\(jsontext)}");
+    iserror:false
+  }
+};
 
+f=handledecompress(argsjson:str):$toolresult{
+  <mt json.dec(argsjson) {
+    $ok:obj decompressobj(obj);
+    $jsonerr:e toolerr("invalid args JSON")
+  }
 };
 
 
