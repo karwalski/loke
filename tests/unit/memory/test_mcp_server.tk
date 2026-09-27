@@ -8,6 +8,7 @@ i=str:std.str;
 i=file:std.file;
 i=std:std;
 i=json:std.json;
+i=process:std.process;
 i=proto:core.mcp.protocol;
 i=mcpmem:core.memory.mcpserver;
 
@@ -34,11 +35,17 @@ f=call(name:str;args:str;dir:str):$toolresult{
   <mcpmem.handlememorytool(name;args;dir)
 };
 
+(* MK6.11. Validity is judged by Python's json module, which refuses a raw control character
+   inside a string. This used to be a match on json.dec, which accepts one (T-51), so "its answer
+   is JSON" passed while memory.context's newlines went out raw: json.enc escapes a quote and
+   not a newline. *)
 f=isjson(s:str):bool{
-  <mt json.dec(s) {
-    $ok:o true;
-    $jsonerr:e false
-  }
+  let code="import json,sys; json.loads(sys.argv[1]); print('ok')";
+  let h=mt process.spawn(@("python3";"-c";code;s)) { $ok:h h; $err:e @() };
+  if(h == @()){ <false }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  let rc=process.wait(h) as i64;
+  <str.eq(str.trim(out);"ok")
 };
 
 f=main():i64{
@@ -96,6 +103,20 @@ f=main():i64{
   if(t.assert(bad.iserror;"memory.store without content is refused")){pass=pass+1}el{fail=fail+1};
   let st3=call("memory.status";"{}";dir);
   if(t.assert(str.contains(st3.text;"\"total_drawers\":2,");"and writes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* MK6.11: free text with a newline, a tab and quotes, into every answer that carries free
+     text. The content is read with jx.strvalue: json.str turned the escaped newline into the
+     letter n before it was stored (T-47). *)
+  if(t.assert(isjson("{\"a\":\"x\\ny\"}") && !isjson("{\"a\":\"x\ny\"}");"control: the validator takes an escaped newline and refuses a raw one")){pass=pass+1}el{fail=fail+1};
+  let ml=call("memory.store";"{\"content\":\"multiline note\\nsecond line\\twith \\\"quotes\\\"\",\"role\":\"user\"}";dir);
+  if(t.assert(ml.iserror == false && isjson(ml.text);"memory.store takes a multi-line note and answers JSON")){pass=pass+1}el{fail=fail+1};
+  let sr2=call("memory.search";"{\"query\":\"multiline\",\"limit\":5}";dir);
+  if(t.assert(str.contains(sr2.text;"multiline note\\nsecond line\\twith \\\"quotes\\\"");"memory.search gives the note back with its newline, tab and quotes, escaped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isjson(sr2.text);"and its answer is JSON")){pass=pass+1}el{fail=fail+1};
+  let fx2=call("memory.facts";"{\"query\":\"multiline\"}";dir);
+  if(t.assert(fx2.iserror == false && str.contains(fx2.text;"second line") && isjson(fx2.text);"memory.facts' answer holds the note and is JSON")){pass=pass+1}el{fail=fail+1};
+  let cx2=call("memory.context";"{\"task\":\"multiline\",\"token_budget\":2000}";dir);
+  if(t.assert(cx2.iserror == false && str.contains(cx2.text;"\\n") && isjson(cx2.text);"memory.context's multi-line answer is JSON")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };
