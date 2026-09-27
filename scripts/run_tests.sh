@@ -262,7 +262,9 @@ ERRORS=""
 # the product module out and lets the runner in. The pattern has no leading */ so it
 # still matches when run_tests.sh is pointed at a subdirectory and find prints a
 # relative path with no ./ prefix.
-for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not -path '*packages/core/src/privacy/test_harness.tk' | sort); do
+# .claude/ holds agent worktrees, each a whole copy of the repo; discovering their tests ran
+# other branches' work-in-progress as if it were this tree's.
+for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not -path '*/.claude/*' -not -path '*packages/core/src/privacy/test_harness.tk' | sort); do
   NAME=$(basename "$SRC" .tk)
   ORIGDIR=$(pwd)
 

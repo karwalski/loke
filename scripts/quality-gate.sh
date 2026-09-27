@@ -286,7 +286,16 @@ step_checks() {
   # nothing could have revealed that from the repository. So the gate asserts the
   # configuration, not the file.
   echo "  git hooks are installed"
-  if [[ "$(git config --get core.hooksPath 2>/dev/null || true)" != "githooks" ]]; then
+  # An absolute path to a githooks directory is accepted as well as the relative one: the
+  # agent-worktree tooling rewrites core.hooksPath to the main checkout's absolute path so
+  # the hooks run in every worktree, and that is installed, not missing. What is checked is
+  # that the configured directory is a githooks directory holding this repo's hooks.
+  hookspath="$(git config --get core.hooksPath 2>/dev/null || true)"
+  hooksok=0
+  if [[ "$hookspath" == "githooks" ]]; then hooksok=1; fi
+  if [[ "$hookspath" == /*/githooks && -d "$hookspath" ]] \
+     && diff -rq "$hookspath" githooks >/dev/null 2>&1; then hooksok=1; fi
+  if [[ "$hooksok" -ne 1 ]]; then
     echo "    core.hooksPath is not set to githooks — run scripts/install-hooks.sh" >&2
     echo "    A hook that is not installed is documentation. X4.2 shipped as exactly that." >&2
     failed=1
