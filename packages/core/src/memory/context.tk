@@ -106,11 +106,24 @@ f=buildpalacemap(walkstr:str):str{
   <str.concat("PALACE: ";mapbody)
 };
 
+(* MK6.8. The three loaders matched `X!$lokeerr` results (pal.walk here, search.search in L2
+   and L3), and such a match takes its first arm whatever the value is (T-18): a palace that
+   could not be read was mapped from the error payload, and a failed search was indistinguishable
+   from one that found nothing. Each now answers a sentinel its caller can read, and
+   loadcontext leaves a layer that failed out of `layersloaded`, which is the field that says
+   how much of the palace was consulted.
+
+   loadl1 answers "" when the palace could not be walked; a map it built always starts
+   "PALACE: ". *)
 f=loadl1(palace:i64;level:$compresslevel):str{
-  <mt pal.walk(palace) {
-    $ok:walkstr buildpalacemap(walkstr);
-    $err:e "PALACE: (unavailable)"
-  }
+  let walkstr=pal.walk(palace);
+  if(pal.iswalked(walkstr)){ <buildpalacemap(walkstr) }el{};
+  log.warn("L1 context load failed -- the palace could not be walked";"context";"system");
+  <""
+};
+
+f=unavailablel1():str{
+  <"PALACE: (unavailable)"
 };
 
 f=formatl2results(results:@$searchresult;level:$compresslevel):str{
@@ -146,28 +159,17 @@ f=formatl2results(results:@$searchresult;level:$compresslevel):str{
   }
 };
 
-f=loadl2warn():str{
-  log.warn("L2 context load failed -- search error";"context";"system");
-  <""
+(* L2 and L3 answer the search itself; search.succeeded says whether it ran. *)
+f=loadl2(palace:i64;taskdescription:str):$searchfound{
+  let r=search.search(palace;taskdescription;5);
+  if(!search.succeeded(r)){ log.warn("L2 context load failed -- search error";"context";"system") }el{};
+  <r
 };
 
-f=loadl2(palace:i64;taskdescription:str;level:$compresslevel):str{
-  <mt search.search(palace;taskdescription;5) {
-    $ok:results formatl2results(results;level);
-    $err:e loadl2warn()
-  }
-};
-
-f=loadl3warn():@$searchresult{
-  log.warn("L3 deep search failed";"context";"system");
-  <@()
-};
-
-f=loadl3(palace:i64;query:str;limit:u32):@$searchresult{
-  <mt search.search(palace;query;limit) {
-    $ok:results results;
-    $err:e loadl3warn()
-  }
+f=loadl3(palace:i64;query:str;limit:u32):$searchfound{
+  let r=search.search(palace;query;limit);
+  if(!search.succeeded(r)){ log.warn("L3 deep search failed";"context";"system") }el{};
+  <r
 };
 
 (* Delegates to shared.types.esttokens — one estimator, so a budget and a context window
@@ -190,19 +192,25 @@ f=loadcontext(palace:i64;taskdesc:str;username:str;tokenbudget:u32):$loadedconte
      the same struct disagreed, and the one a human reads was the wrong one. *)
   let layersloaded=mut.@("L0");
 
-  let l1=loadl1(palace;level);
+  let l1=mut.loadl1(palace;level);
+  if(str.len(l1) > 0){
+    layersloaded=layersloaded.push("L1")
+  }el{
+    l1=unavailablel1()
+  };
   let l1tokens=estimatetokens(l1);
-  layersloaded=layersloaded.push("L1");
 
   let usedtokens=mut.l0tokens + l1tokens;
 
   let l2budget=500;
   let l2=mut."";
   if(tokenbudget > usedtokens + l2budget){
-    l2=loadl2(palace;taskdesc;level);
-    let l2actual=estimatetokens(l2);
-    usedtokens=usedtokens + l2actual;
-    layersloaded=layersloaded.push("L2")
+    let r2=loadl2(palace;taskdesc);
+    if(search.succeeded(r2)){
+      l2=formatl2results(r2.results;level);
+      usedtokens=usedtokens + estimatetokens(l2);
+      layersloaded=layersloaded.push("L2")
+    }el{}
   }el{};
 
   let l3=mut.@($searchresult);
@@ -211,8 +219,11 @@ f=loadcontext(palace:i64;taskdesc:str;username:str;tokenbudget:u32):$loadedconte
     remaining=tokenbudget - usedtokens
   }el{};
   if(remaining > 200){
-    l3=loadl3(palace;taskdesc;remaining / 50);
-    layersloaded=layersloaded.push("L3")
+    let r3=loadl3(palace;taskdesc;remaining / 50);
+    if(search.succeeded(r3)){
+      l3=r3.results;
+      layersloaded=layersloaded.push("L3")
+    }el{}
   }el{};
 
 

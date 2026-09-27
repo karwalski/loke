@@ -73,67 +73,68 @@ f=openok(datadir:str):bool{
 };
 
 
-f=listwings(palace:$palace):@str!$lokeerr{
-  let rows=mt db.many("SELECT DISTINCT wing FROM memory_drawers ORDER BY wing";@()) {
-    $ok:rows rows;
-    $err:e $err($storageerr("failed to query wings"))
-  };
-  (* `.push` RETURNS the new array — it does not mutate in place, and a callee cannot
-     mutate a caller's value either. Both pushes here discarded their result, so
-     listwings returned an empty array whatever the database held and whatever
-     defaultwings() supplied, and every caller saw a memory palace with no wings.
-     listhalls and listrooms below were written the same way. *)
-  let dbwings=mut.@();
+(* MK6.8. The three listings and walk answered `X!$lokeerr`, and every match on that takes its
+   first arm whatever the value is (T-18): walk's own match on listwings, and context.loadl1's
+   on walk, read a failed query as a list of wings and a palace map. They now answer a
+   `$namelist` whose `failure` is empty when the list is real (`islisted` reads it), and walk
+   answers "" when it could not read the palace (`iswalked` reads that): a palace that can be
+   read always has at least the four default wings, so a real walk is never empty. *)
+f=islisted(n:$namelist):bool{
+  <str.len(n.failure)==0
+};
+
+f=iswalked(s:str):bool{
+  <str.len(s)>0
+};
+
+(* `.push` RETURNS the new array — it does not mutate in place, and a callee cannot mutate a
+   caller's value either. The pushes in the original listings discarded their result, so
+   listwings returned an empty array whatever the database held and whatever defaultwings()
+   supplied, and every caller saw a memory palace with no wings. *)
+f=namesof(sql:str;params:@str;column:str;what:str):$namelist{
+  <mt db.many(sql;params) {
+    $ok:rows namesfromrows(rows;column);
+    $err:e $namelist{names:@();failure:"failed to query \(what)"}
+  }
+};
+
+f=namesfromrows(rows:@$row;column:str):$namelist{
+  let names=mut.@();
   lp(let ii=0;ii<rows.len;ii=ii+1){
     let row:$row=rows.get(ii);
-    dbwings=dbwings.push(sdb.rowstr(row;"wing"))
+    names=names.push(sdb.rowstr(row;column))
   };
-  let defaults=memtypes.defaultwings();
+  <$namelist{names:names;failure:""}
+};
 
+f=listwings(palace:$palace):$namelist{
+  let stored=namesof("SELECT DISTINCT wing FROM memory_drawers ORDER BY wing";@();"wing";"wings");
+  if(!islisted(stored)){ <stored }el{};
+  let dbwings=stored.names;
+  let defaults=memtypes.defaultwings();
   let allwings=mut.dbwings;
   lp(let ii=0;ii<defaults.len;ii=ii+1){ let w=defaults.get(ii);
     let already=mut.false;
-    lp(let jj=0;jj<dbwings.len;jj=jj+1){       if(str.eq(dbwings.get(jj);w.name)){
-        already=true
-      }el{};
+    lp(let jj=0;jj<dbwings.len;jj=jj+1){
+      if(str.eq(dbwings.get(jj);w.name)){ already=true }el{}
     };
-    if(!already){
-      allwings=allwings.push(w.name)
-    }el{};
+    if(!already){ allwings=allwings.push(w.name) }el{}
   };
-  <$ok(allwings)
+  <$namelist{names:allwings;failure:""}
 };
 
 
 (* The parameter array was written `@($wing)` — the `$` sigil makes that a type
    reference, not the local `wing`, so the bound parameter was not the wing asked for and
    listhalls returned the halls of nothing. The identical defect is documented in
-   memory/privacy.tk:208-210. The discarded `.push` is the same defect as in listwings. *)
-f=listhalls(palace:$palace;wing:str):@str!$lokeerr{
-  let rows=mt db.many("SELECT DISTINCT hall FROM memory_drawers WHERE wing=? ORDER BY hall";@(wing)) {
-    $ok:rows rows;
-    $err:e $err($storageerr(str.concat("failed to query halls for wing: ";wing)))
-  };
-  let halls=mut.@();
-  lp(let ii=0;ii<rows.len;ii=ii+1){
-    let row:$row=rows.get(ii);
-    halls=halls.push(sdb.rowstr(row;"hall"))
-  };
-  <$ok(halls)
+   memory/privacy.tk:208-210. *)
+f=listhalls(palace:$palace;wing:str):$namelist{
+  <namesof("SELECT DISTINCT hall FROM memory_drawers WHERE wing=? ORDER BY hall";@(wing);"hall";"halls")
 };
 
 
-f=listrooms(palace:$palace;wing:str;hall:str):@str!$lokeerr{
-  let rows=mt db.many("SELECT DISTINCT room FROM memory_drawers WHERE wing=? AND hall=? ORDER BY room";@(wing;hall)) {
-    $ok:rows rows;
-    $err:e $err($storageerr(str.concat("failed to query rooms for: ";str.concat(wing;str.concat("/";hall)))))
-  };
-  let rooms=mut.@();
-  lp(let ii=0;ii<rows.len;ii=ii+1){
-    let row:$row=rows.get(ii);
-    rooms=rooms.push(sdb.rowstr(row;"room"))
-  };
-  <$ok(rooms)
+f=listrooms(palace:$palace;wing:str;hall:str):$namelist{
+  <namesof("SELECT DISTINCT room FROM memory_drawers WHERE wing=? AND hall=? ORDER BY room";@(wing;hall);"room";"rooms")
 };
 
 
@@ -146,8 +147,8 @@ f=listrooms(palace:$palace;wing:str;hall:str):@str!$lokeerr{
    string rather than a value no caller can tell apart from success.
 
    A COUNT without GROUP BY yields exactly one row, so no row at all means the query failed. *)
-f=countrows(sql:str):i64{
-  let rows=mt db.many(sql;@()) {
+f=countrows(sql:str;params:@str):i64{
+  let rows=mt db.many(sql;params) {
     $ok:rows rows;
     $err:e @()
   };
@@ -157,57 +158,46 @@ f=countrows(sql:str):i64{
 };
 
 f=statusjson():str{
-  let drawers=countrows("SELECT COUNT(*) as n FROM memory_drawers");
-  let closets=countrows("SELECT COUNT(*) as n FROM memory_closets");
-  let wings=countrows("SELECT COUNT(DISTINCT wing) as n FROM memory_drawers");
+  let drawers=countrows("SELECT COUNT(*) as n FROM memory_drawers";@());
+  let closets=countrows("SELECT COUNT(*) as n FROM memory_closets";@());
+  let wings=countrows("SELECT COUNT(DISTINCT wing) as n FROM memory_drawers";@());
   if(drawers<0 || closets<0 || wings<0){ <"" }el{};
   <"{\"total_drawers\":\(drawers),\"total_closets\":\(closets),\"total_wings\":\(wings)}"
 };
 
 
+(* One line of the walk. The names arrive as parameters, which is what types them for the
+   interpolation: an element read off the array is untyped and interpolates as its address, and
+   a `let x:str=` annotation on it instead drops it from the `@(...)` parameter list the counts
+   are bound with (LS1.1s, T-46). *)
+f=walkline(indent:str;label:str;name:str;count:i64):str{
+  if(count<0){ <"\(indent)\(label): \(name)
+" }el{};
+  <"\(indent)\(label): \(name) (\(count) drawers)
+"
+};
 
-f=walk(palace:$palace):str!$lokeerr{
-  let wings=mt listwings(palace) {
-    $ok:wings wings;
-    $err:e $err(e)
-  };
+(* "" when any query it makes fails; see `iswalked`. *)
+f=walk(palace:$palace):str{
+  let wings=listwings(palace);
+  if(!islisted(wings)){ <"" }el{};
   let out=mut."";
-  lp(let ii=0;ii<wings.len;ii=ii+1){ let wing=wings.get(ii);
-    let wingline=str.concat("Wing: ";wing);
-    out=str.concat(out;str.concat(wingline;"
-"));
-    let halls=mt listhalls(palace;wing) {
-      $ok:halls halls;
-      $err:v @()
-    };
-    lp(let jj=0;jj<halls.len;jj=jj+1){ let hall=halls.get(jj);
-      let hrows=mt db.many("SELECT COUNT(*) as n FROM memory_drawers WHERE wing=? AND hall=?";@(wing;hall)) {
-        $ok:hrows hrows;
-        $err:v @()
-      };
-      if(hrows.len > 0){
-        let hallcount=str.fromint(sdb.rowi64(hrows.get(0);"n"));
-        let hallline=str.concat("  Hall: ";str.concat(hall;str.concat(" (";str.concat(hallcount;" drawers)"))));
-        out=str.concat(out;str.concat(hallline;"
-"));
-        let rooms=mt listrooms(palace;wing;hall) {
-          $ok:rooms rooms;
-          $err:v @()
-        };
-        lp(let kk=0;kk<rooms.len;kk=kk+1){ let room=rooms.get(kk);
-          let rrows=mt db.many("SELECT COUNT(*) as n FROM memory_drawers WHERE wing=? AND hall=? AND room=?";@(wing;hall;room)) {
-            $ok:rrows rrows;
-            $err:v @()
-          };
-          if(rrows.len > 0){
-            let roomcount=str.fromint(sdb.rowi64(rrows.get(0);"n"));
-            let roomline=str.concat("    Room: ";str.concat(room;str.concat(" (";str.concat(roomcount;" drawers)"))));
-            out=str.concat(out;str.concat(roomline;"
-"))
-          }el{}
-        }
-      }el{}
+  lp(let ii=0;ii<wings.names.len;ii=ii+1){ let wing=wings.names.get(ii);
+    out=str.concat(out;walkline("";"Wing";wing;-1));
+    let halls=listhalls(palace;wing);
+    if(!islisted(halls)){ <"" }el{};
+    lp(let jj=0;jj<halls.names.len;jj=jj+1){ let hall=halls.names.get(jj);
+      let hallcount=countrows("SELECT COUNT(*) as n FROM memory_drawers WHERE wing=? AND hall=?";@(wing;hall));
+      if(hallcount<0){ <"" }el{};
+      out=str.concat(out;walkline("  ";"Hall";hall;hallcount));
+      let rooms=listrooms(palace;wing;hall);
+      if(!islisted(rooms)){ <"" }el{};
+      lp(let kk=0;kk<rooms.names.len;kk=kk+1){ let room=rooms.names.get(kk);
+        let roomcount=countrows("SELECT COUNT(*) as n FROM memory_drawers WHERE wing=? AND hall=? AND room=?";@(wing;hall;room));
+        if(roomcount<0){ <"" }el{};
+        out=str.concat(out;walkline("    ";"Room";room;roomcount))
+      }
     }
   };
-  <$ok(out)
+  <out
 };

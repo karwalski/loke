@@ -11,6 +11,13 @@ i=log:shared.log;
 i=t:shared.types;
 i=memtypes:core.memory.types;
 
+(* A query's rows and whether it ran; see readrows (MK6.8). *)
+t=$rowsread{
+  rows:@$row;
+  ok:bool
+};
+
+
 
 (* Declared i64!$lokeerr, not void!$lokeerr, and returns $ok(0).
 
@@ -143,65 +150,71 @@ f=searchaccumulatescores(rows:@$row;scored:@$searchscore):@$searchscore{
   <out
 };
 
-f=search(palace:i64;query:str;limit:u32):@($searchresult)!$lokeerr{
-  let keywords=extractkeywords(query);
-  if(keywords.len == 0){
-    <$ok(@())
-  }el{
-    
-    let scored=mut.@($searchscore);
-    lp(let ki=0;ki<str.arraylen(keywords);ki=ki+1){ let kw=keywords.get(ki);
-      let likekw=str.concat(kw;"%");
-      scored=mt db.many("SELECT drawer_id, SUM(weight) as score FROM memory_index WHERE keyword LIKE ? GROUP BY drawer_id";@(likekw)) {
-        $ok:rows searchaccumulatescores(rows;scored);
-        $err:v scored
-      }
-    };
+(* ── MK6.8: a failed search is reported, not read as "nothing found" ───────────────
+   search and searchinwing returned `@($searchresult)!$lokeerr`, and every caller matched it,
+   which takes the first arm whatever the value is (T-18): the `$err` arms in the MCP server
+   and in context's L2 and L3 could never run. They were never given anything to run on
+   either: every `db.many` here mapped its own failure to "no rows", so a search against a
+   palace whose tables could not be read answered `$ok` with an empty list, the same answer
+   as a query that matched nothing.
 
-
-    (* `.take(n)` is not a toke array method — it emitted a call to an undefined
-       `_take` and the only error was "Undefined symbols" at link time (T-7).
-       str.arrayslice clamps to the array length, so a limit above it is safe. *)
-    let top=firstn(scored;limit as i64);
-
-
-    let results=mut.@();
-    lp(let ti=0;ti<top.len;ti=ti+1){
-      let entry:$searchscore=top.get(ti);
-      results=mt db.many("SELECT id,wing,hall,room,content,created_at FROM memory_drawers WHERE id=?";@(entry.drawerid)) {
-        $ok:rows searchbuildsingleresult(rows;entry;results);
-        $err:v results
-      }
-    };
-    <$ok(results)
+   So a query that fails now fails the search. The answer is a `$searchfound` whose `failure`
+   names what failed, with no results, and `succeeded` is the predicate a caller branches on.
+   `palace` is unused, as it always was (std.db has one connection); it stays so that the
+   callers need not change what they pass. *)
+f=readrows(sql:str;params:@str):$rowsread{
+  <mt db.many(sql;params) {
+    $ok:rows $rowsread{rows:rows;ok:true};
+    $err:e $rowsread{rows:@();ok:false}
   }
 };
 
+f=succeeded(r:$searchfound):bool{
+  <str.len(r.failure)==0
+};
 
-f=searchinwing(palace:i64;query:str;wing:str;limit:u32):@($searchresult)!$lokeerr{
+f=searchfailed(what:str):$searchfound{
+  log.warn("memory search failed: \(what)";"search";"system");
+  <$searchfound{results:@();failure:what}
+};
+
+(* An empty `wing` searches every wing. *)
+f=runsearch(query:str;wing:str;limit:u32):$searchfound{
   let keywords=extractkeywords(query);
-  if(keywords.len == 0){
-    <$ok(@())
-  }el{
-    let scored=mut.@($searchscore);
-    lp(let ki=0;ki<str.arraylen(keywords);ki=ki+1){ let kw=keywords.get(ki);
-      let likekw=str.concat(kw;"%");
-      scored=mt db.many("SELECT mi.drawer_id, SUM(mi.weight) as score FROM memory_index mi JOIN memory_drawers md ON mi.drawer_id=md.id WHERE mi.keyword LIKE ? AND md.wing=? GROUP BY mi.drawer_id";@(likekw;wing)) {
-        $ok:rows searchaccumulatescores(rows;scored);
-        $err:v scored
-      }
+  if(keywords.len == 0){ <$searchfound{results:@();failure:""} }el{};
+  let scored=mut.@($searchscore);
+  lp(let ki=0;ki<keywords.len;ki=ki+1){
+    let likekw=str.concat(keywords.get(ki);"%");
+    let q=mut.$rowsread{rows:@();ok:false};
+    if(str.len(wing)==0){
+      q=readrows("SELECT drawer_id, SUM(weight) as score FROM memory_index WHERE keyword LIKE ? GROUP BY drawer_id";@(likekw))
+    }el{
+      q=readrows("SELECT mi.drawer_id, SUM(mi.weight) as score FROM memory_index mi JOIN memory_drawers md ON mi.drawer_id=md.id WHERE mi.keyword LIKE ? AND md.wing=? GROUP BY mi.drawer_id";@(likekw;wing))
     };
+    if(!q.ok){ <searchfailed("the keyword index could not be read") }el{};
+    scored=searchaccumulatescores(q.rows;scored)
+  };
 
-    let top=firstn(scored;limit as i64);
+  (* `.take(n)` is not a toke array method — it emitted a call to an undefined
+     `_take` and the only error was "Undefined symbols" at link time (T-7).
+     firstn clamps to the array length, so a limit above it is safe. *)
+  let top=firstn(scored;limit as i64);
 
-    let results=mut.@();
-    lp(let ti=0;ti<top.len;ti=ti+1){
-      let entry:$searchscore=top.get(ti);
-      results=mt db.many("SELECT id,wing,hall,room,content,created_at FROM memory_drawers WHERE id=?";@(entry.drawerid)) {
-        $ok:rows searchbuildsingleresult(rows;entry;results);
-        $err:v results
-      }
-    };
-    <$ok(results)
-  }
+  let results=mut.@();
+  lp(let ti=0;ti<top.len;ti=ti+1){
+    let entry:$searchscore=top.get(ti);
+    let d=readrows("SELECT id,wing,hall,room,content,created_at FROM memory_drawers WHERE id=?";@(entry.drawerid));
+    if(!d.ok){ <searchfailed("a matched drawer could not be read") }el{};
+    results=searchbuildsingleresult(d.rows;entry;results)
+  };
+  <$searchfound{results:results;failure:""}
+};
+
+f=search(palace:i64;query:str;limit:u32):$searchfound{
+  <runsearch(query;"";limit)
+};
+
+f=searchinwing(palace:i64;query:str;wing:str;limit:u32):$searchfound{
+  if(str.len(wing)==0){ <searchfailed("searchinwing was given no wing") }el{};
+  <runsearch(query;wing;limit)
 };

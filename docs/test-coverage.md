@@ -860,15 +860,12 @@ because it will be wrong again tomorrow: the census is generated, a prose list i
 - sidecar_client.tk
 - web_meta.tk
 
-### packages/core/src/memory/ (8 untested of 14)
+### packages/core/src/memory/ (5 untested of 14)
 
-- context.tk
 - graph.tk
-- mining.tk
 - privacy.tk
 - schema.tk
 - shorthand.tk
-- storage.tk
 - types.tk
 
 ### packages/core/src/pipeline/ (3 untested of 3)
