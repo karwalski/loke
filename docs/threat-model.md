@@ -178,14 +178,15 @@ User input (may contain PII)
 |-------|-------------|-------------|---------|
 | User input | Raw PII, proprietary data | Maximum | In-memory only |
 | After anonymisation | Placeholders in place of **detected** entities; undetected PII remains | Reduced, not eliminated | In-memory only |
-| Mapping table | PII ↔ placeholder mappings | Maximum | **Plaintext on disk** — encryption inert (X8) |
+| Mapping table | PII ↔ placeholder mappings | Maximum | Live proxy: **in-memory only**, per request — nothing persists it. The one on-disk form, `placeholder_map_records`, is **sealed** (field-level AES-256-GCM, X8.2); request id and timestamps stay in the clear |
 | After compression | Redacted, compressed prompt | Reduced | In-memory, then transmitted |
 | Audit log | Specified: usage and cost metadata only — no prompt content, no placeholder values, no policy decision. Actual: no row is written yet (GA5, DA1) | Low | **Plaintext on disk** — encryption inert (X8) |
 
 > Two corrections to earlier versions of this table. "After anonymisation: no PII" was an absolute this
 > document contradicts itself in §10.6 — the honest statement there is the one that governs: no combination
-> of layers guarantees complete detection. And the mapping table and audit log are **not** encrypted at
-> rest: the toolchain links plain SQLite, which silently ignores the encryption pragma (X8). The audit log
+> of layers guarantees complete detection. And the database is **not** encrypted at
+> rest: the toolchain links plain SQLite, which silently ignores the encryption pragma (X8.1). What is sealed
+> is one table's payload — the placeholder mapping, field-level, under X8.2 — and nothing else. The audit log
 > has also never contained prompts; what it does and does not evidence is set out in
 > [architecture.md](architecture.md) §7.
 
@@ -600,13 +601,17 @@ is in force today.
 
 ### 9.2 Mapping Table Exposure (I-2) — High
 
-**Threat:** The mapping table is exfiltrated — in the intended design, along with its encryption key; today,
-without needing one, since the file is plaintext (X8).
+**Threat:** The mapping table is exfiltrated along with its encryption key.
 
-**Mitigations:** this list is the specified design. **The first item is not in force:** the 32-byte key is
-generated and held in the OS keychain correctly, but the toolchain links plain SQLite, which silently ignores
-the encryption pragma and returns success, so the mapping table is **plaintext on disk** today (X8). Rely on
-full-disk encryption and file permissions until that is fixed.
+**Mitigations:** this list is the specified design, and it is only partly in force. What holds today (X8.2,
+X8.3, 2026-09-27): the live proxy keeps the mapping in memory for one request and persists nothing; the one
+table that can hold a mapping on disk, `placeholder_map_records`, seals the value, placeholder and entity type
+together with AES-256-GCM under a fresh nonce per write, the request id bound in as AAD, and a key derived by
+HKDF-SHA256 from a 32-byte secret held only in the OS keychain. A wrong, missing or unreadable key fails
+closed. Database-level encryption is **not** available (plain SQLite ignores the pragma, X8.1), so every other
+table remains plaintext. Item 2 below is superseded — the keychain secret is random, so HKDF, not a password
+KDF, is the right derivation — and items 3, 5 and 6 are not implemented as specified (the AEAD tag gives
+per-row tamper detection, but nothing alerts). See `core.privacy.placeholderstore`.
 
 1. **AES-256-GCM encryption at rest** with a key derived from the user's OS keychain credential, not stored on disk.
 2. **Key derivation:** Use PBKDF2 or Argon2 with a high iteration count. The raw key never exists on disk.
