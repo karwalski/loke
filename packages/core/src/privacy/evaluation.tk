@@ -4,6 +4,8 @@
 m=core.privacy.evaluation;
 
 i=str:std.str;
+i=json:std.json;
+i=sh:shared.types;
 
 t=$evaluationresult{
   layerid:str;
@@ -20,6 +22,25 @@ t=$comparisonmatrix{
   layers:@$evaluationresult;
   totallabelled:i64;
   totaltexts:i64
+};
+
+(* AD1.2. A labelled entity or a detection, in BYTE offsets; see the entity-level scoring
+   section below. *)
+t=$labelspan{
+  kind:str;
+  start:i64;
+  end:i64
+};
+
+(* AD1.2. Entity-level counts for one layer or combination of layers, accumulated across
+   texts. regions and spurious count merged detection regions; spurious is the false positives. *)
+t=$entityscore{
+  labelled:i64;
+  matched:i64;
+  directlabelled:i64;
+  directmatched:i64;
+  regions:i64;
+  spurious:i64
 };
 
 (* Basis points, because a threshold has to survive the journey to its caller.
@@ -138,4 +159,311 @@ f=evaluatelayerbp(layerid:str;detected:i64;labelled:i64;matched:i64):$evaluation
     recall:(rbp as f64)/10000.0;
     f1:(fbp as f64)/10000.0
   }
+};
+
+(* ── AD1.2 / AD1.3: entity-level scoring ─────────────────────────────────────
+
+   Everything above scores COUNTS a caller has already worked out. What was missing is the
+   step that works them out: deciding, for one text, which labelled entities a detector
+   caught and which of its detections were spurious. Each caller wrote that loop for itself
+   (tests/integration/test_detection_recall.tk had its own), so two scorers could disagree
+   about what a hit is without anyone noticing. It lives here now, once.
+
+   The unit is the ENTITY, not the token and not the detection:
+
+     recall     labelled entities overlapped by at least one detection, over labelled
+                entities. Any overlap counts and the detector's type label is ignored. That
+                is the leakage question: masking is by span, so a span that was masked did
+                not leave the device, whatever the layer called it.
+     precision  detections that overlap SOME real PII, over detections. It is reported as
+                the utility cost of the recall, never as the headline.
+
+   A false positive is a detection overlapping no real PII. "Real PII" includes entities of
+   types loke claims no detector for (Medicare, BSB, ...): masking one of those is a lucky
+   catch, not a utility cost. The caller leaves them out of the recall denominator, because
+   scoring loke against types it has no detector for conflates two different problems.
+
+   Spans are BYTE offsets, because that is what loke's detectors report (regex.tk recovers
+   them with str.indexof). The privacy-filter sidecar counts Unicode code points, and
+   bytestart converts. The corpus's own offsets are not trusted at all: placelabel finds each
+   labelled value in the text as loke decoded it, for the reason given there. $labelspan and $entityscore are declared at the top of the module. *)
+
+f=emptyscore():$entityscore{
+  <$entityscore{labelled:0;matched:0;directlabelled:0;directmatched:0;regions:0;spurious:0}
+};
+
+f=spanoverlaps(astart:i64;aend:i64;bstart:i64;bend:i64):bool{
+  <astart<bend && bstart<aend
+};
+
+f=coveredby(spans:@$labelspan;start:i64;end:i64):bool{
+  let found=mut.false;
+  lp(let i=0;i<spans.len;i=i+1){
+    let s:$labelspan=spans.get(i);
+    if(spanoverlaps(s.start;s.end;start;end)){ found=true }el{}
+  };
+  <found
+};
+
+(* The byte offset at which code point number charoff begins. A UTF-8 continuation byte
+   (0x80-0xBF) does not start a code point, so it is walked over without being counted. An
+   offset past the end answers the text's byte length. *)
+f=bytestart(text:str;charoff:i64):i64{
+  let n=str.len(text) as i64;
+  let seen=mut.0;
+  let at=mut.n;
+  let done=mut.false;
+  lp(let b=0;b<n && !done;b=b+1){
+    let c=str.charat(text;b);
+    if(c>=128 && c<192){}el{
+      if(seen==charoff){
+        at=b;
+        done=true
+      }el{
+        seen=seen+1
+      }
+    }
+  };
+  <at
+};
+
+(* Direct identifiers: a value that names one person on its own. The set is the one
+   docs/specifications/regulatory-defaults.md gives for its presets (full name, email,
+   phone, national or tax ID, passport), in the corpus's type names. Card numbers, ABNs,
+   IP addresses, URLs and API keys are sensitive, but none names a person by itself, so
+   none is held to this floor. *)
+f=isdirectidentifier(kind:str):bool{
+  let k=sh.strlower(kind);
+  <str.eq(k;"person") || str.eq(k;"email") || str.eq(k;"phone_au") || str.eq(k;"phone_us")
+   || str.eq(k;"au_tfn") || str.eq(k;"ssn_us") || str.eq(k;"au_medicare")
+   || str.eq(k;"passport") || str.eq(k;"driver_licence")
+};
+
+(* THE RECALL FLOOR ON DIRECT IDENTIFIERS: 92.50%, held in basis points because a bare f64
+   does not survive the return to a test (T-20).
+
+   Why this number. A missed direct identifier is the failure this product exists to
+   prevent: it names a person to a third party. So the floor is as high as the shipped
+   regex layer can hold on tests/fixtures/pii-corpus (seed 20260919) and no lower. That
+   layer finds 52 of the 56 direct identifiers it has a pattern for (92.86%), so losing ONE
+   more takes it to 91.07% and fails. It is not 100% because four AU_TFN positives are
+   missed today; a floor the detector cannot meet gets switched off rather than honoured.
+   Raising it follows fixing those. Lowering it to make a build pass is the regression it
+   exists to catch.
+
+   It applies to the direct identifiers the layers under test are responsible for. In CI
+   that is the regex layer alone. PERSON, which only a model layer finds, is measured by
+   AD1.3 (tests/integration/test_layer_marginal.tk) but not floored: that layer needs a
+   local model CI does not have, and its answers vary between runs. *)
+f=directrecallfloorbp():i64{
+  <9250
+};
+
+(* Measuring nothing is not meeting a floor: zero labelled entities fails. *)
+f=meetsfloor(matched:i64;labelled:i64;floorbp:i64):bool{
+  <labelled>0 && recallbp(matched;labelled-matched)>=floorbp
+};
+
+(* Two layers' detections, all of them. What a combination of layers catches is judged on
+   this, never on a merged list: merging drops a detection that overlaps one already kept,
+   and the dropped one may be the only one covering some entity. *)
+f=joinspans(a:@$labelspan;b:@$labelspan):@$labelspan{
+  let out=mut.@($labelspan);
+  let na=a.len as i64;
+  lp(let i=0;i<na+(b.len as i64);i=i+1){
+    if(i<na){ out=out.push(a.get(i)) }el{ out=out.push(b.get(i-na)) }
+  };
+  <out
+};
+
+(* Detections as REGIONS, which is how the utility cost is counted: overlapping detections
+   are one masked region, the union of their spans. Without this, two layers flagging the
+   same decoy would count two false positives where one region was masked.
+
+   The union, not the first one kept: dropping a detection that overlaps a kept one would
+   judge the region by the kept part alone, and call it spurious when the dropped part is
+   the bit that covers the PII. *)
+f=absorb(spans:@$labelspan;d:$labelspan):@$labelspan{
+  (* spans are pairwise disjoint, so a span skipped before cur grew cannot overlap what it
+     grew by: that growth lies inside a span it absorbed, which the skipped one does not
+     touch. One pass is therefore enough. *)
+  let out=mut.@($labelspan);
+  let cs=mut.d.start;
+  let ce=mut.d.end;
+  lp(let i=0;i<spans.len;i=i+1){
+    let s:$labelspan=spans.get(i);
+    if(spanoverlaps(s.start;s.end;cs;ce)){
+      if(s.start<cs){ cs=s.start }el{};
+      if(s.end>ce){ ce=s.end }el{}
+    }el{
+      out=out.push(s)
+    }
+  };
+  <out.push($labelspan{kind:d.kind;start:cs;end:ce})
+};
+
+f=mergedetections(kept:@$labelspan;add:@$labelspan):@$labelspan{
+  let out=mut.kept;
+  lp(let i=0;i<add.len;i=i+1){
+    out=absorb(out;add.get(i))
+  };
+  <out
+};
+
+f=countcovered(scored:@$labelspan;dets:@$labelspan;directonly:bool):i64{
+  let n=mut.0;
+  lp(let i=0;i<scored.len;i=i+1){
+    let e:$labelspan=scored.get(i);
+    if(!directonly || isdirectidentifier(e.kind)){
+      if(coveredby(dets;e.start;e.end)){ n=n+1 }el{}
+    }el{}
+  };
+  <n
+};
+
+f=isdirectspan(s:$labelspan):bool{
+  <isdirectidentifier(s.kind)
+};
+
+f=countdirect(scored:@$labelspan):i64{
+  let n=mut.0;
+  lp(let i=0;i<scored.len;i=i+1){
+    if(isdirectspan(scored.get(i))){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=countspurious(dets:@$labelspan;realpii:@$labelspan):i64{
+  let n=mut.0;
+  lp(let i=0;i<dets.len;i=i+1){
+    let d:$labelspan=dets.get(i);
+    if(!coveredby(realpii;d.start;d.end)){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* Scores one text into acc. scored is the labelled entities recall is computed over;
+   realpii is every labelled entity that is genuinely PII (scored plus the types with no
+   detector), which a detection must overlap not to be a false positive. dets is every
+   detection of every layer being scored (joinspans); recall is judged on all of them, and
+   detections and false positives are counted as merged regions. *)
+f=scoretext(scored:@$labelspan;realpii:@$labelspan;dets:@$labelspan;acc:$entityscore):$entityscore{
+  let merged=mergedetections(@();dets);
+  <$entityscore{
+    labelled:acc.labelled+(scored.len as i64);
+    matched:acc.matched+countcovered(scored;dets;false);
+    directlabelled:acc.directlabelled+countdirect(scored);
+    directmatched:acc.directmatched+countcovered(scored;dets;true);
+    regions:acc.regions+(merged.len as i64);
+    spurious:acc.spurious+countspurious(merged;realpii)
+  }
+};
+
+(* Entity-level precision: detections that overlap real PII, over detections. Not
+   tp/(tp+fp) with tp counted on the labelled side, because one detection can cover two
+   entities and two detections one, so the two sides are different units. *)
+f=entityprecisionbp(s:$entityscore):i64{
+  <ratiobp(s.regions-s.spurious;s.regions)
+};
+
+f=entityrecallbp(s:$entityscore):i64{
+  <recallbp(s.matched;s.labelled-s.matched)
+};
+
+f=directrecallbp(s:$entityscore):i64{
+  <recallbp(s.directmatched;s.directlabelled-s.directmatched)
+};
+
+f=addscores(a:$entityscore;b:$entityscore):$entityscore{
+  <$entityscore{
+    labelled:a.labelled+b.labelled;
+    matched:a.matched+b.matched;
+    directlabelled:a.directlabelled+b.directlabelled;
+    directmatched:a.directmatched+b.directmatched;
+    regions:a.regions+b.regions;
+    spurious:a.spurious+b.spurious
+  }
+};
+
+(* ── Reading the corpus and the layers into spans ─────────────────────────── *)
+
+(* The labelled entities of one corpus case (tests/fixtures/pii-corpus), in byte offsets.
+   scoredonly keeps the entities recall is computed over: labelled expected_detected and not
+   NOT_PII. Without it, every entity that is genuinely PII, which is what a false positive
+   is judged against. NOT_PII decoys are never returned: they exist to be NOT detected. *)
+f=corpuslabels(text:str;ents:@$json;scoredonly:bool):@$labelspan{
+  let out=mut.@($labelspan);
+  lp(let i=0;i<ents.len;i=i+1){
+    let e=ents.get(i);
+    let kind=mt json.str(e;"type") { $ok:s s; $err:x "" };
+    let value=mt json.str(e;"value") { $ok:s s; $err:x "" };
+    let cstart=mt json.i64(e;"start") { $ok:n n; $err:x 0-1 };
+    let cend=mt json.i64(e;"end") { $ok:n n; $err:x 0-1 };
+    if(str.len(kind)>0 && !str.eq(kind;"NOT_PII") && cstart>=0 && cend>cstart && (!scoredonly || json.bool(e;"expected_detected"))){
+      out=out.push(placelabel(text;kind;value;cstart;cend))
+    }el{}
+  };
+  <out
+};
+
+(* Where a labelled entity is in the text AS LOKE READ IT. The corpus's offsets count code
+   points in the text Python wrote, and that is not always the text toke decodes: std.json
+   turns the escape for an em dash into the five letters "u2014" (T-47, measured 2026-09-28
+   on this corpus), so in the twelve texts containing one every later offset is four bytes
+   out. The generator guarantees each labelled value occurs exactly once in its text, so the
+   value is located instead; the converted offset is used only when it cannot be. *)
+f=placelabel(text:str;kind:str;value:str;cstart:i64;cend:i64):$labelspan{
+  let at=mut.(0-1);
+  if(str.len(value)>0){ at=str.indexof(text;value) }el{};
+  if(at>=0){ <$labelspan{kind:kind;start:at;end:at+(str.len(value) as i64)} }el{};
+  <$labelspan{kind:kind;start:bytestart(text;cstart);end:bytestart(text;cend)}
+};
+
+(* What a detection layer that reports spans found, as spans. *)
+f=entityspans(ents:@$piientity):@$labelspan{
+  let out=mut.@($labelspan);
+  lp(let i=0;i<ents.len;i=i+1){
+    let e:$piientity=ents.get(i);
+    out=out.push($labelspan{kind:e.entitytype;start:e.start as i64;end:e.end as i64})
+  };
+  <out
+};
+
+(* What a layer that reports only VALUES found (core.privacy.ner leaves start and end at 0),
+   as the spans the pipeline would mask: placeholder.applytotext replaces the value wherever
+   it occurs, so every occurrence is a span. A value that does not occur in the text masks
+   nothing and yields no span; it is neither a hit nor a utility cost. *)
+f=valuespans(text:str;ents:@$piientity):@$labelspan{
+  let out=mut.@($labelspan);
+  let n=str.len(text) as i64;
+  lp(let i=0;i<ents.len;i=i+1){
+    let e:$piientity=ents.get(i);
+    let vlen=str.len(e.value) as i64;
+    if(vlen>0){
+      let from=mut.0;
+      lp(let k=0;from<n;k=k+1){
+        let off=str.indexof(str.slice(text;from;n);e.value);
+        if(off<0){
+          from=n
+        }el{
+          out=out.push($labelspan{kind:e.entitytype;start:from+off;end:from+off+vlen});
+          from=from+off+vlen
+        }
+      }
+    }el{}
+  };
+  <out
+};
+
+(* A count as text, for interpolation. A str.fromi64 call written directly inside an
+   interpolation is read as an i64 at this pin and prints the string's address (measured
+   2026-09-28: "matched=36322935744"); returned from a function declared str, it is a str. *)
+f=numtext(n:i64):str{
+  <str.fromi64(n)
+};
+
+(* One line a script can parse and a person can read. Recall comes first: it is the
+   headline. *)
+f=scoreline(layerid:str;s:$entityscore):str{
+  <"layer=\(layerid) recall=\(bplabel(entityrecallbp(s))) matched=\(numtext(s.matched)) labelled=\(numtext(s.labelled)) direct_recall=\(bplabel(directrecallbp(s))) direct_matched=\(numtext(s.directmatched)) direct_labelled=\(numtext(s.directlabelled)) precision=\(bplabel(entityprecisionbp(s))) detections=\(numtext(s.regions)) false_positives=\(numtext(s.spurious))"
 };

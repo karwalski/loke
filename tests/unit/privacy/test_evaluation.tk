@@ -6,6 +6,7 @@ m=test.privacy.evaluation;
 i=t:std.test;
 i=str:std.str;
 i=ev:core.privacy.evaluation;
+i=sh:shared.types;
 
 (* X7.2 — this file used to declare its own precision/recall arithmetic and assert against
    it. It now imports core.privacy.evaluation.
@@ -26,9 +27,9 @@ i=ev:core.privacy.evaluation;
    reading the wrong register. An f64 STRUCT FIELD crosses intact, which is why the
    $evaluationresult fields below can be read.
 
-   Scope note: core.privacy.evaluation has no importer anywhere in the repository. De-
-   stubbing this file makes the instrument exercised; it does not mean any published figure
-   came from it. *)
+   Scope note: since AD1.2 the published detection figures DO come from this module, through
+   tests/integration/test_detection_recall.tk and test_layer_marginal.tk, which is why its
+   entity-level scoring is asserted here too. *)
 
 f=main():i64{
   let pass=mut.0;
@@ -148,6 +149,75 @@ f=main():i64{
   if(t.assert(str.contains(line;"P=");"and labels its precision")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(line;"R=");"and its recall")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(line;"F1=");"and its F1, so no figure is unlabelled")){pass=pass+1}el{fail=fail+1};
+
+  (* ── AD1.2: entity-level scoring ─────────────────────────────────────────────
+     The step every caller used to write for itself: which labelled entities a detector
+     caught, and which of its detections were spurious. *)
+
+  (* Code points to bytes. An em dash is three bytes, so in "a—b" the b is code point 2
+     but byte 4. Scoring the corpus's code-point spans against the detector's byte spans
+     without this puts every span after the dash two bytes out. *)
+  let dash="a—b";
+  if(t.assert(ev.bytestart(dash;0)==0;"code point 0 starts at byte 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.bytestart(dash;1)==1;"the dash starts at byte 1")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.bytestart(dash;2)==4;"and the b after it at byte 4, not 2")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.bytestart(dash;3)==5;"an offset at the end answers the byte length")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.bytestart("plain";3)==3;"and ASCII text is unchanged")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(ev.spanoverlaps(0;5;4;9);"spans sharing a byte overlap")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ev.spanoverlaps(0;5;5;9);"spans that only touch do not")){pass=pass+1}el{fail=fail+1};
+
+  (* Direct identifiers: a value that names one person on its own. *)
+  if(t.assert(ev.isdirectidentifier("PERSON") && ev.isdirectidentifier("email");"a name and an email are direct identifiers, whatever the case of the label")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.isdirectidentifier("AU_TFN") && ev.isdirectidentifier("PHONE_AU");"and so are a tax file number and a phone number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ev.isdirectidentifier("CREDIT_CARD") && !ev.isdirectidentifier("AU_ABN") && !ev.isdirectidentifier("URL");"a card number, an ABN and a URL are sensitive but do not name a person")){pass=pass+1}el{fail=fail+1};
+
+  (* The floor. 52 of 56 is what the regex layer holds on the corpus; one fewer must fail. *)
+  if(t.assert(ev.directrecallfloorbp()==9250;"the direct-identifier recall floor is 92.50%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.meetsfloor(52;56;ev.directrecallfloorbp());"52 of 56 direct identifiers meets it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ev.meetsfloor(51;56;ev.directrecallfloorbp());"and losing one more, 51 of 56, does not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ev.meetsfloor(0;0;ev.directrecallfloorbp());"measuring nothing does not meet a floor")){pass=pass+1}el{fail=fail+1};
+
+  (* One text, scored. An email caught twice by overlapping detections, a person missed, a
+     Medicare number masked by luck, and one decoy flagged. *)
+  let scored=@($labelspan{kind:"EMAIL";start:0;end:10};$labelspan{kind:"PERSON";start:20;end:30});
+  let realpii=@($labelspan{kind:"EMAIL";start:0;end:10};$labelspan{kind:"PERSON";start:20;end:30};$labelspan{kind:"AU_MEDICARE";start:40;end:50});
+  let dets=@($labelspan{kind:"email";start:0;end:5};$labelspan{kind:"au_tfn";start:3;end:8};$labelspan{kind:"au_tfn";start:42;end:45};$labelspan{kind:"ssn_us";start:60;end:65});
+  let s1=ev.scoretext(scored;realpii;dets;ev.emptyscore());
+  if(t.assert(s1.labelled==2;"two entities are scored for recall; the Medicare number is not, loke claims no detector for it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s1.matched==1;"the email is caught, by overlap and whatever the detector called it; the person is not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s1.directlabelled==2 && s1.directmatched==1;"both are direct identifiers, and one was caught")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s1.regions==3;"the two overlapping detections on the email count as ONE region")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s1.spurious==1;"only the decoy is a false positive: masking the Medicare number is not a utility cost")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.entityrecallbp(s1)==5000;"recall is one in two")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ev.entityprecisionbp(s1)==6667;"precision is two real regions in three")){pass=pass+1}el{fail=fail+1};
+
+  (* Merging must not cost recall: here the only detection covering the entity is the one
+     merged away, because it overlaps an earlier one. *)
+  let edge=@($labelspan{kind:"PERSON";start:7;end:9});
+  let chain=@($labelspan{kind:"x";start:0;end:5};$labelspan{kind:"x";start:4;end:12});
+  let s2=ev.scoretext(edge;edge;chain;ev.emptyscore());
+  if(t.assert(s2.matched==1;"an entity covered only by a detection that merges into another is still caught")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s2.regions==1;"while the two detections count as one region")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s2.spurious==0;"and that region is the UNION of the two, which covers the entity, so it is not a false positive")){pass=pass+1}el{fail=fail+1};
+
+  let s3=ev.addscores(s1;s2);
+  if(t.assert(s3.labelled==3 && s3.matched==2 && s3.spurious==1;"scores accumulate across texts")){pass=pass+1}el{fail=fail+1};
+
+  (* joinspans keeps everything, in order. *)
+  if(t.assert(ev.joinspans(dets;edge).len==5;"joining four detections and one keeps five")){pass=pass+1}el{fail=fail+1};
+
+  (* A layer that reports values without spans (NER) is placed where the pipeline would
+     mask it: every occurrence. A value not in the text masks nothing. *)
+  let vals=@($piientity{entitytype:"PERSON";value:"Jo";start:0;end:0;confidence:0.5;placeholder:""};$piientity{entitytype:"PERSON";value:"Kim";start:0;end:0;confidence:0.5;placeholder:""});
+  let vs=ev.valuespans("Jo met Jo";vals);
+  if(t.assert(vs.len==2;"a value occurring twice is two spans, and an absent value none")){pass=pass+1}el{fail=fail+1};
+  let v2:$labelspan=vs.get(1);
+  if(t.assert(v2.start==7 && v2.end==9;"the second occurrence is placed at bytes 7 to 9")){pass=pass+1}el{fail=fail+1};
+
+  let sl=ev.scoreline("regex";s1);
+  if(t.assert(str.contains(sl;"recall=50.00%") && str.contains(sl;"precision=66.67%");"the score line carries both figures")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(sl;"recall=")<str.indexof(sl;"precision=");"and recall comes first: it is the headline")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

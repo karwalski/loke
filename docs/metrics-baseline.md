@@ -1,7 +1,7 @@
 # Metrics Baseline
 
 **Version:** 1.0
-**Last updated:** 2026-09-24
+**Last updated:** 2026-09-28
 
 This file is the **only** source from which this project publishes figures. Every number here carries
 its workload, its tokenizer (or says "bytes"), its sample size and its date. Where a figure is widely
@@ -61,6 +61,48 @@ python3 tests/fixtures/pii-corpus/generate.py
 python3 tests/fixtures/pii-corpus/score_patterns.py
 ```
 
+### PII detection, regex layer, entity-level with a direct-identifier recall floor — 2026-09-28
+
+**The headline is recall on direct identifiers**, because a missed one names a person to a third
+party. Precision is the utility cost of that recall, reported under it and not floored.
+
+| Metric | Value | N |
+|---|---|---|
+| **Recall, direct identifiers** the regex layer has a pattern for | **92.86%** | 52 of 56 (EMAIL 28, PHONE_AU 12, AU_TFN 16) |
+| Recall, every regex-addressable type, overlap | 95.45% | 84 of 88 |
+| Recall, exact span | 86.36% | 76 of 88 |
+| Precision (utility cost), detection regions overlapping real PII | 89.36% | 94 regions, 10 false positives |
+
+**Arm:** `regex-layer-toke-compiled`, scored by `core.privacy.evaluation` (production module).
+**Toolchain:** toke `0b0bc4e`, ooke `v3.0.0-rc.1` (`c07c503`), loke branch `work/w20-ad1` on
+`535a909`. **Workload:** `tests/fixtures/pii-corpus`, seed 20260919, 74 cases, `corpus.jsonl`
+sha256 `bece1023187d…`. Deterministic: no model is involved. **Measured:** 2026-09-28 by
+`tests/integration/test_detection_recall.tk`, which prints the line these figures are read from.
+
+**The floor:** `evaluation.directrecallfloorbp()` = **92.50%**, asserted by that test. It is as high
+as the shipped regex layer can hold on this corpus and no higher: losing **one** more direct
+identifier (51 of 56, 91.07%) fails it. The four misses today are the separator-formatted `AU_TFN`
+positives (`288 916 313`, `638-652-169`, …). PERSON is a direct identifier but has no pattern, so it
+is outside this floor and is measured with the model layers below. **Mutation-checked:** with the
+email pattern reverted to lower-case only (the 2026-09-19 defect), direct-identifier recall falls to
+82.14% (46 of 56) and the floor assertion fails, as does the 90% addressable floor; restored and
+checked with `cmp`.
+
+**What changed in the instrument, and why these differ from the 2026-09-23 block:** scoring moved
+out of the test into `core.privacy.evaluation`, where it is entity-level and **type-agnostic** (any
+overlapping detection masks the span, whatever the layer called it — the rule `score_patterns.py`
+always used). And labelled spans are placed by locating each labelled value in the text as loke
+decoded it, because std.json turns the corpus's escaped em dash into `u2014` (T-47). That fix is
+the whole of the exact-span change, 59.09% → 86.36%, and it now agrees with the Python scorer
+exactly (76 of 88, 0.717 over all 106 claimed). Overlap recall is unchanged at 95.45%.
+
+Reproduce:
+
+```sh
+python3 tests/fixtures/pii-corpus/generate.py
+./scripts/run_tests.sh tests/integration/test_detection_recall.tk
+```
+
 ### PII detection, regex layer, measured by loke's OWN compiled detector — 2026-09-23
 
 **The first detection figure this project has taken from the code it ships.** Every earlier
@@ -86,6 +128,13 @@ first evidence that the Python-based figures in the block below were not mislead
 recall, and it is worth more than the number itself: that instrument has carried a mandatory
 "Python's engine is not toke's, and both limits push in unknown directions" caveat since
 2026-09-19, and one of those directions is now known to be zero.
+
+**Corrected 2026-09-28 (AD1.2):** the explanation in the next paragraph is wrong. The divergence
+was the *scorer's*, not loke's spans: std.json decodes the corpus's escaped em dash as the five
+letters `u2014` (T-47), so in the twelve texts containing one every later labelled offset was four
+bytes out of the text the detector saw. Scored by `core.privacy.evaluation`, which places each
+labelled value in the text as loke decoded it, exact-span recall is **86.36%** — see the 2026-09-28
+block above. The paragraph is kept because it is what was published.
 
 **Exact-span recall diverges, and the cause is loke's spans rather than its detection** —
 59.09% against Python's 71.69%. toke's regex engine exposes **no match offset at all**, so
