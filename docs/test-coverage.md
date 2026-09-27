@@ -602,6 +602,9 @@ concurrent rebuild of `/tmp/loke-tests/libloke.a` can fake a crash.
     `submitinnerwithuc`'s third parameter is declared `i64`, so `founduc.risklevel` (an i64) reaches
     `pol.classifyrisk`, which declares `$risktier`. Minimised: every component works standalone and
     `submitinner` dies. `submitinnerunknownuc` is dead code under T-18.
+    **Resolved 2026-09-27 (LS1.1j):** `submit`/`submitinner` are replaced by `trysubmit`, which returns a
+    plain `$gatewaydecision`, looks the use case up with `uc.findor`/`uc.isusecase` and converts the tier
+    with `uc.risktierof`. `tests/unit/governance/test_gateway.tk` now drives it, unknown use case first.
 29. **`core.governance.gateway:148-158` — `activatekillswitch` and `deactivatekillswitch` are `==`
     comparisons, not assignments.** T-26's advice was followed literally. Neither can work with `=`
     either: the parameter is by value and the return is `:void`. `submit`'s deny branch is therefore

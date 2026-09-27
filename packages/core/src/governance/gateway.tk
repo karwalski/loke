@@ -56,10 +56,28 @@ f=defaultrouting():$routingdecision{
 
 
 
-f=submit(gw:$gateway;req:$gatewayrequest):$gatewaydecision!$lokeerr{
+(* LS1.1j — trysubmit is the gateway's plain form, and the only one.
+
+   submit, submitinner and submitinnerwithuc returned $gatewaydecision!$lokeerr. None of
+   them ever returned an $err — every path builds a decision — so the result type added
+   nothing but the hazard, and the one real failure inside them was unreachable:
+   submitinner matched uc.find's result, and toke takes the FIRST arm of a match on a
+   result with a user-declared error side whatever the value is (T-18). An unknown use case
+   therefore took the $ok arm with the error payload bound as the use case, and the DENY
+   written for it in submitinnerunknownuc never ran. On top of that, submitinnerwithuc took
+   the use case as a bare i64 and passed its integer risklevel where policy.classifyrisk
+   wants a $risktier, so a KNOWN use case segfaulted (tests/unit/governance/test_gateway.tk,
+   Finding 1). Nothing called any of them.
+
+   The outcome a caller acts on is isblocked(decision). An unknown use case is the
+   gateway's failure path and it is fail-closed: DENY at HIGH risk, which isblocked reads
+   as blocked. The use-case lookup goes through uc.findor and uc.isusecase, whose sentinel
+   is an empty id, and the tier through uc.risktierof. *)
+f=trysubmit(gw:$gateway;req:$gatewayrequest):$gatewaydecision{
   if(gw.killswitchactive){
-    let reason=str.concat("Kill switch active: ";gw.killswitchreason);
-    let decision=$gatewaydecision{
+    let reason="Kill switch active: \(gw.killswitchreason)";
+    log.error("gateway deny -- \(reason)";"gateway";req.correlationid);
+    <$gatewaydecision{
       requestid:req.requestid;
       policydecision:$deny(reason);
       risktier:$risktier{$high:0};
@@ -67,17 +85,20 @@ f=submit(gw:$gateway;req:$gatewayrequest):$gatewaydecision!$lokeerr{
       controlsapplied:@("kill-switch");
       explanation:reason;
       timestamp:str.nowiso8601()
-    };
-    log.error(str.concat("gateway deny -- ";reason);"gateway";req.correlationid);
-    <decision
+    }
+  }el{};
+  let found=uc.findor(gw.registry;req.usecaseid);
+  if(uc.isusecase(found)){
+    <submitinnerwithuc(req;found)
   }el{
-    <submitinner(gw;req)
+    <submitinnerunknownuc(req)
   }
 };
 
-f=submitinnerunknownuc(req:$gatewayrequest):$gatewaydecision!$lokeerr{
-  let denymsg=str.concat("Unknown use case: ";req.usecaseid);
-  let decision=$gatewaydecision{
+f=submitinnerunknownuc(req:$gatewayrequest):$gatewaydecision{
+  let denymsg="Unknown use case: \(req.usecaseid)";
+  log.error("gateway deny -- \(denymsg)";"gateway";req.correlationid);
+  <$gatewaydecision{
     requestid:req.requestid;
     policydecision:$deny(denymsg);
     risktier:$risktier{$high:0};
@@ -85,24 +106,14 @@ f=submitinnerunknownuc(req:$gatewayrequest):$gatewaydecision!$lokeerr{
     controlsapplied:@("audit-logging");
     explanation:denymsg;
     timestamp:str.nowiso8601()
-  };
-  log.error(str.concat("gateway deny -- ";denymsg);"gateway";req.correlationid);
-  <decision
+  }
 };
 
-f=submitinnerwithuc(gw:$gateway;req:$gatewayrequest;founduc:i64):$gatewaydecision!$lokeerr{
-  let risk=pol.classifyrisk(req.sensitivity;founduc.risklevel;req.estimatedcost);
+f=submitinnerwithuc(req:$gatewayrequest;founduc:$usecasedef):$gatewaydecision{
+  let risk=pol.classifyrisk(req.sensitivity;uc.risktierof(founduc);req.estimatedcost);
   let policy=pol.evaluate(risk;req.sensitivity;req.modelid;req.usecaseid);
   let controls=pol.controlsforrisk(risk;req.sensitivity);
-  let riskstr=gt.risklabel(risk);
-  let decisionstr=gt.decisionlabel(policy);
-  let logmsg=str.concat(
-    str.concat(
-      str.concat(
-        str.concat("gateway ";decisionstr);
-        " use_case=");
-      req.usecaseid);
-    str.concat(" risk=";riskstr));
+  let logmsg="gateway \(gt.decisionlabel(policy)) use_case=\(req.usecaseid) risk=\(gt.risklabel(risk))";
   let gwloglevel=mt policy {
     $allow:v 0;
     $allowwithwarning:warning 1;
@@ -124,7 +135,7 @@ f=submitinnerwithuc(gw:$gateway;req:$gatewayrequest;founduc:i64):$gatewaydecisio
     $requireapproval:msg   msg;
     $deny:msg               msg
   };
-  let decision=$gatewaydecision{
+  <$gatewaydecision{
     requestid:req.requestid;
     policydecision:policy;
     risktier:risk;
@@ -132,15 +143,6 @@ f=submitinnerwithuc(gw:$gateway;req:$gatewayrequest;founduc:i64):$gatewaydecisio
     controlsapplied:controls;
     explanation:explanation;
     timestamp:str.nowiso8601()
-  };
-  <decision
-};
-
-f=submitinner(gw:$gateway;req:$gatewayrequest):$gatewaydecision!$lokeerr{
-  let usecaseresult=uc.find(gw.registry;req.usecaseid);
-  <mt usecaseresult {
-    $ok:v submitinnerwithuc(gw;req;v);
-    $err:e submitinnerunknownuc(req)
   }
 };
 

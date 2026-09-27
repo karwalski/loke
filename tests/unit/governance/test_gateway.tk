@@ -78,11 +78,16 @@ i=gw:core.governance.gateway;
    is settings-backed, verified in tests/unit/governance/test_kill_switch.tk, and not
    connected to this gateway.
 
-   Reported, not fixed. This file therefore covers everything that CAN be exercised —
-   construction, the deny-decision builder, the blocked predicate, the routing placeholder
-   and the inert setter — and deliberately does NOT call `submit` or `submitinner`. A test
-   that segfaults reports as CRASH, takes the runner's exit status with it, and buries the
-   finding instead of recording it. *)
+   Reported, not fixed, at the time. This file therefore covered everything that could be
+   exercised and deliberately did NOT call `submit` or `submitinner`: a test that
+   segfaults reports as CRASH, takes the runner's exit status with it, and buries the
+   finding instead of recording it.
+
+   ══ RESOLVED 2026-09-27, LS1.1j ═════════════════════════════════════════════════
+   submit, submitinner and the i64-typed submitinnerwithuc are gone. trysubmit returns a
+   plain $gatewaydecision, looks the use case up with uc.findor / uc.isusecase and converts
+   the tier with uc.risktierof, and is driven end to end at the bottom of main. Finding 2
+   was fixed separately: activatekillswitch now RETURNS the engaged gateway. *)
 
 f=request(usecaseid:str;sensitivity:$sensitivitylevel;cost:f64):$gatewayrequest{
   <$gatewayrequest{
@@ -167,12 +172,46 @@ f=main():i64{
   gw.deactivatekillswitch(before);
   if(t.assert(!before.killswitchactive;"DEFECT CHARACTERISED: deactivatekillswitch is the same no-op, in the other direction")){pass=pass+1}el{fail=fail+1};
 
+  (* ── trysubmit: the real submission path, end to end (LS1.1j) ────────────────
+     Finding 1 is resolved: trysubmit replaces submit and submitinner, looks the use case
+     up through uc.findor and uc.isusecase instead of matching find's $lokeerr result
+     (T-18), and converts the integer risklevel through uc.risktierof instead of passing it
+     where classifyrisk wants a $risktier. So a request can now be submitted.
+
+     The FAILURE path first, because it is the one T-18 made unreachable: an unknown use
+     case must come back BLOCKED. Under the old submitinner it took the $ok arm and was
+     assessed as if it were a registered use case. *)
+  let unknownsub=gw.trysubmit(gw.new();request("no-such-use-case";$sensitivitylevel{$public:0};0.0));
+  if(t.assert(gw.isblocked(unknownsub);"trysubmit: an UNKNOWN use case is BLOCKED — the failure path T-18 made unreachable")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(unknownsub.policydecision);"DENY";"trysubmit: and the decision is DENY, not an assessment of a use case that does not exist")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(unknownsub.risktier);"HIGH";"trysubmit: at HIGH risk")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(unknownsub.explanation;"no-such-use-case");"trysubmit: naming the unrecognised use case")){pass=pass+1}el{fail=fail+1};
+
+  (* The control: a registered use case with PUBLIC data is ALLOWED, so the assertions
+     above cannot pass by blocking everything. *)
+  let chatsub=gw.trysubmit(gw.new();request("chat-completion";$sensitivitylevel{$public:0};0.0));
+  if(t.assert(!gw.isblocked(chatsub);"trysubmit: a KNOWN low-risk use case with PUBLIC data is not blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.decisionlabel(chatsub.policydecision);"ALLOW";"trysubmit: it is ALLOWED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(gt.risklabel(chatsub.risktier);"LOW";"trysubmit: at the use case's own LOW tier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(gw.isblocked(unknownsub)!=gw.isblocked(chatsub);"trysubmit: known and unknown use cases are DISTINGUISHABLE")){pass=pass+1}el{fail=fail+1};
+
+  (* The use case's own tier reaches the policy: agent-task is registered at risklevel 2. *)
+  let agentsub=gw.trysubmit(gw.new();request("agent-task";$sensitivitylevel{$public:0};0.0));
+  if(t.asserteq(gt.risklabel(agentsub.risktier);"HIGH";"trysubmit: a use case registered HIGH is assessed HIGH — risklevel 2 reaches classifyrisk as $high")){pass=pass+1}el{fail=fail+1};
+
+  (* RESTRICTED data on a registered use case needs approval, and so is blocked. *)
+  let restrictedsub=gw.trysubmit(gw.new();request("chat-completion";$sensitivitylevel{$restricted:0};0.0));
+  if(t.assert(gw.isblocked(restrictedsub);"trysubmit: RESTRICTED data is blocked pending approval")){pass=pass+1}el{fail=fail+1};
+
   (* T4.5's acceptance criterion — "gateway blocks RESTRICTED request when kill switch
-     engaged" — is NOT asserted here, and it is not an omission. Reaching the deny branch
-     requires a $gateway with killswitchactive true, which nothing in the product can
-     produce (Finding 2); and submitting any request at all to reach the branch calls
-     submitinner, which segfaults (Finding 1). The row is a REOPEN, recorded in
-     docs/epics-and-stories.md rather than as a crashing test. *)
+     engaged" — reachable now that activatekillswitch returns the engaged gateway and
+     trysubmit does not crash. *)
+  let engaged=gw.activatekillswitch(gw.new();"an incident");
+  let killed=gw.trysubmit(engaged;request("chat-completion";$sensitivitylevel{$restricted:0};0.0));
+  if(t.assert(gw.isblocked(killed);"trysubmit: with the kill switch engaged a RESTRICTED request is blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(killed.explanation;"Kill switch active");"trysubmit: and the kill switch is the stated reason")){pass=pass+1}el{fail=fail+1};
+  let killedpublic=gw.trysubmit(engaged;request("chat-completion";$sensitivitylevel{$public:0};0.0));
+  if(t.assert(gw.isblocked(killedpublic);"trysubmit: with the kill switch engaged even a PUBLIC request is blocked")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

@@ -1,1 +1,3 @@
 Defines and manages a registry of approved use cases (chat, code generation, summarisation, agent tasks, MCP tool calls, etc.) with associated risk levels and approved model lists. Provides lookup, registration, and listing functionality. Depends on shared.types, core.governance.types, and std.str.
+
+LS1.1j (2026-09-27): findor returns a plain $usecasedef, with the nousecase sentinel (empty id) tested by isusecase, because find's $lokeerr result cannot report a miss (T-18). risktierof converts the stored integer risklevel (0, 1, 2) to a $risktier, and anything out of range is HIGH. find is kept for its existing test callers.

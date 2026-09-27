@@ -9,7 +9,6 @@ i=out:cli.output;
 i=pipe:core.privacy.pipeline;
 i=disp:core.providers.dispatcher;
 i=router:core.router.router;
-i=gw:core.governance.gateway;
 i=cfg:shared.config;
 i=ph:core.privacy.placeholder;
 i=ptypes:core.providers.types;
@@ -123,9 +122,9 @@ f=parseopts(args:@str):$askopts{
    struct, and read piperesult.sensitivitylevel / .entitycount / .anonymisedtext and
    dispatchresult.responsetext. None of those functions, structs or fields exists: the
    real ones are pipe.newconfig(presidiourl;ollamaurl), pipe.run(text;systemprompt;cfg)
-   returning a plain $pipelinerun whose payload is in `.result`, router.route(router;
-   prompt;sensitivity;tokens;tolerance;task), and disp.dispatch(dispatcher;
-   $completionrequest;provider).
+   returning a plain $pipelinerun whose payload is in `.result`,
+   router.routerequest(router;prompt;sensitivity;entitycount;tolerance;cid), and
+   disp.trydispatch(dispatcher;$completionrequest;provider) — the plain forms, LS1.1j.
 
    pipe.run returns a plain value, not a result, so there is nothing to match on — the
    legacy `mt pipe.run(...)` had an $err arm for a union that does not exist. *)
@@ -173,17 +172,26 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
 
   out.printpipelinestage("Router";"selecting model...";"capability and sensitivity routing");
 
+  (* LS1.1j — routerequest and isrouted, not route. route's result could not report a
+     failure (T-18), and its $err arm substituted gw.defaultrouting(), an empty model id on
+     $local, which was then dispatched as though it were a decision. A request the router
+     refuses — RESTRICTED data with no local model, for one — now stops here.
+
+     The fourth argument is the PII entity count, which sens.scorefrompii reads; it was
+     being passed a token estimate. The sixth is the correlation id, which was being passed
+     the literal "chat". *)
   let routeengine=router.new(router.newconfig(config.ollamaurl));
-  let decision=mt router.route(
+  let decision=router.routerequest(
     routeengine;
     detected.anonymised;
     detected.sensitivity;
-    (str.len(detected.anonymised)/4) as u32;
+    piperun.totalentities as u32;
     tolerancefromstr(opts.tolerance);
-    "chat"
-  ) {
-    $ok:d d;
-    $err:e gw.defaultrouting()
+    cid
+  );
+  if(router.isrouted(decision)){}el{
+    out.printerror("not routed: \(decision.reason)");
+    <1
   };
 
   let modelid=mut.decision.model.id;
@@ -207,10 +215,12 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
      structs, and toke needs the spec's type established before it can read the field. *)
   let spec:$modelspec=decision.model;
   let prov:$provider=spec.provider;
-  let responsetext=mt disp.dispatch(disp.new(disp.getapikeys();config.ollamaurl);request;prov) {
-    $ok:r r.content;
-    $err:e ""
+  let response=disp.trydispatch(disp.new(disp.getapikeys();config.ollamaurl);request;prov);
+  if(disp.isdispatched(response)){}el{
+    out.printerror("dispatch failed: \(disp.dispatcherror(response))");
+    <1
   };
+  let responsetext=response.content;
   if(str.len(responsetext)>0){}el{
     out.printerror("dispatch failed: no content returned");
     <1
