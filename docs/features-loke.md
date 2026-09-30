@@ -58,10 +58,11 @@ It reduces what is disclosed; it does not ensure that everything sensitive is fo
 
 **Layer Health** (`core/privacy/layer_health.tk`): Monitors availability of each layer. System degrades gracefully — remains operational with at least one layer available. Reports HEALTHY or DEGRADED status.
 
-> **The multi-layer composition above is written but not wired.** Ten Epic F3b modules —
-> `consensus.tk`, `entity_routing.tk`, `layer_health.tk`, `layer_config.tk`, `filter_registry.tk`,
-> `filter_metrics.tk`, `evaluation.tk`, `org_policy.tk`, `sidecar_client.tk` and `template.tk` — have
-> **zero importers**. `pipeline.tk:8-13` imports regex, Presidio and NER by name in a fixed order and
+> **Most of the multi-layer composition above is written but not wired.** Since 2026-10-01 the
+> pipeline runs its layers from `filter_registry.tk` (F3b.1), each through `layer_health.tk` (F3b.6),
+> and `sidecar_client.tk` is the privacy-filter layer (F3b.3). Seven Epic F3b modules —
+> `consensus.tk`, `entity_routing.tk`, `layer_config.tk`, `filter_metrics.tk`, `evaluation.tk`,
+> `org_policy.tk` and `template.tk` — still have **zero importers**, and `pipeline.tk`
 > de-duplicates overlaps itself.
 >
 > Specifically: the four consensus strategies are **not implemented** —

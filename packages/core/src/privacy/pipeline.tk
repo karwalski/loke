@@ -8,30 +8,27 @@ m=core.privacy.pipeline;
 
 i=str:std.str;
 i=log:shared.log;
-i=regex:core.privacy.regex;
-i=presidio:core.privacy.presidio;
-i=ner:core.privacy.ner;
 i=guardian:core.privacy.guardian;
 i=t:shared.types;
 i=ph:core.privacy.placeholder;
 i=pt:core.privacy.pipelinetypes;
-i=pf:core.privacy.sidecarclient;
+i=fr:core.privacy.filterregistry;
+i=lh:core.privacy.layerhealth;
 i=cfg:shared.config;
 
-(* F3b.3. usepf, pfurl and pfthreshold are the privacy-filter sidecar layer
-   (packages/privacy-filter/server.py). newconfig leaves it OFF, so a caller that says
-   nothing about it gets the three layers it had; withlokeconfig and configured turn it on
-   from privacy.privacy_filter in the user's config.toml. *)
+(* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
+   detection layers exist, which are enabled, the order they run in and the URL and setting
+   each is reached with, in one place. `run` walks it in order and consults each entry
+   through core.privacy.layerhealth, so a layer that is not in `layers`, or is in it
+   disabled, is not consulted.
+
+   The config used to carry usener/usepresidio/usepf and three URLs as separate fields, and
+   `run` wired four layers by hand from them, while a registry that described the same
+   layers had no importer. The accessors below (usener, presidiourl and the rest) read the
+   registry, for callers that ask about one layer. *)
 t=$pipelineconfig{
-  presidiourl:str;
-  ollamaurl:str;
-  nermodelid:str;
-  usepresidio:bool;
-  usener:bool;
-  dryrun:bool;
-  usepf:bool;
-  pfurl:str;
-  pfthreshold:str
+  layers:$filterregistry;
+  dryrun:bool
 };
 
 t=$stageresult{
@@ -58,34 +55,32 @@ t=$pipelinerun{
 };
 
 
-f=newconfig(presidiourl:str;ollamaurl:str):$pipelineconfig{
-  <$pipelineconfig{
-    presidiourl:presidiourl;
-    ollamaurl:ollamaurl;
-    nermodelid:"qwen2.5:7b";
-    usepresidio:true;
-    usener:true;
-    dryrun:false;
-    usepf:false;
-    pfurl:pf.sidecarurl();
-    pfthreshold:""
-  }
+(* Regex, NER at ollamaurl and Presidio at presidiourl on; the privacy-filter sidecar
+   registered and OFF, so a caller that says nothing about it gets the three layers it had
+   (F3b.3). *)
+f=newconfig(purl:str;ourl:str):$pipelineconfig{
+  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false}
+};
+
+f=withlayers(c:$pipelineconfig;layers:$filterregistry):$pipelineconfig{
+  <$pipelineconfig{layers:layers;dryrun:c.dryrun}
+};
+
+(* One registry entry switched on or off. An id the registry does not hold is left alone. *)
+f=withlayer(c:$pipelineconfig;id:str;enabled:bool):$pipelineconfig{
+  <withlayers(c;fr.setenabled(c.layers;id;enabled))
+};
+
+f=withdryrun(c:$pipelineconfig;dryrun:bool):$pipelineconfig{
+  <$pipelineconfig{layers:c.layers;dryrun:dryrun}
 };
 
 (* The privacy-filter layer switched on (or off) at a sidecar URL and operating point. The
    threshold is text, as core.privacy.sidecarclient.new takes it (AD1.4, T-20). *)
 f=withprivacyfilter(c:$pipelineconfig;enabled:bool;url:str;threshold:str):$pipelineconfig{
-  <$pipelineconfig{
-    presidiourl:c.presidiourl;
-    ollamaurl:c.ollamaurl;
-    nermodelid:c.nermodelid;
-    usepresidio:c.usepresidio;
-    usener:c.usener;
-    dryrun:c.dryrun;
-    usepf:enabled;
-    pfurl:url;
-    pfthreshold:threshold
-  }
+  let id=fr.privacyfilterid();
+  let reg=fr.setparam(fr.seturl(fr.setenabled(c.layers;id;enabled);id;url);id;threshold);
+  <withlayers(c;reg)
 };
 
 f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
@@ -93,9 +88,25 @@ f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
 };
 
 (* newconfig plus the privacy-filter settings from the user's config.toml, read now. *)
-f=configured(presidiourl:str;ollamaurl:str):$pipelineconfig{
-  <withlokeconfig(newconfig(presidiourl;ollamaurl);cfg.loaded())
+f=configured(purl:str;ourl:str):$pipelineconfig{
+  <withlokeconfig(newconfig(purl;ourl);cfg.loaded())
 };
+
+(* The layers the loke server runs a request through: the default Presidio and Ollama
+   addresses, with the user's privacy-filter settings. page.api.pipeline filters with it and
+   page.api.health reports the health of the same layers. *)
+f=served():$pipelineconfig{
+  <configured(fr.defaultpresidiourl();fr.defaultollamaurl())
+};
+
+f=usener(c:$pipelineconfig):bool{ <fr.get(c.layers;fr.nerid()).enabled };
+f=usepresidio(c:$pipelineconfig):bool{ <fr.get(c.layers;fr.presidioid()).enabled };
+f=usepf(c:$pipelineconfig):bool{ <fr.get(c.layers;fr.privacyfilterid()).enabled };
+f=ollamaurl(c:$pipelineconfig):str{ <fr.get(c.layers;fr.nerid()).url };
+f=nermodelid(c:$pipelineconfig):str{ <fr.get(c.layers;fr.nerid()).param };
+f=presidiourl(c:$pipelineconfig):str{ <fr.get(c.layers;fr.presidioid()).url };
+f=pfurl(c:$pipelineconfig):str{ <fr.get(c.layers;fr.privacyfilterid()).url };
+f=pfthreshold(c:$pipelineconfig):str{ <fr.get(c.layers;fr.privacyfilterid()).param };
 
 
 (* Ranked, not a chain of == comparisons. `levela==$restricted` is false even when
@@ -449,15 +460,36 @@ f=summariserun(run:$pipelinerun):str{
 
 
 
-f=pipelinenerskip(requestid:str):$stageresult{
-  log.warn("NER scan failed -- skipping";"pipeline";requestid);
-  <$stageresult{
-    stage:$pipelinestage{$nerscan:0};
-    entitiesfound:0;
-    durationms:0;
-    skipped:true;
-    skipreason:"NER detect_entities returned error"
-  }
+(* The detection stage a registry id is recorded as. page.api.pipeline names the stages in
+   detection_layers (regex, ner, presidio, privacy_filter). Only ids layerhealth.isknown
+   accepts reach here. *)
+f=stagefor(id:str):$pipelinestage{
+  if(str.eq(id;fr.nerid())){ <$pipelinestage{$nerscan:0} }el{};
+  if(str.eq(id;fr.presidioid())){ <$pipelinestage{$presidioscan:0} }el{};
+  if(str.eq(id;fr.privacyfilterid())){ <$pipelinestage{$privacyfilterscan:0} }el{};
+  <$pipelinestage{$regexscan:0}
+};
+
+(* The stage a consulted layer leaves in the trace: a scan when it completed, and a skipped
+   stage carrying the reason otherwise, disabled and degraded alike. *)
+f=layerstage(s:$layerstatus):$stageresult{
+  if(lh.iscompleted(s)){
+    <$stageresult{stage:stagefor(s.id);entitiesfound:s.detectioncount as u32;durationms:0;skipped:false;skipreason:""}
+  }el{};
+  <$stageresult{stage:stagefor(s.id);entitiesfound:0;durationms:0;skipped:true;skipreason:s.reason}
+};
+
+(* One skipped stage for each of the four real layers the registry has no entry for. *)
+f=unregisteredstages(reg:$filterregistry):@$stageresult{
+  let ids=@(fr.regexid();fr.nerid();fr.presidioid();fr.privacyfilterid());
+  let out=mut.@();
+  lp(let i=0;i<ids.len;i=i+1){
+    let id:str=ids.get(i);
+    if(fr.has(reg;id)){}el{
+      out=out.push($stageresult{stage:stagefor(id);entitiesfound:0;durationms:0;skipped:true;skipreason:"\(id) is not in the layer registry"})
+    }
+  };
+  <out
 };
 
 f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
@@ -470,217 +502,41 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let completed=mut.0;
   let degraded=mut.0;
 
-  
-  let regexresult=regex.detect(text);
-  let regexentitycount=str.arraylen(regexresult.entities);
-  let regexstage=$stageresult{
-    stage:$pipelinestage{$regexscan:0};
-    entitiesfound:regexentitycount;
-    durationms:0;
-    skipped:false;
-    skipreason:""
-  };
-  stages=stages.push(regexstage);
-  completed=completed+1;
-  let ei=mut.0;
-  lp(let lv=0;true;lv=lv){
-    if(ei>=regexentitycount){
-      br
-    }el{
-      let entity=regexresult.entities.get(ei);
-      allentities=allentities.push(entity);
-      ei=ei+1
-    }
-  };
-
-  
-  if(config.usener){
-    let nerclient=ner.new(config.ollamaurl;config.nermodelid);
-    let neravailable=ner.isavailable(nerclient);
-    if(neravailable){
-      (* VM1.6e. A plain struct, not detectentities' result: `mt` on a result whose error
-         side is a user sum takes the first arm whatever the value is (T-18), so a failed
-         scan was counted as a completed layer. See core.privacy.ner.scan. *)
-      let nerscan=ner.scan(nerclient;text);
-      if(nerscan.ok){
-        let nerentities=nerscan.nerhits;
-        let nercount=str.arraylen(nerentities);
-        let ni=mut.0;
-        lp(let lv2=0;true;lv2=lv2){
-          if(ni>=nercount){
-            br
-          }el{
-            let entity=nerentities.get(ni);
-            allentities=allentities.push(entity);
-            ni=ni+1
-          }
-        };
-        let nerstage=$stageresult{
-          stage:$pipelinestage{$nerscan:0};
-          entitiesfound:nercount;
-          durationms:0;
-          skipped:false;
-          skipreason:""
-        };
-        stages=stages.push(nerstage);
-        completed=completed+1
-      }el{
-        let skipstage=pipelinenerskip(requestid);
-        stages=stages.push(skipstage);
-        degraded=degraded+1
-      }
-    }el{
-      degraded=degraded+1;
-      log.warn("NER unavailable -- skipping NER scan";"pipeline";requestid);
-      let nerstage=$stageresult{
-        stage:$pipelinestage{$nerscan:0};
-        entitiesfound:0;
-        durationms:0;
-        skipped:true;
-        skipreason:"Ollama unreachable"
+  (* F3b.1 / F3b.6. Every detection layer, in registry order, through the one path in
+     core.privacy.layerhealth: a disabled entry is recorded as a skipped stage and sent
+     nothing; an enabled one is probed, and scanned only if it answers. Completed means it
+     scanned; an enabled layer that is unavailable or whose scan failed is degraded, logged
+     with its id and reason, and recorded as a skipped stage with that reason. An id with no
+     detector is degraded too, and has no stage of its own to record. *)
+  let reg=config.layers;
+  lp(let li=0;li<reg.filters.len;li=li+1){
+    let layer:$privacyfilter=reg.filters.get(li);
+    let lr:$layerresult=lh.consult(layer;text);
+    let st:$layerstatus=lr.status;
+    if(lh.iscompleted(st)){
+      completed=completed+1;
+      lp(let hi=0;hi<lr.hits.len;hi=hi+1){
+        allentities=allentities.push(lr.hits.get(hi))
       };
-      stages=stages.push(nerstage)
-    }
-  }el{
-    let nerstage=$stageresult{
-      stage:$pipelinestage{$nerscan:0};
-      entitiesfound:0;
-      durationms:0;
-      skipped:true;
-      skipreason:"use_ner=false"
-    };
-    stages=stages.push(nerstage)
-  };
-
-  
-  if(config.usepresidio){
-    let presidioclient=presidio.new(config.presidiourl);
-    let presidioavailable=presidio.isavailable(presidioclient);
-    if(presidioavailable){
-      (* VM1.6e. See core.privacy.presidio.scan: measured, the result form counted a
-         Presidio that was never reached as a completed layer (T-18). *)
-      let presidioscan=presidio.scan(presidioclient;text);
-      if(presidioscan.ok){
-        let rawpresidioentities=presidioscan.presidiohits;
-        let piifrompresidio=presidio.topiientities(rawpresidioentities;text);
-        let presidiocount=str.arraylen(piifrompresidio);
-        let pri=mut.0;
-        lp(let lv3=0;pri<presidiocount;lv3=lv3){
-          let entity=piifrompresidio.get(pri);
-          allentities=allentities.push(entity);
-          pri=pri+1
-        };
-        let presidiostage=$stageresult{
-          stage:$pipelinestage{$presidioscan:0};
-          entitiesfound:presidiocount;
-          durationms:0;
-          skipped:false;
-          skipreason:""
-        };
-        stages=stages.push(presidiostage);
-        completed=completed+1
-      }el{
-        degraded=degraded+1;
-        log.warn("Presidio scan failed -- degraded mode";"pipeline";requestid);
-        let presidiostage=$stageresult{
-          stage:$pipelinestage{$presidioscan:0};
-          entitiesfound:0;
-          durationms:0;
-          skipped:true;
-          skipreason:"Presidio analyze returned error"
-        };
-        stages=stages.push(presidiostage)
-      }
-    }el{
+      if(lr.unplaced>0){
+        log.warn("privacy layer \(layer.id) reported \(lr.unplaced) span(s) that could not be located in the text";"pipeline";requestid)
+      }el{}
+    }el{};
+    if(lh.isdegraded(st)){
       degraded=degraded+1;
-      log.warn("Presidio unavailable -- running in degraded mode";"pipeline";requestid);
-      let presidiostage=$stageresult{
-        stage:$pipelinestage{$presidioscan:0};
-        entitiesfound:0;
-        durationms:0;
-        skipped:true;
-        skipreason:"Presidio sidecar unreachable"
-      };
-      stages=stages.push(presidiostage)
-    }
-  }el{
-    let presidiostage=$stageresult{
-      stage:$pipelinestage{$presidioscan:0};
-      entitiesfound:0;
-      durationms:0;
-      skipped:true;
-      skipreason:"use_presidio=false"
-    };
-    stages=stages.push(presidiostage)
+      log.warn("privacy layer \(layer.id) \(st.state): \(st.reason) -- running degraded";"pipeline";requestid)
+    }el{};
+    if(lh.isknown(layer.id)){
+      stages=stages.push(layerstage(st))
+    }el{}
+  };
+  (* A real layer the registry does not hold at all is still named in the trace, as a
+     skipped stage, so detection_layers says it did not look rather than leaving it out. *)
+  let absent=unregisteredstages(reg);
+  lp(let ai=0;ai<absent.len;ai=ai+1){
+    stages=stages.push(absent.get(ai))
   };
 
-  (* F3b.3 -- the privacy-filter sidecar, the fourth layer. Counted exactly as NER and
-     Presidio are: completed only when /detect answered a scan whose entities could all be
-     read; degraded when it is enabled and either does not answer /health or does not scan;
-     a skipped stage either way, so detection_layers names it. Its health check is the
-     one-argument client GET and its scan a loopback-only POST (sidecarclient). AD1.3
-     measured this layer's marginal value on the PII corpus; see docs/metrics-baseline.md. *)
-  if(config.usepf){
-    let pfclient=pf.new(config.pfurl;config.pfthreshold);
-    if(pf.isavailable(pfclient)){
-      let pfscan=pf.scanentities(pfclient;text);
-      if(pfscan.ok){
-        let pfhits=pfscan.hits;
-        let pfcount=str.arraylen(pfhits);
-        let pfi=mut.0;
-        lp(let lv4=0;pfi<pfcount;lv4=lv4){
-          let entity=pfhits.get(pfi);
-          allentities=allentities.push(entity);
-          pfi=pfi+1
-        };
-        if(pfscan.unplaced>0){
-          log.warn("privacy filter reported \(pfscan.unplaced) span(s) that could not be located in the text";"pipeline";requestid)
-        }el{};
-        let pfstage=$stageresult{
-          stage:$pipelinestage{$privacyfilterscan:0};
-          entitiesfound:pfcount;
-          durationms:0;
-          skipped:false;
-          skipreason:""
-        };
-        stages=stages.push(pfstage);
-        completed=completed+1
-      }el{
-        degraded=degraded+1;
-        log.warn("privacy filter scan failed -- degraded mode";"pipeline";requestid);
-        let pfstage=$stageresult{
-          stage:$pipelinestage{$privacyfilterscan:0};
-          entitiesfound:0;
-          durationms:0;
-          skipped:true;
-          skipreason:"privacy-filter detect returned no scan"
-        };
-        stages=stages.push(pfstage)
-      }
-    }el{
-      degraded=degraded+1;
-      log.warn("privacy filter unavailable -- running in degraded mode";"pipeline";requestid);
-      let pfstage=$stageresult{
-        stage:$pipelinestage{$privacyfilterscan:0};
-        entitiesfound:0;
-        durationms:0;
-        skipped:true;
-        skipreason:"privacy-filter sidecar unreachable"
-      };
-      stages=stages.push(pfstage)
-    }
-  }el{
-    let pfstage=$stageresult{
-      stage:$pipelinestage{$privacyfilterscan:0};
-      entitiesfound:0;
-      durationms:0;
-      skipped:true;
-      skipreason:"use_privacy_filter=false"
-    };
-    stages=stages.push(pfstage)
-  };
-
-  
   let dedupedraw=dedupentities(allentities);
   (* PL1.1 — placeholders are assigned HERE, after dedup and before anonymisation, and
      nowhere else.
@@ -812,18 +668,7 @@ f=runforward(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
 };
 
 f=rundry(text:str;config:$pipelineconfig):$pipelinerun{
-  let dryconfig=$pipelineconfig{
-    presidiourl:config.presidiourl;
-    ollamaurl:config.ollamaurl;
-    nermodelid:config.nermodelid;
-    usepresidio:config.usepresidio;
-    usener:config.usener;
-    dryrun:true;
-    usepf:config.usepf;
-    pfurl:config.pfurl;
-    pfthreshold:config.pfthreshold
-  };
-  <run(text;"";dryconfig)
+  <run(text;"";withdryrun(config;true))
 };
 
 f=applypreset(config:i64;preset:str):i64{

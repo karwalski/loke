@@ -1,0 +1,207 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.layerregistrypipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=pt:core.privacy.pipelinetypes;
+i=fr:core.privacy.filterregistry;
+i=lh:core.privacy.layerhealth;
+
+(* F3b.1 and F3b.6 — the filter registry is what core.privacy.pipeline.run runs its layers
+   from, and every layer goes through the one health and degradation path in
+   core.privacy.layerhealth. Judged on the production pipeline by what arrives at a server
+   standing in for the sidecars, and by the counts and stages the run records.
+
+   scripts/lib/http_recorder.py answers as Ollama (/api/tags, /api/chat), Presidio (/health,
+   /analyze) and the privacy-filter sidecar (/health, /detect) at once, and logs every request
+   before it replies, so one recorder is NER, Presidio and the privacy filter here, and the
+   request lines say which layer was consulted. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_layerreg_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+(* An unprivileged port nothing listens on (see test_fail_closed.tk on why not port 1). *)
+f=deadurl():str{
+  <"http://127.0.0.1:59994"
+};
+
+(* Every arm of $pipelinestage, so a new stage is a compile error here rather than a gap. *)
+f=stagename(st:$pipelinestage):str{
+  <mt st {
+    $regexscan:v "regex";
+    $nerscan:v "ner";
+    $presidioscan:v "presidio";
+    $dedup:v "dedup";
+    $anonymise:v "anonymise";
+    $guardianinject:v "guardian";
+    $privacyfilterscan:v "privacy_filter"
+  }
+};
+
+(* The detection stages in the order the run recorded them, "name:scanned" or
+   "name:skipped", comma-separated. *)
+f=detectionorder(run:$pipelinerun):str{
+  let out=mut.@();
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    let n=stagename(sr.stage);
+    if(str.eq(n;"dedup") || str.eq(n;"anonymise") || str.eq(n;"guardian")){}el{
+      if(sr.skipped){ out=out.push("\(n):skipped") }el{ out=out.push("\(n):scanned") }
+    }
+  };
+  <str.join(",";out)
+};
+
+f=skipreason(run:$pipelinerun;name:str):str{
+  let r=mut."";
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    if(str.eq(stagename(sr.stage);name)){ r=sr.skipreason }el{}
+  };
+  <r
+};
+
+f=statusof(report:$healthreport;id:str):$layerstatus{
+  let idx=mut.0;
+  lp(let i=0;i<report.layers.len;i=i+1){
+    let s:$layerstatus=report.layers.get(i);
+    if(str.eq(s.id;id)){ idx=i }el{}
+  };
+  <report.layers.get(idx)
+};
+
+(* All four real layers enabled, NER, Presidio and the privacy filter all at url. *)
+f=allat(url:str):$pipelineconfig{
+  let c=pl.withprivacyfilter(pl.newconfig(url;url);true;url;"");
+  <c
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  let text="Jane Citizen called Tuesday";
+
+  (* ── Four registry entries, four layers consulted ─────────────────────── *)
+  let all=pl.runforward(text;"";allat(url));
+  let log1=readfile(logp);
+  let ac:str=str.fromint(all.layerscompleted as i64);
+  if(t.assert(all.layerscompleted==4 as u32 && all.layersdegraded==0 as u32;"with every entry enabled and answering, all four layers complete (completed=\(ac))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(log1;"POST /api/chat") && str.contains(log1;"POST /analyze") && str.contains(log1;"POST /detect");"and NER, Presidio and the privacy filter each received the scan")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(detectionorder(all);"regex:scanned,ner:scanned,presidio:scanned,privacy_filter:scanned";"the stages follow the registry's order")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A disabled entry is not consulted ─────────────────────────────────── *)
+  let analyses=countof(readfile(logp);"POST /analyze");
+  let healths=countof(readfile(logp);"GET /health");
+  let nopresidio=pl.withlayer(allat(url);fr.presidioid();false);
+  let off=pl.runforward(text;"";nopresidio);
+  let log2=readfile(logp);
+  if(t.assert(countof(log2;"POST /analyze")==analyses;"with the Presidio entry disabled, no /analyze is sent")){pass=pass+1}el{fail=fail+1};
+  (* The privacy filter's probe is one GET /health; Presidio's would have been a second. *)
+  if(t.assert(countof(log2;"GET /health")==healths+1;"and Presidio is not even probed: only the privacy filter's health check arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(off.layerscompleted==3 as u32 && off.layersdegraded==0 as u32;"a disabled layer is neither completed nor degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(detectionorder(off);"regex:scanned,ner:scanned,presidio:skipped,privacy_filter:scanned";"and it is still named in the trace, as skipped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(skipreason(off;"presidio");"disabled");"with the reason that it is disabled")){pass=pass+1}el{fail=fail+1};
+
+  (* The same for a registry with the entry REMOVED: nothing is sent, and the trace still
+     names it as skipped, so detection_layers is as complete as before the registry. *)
+  let removed=pl.withlayers(allat(url);fr.remove(allat(url).layers;fr.presidioid()));
+  let rem=pl.runforward(text;"";removed);
+  if(t.assert(countof(readfile(logp);"POST /analyze")==analyses;"a removed entry is not consulted either")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(detectionorder(rem);"regex:scanned,ner:scanned,privacy_filter:scanned,presidio:skipped";"and is still named in the trace, as skipped, after the registered layers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rem.layerscompleted==3 as u32 && rem.layersdegraded==0 as u32;"a removed layer is neither completed nor degraded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Enabled but down is degraded ─────────────────────────────────────── *)
+  let downreg=fr.seturl(allat(url).layers;fr.presidioid();deadurl());
+  let down=pl.runforward(text;"";pl.withlayers(allat(url);downreg));
+  if(t.assert(down.layerscompleted==3 as u32 && down.layersdegraded==1 as u32;"an enabled Presidio that does not answer is DEGRADED, and the others complete")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(skipreason(down;"presidio");"Presidio sidecar unreachable";"its stage is skipped with the reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(down);"a degraded run with completed layers may still be forwarded (NC1.9)")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Order comes from the registry ────────────────────────────────────── *)
+  let full=allat(url).layers;
+  let reordered=fr.register(fr.register(fr.register(fr.newregistry();fr.get(full;fr.privacyfilterid()));fr.get(full;fr.regexid()));fr.get(full;fr.nerid()));
+  let ord=pl.runforward(text;"";pl.withlayers(allat(url);reordered));
+  if(t.asserteq(detectionorder(ord);"privacy_filter:scanned,regex:scanned,ner:scanned,presidio:skipped";"a registry in another order runs in that order, and the unregistered Presidio is named as skipped")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Zero completed layers is refused ─────────────────────────────────── *)
+  (* Regex switched off in the registry, NER down, the rest off. *)
+  let nothingreg=fr.setenabled(fr.setenabled(fr.setenabled(fr.layers(deadurl();deadurl());fr.regexid();false);fr.presidioid();false);fr.privacyfilterid();false);
+  let zero=pl.runforward("card 4111 1111 1111 1111";"";pl.withlayers(pl.newconfig(deadurl();deadurl());nothingreg));
+  let zc:str=str.fromint(zero.layerscompleted as i64);
+  if(t.assert(zero.layerscompleted==0 as u32;"with regex disabled and NER down, no layer completes (completed=\(zc))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(zero.layersdegraded==1 as u32;"and NER is counted degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(zero);"so the production run is REFUSED, however clean it looks (NC1.9)")){pass=pass+1}el{fail=fail+1};
+
+  let unknown=fr.register(fr.newregistry();$privacyfilter{id:"custom-layer";name:"Custom";kind:"external";entitytypes:"";confidence:0.5;enabled:true;url:url;param:""});
+  let unk=pl.runforward(text;"";pl.withlayers(pl.newconfig(deadurl();deadurl());unknown));
+  if(t.assert(unk.layerscompleted==0 as u32 && unk.layersdegraded==1 as u32;"an enabled id with no detector is degraded, never completed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(unk);"and a run of only that is refused")){pass=pass+1}el{fail=fail+1};
+
+  let empty=pl.runforward(text;"";pl.withlayers(pl.newconfig(deadurl();deadurl());fr.newregistry()));
+  if(t.assert(empty.layerscompleted==0 as u32 && !pl.issafetoforward(empty);"an empty registry scans nothing and is refused")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Health: one status per layer, through the same probe ──────────────── *)
+  let hreg=fr.setenabled(fr.seturl(allat(url).layers;fr.presidioid();deadurl());fr.privacyfilterid();false);
+  let before=countof(readfile(logp);"GET /health");
+  let report=lh.checkhealth(hreg);
+  if(t.assert(countof(readfile(logp);"GET /health")==before;"the disabled privacy filter is not probed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(report;"regex").state;"healthy";"regex reports healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(report;"ner").state;"healthy";"NER, answering at the recorder, reports healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(report;"presidio").state;"unavailable";"Presidio, enabled and down, reports unavailable")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(report;"presidio").reason;"Presidio sidecar unreachable";"with the reason the pipeline records")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(statusof(report;"openai-privacy-filter").state;"disabled";"the privacy filter reports disabled")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(report.totallayers==3 && report.availablelayers==2;"three layers are enabled and two answer")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lh.overall(report);"degraded";"so the privacy layers are degraded")){pass=pass+1}el{fail=fail+1};
+  let rj=lh.reportjson(report);
+  if(t.assert(str.contains(rj;"{\"id\":\"presidio\",\"enabled\":true,\"state\":\"unavailable\",\"reason\":\"Presidio sidecar unreachable\"}");"the JSON a surface reads names each layer and its state")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rj;"\"state\":\"degraded\"") && str.contains(rj;"{\"id\":\"openai-privacy-filter\",\"enabled\":false,\"state\":\"disabled\"");"with the overall state and the disabled layer")){pass=pass+1}el{fail=fail+1};
+
+  let nohealth=lh.checkhealth(nothingreg);
+  if(t.asserteq(lh.overall(nohealth);"unhealthy";"a registry where nothing answers is UNHEALTHY")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.formathealthstatus(lh.checkhealth(fr.newregistry()));"UNHEALTHY");"and so is an empty one: no layer is not a healthy pipeline")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete("\(logp).headers");
+  file.delete("\(base).port");
+  <fail
+};

@@ -350,6 +350,11 @@ approve_post() {  # $1 approval id, $2 decision; sets CODE and BODY
           -d "{\"approval_id\":\"$1\",\"decision\":\"$2\"}" http://127.0.0.1:11430/api/approve)
   CODE=${out##*$'\n'}; BODY=${out%$'\n'*}
 }
+health_get() {  # sets CODE and BODY from GET /api/health
+  local out
+  out=$(curl -s -m 20 -w '\n%{http_code}' http://127.0.0.1:11430/api/health)
+  CODE=${out##*$'\n'}; BODY=${out%$'\n'*}
+}
 judge() {  # $1 label, $2 expected status, $3 substring the body must contain
   if [ "$CODE" = "$2" ] && [[ "$BODY" == *"$3"* ]]; then echo "  ok   $1 [$CODE]"
   else echo "  FAIL $1: got [$CODE] $(printf '%s' "$BODY" | head -c 300), expected [$2] containing $3" >&2; fail=1; fi
@@ -630,8 +635,15 @@ else
     scanned=*privacy_filter*\;skipped=*) echo "  ok   the disclosure record names privacy_filter among the layers that scanned: $pflayers" ;;
     *) echo "  FAIL the disclosure record's detection layers are '$pflayers'" >&2; fail=1 ;;
   esac
+  # F3b.6: /api/health reports each layer of the same registry the request just ran through.
+  health_get
+  judge "/api/health lists the privacy filter from config.toml, enabled and answering" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"healthy"'
+  judge "and the in-process regex layer as healthy" 200 '{"id":"regex","enabled":true,"state":"healthy"'
   # The sidecar down: the layer is degraded, recorded as skipped, and nothing claims it scanned.
   kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null
+  health_get
+  judge "with the sidecar down, /api/health reports it unavailable, with the reason the pipeline records" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"unavailable","reason":"privacy-filter sidecar unreachable"}'
+  judge "and the privacy layers as a whole degraded" 200 '"privacy_layers":{"state":"degraded"'
   pipe_post "summarise what $PFNAME asked about the invoice" ""
   judge "with the privacy filter down and other layers completing, the request is still answered (degraded)" 200 '"layers_degraded":'
   pflayers=$(dl "SELECT detection_layers FROM disclosure_log ORDER BY rowid DESC LIMIT 1")

@@ -3,10 +3,43 @@
 
 m=core.privacy.layerhealth;
 i=str:std.str;
+i=json:std.json;
+i=fr:core.privacy.filterregistry;
+i=regex:core.privacy.regex;
+i=ner:core.privacy.ner;
+i=presidio:core.privacy.presidio;
+i=pf:core.privacy.sidecarclient;
+i=t:shared.types;
+
+(* F3b.6. The one health and degradation path every detection layer goes through.
+
+   core.privacy.pipeline.run used to hand-write the same check four times: regex was assumed
+   up, and NER, Presidio and the privacy-filter sidecar each had their own isavailable call,
+   their own scan, their own completed/degraded counting and their own skip reasons. This
+   module now does it once, for a registry entry: `probe` asks the layer's own client whether
+   it answers, and `consult` probes and then scans. What comes back is a $layerstatus whose
+   state is one of
+
+     disabled     the registry entry is off; nothing was sent to the layer
+     unavailable  enabled, and the health check failed (or there is no detector for the id)
+     failed       enabled and answering, but the scan did not produce a readable result
+     completed    the layer scanned the text (consult only)
+     healthy      the layer answers its health check (probe only)
+
+   and the pipeline counts completed as a completed layer and unavailable/failed as a
+   degraded one (NC1.9), with the reason in the stage it records.
+
+   The reasons for the existing layers are the strings pipeline.run used before, so the
+   pipeline trace reads as it did.
+
+   The states are strings because they are also what a surface prints: page.api.health
+   writes them into its body as they are. *)
 
 t=$layerstatus{
   id:str;
+  enabled:bool;
   available:bool;
+  state:str;
   reason:str;
   lastchecked:i64;
   detectioncount:i64
@@ -19,37 +52,167 @@ t=$healthreport{
   degraded:bool
 };
 
-f=checkhealth(layerids:@str):$healthreport{
+(* What one layer did with one text: its status, and when it completed, what it found.
+   unplaced is the privacy filter's count of spans it reported and loke could not locate in
+   the text (F3b.3); 0 for every other layer. *)
+t=$layerresult{
+  status:$layerstatus;
+  hits:@$piientity;
+  unplaced:i64
+};
+
+f=status(f:$privacyfilter;available:bool;state:str;reason:str;count:i64):$layerstatus{
+  <$layerstatus{id:f.id;enabled:f.enabled;available:available;state:state;reason:reason;lastchecked:t.nowms();detectioncount:count}
+};
+
+f=isknown(id:str):bool{
+  <str.eq(id;fr.regexid()) || str.eq(id;fr.nerid()) || str.eq(id;fr.presidioid()) || str.eq(id;fr.privacyfilterid())
+};
+
+(* Whether the layer's own client says it answers. The regex layer is in-process. Each other
+   client refuses a URL that is not loopback before it probes (T-58, sidecarclient). *)
+f=answers(f:$privacyfilter):bool{
+  if(str.eq(f.id;fr.regexid())){ <true }el{};
+  if(str.eq(f.id;fr.nerid())){ <ner.isavailable(ner.new(f.url;f.param)) }el{};
+  if(str.eq(f.id;fr.presidioid())){ <presidio.isavailable(presidio.new(f.url)) }el{};
+  if(str.eq(f.id;fr.privacyfilterid())){ <pf.isavailable(pf.new(f.url;f.param)) }el{};
+  <false
+};
+
+f=unavailablereason(id:str):str{
+  if(str.eq(id;fr.nerid())){ <"Ollama unreachable" }el{};
+  if(str.eq(id;fr.presidioid())){ <"Presidio sidecar unreachable" }el{};
+  if(str.eq(id;fr.privacyfilterid())){ <"privacy-filter sidecar unreachable" }el{};
+  <"no detector is implemented for layer \(id)"
+};
+
+f=failedreason(id:str):str{
+  if(str.eq(id;fr.nerid())){ <"NER detect_entities returned error" }el{};
+  if(str.eq(id;fr.presidioid())){ <"Presidio analyze returned error" }el{};
+  <"privacy-filter detect returned no scan"
+};
+
+f=probe(f:$privacyfilter):$layerstatus{
+  if(!f.enabled){ <status(f;false;"disabled";"\(f.id) is disabled in the layer registry";0) }el{};
+  if(!isknown(f.id)){ <status(f;false;"unavailable";unavailablereason(f.id);0) }el{};
+  if(answers(f)){ <status(f;true;"healthy";"answering";0) }el{};
+  <status(f;false;"unavailable";unavailablereason(f.id);0)
+};
+
+f=nohits(st:$layerstatus):$layerresult{
+  <$layerresult{status:st;hits:@($piientity);unplaced:0}
+};
+
+f=completed(f:$privacyfilter;hits:@$piientity;unplaced:i64):$layerresult{
+  <$layerresult{status:status(f;true;"completed";"";hits.len as i64);hits:hits;unplaced:unplaced}
+};
+
+f=failed(f:$privacyfilter):$layerresult{
+  <nohits(status(f;true;"failed";failedreason(f.id);0))
+};
+
+(* One scan by one answering layer. Every scan result is a plain struct whose ok is true only
+   when the layer produced a readable answer (VM1.6e, F3b.3); anything else is failed. *)
+f=scan(f:$privacyfilter;text:str):$layerresult{
+  if(str.eq(f.id;fr.regexid())){
+    let rr=regex.detect(text);
+    <completed(f;rr.entities;0)
+  }el{};
+  if(str.eq(f.id;fr.nerid())){
+    let ns:$nerscan=ner.scan(ner.new(f.url;f.param);text);
+    if(ns.ok){ <completed(f;ns.nerhits;0) }el{ <failed(f) }
+  }el{};
+  if(str.eq(f.id;fr.presidioid())){
+    let ps:$presidioscan=presidio.scan(presidio.new(f.url);text);
+    if(ps.ok){ <completed(f;presidio.topiientities(ps.presidiohits;text);0) }el{ <failed(f) }
+  }el{};
+  (* Named, not a fall-through: an id with no detector must never have the text posted to
+     whatever URL its entry carries. *)
+  if(str.eq(f.id;fr.privacyfilterid())){
+    let es:$pfentities=pf.scanentities(pf.new(f.url;f.param);text);
+    if(es.ok){ <completed(f;es.hits;es.unplaced) }el{ <failed(f) }
+  }el{};
+  <nohits(status(f;false;"unavailable";unavailablereason(f.id);0))
+};
+
+(* Probe, then scan only a layer that answered. A disabled layer is not probed and not sent
+   the text; nor is an unknown id. *)
+f=consult(f:$privacyfilter;text:str):$layerresult{
+  let st:$layerstatus=probe(f);
+  if(!st.available){ <nohits(st) }el{};
+  <scan(f;text)
+};
+
+f=iscompleted(s:$layerstatus):bool{
+  <str.eq(s.state;"completed")
+};
+
+(* Degraded is an ENABLED layer that did not complete: unavailable, or failed. A layer the
+   operator switched off is not degraded (NC1.9). *)
+f=isdegraded(s:$layerstatus):bool{
+  <s.enabled && !str.eq(s.state;"completed") && !str.eq(s.state;"healthy")
+};
+
+(* Probes every entry of the registry. totallayers counts the ENABLED layers; a disabled one
+   is reported, with state disabled, and does not count against health. *)
+f=checkhealth(reg:$filterregistry):$healthreport{
   let statuses=mut.@();
   let available=mut.0;
-  let total=layerids.len;
-  lp(let i=0;i<total;i=i+1){
-    let id=layerids.get(i);
-    let isavail=mut.true;
-    let reason=mut."operational";
-    if(str.eq(id;"presidio")){isavail=false; reason="not installed"}el{};
-    let status=$layerstatus{id:id;available:isavail;reason:reason;lastchecked:0;detectioncount:0};
-    statuses=statuses.push(status);
-    if(isavail){available=available+1}el{}
+  let total=mut.0;
+  lp(let i=0;i<reg.filters.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
+    let s=probe(f);
+    statuses=statuses.push(s);
+    if(f.enabled){total=total+1}el{};
+    if(s.available){available=available+1}el{}
   };
   <$healthreport{
     layers:statuses;
     totallayers:total;
     availablelayers:available;
-    degraded:available<total
+    degraded:available<total || available==0
   }
 };
 
+(* No layer available is not healthy: nothing would scan the text, and the pipeline refuses
+   such a request (NC1.9). *)
 f=issystemhealthy(report:$healthreport):bool{
   <report.availablelayers>0
 };
 
+(* Three states, and an empty or all-down registry is UNHEALTHY. It used to read "HEALTHY:
+   all 0 layers available" for an empty list, disagreeing with issystemhealthy. *)
+f=overall(report:$healthreport):str{
+  if(!issystemhealthy(report)){ <"unhealthy" }el{};
+  if(report.degraded){ <"degraded" }el{};
+  <"healthy"
+};
+
 f=formathealthstatus(report:$healthreport):str{
-  let avail=str.fromint(report.availablelayers);
-  let total=str.fromint(report.totallayers);
-  if(report.degraded){
-    <str.concat("DEGRADED: ";str.concat(avail;str.concat("/";str.concat(total;" layers available"))))
-  }el{
-    <str.concat("HEALTHY: all ";str.concat(total;" layers available"))
-  }
+  let avail:str=str.fromint(report.availablelayers);
+  let total:str=str.fromint(report.totallayers);
+  if(!issystemhealthy(report)){ <"UNHEALTHY: no detection layer available (0/\(total))" }el{};
+  if(report.degraded){ <"DEGRADED: \(avail)/\(total) layers available" }el{};
+  <"HEALTHY: all \(total) layers available"
+};
+
+f=statusjson(s:$layerstatus):str{
+  let id=json.enc(s.id);
+  let state=json.enc(s.state);
+  let reason=json.enc(s.reason);
+  let enabled=mut."false";
+  if(s.enabled){enabled="true"}el{};
+  <"{\"id\":\(id),\"enabled\":\(enabled),\"state\":\(state),\"reason\":\(reason)}"
+};
+
+(* {"state":"degraded","summary":"...","layers":[{"id":"regex","enabled":true,"state":"healthy",...}]} *)
+f=reportjson(report:$healthreport):str{
+  let items=mut.@();
+  lp(let i=0;i<report.layers.len;i=i+1){
+    items=items.push(statusjson(report.layers.get(i)))
+  };
+  let state=json.enc(overall(report));
+  let summary=json.enc(formathealthstatus(report));
+  let layers=str.join(",";items);
+  <"{\"state\":\(state),\"summary\":\(summary),\"layers\":[\(layers)]}"
 };

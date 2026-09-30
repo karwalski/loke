@@ -87,32 +87,30 @@ gracefully — if a layer is unavailable, remaining layers continue processing.
 
 ## Configuring Layers
 
-Layer configuration is managed through `layer_config.tk`. Each layer entry specifies:
-
-- **id** — Unique identifier (e.g., `"regex"`, `"ner"`, `"presidio"`)
-- **enabled** — Whether the layer participates in detection
-- **priority** — Lower number = higher priority (used by `first-match` strategy)
-- **mode** — `"detect-and-mask"` (full pipeline) or `"detect-only"` (reporting without masking)
-- **confidencethreshold** — Minimum confidence score to accept a detection (0.0 to 1.0)
-- **entityfilter** — Comma-separated entity types to restrict detection scope (empty = all)
+The pipeline runs its layers from the filter registry (`filter_registry.tk`, F3b.1): which layers
+exist, which are enabled, the order they run in, and each one's address. Each entry has an **id**,
+**enabled**, a **url** (empty for the in-process regex layer) and one **param** (the NER model id, or
+the privacy filter's operating point), plus descriptive **entitytypes** and **confidence** that
+nothing filters on yet. A disabled entry is sent nothing and is recorded in the trace as skipped.
 
 ### Default Configuration
 
 ```
-Layer 1: regex     — enabled, priority 1, detect-and-mask, threshold 0.80
-Layer 2: ner       — enabled, priority 2, detect-and-mask, threshold 0.75
-Layer 3: presidio  — disabled, priority 3, detect-only,     threshold 0.70
+1. regex                  — enabled, in-process
+2. ner                    — enabled, Ollama at http://127.0.0.1:11434, model qwen2.5:7b
+3. presidio               — enabled, http://127.0.0.1:5000
+4. openai-privacy-filter  — disabled unless privacy.privacy_filter = true in config.toml
 ```
 
-The default setup uses two on-device layers (regex + NER) for zero-network-dependency operation. Presidio is disabled by default because it requires a separate service.
+NER and Presidio are enabled so that a missing service shows up as a DEGRADED layer rather than
+silently absent. Only the privacy filter can be switched and re-addressed from `config.toml` today.
+`layer_config.tk` (priority, mode, per-layer threshold) describes the same layers but nothing reads it.
 
 ### Enabling Presidio
 
-To enable Presidio:
-
-1. Install and start the Presidio analyser service (default: `http://localhost:5001`)
-2. Set the Presidio layer to `enabled: true` in your configuration
-3. Optionally change its mode from `"detect-only"` to `"detect-and-mask"`
+The Presidio layer is already enabled; it completes once a Presidio analyser answers at
+`http://127.0.0.1:5000`. Until then it is reported as unavailable in `/api/health` and counted as a
+degraded layer on every request.
 
 ## Consensus Strategies
 
@@ -172,10 +170,14 @@ Entity routes are defined as mappings from entity type to layer ID. When a route
 
 ## Health Monitoring and Graceful Degradation
 
-The health system (`layer_health.tk`) continuously tracks layer availability:
+The health system (`layer_health.tk`) probes each enabled layer in the filter registry with that
+layer's own client, before every pipeline run and on every `GET /api/health` (there is no background
+monitor and no stored history). `/api/health` carries `privacy_layers`, each layer with its state
+(`healthy`, `unavailable` or `disabled`) and reason, and an overall state:
 
 - **HEALTHY** — All enabled layers are responding
 - **DEGRADED** — At least one layer is unavailable, but the system continues with remaining layers
+- **UNHEALTHY** — No layer is available (or none is enabled); the pipeline refuses to forward
 
 ### Degradation Behaviour
 

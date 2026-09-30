@@ -27,7 +27,7 @@ f=main():i64{
   if(t.assert(reg.count==0;"new registry has 0 filters")){pass=pass+1}el{fail=fail+1};
 
   (* 2. register increments count *)
-  let reg2=fr.register(reg;$privacyfilter{id:"test";name:"Test";kind:"test";entitytypes:"";confidence:0.5;enabled:true});
+  let reg2=fr.register(reg;$privacyfilter{id:"test";name:"Test";kind:"test";entitytypes:"";confidence:0.5;enabled:true;url:"";param:""});
   if(t.assert(reg2.count==1;"registry count is 1 after register")){pass=pass+1}el{fail=fail+1};
 
   (* 3. default registry has 4 filters: regex, ner, presidio and (F3b.3) openai-privacy-filter *)
@@ -49,13 +49,16 @@ f=main():i64{
   let allfilters=fr.list(defreg);
   if(t.assert(allfilters.len==4;"list returns all 4 filters")){pass=pass+1}el{fail=fail+1};
 
-  (* 8. listenabled returns only enabled filters *)
+  (* 8. listenabled returns only enabled filters. F3b.1: the default registry is now what
+        the pipeline runs (pipeline.newconfig builds it), so it says what production does:
+        regex, NER and Presidio on, the privacy filter off. It used to say Presidio was off
+        while the pipeline, which did not read it, ran Presidio. *)
   let enabled=fr.listenabled(defreg);
-  if(t.assert(enabled.len==2;"listenabled returns 2 enabled filters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(enabled.len==3;"listenabled returns the 3 enabled filters")){pass=pass+1}el{fail=fail+1};
 
-  (* 9. presidio is not in enabled list *)
+  (* 9. presidio is enabled by default, at the default address *)
   let presidio=fr.get(defreg;"presidio");
-  if(t.assert(!presidio.enabled;"presidio is disabled by default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(presidio.enabled && str.eq(presidio.url;"http://127.0.0.1:5000");"presidio is enabled by default, at 127.0.0.1:5000")){pass=pass+1}el{fail=fail+1};
 
   (* 9b. F3b.3: the sidecar is registered under the story's id, off by default *)
   let pfentry=fr.get(defreg;"openai-privacy-filter");
@@ -63,6 +66,33 @@ f=main():i64{
 
   (* 10. regex confidence is 0.95 *)
   if(t.assert(regexfilter.confidence>0.94;"regex confidence is 0.95")){pass=pass+1}el{fail=fail+1};
+
+  (* 11. F3b.1: the order is the pipeline's run order *)
+  let order=mut.@();
+  lp(let i=0;i<allfilters.len;i=i+1){
+    let f:$privacyfilter=allfilters.get(i);
+    order=order.push(f.id)
+  };
+  if(t.asserteq(str.join(",";order);"regex,ner,presidio,openai-privacy-filter";"the default registry lists the layers in run order")){pass=pass+1}el{fail=fail+1};
+
+  (* 12. get for an id it does not hold returns an empty, disabled entry — it used to return
+         the first entry, the regex layer *)
+  let none=fr.get(defreg;"no-such-layer");
+  if(t.assert(str.eq(none.id;"") && !none.enabled;"get of an unknown id is empty and disabled, not the regex entry")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!fr.has(defreg;"no-such-layer") && fr.has(defreg;"ner");"has answers for held and unheld ids")){pass=pass+1}el{fail=fail+1};
+
+  (* 13. register of an id already held replaces it in place *)
+  let again=fr.register(defreg;$privacyfilter{id:"ner";name:"Other NER";kind:"ner";entitytypes:"";confidence:0.5;enabled:false;url:"";param:""});
+  let second:$privacyfilter=fr.list(again).get(1);
+  if(t.assert(again.count==4 && str.eq(second.name;"Other NER");"re-registering an id replaces that entry where it stands")){pass=pass+1}el{fail=fail+1};
+
+  (* 14. remove, and the setters *)
+  let dropped=fr.remove(defreg;"presidio");
+  if(t.assert(dropped.count==3 && !fr.has(dropped;"presidio");"remove drops the entry")){pass=pass+1}el{fail=fail+1};
+  let pfon=fr.setparam(fr.seturl(fr.setenabled(defreg;"openai-privacy-filter";true);"openai-privacy-filter";"http://127.0.0.1:11288");"openai-privacy-filter";"0.5");
+  let pfe=fr.get(pfon;"openai-privacy-filter");
+  if(t.assert(pfe.enabled && str.eq(pfe.url;"http://127.0.0.1:11288") && str.eq(pfe.param;"0.5");"setenabled, seturl and setparam change that one entry")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fr.setenabled(defreg;"no-such-layer";true).count==4;"a setter for an unheld id creates nothing")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

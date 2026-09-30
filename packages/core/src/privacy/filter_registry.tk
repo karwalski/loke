@@ -5,13 +5,25 @@ m=core.privacy.filterregistry;
 
 i=str:std.str;
 
+(* F3b.1. The registry is where core.privacy.pipeline gets its detection layers from: which
+   layers exist, which are enabled, the order they run in and where each one is reached.
+   core.privacy.pipeline.run walks it in order, and core.privacy.layerhealth probes and
+   consults each entry, so a layer that is not in the registry, or is in it disabled, is not
+   consulted at all.
+
+   url is the layer's sidecar ("" for the in-process regex layer). param is the one setting a
+   layer's client takes besides its URL: the NER model id, or the privacy filter's operating
+   point as text, which is how core.privacy.sidecarclient.new takes it (AD1.4). The ids are the ones the story names; the detection stage each
+   id is recorded as is core.privacy.pipeline.stagefor. *)
 t=$privacyfilter{
   id:str;
   name:str;
   kind:str;
   entitytypes:str;
   confidence:f64;
-  enabled:bool
+  enabled:bool;
+  url:str;
+  param:str
 };
 
 t=$filterregistry{
@@ -19,33 +31,75 @@ t=$filterregistry{
   count:i64
 };
 
-t=$detection{
-  entitytype:str;
-  value:str;
-  start:i64;
-  end:i64;
-  confidence:f64;
-  layerid:str;
-  placeholder:str
-};
+f=regexid():str{ <"regex" };
+f=nerid():str{ <"ner" };
+f=presidioid():str{ <"presidio" };
+f=privacyfilterid():str{ <"openai-privacy-filter" };
+
+(* The four addresses and the model a default install uses. The pipeline's newconfig takes
+   the first two from its caller; these are what defaultregistry fills in. *)
+f=defaultpresidiourl():str{ <"http://127.0.0.1:5000" };
+f=defaultollamaurl():str{ <"http://127.0.0.1:11434" };
+f=defaultnermodel():str{ <"qwen2.5:7b" };
+(* The privacy-filter sidecar's default; core.privacy.sidecarclient.sidecarurl reads it from
+   here. F3b.12 records that mcp-toke defaults to the same port. *)
+f=defaultpfurl():str{ <"http://127.0.0.1:11435" };
 
 f=newregistry():$filterregistry{
   <$filterregistry{filters:@();count:0}
 };
 
+(* Returned by get for an id the registry does not hold: disabled, with an empty id, so a
+   caller that does not check has still got nothing to run. `get` used to return
+   filters.get(0) for a missing id, which was the regex layer. *)
+f=missing():$privacyfilter{
+  <$privacyfilter{id:"";name:"";kind:"";entitytypes:"";confidence:0.0;enabled:false;url:"";param:""}
+};
+
+f=has(reg:$filterregistry;id:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<reg.filters.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
+    if(str.eq(f.id;id)){found=true}el{}
+  };
+  <found
+};
+
+f=replace(reg:$filterregistry;filter:$privacyfilter):$filterregistry{
+  let filters=mut.@();
+  lp(let i=0;i<reg.filters.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
+    if(str.eq(f.id;filter.id)){filters=filters.push(filter)}el{filters=filters.push(f)}
+  };
+  <$filterregistry{filters:filters;count:filters.len as i64}
+};
+
 (* `@(reg.filters;filter)` is an array LITERAL holding the array and the filter, not an
    append (LS1.1b) — so filters.len stayed 2 while count kept incrementing, and `get`
    then looped to i<count and indexed past the end. count is derived from the array
-   now, so the two cannot disagree. *)
+   now, so the two cannot disagree.
+
+   Registering an id that is already present REPLACES that entry where it stands, so an id
+   names one layer and the order the pipeline runs in is not changed by re-registering. *)
 f=register(reg:$filterregistry;filter:$privacyfilter):$filterregistry{
+  if(has(reg;filter.id)){ <replace(reg;filter) }el{};
   let filters=reg.filters.push(filter);
   <$filterregistry{filters:filters;count:filters.len as i64}
 };
 
-f=get(reg:$filterregistry;id:str):$privacyfilter{
-  let result=mut.reg.filters.get(0);
+f=remove(reg:$filterregistry;id:str):$filterregistry{
+  let filters=mut.@();
   lp(let i=0;i<reg.filters.len;i=i+1){
-    let f=reg.filters.get(i);
+    let f:$privacyfilter=reg.filters.get(i);
+    if(str.eq(f.id;id)){}el{filters=filters.push(f)}
+  };
+  <$filterregistry{filters:filters;count:filters.len as i64}
+};
+
+f=get(reg:$filterregistry;id:str):$privacyfilter{
+  let result=mut.missing();
+  lp(let i=0;i<reg.filters.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
     if(str.eq(f.id;id)){result=f}el{}
   };
   <result
@@ -58,37 +112,62 @@ f=list(reg:$filterregistry):@$privacyfilter{
 f=listenabled(reg:$filterregistry):@$privacyfilter{
   let result=mut.@();
   lp(let i=0;i<reg.filters.len;i=i+1){
-    let f=reg.filters.get(i);
+    let f:$privacyfilter=reg.filters.get(i);
     if(f.enabled){result=result.push(f)}el{}
   };
   <result
 };
 
-f=defaultregistry():$filterregistry{
+(* Each setter changes one entry, and leaves the registry as it was for an id it does not
+   hold: a setting for a layer that is not registered does not create one. *)
+f=setenabled(reg:$filterregistry;id:str;enabled:bool):$filterregistry{
+  if(!has(reg;id)){ <reg }el{};
+  let f=get(reg;id);
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:enabled;url:f.url;param:f.param})
+};
+
+f=seturl(reg:$filterregistry;id:str;url:str):$filterregistry{
+  if(!has(reg;id)){ <reg }el{};
+  let f=get(reg;id);
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:f.enabled;url:url;param:f.param})
+};
+
+f=setparam(reg:$filterregistry;id:str;param:str):$filterregistry{
+  if(!has(reg;id)){ <reg }el{};
+  let f=get(reg;id);
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:f.enabled;url:f.url;param:param})
+};
+
+(* The four real layers, in the order the pipeline runs them: regex, NER, Presidio, then the
+   privacy-filter sidecar. NER and Presidio are enabled, so a missing sidecar is a DEGRADED
+   layer rather than an absent one; the privacy filter is off until privacy.privacy_filter
+   turns it on (F3b.3). This is what core.privacy.pipeline.newconfig builds, with the two
+   URLs its caller gives. *)
+f=layers(presidiourl:str;ollamaurl:str):$filterregistry{
   let reg=newregistry();
   let reg=register(reg;$privacyfilter{
-    id:"regex";name:"Regex Pattern Detector";kind:"regex";
+    id:regexid();name:"Regex Pattern Detector";kind:"regex";
     entitytypes:"email,phone,ssn,creditcard,ip,tfn,abn";
-    confidence:0.95;enabled:true
+    confidence:0.95;enabled:true;url:"";param:""
   });
   let reg=register(reg;$privacyfilter{
-    id:"ner";name:"NLP NER Detector";kind:"ner";
+    id:nerid();name:"NLP NER Detector";kind:"ner";
     entitytypes:"person,organization,location";
-    confidence:0.85;enabled:true
+    confidence:0.85;enabled:true;url:ollamaurl;param:defaultnermodel()
   });
   let reg=register(reg;$privacyfilter{
-    id:"presidio";name:"Presidio Analyser";kind:"external";
+    id:presidioid();name:"Presidio Analyser";kind:"external";
     entitytypes:"email,phone,person,creditcard,iban,medical,address";
-    confidence:0.80;enabled:false
+    confidence:0.80;enabled:true;url:presidiourl;param:""
   });
-  (* F3b.3. Registered as the story names it, off by default as privacy.privacy_filter is.
-     This registry has no production importer: core.privacy.pipeline decides its layers
-     from $pipelineconfig, not from here, so this entry describes the layer, it does not
-     switch it. *)
   let reg=register(reg;$privacyfilter{
-    id:"openai-privacy-filter";name:"OpenAI Privacy Filter (sidecar)";kind:"external";
+    id:privacyfilterid();name:"OpenAI Privacy Filter (sidecar)";kind:"external";
     entitytypes:"person,email,phone,address,url,date,account,secret";
-    confidence:0.0;enabled:false
+    confidence:0.0;enabled:false;url:defaultpfurl();param:""
   });
   <reg
+};
+
+f=defaultregistry():$filterregistry{
+  <layers(defaultpresidiourl();defaultollamaurl())
 };
