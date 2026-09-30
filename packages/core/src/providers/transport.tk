@@ -4,7 +4,6 @@
 m=core.providers.transport;
 
 i=http:std.http;
-i=json:std.json;
 i=str:std.str;
 i=log:shared.log;
 i=reach:shared.reachability;
@@ -36,7 +35,17 @@ i=reach:shared.reachability;
 
    The glue always sends its own `Content-Type: application/json`. A second content-type
    in `headersjson` is sent as a second header line, not merged, so the header builders
-   below do not add one. *)
+   below do not add one.
+
+   F10.39, toke 3.1.0. `http.postheaders` is now typed, `(url; body; headers:[[str]]) ->
+   httpresp!httperr`: the four-argument form above is E4026, the headers are @(name; value)
+   pairs instead of a JSON string, a header holding CR or LF is refused with nothing sent,
+   and $err means a transport failure. The response is still read as its BODY whatever the
+   status, so a 401 with an error document reads as a body exactly as before, and the
+   default Content-Type is still application/json (a caller's would replace it; the
+   builders below still add none). What this call shape does NOT change is the refusal in
+   `sendable` below: 3.1.0 verifies certificates (B0), and lifting the refusal is its own
+   story with its own test, not a side effect of a toolchain move. *)
 
 (* The production endpoints. Tests pass a loopback URL to the functions that take one;
    nothing here reads a URL from configuration or the environment, so no production path
@@ -49,18 +58,16 @@ f=openaiurl():str{
   <"https://api.openai.com/v1/chat/completions"
 };
 
-f=anthropicheaders(key:str):str{
-  <"{\"x-api-key\":\(json.enc(key)),\"anthropic-version\":\"2023-06-01\"}"
+f=anthropicheaders(key:str):@@str{
+  <@(@("x-api-key";key);@("anthropic-version";"2023-06-01"))
 };
 
-f=openaiheaders(key:str):str{
-  let bearer="Bearer \(key)";
-  <"{\"authorization\":\(json.enc(bearer))}"
+f=openaiheaders(key:str):@@str{
+  <@(@("authorization";"Bearer \(key)"))
 };
 
-(* POST `body` to `url` with the headers in `headersjson`, and answer the response body,
-   or "" when nothing came back. The 0 the glue answers on failure is tested as an
-   integer before it is read as a string, because it is a null address. *)
+(* POST `body` to `url` with `headers`, and answer the response body, or "" when nothing
+   came back: a transport failure, a refused header, or a body that is not UTF-8. *)
 (* T-58: nothing leaves the machine through this until toke verifies certificates.
 
    Measured 2026-09-27 against the pinned toke: tk_http_postheaders_w creates its TLS client
@@ -79,13 +86,13 @@ f=sendable(url:str):bool{
   <reach.isloopbackurl(url)
 };
 
-f=post(url:str;body:str;headersjson:str):str{
+f=post(url:str;body:str;headers:@@str):str{
   if(sendable(url)==false){
     log.warn("provider request refused: toke's https client does not verify certificates (T-58), so a provider API key is not sent";"providers.transport";"");
     <""
   }el{};
-  let addr=http.postheaders(url;body;headersjson;"");
-  if(addr==0){ <"" }el{};
-  let raw:str=addr;
-  <raw
+  <mt http.postheaders(url;body;headers) {
+    $ok:r mt str.frombytes(r.body) { $ok:s s; $err:e "" };
+    $err:e ""
+  }
 };

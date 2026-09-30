@@ -9,6 +9,7 @@ i=http:std.http;
 i=str:std.str;
 i=encoding:std.encoding;
 i=log:shared.log;
+i=reach:shared.reachability;
 i=pkce:loke.core.auth.pkce;
 i=refresh:loke.core.auth.refresh;
 i=store:loke.core.auth.tokenstore;
@@ -80,10 +81,21 @@ f=generatestate():str{
   <crypto.randomhex(32)
 };
 
+(* F10.39, toke 3.1.0. This was `http.postheaders(http.client(url);"";bytes;headersjson)`,
+   the client-first four-argument shape that toke 0b0bc4e compiled and that sent NOTHING
+   (T-48): the request never left the machine and the match took its error arm. 3.1.0
+   rejects that shape (E4026), and the typed three-argument call that replaces it really
+   sends. Migrating the call must not quietly start sending to a host it never reached, and
+   core.providers.transport still refuses every non-loopback send (T-58 hold), so the same
+   rule applies here: a non-loopback URL takes the error path without a byte sent, which is
+   what callers observed before. Enabling this send is a separate story. *)
 f=exchangecode(cfg:$oauthconfig;code:str;codeverifier:str;redir:str):$tokenset!$oautherr{
-  let client=http.client(cfg.tokenurl);
+  if(!reach.isloopbackurl(cfg.tokenurl)){
+    log.warn("token exchange refused: only a loopback token endpoint is sent to (F10.39)";"auth.oauth";"");
+    <$err($oautherr{adapterid:cfg.adapterid;errorcode:"network_error";errordesc:"token request failed"})
+  }el{};
   let body="grant_type=authorization_code&code=\(code)&redirect_uri=\(redir)&client_id=\(cfg.clientid)&code_verifier=\(codeverifier)";
-  <mt http.postheaders(client;"";str.tobytes(body);"{\"content-type\":\"application/x-www-form-urlencoded\"}") {
+  <mt http.postheaders(cfg.tokenurl;body;@(@("content-type";"application/x-www-form-urlencoded"))) {
     $ok:r tokensfromresp(cfg;r);
     $err:e $err($oautherr{adapterid:cfg.adapterid;errorcode:"network_error";errordesc:"token request failed"})
   }
@@ -176,14 +188,19 @@ f=revoke(cfg:$oauthconfig):bool{
   let access=store.loadaccesstoken(cfg.adapterid);
   if(str.len(access)>0){
     if(str.len(cfg.revokeurl)>0){
-      let client=http.client(cfg.revokeurl);
-      let body=str.concat("token=";access);
-      let revokeresult=http.postheaders(client;"";str.tobytes(body);"{\"content-type\":\"application/x-www-form-urlencoded\"}");
-      mt revokeresult {
-        $ok:v void;
-        $err:v log.warn("loke.core.auth.oauth: revocation request failed";"auth.oauth";"")
-      };
-      log.info(str.concat("loke.core.auth.oauth: revocation request sent for ";cfg.adapterid);"auth.oauth";"")
+      (* F10.39: the same loopback rule as exchangecode. A refused revocation is logged as a
+         failed request, which is what the client-first call always produced. *)
+      if(reach.isloopbackurl(cfg.revokeurl)){
+        let body=str.concat("token=";access);
+        let revokeresult=http.postheaders(cfg.revokeurl;body;@(@("content-type";"application/x-www-form-urlencoded")));
+        mt revokeresult {
+          $ok:v 0;
+          $err:v log.warn("loke.core.auth.oauth: revocation request failed";"auth.oauth";"")
+        };
+        log.info(str.concat("loke.core.auth.oauth: revocation request sent for ";cfg.adapterid);"auth.oauth";"")
+      }el{
+        log.warn("loke.core.auth.oauth: revocation request failed: only a loopback revoke url is sent to (F10.39)";"auth.oauth";"")
+      }
     }el{
       log.info("loke.core.auth.oauth: no revoke url configured";"auth.oauth";"")
     }

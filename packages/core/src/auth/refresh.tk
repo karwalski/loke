@@ -8,6 +8,7 @@ i=http:std.http;
 i=encoding:std.encoding;
 i=str:std.str;
 i=log:shared.log;
+i=reach:shared.reachability;
 i=store:loke.core.auth.tokenstore;
 
 t=$oauthconfig{
@@ -40,10 +41,21 @@ f=isexpired(expiresat:i64;now:i64):bool{
   <now>expiresat
 };
 
+(* F10.39, toke 3.1.0. This was `http.postheaders(http.client(url);"";bytes;headersjson)`,
+   the client-first four-argument shape that toke 0b0bc4e compiled and that sent NOTHING
+   (T-48): the request never left the machine and the match took its error arm. 3.1.0
+   rejects that shape (E4026), and the typed three-argument call that replaces it really
+   sends. Migrating the call must not quietly start sending to a host it never reached, and
+   core.providers.transport still refuses every non-loopback send (T-58 hold), so the same
+   rule applies here: a non-loopback URL takes the error path without a byte sent, which is
+   what callers observed before. Enabling this send is a separate story. *)
 f=dorefresh(tokenurl:str;clientid:str;refreshtok:str):$refreshresult{
-  let client=http.client(tokenurl);
+  if(!reach.isloopbackurl(tokenurl)){
+    log.warn("token refresh refused: only a loopback token endpoint is sent to (F10.39)";"auth.refresh";"");
+    <$refreshresult{ok:false;accesstoken:"";refreshtoken:"";expiresin:0;status:0;errormsg:"network error"}
+  }el{};
   let body="grant_type=refresh_token&refresh_token=\(refreshtok)&client_id=\(clientid)";
-  <mt http.postheaders(client;"";str.tobytes(body);"{\"content-type\":\"application/x-www-form-urlencoded\"}") {
+  <mt http.postheaders(tokenurl;body;@(@("content-type";"application/x-www-form-urlencoded"))) {
     $ok:r refreshfromresp(r;refreshtok);
     $err:e $refreshresult{ok:false;accesstoken:"";refreshtoken:"";expiresin:0;status:0;errormsg:"network error"}
   }
