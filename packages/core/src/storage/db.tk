@@ -284,6 +284,28 @@ f=connectionlive():bool{
   }
 };
 
+(* F10.39. The connection just opened becomes the one std.db's handle-less calls use, as it
+   always was before toke 3.1.0.
+
+   Until 3.1.0 std.db held ONE process-wide connection and every db.open replaced it (leaking
+   the old one), so db.exec/one/many always reached the database opened last. 3.1.0 keeps a
+   table of connections (138.6): every open gets a fresh handle, and the handle-less calls use
+   the LOWEST-numbered one still open, so a second open repoints nothing. loke only uses the
+   handle-less calls. Without this, every page request that opens the store (and they do,
+   once each) would leave one more connection open, and a test that deletes its database file
+   and reopens it would keep writing to the unlinked first file, which SQLite then refuses.
+
+   Handles are 1, 2, 3, ... and never reused. Closing downward from the one below `conn`
+   until a handle is already closed closes every older connection this module and
+   core.memory.palace left open, because each of them adopted its own in turn. *)
+f=adopt(conn:u64):u64{
+  let i=mut.(conn as i64)-1;
+  lp(let lv=0;i>0;lv=lv){
+    if(db.closeon(i as u64)){ i=i-1 }el{ i=0 }
+  };
+  <conn
+};
+
 f=openstore(datadir:str):$store!$lokeerr{
   let path=str.concat(datadir;"/loke.db");
   (* The data directory is created here, because nothing else is guaranteed to have created
@@ -292,7 +314,7 @@ f=openstore(datadir:str):$store!$lokeerr{
      until the log writer happened to create the directory. *)
   file.mkdir(datadir);
   let conn=mt db.open(path) {
-    $ok:conn conn;
+    $ok:conn adopt(conn);
     $err:e $err($storageerr(str.concat("failed to open database: ";path)))
   };
   (* The busy timeout goes on BEFORE the liveness check. The check's SELECT reads the schema,
@@ -481,7 +503,7 @@ f=rowi64(r:$row;col:str):i64{
 };
 
 f=rowi32(r:$row;col:str):i32{
-  <mt row.i64(r;col) {$ok:v v as i32;$err:e 0}
+  <mt row.i64(r;col) {$ok:v v as i32;$err:e 0 as i32}
 };
 
 f=rowbool(r:$row;col:str):bool{

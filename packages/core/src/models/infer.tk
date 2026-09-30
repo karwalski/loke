@@ -13,7 +13,13 @@
    depends on local inference — privacy/ner_local is one — sees an unavailable
    layer instead of receiving the stub's sentinel string as if it were output.
    Returning "[infer: not available]" to a privacy detector would read as
-   "no entities found", which is a fail-open. *)
+   "no entities found", which is a fail-open.
+
+   F10.39, toke 3.1.0: std.infer is typed now. load takes (path; opts) and answers
+   `modelhandle!infererr`, generate takes a token limit and answers `str!infererr`, and the
+   stub reports no false success (T-11): with no backend compiled in, load takes $err. So
+   a model is in the pool only when load took $ok, and every $err reads as "not loaded" or
+   "" exactly as the zero handle did. *)
 
 m=core.models.infer;
 
@@ -23,7 +29,7 @@ i=log:shared.log;
 i=inf:std.infer;
 
 t=$infermodel{
-  handle:i64;
+  handle:$modelhandle;
   modelid:str;
   modelpath:str;
   loadedat:i64
@@ -44,21 +50,27 @@ f=modelpath(pool:$inferpool;modelid:str):str{
 
 f=load(pool:$inferpool;modelid:str):$inferpool{
   let path=modelpath(pool;modelid);
-  let handle=inf.load(path);
-  if(handle==0){
-    log.warn("in-process inference unavailable, \(modelid) not loaded";"infer";"");
-    <pool
-  }el{
-    log.info("loaded in-process: \(modelid)";"infer";"");
-    <$inferpool{
-      models:pool.models.push($infermodel{
-        handle:handle;
-        modelid:modelid;
-        modelpath:path;
-        loadedat:time.now()
-      });
-      datadir:pool.datadir
-    }
+  <mt inf.load(path;$inferopts{ngpulayers:0;nthreads:0;seed:0}) {
+    $ok:handle loaded(pool;modelid;path;handle);
+    $err:e notloaded(pool;modelid)
+  }
+};
+
+f=notloaded(pool:$inferpool;modelid:str):$inferpool{
+  log.warn("in-process inference unavailable, \(modelid) not loaded";"infer";"");
+  <pool
+};
+
+f=loaded(pool:$inferpool;modelid:str;path:str;handle:$modelhandle):$inferpool{
+  log.info("loaded in-process: \(modelid)";"infer";"");
+  <$inferpool{
+    models:pool.models.push($infermodel{
+      handle:handle;
+      modelid:modelid;
+      modelpath:path;
+      loadedat:time.now()
+    });
+    datadir:pool.datadir
   }
 };
 
@@ -77,37 +89,41 @@ f=unload(pool:$inferpool;modelid:str):$inferpool{
   <$inferpool{models:remaining;datadir:pool.datadir}
 };
 
-f=handlefor(pool:$inferpool;modelid:str):i64{
-  let handle=mut.0;
+(* The pool index of `modelid`, or -1 when it is not loaded. It replaces handlefor, whose
+   zero handle meant "not loaded": a modelhandle is a record, not a number. *)
+f=indexfor(pool:$inferpool;modelid:str):i64{
+  let at=mut.0-1;
   lp(let i=0;i<pool.models.len;i=i+1){
     let m:$infermodel=pool.models.get(i);
     if(str.eq(m.modelid;modelid)){
-      handle=m.handle
+      at=i
     }el{}
   };
-  <handle
+  <at
 };
 
 (* Returns "" when the model is not loaded. The caller must distinguish that from a
    real empty generation; isloaded is the check for it. *)
 f=generate(pool:$inferpool;modelid:str;prompt:str;maxtokens:i32):str{
-  let handle=handlefor(pool;modelid);
-  if(handle==0){
+  let at=indexfor(pool;modelid);
+  if(at<0){
     <""
   }el{
-    <inf.generate(handle;prompt)
+    let m:$infermodel=pool.models.get(at);
+    <mt inf.generate(m.handle;prompt;maxtokens) { $ok:s s; $err:e "" }
   }
 };
 
 f=embed(pool:$inferpool;modelid:str;text:str):@f32{
-  let handle=handlefor(pool;modelid);
-  if(handle==0){
+  let at=indexfor(pool;modelid);
+  if(at<0){
     <@()
   }el{
-    <inf.embed(handle;text)
+    let m:$infermodel=pool.models.get(at);
+    <mt inf.embed(m.handle;text) { $ok:v v; $err:e @() }
   }
 };
 
 f=isloaded(pool:$inferpool;modelid:str):bool{
-  <handlefor(pool;modelid)!=0
+  <indexfor(pool;modelid)>=0
 };

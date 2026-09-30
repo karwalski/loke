@@ -10,7 +10,13 @@
 
    The RAM ceiling and prefetch depth are kept in $streamconfig because they are
    loke's policy, but std.infer.loadstreaming takes only a path — it cannot be told
-   about them. They are not being honoured by anything today. *)
+   about them. They are not being honoured by anything today.
+
+   F10.39, toke 3.1.0: loadstreaming takes (dir; streamopts) and answers
+   `modelhandle!infererr`, and generate takes a token limit. The RAM ceiling and prefetch
+   depth are now passed, so the published call can be told about them, though with no
+   backend compiled in the stub still loads nothing and takes $err (T-11). A session is
+   loaded only when loadstreaming took $ok. *)
 
 m=core.models.streaming;
 i=inf:std.infer;
@@ -19,36 +25,44 @@ i=str:std.str;
 i=t:shared.types;
 
 t=$streamconfig{ modeldir:str; ramceilinggb:f32; prefetchlayers:i32 };
-t=$streamsession{ handle:i64; config:$streamconfig; modelid:str };
+t=$streamsession{ handle:$modelhandle; loaded:bool; config:$streamconfig; modelid:str };
 
 f=defaultconfig(modeldir:str):$streamconfig{
   <$streamconfig{ modeldir:modeldir; ramceilinggb:8.0; prefetchlayers:2 }
 };
 
 f=load(cfg:$streamconfig;modelid:str):$streamsession{
-  let handle=inf.loadstreaming("\(cfg.modeldir)/\(modelid)");
-  if(handle==0){
-    log.warn("disk-streaming inference unavailable, \(modelid) not loaded";"streaming";"system")
-  }el{
-    log.info("disk-streaming model loaded: \(modelid) (RAM ceiling \(cfg.ramceilinggb)GB, not enforced by std.infer)";"streaming";"system")
-  };
-  <$streamsession{ handle:handle; config:cfg; modelid:modelid }
+  let opts=$streamopts{ramceilinggb:cfg.ramceilinggb;prefetchlayers:cfg.prefetchlayers;requiresnvme:false};
+  <mt inf.loadstreaming("\(cfg.modeldir)/\(modelid)";opts) {
+    $ok:handle loadedsession(cfg;modelid;handle);
+    $err:e unloadedsession(cfg;modelid)
+  }
+};
+
+f=loadedsession(cfg:$streamconfig;modelid:str;handle:$modelhandle):$streamsession{
+  log.info("disk-streaming model loaded: \(modelid) (RAM ceiling \(cfg.ramceilinggb)GB, not enforced by std.infer)";"streaming";"system");
+  <$streamsession{ handle:handle; loaded:true; config:cfg; modelid:modelid }
+};
+
+f=unloadedsession(cfg:$streamconfig;modelid:str):$streamsession{
+  log.warn("disk-streaming inference unavailable, \(modelid) not loaded";"streaming";"system");
+  <$streamsession{ handle:$modelhandle{id:""}; loaded:false; config:cfg; modelid:modelid }
 };
 
 f=isloaded(session:$streamsession):bool{
-  <session.handle!=0
+  <session.loaded
 };
 
 f=generate(session:$streamsession;prompt:str;maxtokens:i32):str{
-  if(session.handle==0){
+  if(!session.loaded){
     <""
   }el{
-    <inf.generate(session.handle;prompt)
+    <mt inf.generate(session.handle;prompt;maxtokens) { $ok:s s; $err:e "" }
   }
 };
 
 f=unload(session:$streamsession):bool{
-  if(session.handle==0){
+  if(!session.loaded){
     <false
   }el{
     let result=inf.unload(session.handle);
