@@ -224,6 +224,9 @@ build_one() {
 # else — cfgdefault is named in ooke's own cli.tkc.md as BLOCKED on a toke codegen
 # bug and is not in ooke.config.tki, so calling it produced an undefined
 # `_ooke_config_cfgdefault` at link time and the fallback is built here instead.
+# ooke 3.0.0-rc.2 (F10.39): $ookecfg gains serverhost and drops rc.1's storebackend,
+# logmaxlines and logmaxagedays, and serverun takes the host after projectdir. See the
+# same note in scripts/build_loke.sh.
 write_ooke_main() {
   _out=$1; _site=$2; _port=$3; _url=$4
   cat > "$_out" << MAIN
@@ -249,12 +252,14 @@ f=appdefaultcfg():\$ookecfg{
     buildminify:false;
     buildinlinecss:false;
     serverport:$_port;
+    serverhost:"127.0.0.1";
     serverworkers:4;
     servercorsorigins:"";
-    storebackend:"flat";
+    logaccess:"-";
+    logerror:"";
     logaccessformat:"combined";
-    logmaxlines:100000;
-    logmaxagedays:30;
+    tlscert:"";
+    tlskey:"";
     apiprefix:"/api"
   }
 };
@@ -264,7 +269,7 @@ f=main():i64{
   let cfg=mt config.configload(path.join(projectdir;"ooke.toml")) {\$ok:v v;\$err:e appdefaultcfg()};
   let handledpaths=handlers.registerall();
   (log.info(str.concat("registered ";str.concat(str.fromint(handledpaths.len);" handler routes"));@()));
-  let r=mt serve.serverun(projectdir;cfg.serverport;cfg.serverworkers;cfg.buildoutput;"";"";cfg.sitename;cfg.siteurl;cfg.sitelanguage;cfg.apiprefix;cfg.servercorsorigins;handledpaths) {\$ok:v 0;\$err:e 1};
+  let r=mt serve.serverun(projectdir;cfg.serverhost;cfg.serverport;cfg.serverworkers;cfg.buildoutput;"";"";cfg.sitename;cfg.siteurl;cfg.sitelanguage;cfg.apiprefix;cfg.servercorsorigins;handledpaths) {\$ok:v 0;\$err:e 1};
   <r
 };
 MAIN

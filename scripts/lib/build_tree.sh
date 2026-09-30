@@ -482,7 +482,7 @@ fi
 # $OOKE_DIR: this script used to drop .o files into a shared checkout that other
 # builds, including other worktrees, were reading at the same time.
 OOKE_BUILD="$PROJECTDIR/build/ooke-objs"
-OOKE_MODS="config store router template validate repair run build serve apihealth handlers cli"
+OOKE_MODS="config store router template validate repair run floor build serve apihealth handlers cli"
 build_ooke_objs() {
   local stamp="$OOKE_BUILD/.stamp" want
   want="$TOKE $(stat -f %m "$TOKE" 2>/dev/null || stat -c %Y "$TOKE")"
@@ -494,9 +494,33 @@ build_ooke_objs() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/ooke_objs.XXXXXX")
   mkdir -p "$tmp/src/ooke"
   cp "$OOKE_DIR"/src/*.tk "$tmp/src/"
+  # ooke 3.0.0-rc.2 no longer tracks src/_handlers.tk: its Makefile generates it from the
+  # site's pages. ooke's own handlers object is never linked (the application supplies
+  # ooke.handlers, see the link step), so an empty registry from ooke's own generator stands
+  # in for it here, in the temporary copy, never in $OOKE_DIR. (F10.39)
+  if [ ! -f "$tmp/src/_handlers.tk" ]; then
+    mkdir -p "$tmp/nopages"
+    "$OOKE_DIR/scripts/gen_handlers.sh" "$tmp/nopages" "$tmp/src/_handlers.tk" >/dev/null \
+      || { rm -rf "$tmp"; die "could not generate ooke's placeholder handler registry"; }
+  fi
+  # rc.2's cli.tk imports ooke.floor, which ooke's Makefile generates from ooke.toml
+  # [requires] into src/_floor.tk (ooke story 134.35) and does not track. The same three
+  # keys, the same text, generated here into the temporary copy. (F10.39)
+  if [ ! -f "$tmp/src/_floor.tk" ]; then
+    _req() { sed -n "s/^$1 *= *\"\(.*\)\"/\1/p" "$OOKE_DIR/ooke.toml" | head -1; }
+    _mtv=$(_req mintoke); _mtd=$(_req mintokedate); _mtc=$(_req mintokecommit)
+    [ -n "$_mtv" ] && [ -n "$_mtd" ] && [ -n "$_mtc" ] \
+      || { rm -rf "$tmp"; die "ooke.toml [requires] lacks mintoke, mintokedate or mintokecommit"; }
+    printf '%s\n' \
+      '(* GENERATED from ooke.toml [requires] by loke scripts/lib/build_tree.sh, as ooke'"'"'s Makefile does. *)' \
+      'm=ooke.floor;' \
+      'f=floortoml():$str{' \
+      "  <\"[requires]\\nmintoke = \\\"$_mtv\\\"\\nmintokedate = \\\"$_mtd\\\"\\nmintokecommit = \\\"$_mtc\\\"\\n\"" \
+      '};' > "$tmp/src/_floor.tk"
+  fi
   local m src
   for m in $OOKE_MODS; do
-    src="$m.tk"; [ "$m" = handlers ] && src="_handlers.tk"
+    src="$m.tk"; [ "$m" = handlers ] && src="_handlers.tk"; [ "$m" = floor ] && src="_floor.tk"
     ( cd "$tmp/src" && "$TOKE" --emit-interface --emit-llvm --out "ooke/$m" "$src" ) \
       >"$tmp/$m.log" 2>&1 || { cat "$tmp/$m.log" >&2; rm -rf "$tmp"; die "ooke module $m does not compile with $TOKE"; }
     clang -c -x ir "$tmp/src/ooke/$m" -o "$tmp/src/ooke/$m.o" 2>"$tmp/$m.cc.log" \

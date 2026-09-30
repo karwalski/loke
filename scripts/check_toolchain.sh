@@ -3,14 +3,16 @@
 #
 # The two dependencies are gated differently, deliberately:
 #
-#   toke  — gated on COMMIT ANCESTRY. Upstream states that no tagged toke
-#           release works for loke; the requirement is a build of main at or
-#           after toke_min_commit. The VERSION file is unreliable for this
-#           purpose (it still reads 2.8.0 well past the v2.8.0 tag, so the tag
-#           predates the commit loke needs), and is therefore advisory only.
+#   toke  — gated on COMMIT ANCESTRY: a build at or after toke_min_commit. Until
+#           toke 3.1.0 no tagged release worked for loke, and the VERSION file
+#           lagged the tags (it read 2.8.0 well past v2.8.0). Since F10.39 the
+#           minimum IS the v3.1.0 commit, because loke's source calls what 3.1.0
+#           introduced (http.clientget, the typed http.postheaders). Ancestry is
+#           still the gate, since a tag can be moved and a commit cannot;
+#           VERSION stays advisory.
 #
-#   ooke  — gated on VERSION. loke needs released 3.0.0, and a "-dev" suffix
-#           does not satisfy that.
+#   ooke  — gated on VERSION, pre-releases ordered (3.0.0-rc.2 > 3.0.0-rc.1),
+#           at or after ooke_min_version.
 #
 # Exit codes:
 #   0 — requirements met
@@ -97,8 +99,8 @@ else
     fi
   else
     echo "ERROR: toke at $toke_head is BEFORE the required commit $TOKE_MIN." >&2
-    echo "       loke needs a build of main at or after $TOKE_MIN. No tagged" >&2
-    echo "       release works, so checking out a tag will not help." >&2
+    echo "       loke needs toke $(lockval toke_version) ($(lockval toke_tag), $TOKE_MIN) or a" >&2
+    echo "       later commit: its source calls what that release introduced." >&2
     STATUS=1
   fi
 
@@ -119,8 +121,8 @@ else
   ooke_v="unknown"
   [ -f "$OOKE_DIR/VERSION" ] && ooke_v=$(tr -d ' \n' < "$OOKE_DIR/VERSION")
 
-  # The requirement is now a named pre-release, v3.0.0-rc.1, so a pre-release
-  # suffix no longer disqualifies a build. What still has to hold is that the
+  # The requirement is a named pre-release (v3.0.0-rc.2 since F10.39), so a
+  # pre-release suffix does not disqualify a build. What still has to hold is that the
   # version is at least the pinned one, and an rc ordering needs its own
   # comparison: 3.0.0-rc.2 is newer than 3.0.0-rc.1, and plain 3.0.0 is newer
   # than any rc of it.

@@ -32,6 +32,12 @@ fi
 # Step 1: Generate _serve_main.tk
 # NOTE: match arms use $ok/$err and serverun's final parameter is [str] as of
 # ooke 2.0.0. Keep this in sync with $OOKE_DIR/src/ooke.serve.tki.
+#
+# ooke 3.0.0-rc.2 (F10.39): $ookecfg is sixteen fields — serverhost is new, and rc.1's
+# storebackend, logmaxlines and logmaxagedays are gone (logaccess, logerror, tlscert and
+# tlskey replace them) — and serve.serverun takes the bind host after projectdir. The
+# host comes from [server] host, which rc.2 defaults to 127.0.0.1; rc.1's serverun bound
+# every interface (T-43/O-3). The fallback config below says 127.0.0.1 too.
 cat > "$BROWSERDIR/_serve_main.tk" << 'MAIN'
 (* Copyright 2026 loke contributors
    SPDX-License-Identifier: Apache-2.0 *)
@@ -60,12 +66,14 @@ f=lokedefaultcfg():$ookecfg{
     buildminify:false;
     buildinlinecss:false;
     serverport:11430;
+    serverhost:"127.0.0.1";
     serverworkers:4;
     servercorsorigins:"";
-    storebackend:"sqlite";
+    logaccess:"-";
+    logerror:"";
     logaccessformat:"combined";
-    logmaxlines:100000;
-    logmaxagedays:30;
+    tlscert:"";
+    tlskey:"";
     apiprefix:"/api"
   }
 };
@@ -75,7 +83,7 @@ f=main():i64{
   let cfg=mt config.configload(path.join(projectdir;"ooke.toml")) {$ok:v v;$err:e lokedefaultcfg()};
   let handledpaths=handlers.registerall();
   (log.info(str.concat("registered ";str.concat(str.fromint(handledpaths.len);" handler routes"));@()));
-  let r=mt serve.serverun(projectdir;cfg.serverport;cfg.serverworkers;cfg.buildoutput;"";"";cfg.sitename;cfg.siteurl;cfg.sitelanguage;cfg.apiprefix;cfg.servercorsorigins;handledpaths) {$ok:v 0;$err:e 1};
+  let r=mt serve.serverun(projectdir;cfg.serverhost;cfg.serverport;cfg.serverworkers;cfg.buildoutput;"";"";cfg.sitename;cfg.siteurl;cfg.sitelanguage;cfg.apiprefix;cfg.servercorsorigins;handledpaths) {$ok:v 0;$err:e 1};
   <r
 };
 MAIN

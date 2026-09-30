@@ -105,9 +105,15 @@ MODULE_DIR="$PROJECTDIR/packages/browser/build/ooke"
 
 CFLAGS="-std=c99 -D_GNU_SOURCE -O1 -iquote $STDLIB -I$VENDOR/cmark/src -I$VENDOR/tomlc99 -I/opt/homebrew/include -Wno-implicit-function-declaration -Wno-pedantic -DTK_HAVE_OPENSSL"
 
-# Rebuild the stdlib archive only when a source is newer than it.
+# Rebuild the stdlib archive only when a source is newer than it, or when it was built
+# from another toke. The mtime test alone cannot see a toolchain SWITCH: pointing TOKE_DIR
+# at a different checkout whose sources are older than the archive (the move from toke
+# 3.0.0 to 3.1.0, F10.39) would link every test against the previous runtime. The stamp
+# names the checkout and its VERSION.
+STDLIB_STAMP="$STDLIB_A.toke"
+STDLIB_WANT="$TOKEDIR $(cat "$TOKEDIR/VERSION" 2>/dev/null)"
 NEWEST_C=$(find "$STDLIB" "$VENDOR/cmark/src" "$VENDOR/tomlc99" -name '*.c' -newer "$STDLIB_A" 2>/dev/null | head -1)
-if [ ! -f "$STDLIB_A" ] || [ -n "$NEWEST_C" ]; then
+if [ ! -f "$STDLIB_A" ] || [ -n "$NEWEST_C" ] || [ "$(cat "$STDLIB_STAMP" 2>/dev/null)" != "$STDLIB_WANT" ]; then
   echo "Building $STDLIB_A (once) ..."
   OBJDIR="$BUILDDIR/stdobj"
   rm -rf "$OBJDIR"; mkdir -p "$OBJDIR"
@@ -125,6 +131,7 @@ if [ ! -f "$STDLIB_A" ] || [ -n "$NEWEST_C" ]; then
   done
   rm -f "$STDLIB_A"
   ar rcs "$STDLIB_A" "$OBJDIR"/*.o 2>/dev/null
+  echo "$STDLIB_WANT" > "$STDLIB_STAMP"
   echo "  $(ls "$OBJDIR"/*.o 2>/dev/null | wc -l | tr -d ' ') objects archived"
 fi
 
