@@ -34,6 +34,17 @@ t=$msrange{
   ok:bool
 };
 
+(* X8.3 — what resolvedbkey (below) did. ensuredbkey needs only .key; the X8.3 test needs
+   the decision, because on a locked keychain "refused" and "generated but could not
+   store" both end in an empty key, and only the first is correct. action is
+   dbkeyaction's answer; kind is the keychain's error kind from the call that settled
+   the outcome ("" on success). *)
+t=$dbkeyresult{
+  key:str;
+  action:i64;
+  kind:str
+};
+
 (* X8.3 — the key comes from the OS keychain and from nowhere else.
 
    WHAT WAS HERE, AND WHY IT IS GONE. ensuredbkey used to read LOKE_DB_KEY from the
@@ -68,11 +79,11 @@ t=$msrange{
         to gate: the difference between a test and production is which function calls
         which, not which value some variable happens to hold.
 
-   What this costs, stated rather than hidden: the keychain read itself is not exercised
-   by the automated suite, because a headless process cannot answer the dialog it may
-   raise. The suite covers everything on both sides of it — the decision taken on what the
-   keychain returned (dbkeyaction below), key shape, derivation, sealing, opening, and
-   fail-closed behaviour on a wrong or absent key — and not that one call.
+   Since toke 3.1.0 the keychain calls themselves are exercised too, against a throwaway
+   keychain file with user interaction disallowed (X8.7): tests/unit/storage/
+   test_dbkey_keychain.tk runs resolvedbkey on an absent item, a present one, and a
+   LOCKED keychain with and without the item. What remains untested is the authorisation
+   dialog on the user's own login keychain, which no test may touch.
 
    dbkeyfromenv, which read LOKE_DB_KEY and was kept only so tests/unit/storage/test_db.tk
    could assert that it did, is DELETED (2026-09-27). A function in the storage module that
@@ -85,36 +96,39 @@ t=$msrange{
    can derive anything. *)
 
 (* X8.3 — what ensuredbkey does with what the keychain told it, as a pure function so the
-   decision is testable without touching the keychain.
+   decision is testable without touching the keychain. Its inputs are what ONE read of the
+   item returned: the value, and std.keychain.lasterrkind() for that read.
 
-     1  use the stored secret: an item exists and reads back as 64 characters.
-     2  generate and store one: NO item exists. On first use that is simply first use. If
-        the item was REMOVED, rows sealed under the old key stay sealed and fail to open
-        under the new one, which is what X8.3 requires: removing the keychain entry makes
-        the store unreadable, never transparently readable.
-     0  refuse: an item EXISTS but did not read back as a usable secret — the read was
-        denied, the keychain is locked, or the item was altered.
+     1  use the stored secret: the read returned 64 characters.
+     2  generate and store one: the read failed with kind "notfound" — there is NO item. On
+        first use that is simply first use. If the item was REMOVED, rows sealed under the
+        old key stay sealed and fail to open under the new one, which is what X8.3
+        requires: removing the keychain entry makes the store unreadable, never
+        transparently readable.
+     0  refuse: anything else. Either an item exists but did not read back as a usable
+        secret (kind "", value malformed or empty), or the READ ITSELF failed — "locked",
+        "denied", "nokeychain", "badarg", "unavailable", "failed", or a kind this code has
+        never heard of. None of those says whether an item exists.
 
-   The third case is the one that used to be wrong. ensuredbkey fell through to "generate
-   and store" whenever the read did not return 64 characters, and keychain.set is an
-   update-or-add, so a single failed read OVERWROTE the key that every stored mapping was
-   sealed under and made all of them permanently unreadable. That fails closed for
-   privacy — nothing leaks — but it destroys data silently and rotates the key on the
-   say-so of a transient error. Refusing is correct: the operation that wanted the key
-   fails, the key survives, and the next attempt can succeed.
-
-   What this cannot close at the pin: std.keychain.exists is a bool that is true only on
-   errSecSuccess, so "no such item" and "the query itself failed" are the same false, and
-   a failed EXISTS check still takes the generate branch. Distinguishing them needs the
-   OSStatus from std.keychain, which it does not return. *)
-f=dbkeyaction(present:bool;existing:str):i64{
-  if(present){
-    if(str.len(existing)==64){
-      <1
-    }el{};
-    <0
+   Two branches used to be wrong. (a) ensuredbkey fell through to "generate and store"
+   whenever the read did not return 64 characters, and keychain.set is an update-or-add,
+   so a single failed read OVERWROTE the key that every stored mapping was sealed under
+   and made all of them permanently unreadable. (b) Until toke 3.1.0, std.keychain.exists
+   was a bool that was true only on errSecSuccess, so "no such item" and "the query
+   failed" were the same false, and a locked or denied keychain took the generate branch.
+   3.1.0 says why a call failed (keychain.lasterrkind), and "notfound" is the ONLY kind
+   that means absent, so it is the only kind that may generate. Every other kind fails
+   closed: the operation that wanted the key fails, the key survives, and the next attempt
+   can succeed. Generating instead would orphan every mapping sealed under the real key
+   the moment the keychain became readable again. *)
+f=dbkeyaction(kind:str;existing:str):i64{
+  if(str.len(existing)==64){
+    <1
   }el{};
-  <2
+  if(kind=="notfound"){
+    <2
+  }el{};
+  <0
 };
 
 (* A fresh secret: 32 bytes from the OS CSPRNG, as 64 hex characters. Separate from
@@ -125,36 +139,47 @@ f=generatedbsecret():str{
 };
 
 (* The 64-character hex secret, from the keychain, generating and storing one on first
-   use. "" means no secret is available, which must fail the operation that wanted it
+   use. key "" means no secret is available, which must fail the operation that wanted it
    rather than fall back to anything.
 
+   ONE read decides it: getdbkey, then the kind that read left. There is no exists()
+   probe in front of it any more: the read already says everything the probe would, and a
+   second call is a second chance for the keychain's state to change between question and
+   answer.
+
    NOT called by openstore — see the note above. Call it only where a key is actually
-   needed, so that no code path blocks on the keychain for a key it does not use. *)
-f=ensuredbkey():str{
-  let present=kc.haskey("db_encryption_key");
-  let existing=mut."";
-  if(present){
-    existing=kc.getdbkey()
-  }el{};
-  let action=dbkeyaction(present;existing);
+   needed, so that no code path reaches the keychain for a key it does not use. *)
+f=resolvedbkey():$dbkeyresult{
+  let existing=kc.getdbkey();
+  let kind=kc.lastkind();
+  let action=dbkeyaction(kind;existing);
   if(action==1){
-    <existing
+    <$dbkeyresult{key:existing;action:1;kind:kind}
   }el{};
   if(action==0){
-    log.warn("db: a database key is in the keychain but could not be read as a 64-character secret; refusing rather than replacing it";"db";"system");
-    <""
+    if(str.len(kind)==0){
+      log.warn("db: a database key is in the keychain but could not be read as a 64-character secret; refusing rather than replacing it";"db";"system")
+    }el{
+      log.warn("db: the keychain could not be read (\(kind)); refusing rather than generating a key over one that may exist";"db";"system")
+    };
+    <$dbkeyresult{key:"";action:0;kind:kind}
   }el{};
   let hexkey=generatedbsecret();
   if(str.len(hexkey)!=64){
     log.warn("db: the generated database key is not 64 hex characters; refusing to store it";"db";"system");
-    <""
+    <$dbkeyresult{key:"";action:2;kind:"badkey"}
   }el{};
   if(kc.setdbkey(hexkey)){}el{
-    log.warn("db: could not store the database key in the keychain; field encryption is unavailable";"db";"system");
-    <""
+    let setkind=kc.lastkind();
+    log.warn("db: could not store the database key in the keychain (\(setkind)); field encryption is unavailable";"db";"system");
+    <$dbkeyresult{key:"";action:2;kind:setkind}
   };
   log.info("db: generated new database encryption key";"db";"system");
-  <hexkey
+  <$dbkeyresult{key:hexkey;action:2;kind:""}
+};
+
+f=ensuredbkey():str{
+  <resolvedbkey().key
 };
 
 (* X8.4 — PRAGMA secure_delete, and whether this toolchain honours it.

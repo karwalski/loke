@@ -1,0 +1,137 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.storage.dbkeykeychain;
+
+i=t:std.test;
+i=str:std.str;
+i=std:std;
+i=process:std.process;
+i=kcs:std.keychain;
+i=kc:core.storage.keychain;
+i=sdb:core.storage.db;
+
+(* X8.3 — core.storage.db.ensuredbkey against a REAL keychain: a throwaway keychain file
+   this test creates under its own (throwaway) HOME, never the user's login keychain
+   (X8.7). Until toke 3.1.0 nothing could run here: std.keychain could not say why a read
+   failed, and the only keychain available was the user's.
+
+   The property: "no item" and "the keychain could not be read" are different answers, and
+   only the first may generate a key. A locked keychain that is treated as empty generates
+   a fresh key and tries to store it over the real one; had that write succeeded, every
+   mapping sealed under the real key would be orphaned the moment the keychain unlocked.
+   So the locked cases below assert the DECISION ensuredbkey took (resolvedbkey's action),
+   not only its empty return: a generate-and-fail-to-store also returns "", and would pass
+   an assertion on the key alone.
+
+   The keychain is locked and unlocked with /usr/bin/security on the throwaway file's
+   absolute path. Only paths makekeychain returned ever reach it: `security lock-keychain`
+   with no path locks the user's DEFAULT keychain, so an empty path is refused here. *)
+
+f=makekeychain(tag:str):str{
+  let hex:str=str.randhex(8);
+  let p="\(std.homedir())/loke-test-\(tag)-\(hex).keychain-db";
+  if(kcs.create(p;"loke-throwaway")){
+    <p
+  }el{};
+  <""
+};
+
+f=runsecurity(args:@str):i64{
+  let h=mt process.spawn(args) { $ok:h h; $err:e @() };
+  if(h == @()){ <-1 }el{};
+  <process.wait(h) as i64
+};
+
+f=lockkc(p:str):bool{
+  if(str.len(p)==0){ <false }el{};
+  <runsecurity(@("security";"lock-keychain";p))==0
+};
+
+f=unlockkc(p:str):bool{
+  if(str.len(p)==0){ <false }el{};
+  <runsecurity(@("security";"unlock-keychain";"-p";"loke-throwaway";p))==0
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* No keychain call may run before this: without a selected throwaway keychain it would
+     go to the default one. use("") selects the default, so "" must never reach it. *)
+  let kca=makekeychain("dbkey-a");
+  if(str.len(kca)==0){
+    t.assert(false;"a throwaway keychain could be created; nothing else runs without one");
+    <1
+  }el{};
+  if(kcs.use(kca)){}el{
+    t.assert(false;"the throwaway keychain could be selected; nothing else runs without it");
+    kcs.destroy(kca);
+    <1
+  };
+
+  (* ── The decision, as a pure function, over every kind std.keychain reports ─── *)
+  let good="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  if(t.assert(sdb.dbkeyaction("";good)==1;"a 64-character secret that read back cleanly is used")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("notfound";"")==2;"notfound, and only notfound, means no item: generate on first use")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("locked";"")==0;"a LOCKED keychain is refused, never taken as empty")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("denied";"")==0;"a denied read is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("nokeychain";"")==0;"a missing keychain is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("failed";"")==0;"a failed query is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("unavailable";"")==0;"no credential store at all is refused, not a reason to invent a key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("somethingnew";"")==0;"a kind this code has never heard of is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sdb.dbkeyaction("";"abc123")==0;"an item that reads back malformed is refused, not overwritten")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Absent item: generated, stored, and then used ─────────────────────────── *)
+  let first=sdb.resolvedbkey();
+  if(t.assert(first.action==2;"with no item in the keychain, resolving the key takes the generate branch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(first.key) as i64)==64;"and returns a 64-character secret")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kc.getdbkey();first.key;"which is now what the keychain holds")){pass=pass+1}el{fail=fail+1};
+  let second=sdb.resolvedbkey();
+  if(t.assert(second.action==1;"the next call uses the stored key rather than generating another")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(second.key;first.key;"and it is the same key")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sdb.ensuredbkey();first.key;"ensuredbkey returns that key")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Locked, with the real key in it: refused, and the key survives ───────────
+     This is the orphaning case. *)
+  if(t.assert(lockkc(kca);"the throwaway keychain is locked")){pass=pass+1}el{fail=fail+1};
+  let lockedwith=sdb.resolvedbkey();
+  if(t.assert(lockedwith.action==0;"a locked keychain holding the key is REFUSED, not taken as empty")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lockedwith.kind;"locked";"and the reason recorded is that it is locked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(lockedwith.key) as i64)==0;"no key is returned, so the operation that wanted one fails")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(sdb.ensuredbkey()) as i64)==0;"ensuredbkey returns empty on a locked keychain")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unlockkc(kca);"the keychain is unlocked again")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kc.getdbkey();first.key;"and it still holds the ORIGINAL key: nothing was written over it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Locked, with no item: no key comes back, and none is written ─────────────
+     MEASURED 2026-10-01, toke 3.1.0: a locked FILE keychain still answers item lookups
+     truthfully (std.keychain documents this for exists; get behaves the same), so a
+     read of an ABSENT item on a locked keychain reports "notfound", not "locked". That
+     is a true "no item", so the decision is the first-use branch — and nothing can be
+     orphaned, because there is no key to orphan. The write that follows fails "locked",
+     so the operation still gets no key and the keychain is left without one. Asserted
+     as measured, so a runtime that started reporting "locked" here would be noticed. *)
+  let kcb=makekeychain("dbkey-b");
+  if(str.len(kcb)==0){
+    t.assert(false;"a second throwaway keychain could be created");
+    kcs.destroy(kca);
+    <fail+1
+  }el{};
+  if(t.assert(kcs.use(kcb);"a second, empty throwaway keychain is selected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lockkc(kcb);"and locked")){pass=pass+1}el{fail=fail+1};
+  let probe=kc.getdbkey();
+  if(t.asserteq(kc.lastkind();"notfound";"a locked keychain reports an absent item as notfound: the lookup still works")){pass=pass+1}el{fail=fail+1};
+  let lockedempty=sdb.resolvedbkey();
+  if(t.assert(lockedempty.action==2;"so resolving takes the first-use branch: there is no key to orphan")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lockedempty.kind;"locked";"but the store fails because the keychain is locked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert((str.len(lockedempty.key) as i64)==0;"and no key is returned, so the operation that wanted one fails")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unlockkc(kcb);"the second keychain is unlocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!kc.haskey("db_encryption_key");"and holds no database key: none was generated and written while it was locked")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kcs.lasterrkind();"notfound";"its absence reads as notfound once it can be read")){pass=pass+1}el{fail=fail+1};
+
+  (* Both keychains go; destroy() also deselects. No keychain call follows. *)
+  if(t.assert(kcs.destroy(kcb);"the second throwaway keychain is destroyed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(kcs.destroy(kca);"the first throwaway keychain is destroyed")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
