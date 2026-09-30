@@ -6,6 +6,8 @@ m=test.storage.keychain;
 i=t:std.test;
 i=str:std.str;
 i=kc:core.storage.keychain;
+i=kcs:std.keychain;
+i=std:std;
 
 (* X7.2 — this file used to declare six stand-ins for core.storage.keychain: a
    keychainstore/keychainretrieve pair with hardcoded credentials, a keychainexists built
@@ -29,15 +31,41 @@ i=kc:core.storage.keychain;
    provider key becomes unreadable and loke falls back to prompting for keys that are
    already in the keychain.
 
-   All accounts below are unique to this test and deleted at the end. That is not
-   tidiness: core.storage.db's comment on ensuredbkey records that SecItemCopyMatching
-   BLOCKS on an authorisation dialog when the reading binary is not the one that stored
-   the item, and a headless test process can never answer it. Leaving items behind for a
-   differently-named binary to read later is how the suite hangs rather than fails. *)
+   X8.7 — none of this touches the user's login keychain. Every call below goes to a
+   throwaway keychain FILE this test creates under its own (throwaway) HOME with
+   std.keychain.create, selects with std.keychain.use and deletes with
+   std.keychain.destroy. The file is not on the keychain search list, and use() disallows
+   user interaction, so a locked or missing keychain fails instead of raising a dialog.
+   core.storage.keychain is NOT told about any of this: use() redirects every later
+   std.keychain call in the process, which is what the module makes, and the "follows
+   use()" block below proves that rather than assuming it. If the throwaway keychain
+   cannot be created or selected the test stops before its first keychain call, because
+   carrying on would send that call to the default keychain. *)
+
+f=makekeychain(tag:str):str{
+  let hex:str=str.randhex(8);
+  let p="\(std.homedir())/loke-test-\(tag)-\(hex).keychain-db";
+  if(kcs.create(p;"loke-throwaway")){
+    <p
+  }el{};
+  <""
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
+
+  let kca=makekeychain("unit-a");
+  if(str.len(kca)==0){
+    t.assert(false;"a throwaway keychain could be created; nothing else runs without one");
+    <1
+  }el{};
+  if(kcs.use(kca)){}el{
+    t.assert(false;"the throwaway keychain could be selected; nothing else runs without it");
+    kcs.destroy(kca);
+    <1
+  };
+  if(t.assert(kcs.lasterrkind()=="";"use() on the throwaway keychain succeeded")){pass=pass+1}el{fail=fail+1};
 
   (* The plain round trip, through the real module and the real keychain. *)
   if(t.assert(kc.setkey("unit_kc_roundtrip";"secret-value");"setkey reports success")){pass=pass+1}el{fail=fail+1};
@@ -79,8 +107,31 @@ f=main():i64{
   if(t.assert(!kc.haskey("unit_kc_roundtrip");"and the account is gone afterwards")){pass=pass+1}el{fail=fail+1};
   if(t.assert((str.len(kc.getkey("unit_kc_roundtrip")) as i64)==0;"a deleted account reads as zero-length, not as its old value")){pass=pass+1}el{fail=fail+1};
 
-  (* Leave nothing for a differently-named binary to block on. *)
-  kc.deletekey("api_key.unit_kc_provider");
+  (* ── core.storage.keychain follows use() (X8.7) ─────────────────────────────
+     The module has no keychain handle of its own; it calls std.keychain, and use() is
+     what keeps those calls out of the login keychain. So: an account the MODULE wrote to
+     keychain A is invisible after switching to a second throwaway keychain B, reads as
+     "notfound" there rather than as a failure, and is back after switching to A. Were
+     use() not honoured by the module's calls, the account would be visible from both. *)
+  kc.setkey("unit_kc_follows";"follows-value");
+  let kcb=makekeychain("unit-b");
+  (* use("") would select the DEFAULT keychain, so an empty path must never reach it. *)
+  if(str.len(kcb)==0){
+    t.assert(false;"a second throwaway keychain could be created");
+    kcs.destroy(kca);
+    <fail+1
+  }el{};
+  if(t.assert(kcs.use(kcb);"a second throwaway keychain is created and selected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!kc.haskey("unit_kc_follows");"the module's account is not in the second keychain: its calls go where use() points")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kcs.lasterrkind();"notfound";"and its absence there is reported as notfound, not as a failed query")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(kcs.use(kca);"switching back to the first keychain succeeds")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(kc.getkey("unit_kc_follows");"follows-value";"and the module reads its account from it again")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(kcs.destroy(kcb);"the second throwaway keychain is destroyed")){pass=pass+1}el{fail=fail+1};
+
+  (* The whole keychain goes, and with it everything above. destroy() also deselects it,
+     so nothing after this line could reach any keychain but the default — and nothing
+     after this line makes a keychain call. *)
+  if(t.assert(kcs.destroy(kca);"the throwaway keychain is destroyed at the end")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

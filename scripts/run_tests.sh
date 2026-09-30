@@ -250,16 +250,24 @@ fi
 #      run. That catches a hardcoded path or a getpwuid() fallback, which a HOME override
 #      alone would not.
 #
-# The keychain is the one exception, and it is named here rather than left implicit. The
-# Security framework finds the login keychain through $HOME/Library/Keychains; measured
-# 2026-09-28, test_keychain_e2e under an empty HOME blocks indefinitely (no keychain, so it
-# waits on a dialog nobody can answer) and passes when that one directory is linked in. The
-# three tests below still use the real login keychain (X8.7, a user decision), under
-# account names of their own that they delete afterwards, so their throwaway HOME gets a
-# link to the real Library/Keychains and nothing else: their ~/.loke is still throwaway and
-# the guard still applies to them. No other test gets the link. Keychain traffic itself goes
-# to securityd over IPC, not through a path, so the guard cannot see it.
-KEYCHAIN_TESTS="test_keychain test_keychain_e2e test_keychain_settings"
+# The keychain — X8.7, 2026-10-01. No test is given the user's keychain any more. Until
+# toke 3.1.0 the three keychain tests used the real LOGIN keychain, and their throwaway
+# HOME got a link to the real Library/Keychains so the Security framework could find it.
+# That link is gone. Each keychain test now creates its own keychain FILE under its
+# throwaway HOME (std.keychain.create), selects it (std.keychain.use: every later call in
+# the process goes there, with user interaction disallowed) and destroys it at the end.
+#
+# The throwaway HOME alone does NOT keep a test out of the login keychain. Measured
+# 2026-10-01 at toke 3.1.0: under an empty HOME with no Library/Keychains, a default-keychain
+# exists() for a never-written account returned at once with errSecItemNotFound (-25300),
+# kind "notfound" — the query was answered from a keychain search list (apparently
+# resolved per user, not through $HOME; not investigated further) instead of failing "nokeychain". (The 2026-09-28 hang was
+# the pre-3.1.0 runtime waiting on a dialog.) So a test that forgets use() must be assumed
+# to reach the user's keychains; the guard below is what catches one that writes.
+#
+# Keychain traffic goes to securityd over IPC, not through a path, so the ~/.loke guard
+# cannot see it. The keychain guard below watches the one thing a write to the login
+# keychain must change, the file's metadata — see KEYCHAIN GUARD.
 REALHOME="${HOME:?HOME must be set}"
 GUARD_PREFIX="$REALHOME/.loke"
 TESTHOME_ROOT="$BUILDDIR/home"
@@ -296,6 +304,42 @@ if ! grep -q 'f3b13-guard-probe' "$BUILDDIR/realhome_guard_probe.log" 2>/dev/nul
 fi
 mkdir -p "$TESTHOME_ROOT"
 GUARDED=0
+
+# ── KEYCHAIN GUARD (X8.7): no test may write to the user's login keychain ─────────────
+#
+# What is watched: the login keychain FILE's metadata — modification and change times to
+# the nanosecond, size and inode, from stat(1). Never its contents: nothing here opens the
+# file, lists its items or reads a secret. Every item added, changed or deleted is a write
+# to that SQLite file, so a test that writes to the login keychain changes this metadata.
+# A test that only READS it (a lookup, an exists()) changes nothing here and is NOT caught;
+# that is the limit of a guard that reads no keychain data, stated rather than hidden.
+#
+# Why per test, and why a re-run. Other processes write the login keychain too (measured
+# 2026-10-01 on the development machine: the file changed within two minutes of watching,
+# with no loke process involved), so a change during a test's run is only a suspicion. The
+# runner snapshots the metadata immediately before and after each test binary; on a change
+# it runs that test ONCE more under a fresh HOME and fails it only if the metadata changes
+# AGAIN during the second run. A test that writes to the keychain writes on every run; a
+# coincidence with another process does not repeat on demand. A test whose second run is
+# clean is reported (KEYCHAIN? line) but not failed. The cost, accepted: a test that really
+# does write to the keychain is run twice, so it writes twice before it is failed.
+#
+# LOKE_KEYCHAIN_GUARD_FILES overrides the watched files, for the guard's own mutation test
+# (point it at a throwaway keychain the mutant writes to). It is never needed otherwise.
+KC_GUARD_FILES="${LOKE_KEYCHAIN_GUARD_FILES:-$REALHOME/Library/Keychains/login.keychain-db}"
+KC_GUARD_LIVE=""
+for f in $KC_GUARD_FILES; do [ -f "$f" ] && KC_GUARD_LIVE="$KC_GUARD_LIVE $f"; done
+kcstat() {
+  [ -n "$KC_GUARD_LIVE" ] || return 0
+  # shellcheck disable=SC2086
+  stat -f '%N %Fm %Fc %z %i' $KC_GUARD_LIVE 2>/dev/null
+}
+if [ -n "$KC_GUARD_LIVE" ]; then
+  KC_SUITE_BEFORE=$(kcstat)
+else
+  echo "NOTE: keychain guard inactive — none of $KC_GUARD_FILES exists (not macOS, or no login keychain)"
+fi
+KC_SUSPECTS=""
 
 PASS=0
 FAIL=0
@@ -354,16 +398,35 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   GUARD_LOG="$BUILDDIR/$NAME.realhome.log"
   rm -rf "$TESTHOME" "$GUARD_LOG"
   mkdir -p "$TESTHOME"
-  case " $KEYCHAIN_TESTS " in
-    *" $NAME "*)
-      mkdir -p "$TESTHOME/Library"
-      ln -s "$REALHOME/Library/Keychains" "$TESTHOME/Library/Keychains" ;;
-  esac
+  KC_BEFORE=$(kcstat)
   HOME="$TESTHOME" LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$GUARD_LOG" \
     DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" "$BUILDDIR/$NAME" 2>/dev/null
   EXIT=$?
+  KC_AFTER=$(kcstat)
   GUARDED=$((GUARDED+1))
-  if [ -s "$GUARD_LOG" ]; then
+  KC_TOUCHED=""
+  if [ "$KC_BEFORE" != "$KC_AFTER" ]; then
+    # Suspicion only: confirm with a second run (KEYCHAIN GUARD, above). The re-run's
+    # own result is discarded; only whether the keychain changed again counts.
+    rm -rf "$TESTHOME"; mkdir -p "$TESTHOME"
+    KC_BEFORE2=$(kcstat)
+    HOME="$TESTHOME" LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$GUARD_LOG" \
+      DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" "$BUILDDIR/$NAME" >/dev/null 2>&1
+    KC_AFTER2=$(kcstat)
+    if [ "$KC_BEFORE2" != "$KC_AFTER2" ]; then
+      KC_TOUCHED=1
+    else
+      echo "KEYCHAIN?    $SRC (the watched keychain file changed during its run but not during a re-run: another process, not counted)"
+      KC_SUSPECTS="$KC_SUSPECTS $NAME"
+    fi
+  fi
+  if [ -n "$KC_TOUCHED" ]; then
+    # Judged first, like REAL_HOME: a test that passed by writing to the user's keychain
+    # has not passed.
+    echo "KEYCHAIN     $SRC (the watched keychain file,$KC_GUARD_LIVE, changed during this test and again during a re-run; the test's own exit was $EXIT)"
+    FAIL=$((FAIL+1))
+    ERRORS="$ERRORS\n  $SRC (wrote to the user's login keychain — X8.7 keychain guard)"
+  elif [ -s "$GUARD_LOG" ]; then
     # Judged before the test's own result: a test that passed by reading a developer's
     # config has not passed.
     echo "REAL_HOME    $SRC (touched the real ~/.loke; the test's own exit was $EXIT)"
@@ -402,6 +465,14 @@ echo "Pass: $PASS"
 echo "Fail: $FAIL"
 echo "Total: $((PASS+FAIL))"
 echo "Real-HOME guard: $GUARDED test binaries ran under a throwaway HOME with the guard on $GUARD_PREFIX (F3b.13)"
+if [ -n "$KC_GUARD_LIVE" ]; then
+  KC_SUITE_AFTER=$(kcstat)
+  if [ "$KC_SUITE_BEFORE" = "$KC_SUITE_AFTER" ]; then
+    echo "Keychain guard: the watched keychain file's metadata ($KC_GUARD_LIVE ) is identical before and after the run (X8.7)"
+  else
+    echo "Keychain guard: the watched keychain file changed during the run; per-test checks attribute it as above (suspects not confirmed:${KC_SUSPECTS:- none}) (X8.7)"
+  fi
+fi
 if [ -n "$ERRORS" ]; then
   echo ""
   echo "Failures:$ERRORS"
