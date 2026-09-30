@@ -81,6 +81,14 @@ f=lokedefaultcfg():$ookecfg{
 f=main():i64{
   let projectdir=mt args.get(1 as u64) {$ok:v v;$err:e "."};
   let cfg=mt config.configload(path.join(projectdir;"ooke.toml")) {$ok:v v;$err:e lokedefaultcfg()};
+  (* GA2.5: loke is a local server. ooke rc.2 binds [server] host, and ooke.toml sets
+     127.0.0.1; ooke announces a loopback bind and says nothing about any other, so a host
+     that is not loopback is warned about here, once, at start. It is a warning and not a
+     refusal because the address is the user's to choose. *)
+  let host=cfg.serverhost;
+  if(host=="127.0.0.1" || host=="localhost" || host=="::1"){}el{
+    (log.warn(str.concat("[server] host is not loopback: loke will accept connections from other machines on ";host);@()))
+  };
   let handledpaths=handlers.registerall();
   (log.info(str.concat("registered ";str.concat(str.fromint(handledpaths.len);" handler routes"));@()));
   let r=mt serve.serverun(projectdir;cfg.serverhost;cfg.serverport;cfg.serverworkers;cfg.buildoutput;"";"";cfg.sitename;cfg.siteurl;cfg.sitelanguage;cfg.apiprefix;cfg.servercorsorigins;handledpaths) {$ok:v 0;$err:e 1};

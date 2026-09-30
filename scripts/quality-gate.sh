@@ -306,6 +306,12 @@ step_checks() {
       || { python3 ./scripts/check_retired_models.py packages >&2; failed=1; }
   fi
 
+  if [[ -f ./scripts/check_loopback_binds.py ]]; then
+    echo "  every listener is bound to loopback, and [server] host is explicit (GA2.5)"
+    python3 ./scripts/check_loopback_binds.py --check packages src >/dev/null \
+      || { python3 ./scripts/check_loopback_binds.py packages src >&2; failed=1; }
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1

@@ -70,6 +70,15 @@ for _ in $(seq 1 40); do
 done
 
 fail=0
+# GA2.5: loke and moke, started from the tree's own ooke.toml, listen on loopback only.
+. "$ROOT/scripts/lib/port_owner.sh"
+for port in 11430 11432; do
+  if assert_loopback_only smoke_e2e "$port"; then
+    echo "  ok   port $port listens on loopback only: $(port_bind_addresses "$port" | tr '\n' ' ')(GA2.5)"
+  else
+    fail=1
+  fi
+done
 # NC1.13: loke issues the session. moke's pages cannot ask loke directly (a foreign Origin is
 # refused), so moke's POST /api/session asks on their behalf and hands back loke's id.
 E2ESID=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:11432/api/session \

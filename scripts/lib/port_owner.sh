@@ -86,3 +86,34 @@ assert_port_owner() {
   done
   [ "$ours" -eq 1 ]
 }
+
+# GA2.5: the addresses TCP port $1 is listening on, one per line, as lsof prints them
+# (`127.0.0.1:11430`, `*:11430`, `[::1]:11430`). Empty when nothing listens.
+port_bind_addresses() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n//p' | sort -u
+}
+
+# GA2.5: confirm that port $2 listens on loopback only. Every listening socket on it must
+# be bound to 127.0.0.1 or ::1; `*:port` (every interface, INADDR_ANY) or any other
+# address fails, naming what it saw. $1 is the caller's name, for the message. It needs
+# lsof: `ss` prints addresses differently and no smoke here runs on Linux yet, so without
+# lsof it refuses rather than passing unseen.
+assert_loopback_only() {
+  local name="$1" port="$2" addrs a bad=0
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "$name: lsof is not available, so it cannot confirm port $port is bound to loopback only; refusing (GA2.5)" >&2
+    return 1
+  fi
+  addrs=$(port_bind_addresses "$port")
+  if [ -z "$addrs" ]; then
+    echo "$name: nothing visible to this user listens on port $port, so its bind address cannot be confirmed (GA2.5)" >&2
+    return 1
+  fi
+  for a in $addrs; do
+    case "$a" in
+      "127.0.0.1:$port"|"[::1]:$port") ;;
+      *) echo "$name: port $port listens on $a, not on loopback only (GA2.5)" >&2; bad=1 ;;
+    esac
+  done
+  [ "$bad" -eq 0 ]
+}

@@ -221,6 +221,15 @@ done
 # F10.38: and it still is, so no answer above came from a server that took the port later.
 assert_port_owner smoke_serve "$PORT" "$PID" || fail=1
 
+# GA2.5: and it listens on loopback only. lsof names each listening socket's address; `*:$PORT`
+# (every interface) or any address but 127.0.0.1 / ::1 fails. The served ooke.toml is the
+# tree's own with only the port changed, so this checks the [server] host loke ships with.
+if assert_loopback_only smoke_serve "$PORT"; then
+  echo "  ok   listening on loopback only: $(port_bind_addresses "$PORT" | tr '\n' ' ')(GA2.5)"
+else
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "smoke_serve: at least one route failed (F10.36, GA2.6)" >&2
   exit 1
