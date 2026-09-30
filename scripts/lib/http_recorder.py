@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A local HTTP server that records EVERY request it receives, whatever the method. (VM1.6e)
 
-Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo]
+Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo] [<cert.pem> <key.pem>]
 
 It binds a port the OS hands out on 127.0.0.1 and writes the number to <port-file> once it
 is listening, so a test needs no fixed port and two runs cannot collide. Each request is
@@ -45,8 +45,16 @@ is exactly what an escaped one looks like, so it cannot tell a body a strict par
 from one it refuses. Every request is therefore also appended to `<log-file>.bodies` as one
 line, `json.dumps([method, path, body])`, which keeps the body's exact characters.
 scripts/lib/json_field.py reads that file and judges a body with Python's strict parser.
+
+F5.11 (https): given a certificate and its key after the mode, it serves TLS with them, so a
+test can see what toke's https client does with a certificate it should or should not trust.
+The handshake happens before any request is read, and each one is appended to
+`<log-file>.tls` as `handshake ok` or `handshake failed: <reason>`. So when a client refuses
+the certificate the test can see both that a connection was attempted (the `.tls` line) and
+that no request arrived (nothing in `<log-file>`). scripts/lib/tls_fixture.sh makes the
+certificates.
 """
-import http.server, json, os, sys
+import http.server, json, os, ssl, sys
 
 LOG = sys.argv[1]
 PORTFILE = sys.argv[2]
@@ -218,7 +226,34 @@ class H(http.server.BaseHTTPRequestHandler):
         self._answer()
 
 
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+CERT = sys.argv[4] if len(sys.argv) > 5 else ""
+KEY = sys.argv[5] if len(sys.argv) > 5 else ""
+
+
+class TLSServer(http.server.ThreadingHTTPServer):
+    """Handshakes each connection as it is accepted, and records the outcome."""
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        sock.settimeout(10)
+        try:
+            tls = TLS_CTX.wrap_socket(sock, server_side=True)
+        except (ssl.SSLError, OSError) as e:
+            with open(LOG + ".tls", "a") as f:
+                f.write("handshake failed: %s\n" % (getattr(e, "reason", None) or e))
+            sock.close()
+            raise
+        with open(LOG + ".tls", "a") as f:
+            f.write("handshake ok\n")
+        return tls, addr
+
+
+if CERT:
+    TLS_CTX = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    TLS_CTX.load_cert_chain(CERT, KEY)
+    srv = TLSServer(("127.0.0.1", 0), H)
+else:
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 tmp = PORTFILE + ".tmp"
 with open(tmp, "w") as f:
     f.write(str(srv.server_address[1]))

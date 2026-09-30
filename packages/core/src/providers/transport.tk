@@ -23,10 +23,10 @@ i=reach:shared.reachability;
    So this calls it URL-first, and says what it measured:
    - over http, the method, path, body and every header arrive (tests/integration/
      test_hosted_requests.tk, against scripts/lib/http_recorder.py);
-   - over https it is NOT measured. The glue does a TLS handshake with SNI when the URL is
-     https and openssl was linked in, but proving that a request reaches a provider needs
-     a real key and costs money, which is the user's decision. F5.11 carries the one
-     command that measures it.
+   - over https it was NOT measured then. Since toke 3.1.0 it is, against a local TLS
+     recorder (tests/integration/test_https_verify.tk, below); proving that a request
+     reaches a real provider still needs a real key and costs money, which is the user's
+     decision. F5.11 carries the one command that measures it.
 
    The glue answers the response BODY, or 0 when the connection, the TLS handshake or the
    read failed. It does not expose the status code, so a 401 with an error document reads
@@ -43,9 +43,8 @@ i=reach:shared.reachability;
    and $err means a transport failure. The response is still read as its BODY whatever the
    status, so a 401 with an error document reads as a body exactly as before, and the
    default Content-Type is still application/json (a caller's would replace it; the
-   builders below still add none). What this call shape does NOT change is the refusal in
-   `sendable` below: 3.1.0 verifies certificates (B0), and lifting the refusal is its own
-   story with its own test, not a side effect of a toolchain move. *)
+   builders below still add none). The call shape did not change the refusal in `sendable`
+   below; that was lifted afterwards by F5.11, with its own test. *)
 
 (* The production endpoints. Tests pass a loopback URL to the functions that take one;
    nothing here reads a URL from configuration or the environment, so no production path
@@ -68,27 +67,42 @@ f=openaiheaders(key:str):@@str{
 
 (* POST `body` to `url` with `headers`, and answer the response body, or "" when nothing
    came back: a transport failure, a refused header, or a body that is not UTF-8. *)
-(* T-58: nothing leaves the machine through this until toke verifies certificates.
+(* T-58, lifted 2026-10-01 (F5.11): what may be sent is a loopback URL, or an https URL.
 
-   Measured 2026-09-27 against the pinned toke: tk_http_postheaders_w creates its TLS client
-   context, sets SNI and connects, and never calls SSL_CTX_set_verify, SSL_set1_host or
-   SSL_get_verify_result, so OpenSSL verifies nothing. A local probe with a self-signed
-   certificate for CN=probe.invalid received the request, authorization header included
-   (docs/upstream/toke-issues.md T-58). Every call here carries a provider API key, so an
-   https send today hands the key to anyone who can intercept the connection.
+   The hold. At toke 0b0bc4e, tk_http_postheaders_w created its TLS client context, set SNI
+   and connected, and never asked OpenSSL to verify anything: a local probe with a
+   self-signed certificate for CN=probe.invalid received the request, key included
+   (docs/upstream/toke-issues.md T-58). Every call here carries a provider API key, so from
+   2026-09-27 only a loopback URL was sendable.
 
-   So only a loopback URL is sendable. Anything else is refused before the glue is called,
-   and the caller sees "", which every caller already reports as a provider failure, never
-   as an answer. This undoes nothing F5.11 measured: the URL-first call still arrives over
-   loopback, and the refusal lifts, here and only here, when T-58 is fixed upstream and a
-   test proves an untrusted certificate is rejected. *)
+   Why it lifts. toke 3.1.0 verifies every https client connection (B0, commit 6b82978;
+   docs/upstream/toke-reply-2026-09-30.md section 3): the chain must verify against the trust
+   store (the system default, or SSL_CERT_FILE / SSL_CERT_DIR) and the certificate must name
+   the host, or the call is $err and nothing is written to the socket. Measured here, not
+   taken on trust, by tests/integration/test_https_verify.tk against a local TLS recorder
+   with certificates generated for the run: a self-signed certificate is refused and the
+   recorder receives no request; a certificate from a CA trusted through SSL_CERT_FILE
+   arrives with its body and headers; the same CA's certificate for another name is refused.
+
+   So the rule is loopback, or verified:
+   - https to any host: toke verifies the peer and its name before a byte of the request
+     is sent, so the key goes only to the holder of a certificate for that name.
+   - http to loopback: the local recorders and local model servers, which never leave the
+     machine.
+   - http to anything else is refused. Nothing verifies the peer and the key would cross the
+     network in clear.
+   A refused send answers "", which every caller already reports as a provider failure.
+
+   The production URLs are the https constants above. Whether a real provider accepts the
+   request as sent is still the user's one-command check (scripts/check_https_dispatch.sh),
+   because it needs a real key; nothing in the gate calls it. *)
 f=sendable(url:str):bool{
-  <reach.isloopbackurl(url)
+  <reach.isloopbackurl(url) || str.startswith(url;"https://")
 };
 
 f=post(url:str;body:str;headers:@@str):str{
   if(sendable(url)==false){
-    log.warn("provider request refused: toke's https client does not verify certificates (T-58), so a provider API key is not sent";"providers.transport";"");
+    log.warn("provider request refused: a provider API key is sent only over https, or to this machine (F5.11)";"providers.transport";"");
     <""
   }el{};
   <mt http.postheaders(url;body;headers) {

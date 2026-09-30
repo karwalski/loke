@@ -25,12 +25,17 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# DISABLED until toke T-58 is fixed. toke's https client verifies no certificate, so this
-# script would hand your key to anyone able to intercept the connection, and
-# core.providers.transport now refuses every non-loopback send anyway. Re-enable only when a
-# test shows an untrusted certificate being rejected.
-echo "check_https_dispatch: disabled — toke's https client does not verify certificates (T-58), so no key is sent. Nothing was sent." >&2
-exit 3
+# Re-enabled 2026-10-01 (F5.11). It was disabled from 2026-09-27 because toke's https client
+# verified no certificate (T-58), so running it would have handed your key to anyone able to
+# intercept the connection. toke 3.1.0 verifies the peer and its host name (B0), and
+# tests/integration/test_https_verify.tk measures that on every run against a local TLS
+# server: an untrusted or wrongly named certificate is refused and nothing arrives. The
+# certificate api.anthropic.com presents must therefore verify against this machine's trust
+# store (or SSL_CERT_FILE, if you set one) or nothing is sent.
+#
+# It never runs by itself: it refuses without LOKE_HTTPS_CHECK_KEY, run_tests.sh cannot
+# discover the test it writes (that lives in a temporary directory), and the quality gate
+# does not call it.
 if [ -z "${LOKE_HTTPS_CHECK_KEY:-}" ]; then
   echo "check_https_dispatch: set LOKE_HTTPS_CHECK_KEY to your Anthropic key. Nothing was sent." >&2
   exit 2

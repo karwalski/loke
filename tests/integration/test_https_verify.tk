@@ -1,0 +1,176 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.httpsverify;
+
+i=t:std.test;
+i=io:std.io;
+i=str:std.str;
+i=file:std.file;
+i=args:std.args;
+i=process:std.process;
+i=tr:core.providers.transport;
+
+(* F5.11 / T-58 — does a provider key go only to a server that proves it is the host named?
+
+   core.providers.transport.sendable lets an https URL through to any host, on the strength
+   of toke 3.1.0 verifying the certificate (B0). This measures that property through the
+   production call, transport.post, against scripts/lib/http_recorder.py serving TLS on
+   loopback with certificates scripts/lib/tls_fixture.sh generates for this run. No request
+   leaves the machine and no key is real.
+
+   The three cases, each judged by what the RECORDER saw, not only by what post answered:
+   (a) a self-signed certificate, which nothing trusts: post answers "", the recorder logs a
+       failed handshake, and no request, body or header arrives;
+   (b) a certificate from a CA the caller trusts through SSL_CERT_FILE: the request arrives
+       with its body and its x-api-key header, and the reply is read;
+   (c) a certificate from that same trusted CA for another host name (other.invalid) while
+       the URL names 127.0.0.1: refused, nothing arrives.
+   Case (b) without SSL_CERT_FILE is refused too, which shows the trust came from the CA
+   file and from nothing else.
+
+   SSL_CERT_FILE has to be in the environment of the process making the call, and loke's
+   binaries (tests included) are not granted env.write (tkc.toml). So (b) and (c) run in a
+   child: this binary again, started through env(1) with SSL_CERT_FILE set and a
+   --tls-child argument, doing one transport.post and exiting 0 only when the recorder's
+   answer came back. env(1) is a system binary, so the child runs without the real-HOME
+   guard's library; it still has the throwaway HOME, and it does nothing but that post. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_httpsverify_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitfile(p:str):str{
+  let v=mut."";
+  lp(let k=0;k<150 && str.len(v)==0;k=k+1){
+    v=readfile(p);
+    if(str.len(v)==0){ pause() }el{}
+  };
+  <v
+};
+
+(* The recorder writes a failed handshake's line AFTER the client has already given up, so
+   a test that reads it at once can race it. Poll for the text for up to five seconds. *)
+f=waitcontains(p:str;needle:str):bool{
+  let seen=mut.false;
+  lp(let k=0;k<50 && seen==false;k=k+1){
+    seen=str.contains(readfile(p);needle);
+    if(seen==false){ pause() }el{}
+  };
+  <seen
+};
+
+f=body():str{
+  <"{\"probe\":\"tls\"}"
+};
+
+(* The child: one transport.post to the URL it was given, with whatever SSL_CERT_FILE its
+   parent set. Exit 0 when the recorder's answer came back, 1 when nothing did. *)
+f=child(url:str):i64{
+  let raw=tr.post(url;body();tr.anthropicheaders("sk-tls-test-key"));
+  if(str.contains(raw;"answered-by-recorder")){ <0 }el{};
+  <1
+};
+
+(* Run this binary as a child with SSL_CERT_FILE=ca and answer its exit status, or -1 when
+   it could not be started. *)
+f=runtrusted(self:str;ca:str;url:str):i64{
+  let certenv="SSL_CERT_FILE=\(ca)";
+  let h=mt process.spawn(@("env";"-u";"SSL_CERT_DIR";certenv;self;"--tls-child";url)) { $ok:h h; $err:e @() };
+  if(h == @()){ <0-1 }el{};
+  <process.wait(h) as i64
+};
+
+(* The argv that starts a TLS recorder serving certs/<name>.pem, logging to <base>.<name>.log. *)
+f=recorderargv(base:str;name:str;certs:str):@str{
+  <@("python3";"scripts/lib/http_recorder.py";"\(base).\(name).log";"\(base).\(name).port";"answer";"\(certs)/\(name).pem";"\(certs)/\(name).key")
+};
+
+f=main():i64{
+  let mode=mt args.get(1 as u64) { $ok:v v; $err:e "" };
+  if(mode=="--tls-child"){
+    <child(mt args.get(2 as u64) { $ok:v v; $err:e "" })
+  }el{};
+  let self=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let certs="\(base).certs";
+  let gen=mt process.spawn(@("sh";"scripts/lib/tls_fixture.sh";certs)) { $ok:h h; $err:e @() };
+  if(!(gen == @())){ process.wait(gen); }el{};
+  if(t.assert(str.len(waitfile("\(certs)/done"))>0 && str.len(readfile("\(certs)/ca.pem"))>0;"the throwaway CA and certificates were generated")){pass=pass+1}el{fail=fail+1};
+
+  let srec=mt process.spawn(recorderargv(base;"self";certs)) { $ok:h h; $err:e @() };
+  let grec=mt process.spawn(recorderargv(base;"good";certs)) { $ok:h h; $err:e @() };
+  let orec=mt process.spawn(recorderargv(base;"other";certs)) { $ok:h h; $err:e @() };
+  let sport=waitfile("\(base).self.port");
+  let gport=waitfile("\(base).good.port");
+  let oport=waitfile("\(base).other.port");
+  if(t.assert(str.len(sport)>0 && str.len(gport)>0 && str.len(oport)>0;"three TLS recorders came up")){pass=pass+1}el{fail=fail+1};
+  let surl="https://127.0.0.1:\(sport)/v1/messages";
+  let gurl="https://127.0.0.1:\(gport)/v1/messages";
+  let ourl="https://127.0.0.1:\(oport)/v1/messages";
+
+  (* ── The rule: loopback, or verified ─────────────────────────────────────── *)
+  if(t.assert(tr.sendable(tr.anthropicurl());"the Anthropic endpoint is sendable: it is https, and toke verifies it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tr.sendable(tr.openaiurl());"so is the OpenAI endpoint")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tr.sendable(gurl);"an https loopback URL is sendable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tr.sendable("http://127.0.0.1:1/v1/messages");"plain http to loopback stays sendable")){pass=pass+1}el{fail=fail+1};
+  (* 192.0.2.1 is TEST-NET-1 (RFC 5737), never routed, so even a broken guard reaches nobody. *)
+  if(t.assert(tr.sendable("http://192.0.2.1/v1/messages")==false;"plain http to another host is not: the key would cross the network in clear")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tr.sendable("http://127.0.0.1.example.com/v1/messages")==false;"nor is a host that merely starts with 127.0.0.1")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tr.sendable("HTTP://api.anthropic.com/v1/messages")==false;"nor an http URL spelt in capitals")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tr.post("http://192.0.2.1/v1/messages";body();tr.anthropicheaders("sk-not-a-real-key"));"";"post refuses plain http to another host and answers nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── (a) an untrusted, self-signed certificate ───────────────────────────── *)
+  let ra=tr.post(surl;body();tr.anthropicheaders("sk-tls-test-key"));
+  if(t.asserteq(ra;"";"(a) a self-signed certificate: post answers nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(waitcontains("\(base).self.log.tls";"handshake failed");"(a) the recorder saw the connection and a failed handshake")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile("\(base).self.log");"";"(a) and received no request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(readfile("\(base).self.log.headers");"sk-tls-test-key");"(a) so the key never reached it")){pass=pass+1}el{fail=fail+1};
+
+  (* A certificate from the test CA, with the CA NOT trusted: refused as well. *)
+  let rb0=tr.post(gurl;body();tr.anthropicheaders("sk-tls-test-key"));
+  if(t.asserteq(rb0;"";"(b0) the test CA's certificate, the CA not trusted: post answers nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile("\(base).good.log");"";"(b0) and nothing arrived")){pass=pass+1}el{fail=fail+1};
+
+  (* ── (b) the same certificate, the CA trusted through SSL_CERT_FILE ──────── *)
+  let cb=runtrusted(self;"\(certs)/ca.pem";gurl);
+  if(t.assert(cb==0;"(b) the CA trusted: the child's post came back with the recorder's answer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile("\(base).good.log");"POST /v1/messages {\"probe\":\"tls\"}");"(b) the POST arrived with its body")){pass=pass+1}el{fail=fail+1};
+  let gh=readfile("\(base).good.log.headers");
+  if(t.assert(str.contains(gh;"x-api-key: sk-tls-test-key");"(b) with the x-api-key header")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(gh;"anthropic-version: 2023-06-01");"(b) and the anthropic-version header")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile("\(base).good.log.tls");"handshake ok");"(b) over a completed TLS handshake")){pass=pass+1}el{fail=fail+1};
+
+  (* ── (c) a trusted CA, but a certificate for another host name ───────────── *)
+  let cc=runtrusted(self;"\(certs)/ca.pem";ourl);
+  if(t.assert(cc==1;"(c) a trusted certificate for other.invalid, URL 127.0.0.1: the child's post answered nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(waitcontains("\(base).other.log.tls";"handshake failed");"(c) the recorder saw a failed handshake")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile("\(base).other.log");"";"(c) and received no request")){pass=pass+1}el{fail=fail+1};
+
+  (* Trusting the test CA does not make the self-signed certificate acceptable. *)
+  let ca2=runtrusted(self;"\(certs)/ca.pem";surl);
+  if(t.assert(ca2==1;"(a2) the self-signed certificate is refused with the test CA trusted too")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile("\(base).self.log");"";"(a2) and still nothing arrived")){pass=pass+1}el{fail=fail+1};
+
+  if(!(srec == @())){ process.kill(srec); process.wait(srec); }el{};
+  if(!(grec == @())){ process.kill(grec); process.wait(grec); }el{};
+  if(!(orec == @())){ process.kill(orec); process.wait(orec); }el{};
+  let rm=mt process.spawn(@("sh";"-c";"rm -rf \"$0\".*";base)) { $ok:h h; $err:e @() };
+  if(!(rm == @())){ process.wait(rm); }el{};
+  io.println("test_https_verify: \(pass) passed, \(fail) failed");
+  <fail
+};
