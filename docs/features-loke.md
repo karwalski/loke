@@ -381,7 +381,7 @@ ooke native binary with web view. Tab management, history, bookmarks. Chat inter
 
 ### MCP Framework
 
-**MCP Server** (`mcp-toke/src/server.tk`): Port 11435. Tools: compress, decompress, template, analyse.
+**MCP Server** (`mcp-toke/src/server.tk`): Port 11460. Tools: compress, decompress, template, analyse.
 
 **MCP Broker** (`mcp-broker/src/server.tk`): Port 11436. Connects local MCP servers. Per-server permissions (tool allowlist/denylist, max-cost, require-approval). Privacy pipeline on all tool call data.
 

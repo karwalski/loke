@@ -318,6 +318,15 @@ step_checks() {
       || { python3 ./scripts/check_loopback_binds.py packages src >&2; failed=1; }
   fi
 
+  # F3b.12: the privacy-filter sidecar and mcp-toke both defaulted to 11435, so only one could
+  # bind and the privacy-filter layer could post the prompt to mcp-toke. Each default is a
+  # literal in its own file; this reads them all and fails on a shared one.
+  if [[ -f ./scripts/check_default_ports.py ]]; then
+    echo "  no two services share a default port (F3b.12)"
+    python3 ./scripts/check_default_ports.py >/dev/null 2>&1 \
+      || { python3 ./scripts/check_default_ports.py >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/check_moke_estimates.sh ]]; then
     echo "  moke invents no token count or saving (GA1.5c)"
     bash ./scripts/check_moke_estimates.sh >/dev/null \

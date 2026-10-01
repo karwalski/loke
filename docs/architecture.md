@@ -108,6 +108,28 @@ before forwarding. It is not a transparent interceptor: coding tools (Claude Cod
 be configured to point at `http://127.0.0.1:11431`, and anything addressed elsewhere never reaches it
 (AD1.6).
 
+### Default ports
+
+Each local service's default port. `scripts/check_default_ports.py` (in the gate) holds the same
+table with every file that declares each default, and fails when a declaration disagrees, when two
+services share a port, or when this table drifts (F3b.12). Every default is overridable in config.
+The CLI proxy also falls back to the first free port in 11430–11450 (`cli/src/port.tk`), so new
+defaults are kept outside that range.
+
+| Service | Port | Notes |
+|---|---|---|
+| loke API | 11430 | |
+| loke CLI proxy | 11431 | |
+| moke | 11432 | |
+| Ollama | 11434 | external |
+| privacy-filter sidecar | 11435 | `packages/privacy-filter/server.py` |
+| mcp-broker | 11436 | |
+| mcp-memory | 11437 | |
+| mcp-toke | 11460 | was 11435, the sidecar's port, until F3b.12 |
+| Presidio | 5000 | external |
+| LLMLingua | 5001 | external |
+| RouteLLM sidecar | 11431 | **shares the CLI proxy's port** — F3b.14 |
+
 ---
 
 ## 4. Pipeline Data Flow
