@@ -5,7 +5,6 @@ m=core.installer.pull;
 
 i=str:std.str;
 i=log:shared.log;
-i=proc:std.process;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=reach:shared.reachability;
@@ -44,73 +43,62 @@ f=extractbytes(line:str):$bytesinfo{
   }
 };
 
-(* ── Every push into `results` was discarded, so a pull reported nothing ───────────
-   `results` is a PARAMETER, threaded in and returned, which is the right shape under T-26 —
-   toke has no mutable struct field and no in-place array update. But every `results.push(...)`
-   here was written bare, and an array push RETURNS the new array (T-24), so all five sites threw
-   their value away and each function returned its input unchanged.
+(* ── The first-run download, F10.43 ────────────────────────────────────────────────
+   `pullmodel` spawned `ollama pull <id>` correctly, then handed the process HANDLE to
+   `process.readlines`, which takes a COMMAND STRING: the handle's address was run as a
+   command and the pull's own output was never read. Nor was stderr, where `ollama pull`
+   writes its progress, so a pull that printed more than a pipe buffer blocked on the full
+   pipe while loke waited for it to exit — measured against the stand-in writing ~145 KB
+   to stderr: killed by a 20 s alarm, never returned.
 
-   What that cost: `handlepullchild` parsed every progress line from `ollama pull` and kept none,
-   then appended a "complete" or "error" record and kept that either — so a model download
-   reported **no progress and no outcome**, whatever happened. `handlepullerror` likewise
-   swallowed the spawn failure it exists to record.
+   It now runs through core.installer.ollamacli.run with stderr read first, which drains
+   both pipes before waiting (F10.37), and the id must pass `ollamacli.validmodelid` first,
+   so it cannot be read as an option. Progress is what ollama actually printed, read after
+   it exits (not live): its lines are split on newlines AND carriage returns, since a
+   terminal progress bar redraws with CR, and each is parsed. The closing record says only
+   whether ollama exited 0; it carries no percent, so nothing reports a 100% ollama did
+   not print. (Earlier, T-24: every bare `results.push` discarded its value, so a pull
+   reported nothing at all; `acc` is reassigned for that reason.) *)
+f=pullrecord(modelid:str;status:str):$pullprogress{
+  <$pullprogress{modelid:modelid;totalbytes:0;downloadedbytes:0;percent:0.0;etaseconds:0;status:status}
+};
 
-   `results` is reassigned through a `mut.` local, because a parameter cannot be rebound. *)
-f=handlepullchild(handle:i64;modelid:str;results:@$pullprogress):@$pullprogress{
-  let acc=mut.results;
-  let lines=proc.readlines(handle);
-  lp(let i=0;i<str.arraylen(lines);i=i+1){ let line=lines.get(i);
-    let progress=parseprogressline(modelid;line);
-    acc=acc.push(progress)
-  };
-  let exitcode=proc.wait(handle);
-  if(exitcode == 0){
-    acc=acc.push($pullprogress{
-      modelid:modelid;
-      totalbytes:0;
-      downloadedbytes:0;
-      percent:100.0;
-      etaseconds:0;
-      status:"complete"
-    })
-  }el{
-    log.error(str.concat("ollama pull failed with exit code: ";str.fromint(exitcode));"installer.pull";"system");
-    acc=acc.push($pullprogress{
-      modelid:modelid;
-      totalbytes:0;
-      downloadedbytes:0;
-      percent:0.0;
-      etaseconds:0;
-      status:"error"
-    })
+(* The non-empty lines of a pull's output, split on LF and on CR. *)
+f=progresslines(text:str):@str{
+  let acc=mut.@();
+  let lines=str.split(text;"\n");
+  lp(let i=0;i<lines.len;i=i+1){
+    let parts=str.split(lines.get(i);"\r");
+    lp(let j=0;j<parts.len;j=j+1){
+      let line=str.trim(parts.get(j));
+      if(str.len(line) > 0){ acc=acc.push(line) }el{}
+    }
   };
   <acc
 };
 
-f=handlepullerror(e:str;modelid:str;results:@$pullprogress):@$pullprogress{
-  log.error(str.concat("failed to spawn ollama pull: ";e);"installer.pull";"system");
-  let acc=mut.results;
-  acc=acc.push($pullprogress{
-    modelid:modelid;
-    totalbytes:0;
-    downloadedbytes:0;
-    percent:0.0;
-    etaseconds:0;
-    status:"error"
-  });
-  <acc
+f=pullresults(modelid:str;r:$cliresult):@$pullprogress{
+  let acc=mut.@();
+  let lines=progresslines("\(r.err)\n\(r.out)");
+  lp(let i=0;i<lines.len;i=i+1){
+    acc=acc.push(parseprogressline(modelid;lines.get(i)))
+  };
+  if(r.ok){ <acc.push(pullrecord(modelid;"complete")) }el{};
+  if(r.ran){
+    log.error("ollama pull failed with exit code: \(str.fromint(r.code))";"installer.pull";"system")
+  }el{
+    log.error("failed to start ollama pull";"installer.pull";"system")
+  };
+  <acc.push(pullrecord(modelid;"error"))
 };
 
 f=pullmodel(modelid:str):@$pullprogress{
-  log.info(str.concat("pulling model: ";modelid);"installer.pull";"system");
-  let results=mut.@();
-
-  let child=proc.spawn(@("ollama";"pull";modelid));
-  results=mt child {
-    $ok:handle handlepullchild(handle;modelid;results);
-    $err:e handlepullerror(e;modelid;results)
-  };
-  <results
+  if(!cli.validmodelid(modelid)){
+    log.error("refusing to pull: the id is not a model name";"installer.pull";"system");
+    <@(pullrecord(modelid;"error"))
+  }el{};
+  log.info("pulling model: \(modelid)";"installer.pull";"system");
+  <pullresults(modelid;cli.run(@("ollama";"pull";modelid);true))
 };
 
 f=parseprogressline(modelid:str;line:str):$pullprogress{
@@ -337,4 +325,17 @@ f=listinstalledmodels():@str{
     <listinstalledmodelserr("exit \(str.fromint(r.code)): \(str.trim(r.err))")
   }el{};
   <parseinstalledmodels(r.out)
+};
+
+(* F10.43. The last percent ollama itself printed during a pull, as "97%", or "" when it
+   printed none. Formatted here, where the number was parsed, so a caller never shows a
+   percent that ollama did not report. *)
+f=lastpercenttext(progress:@$pullprogress):str{
+  let last=mut.0-1;
+  lp(let k=0;k<progress.len;k=k+1){
+    let p=progress.get(k);
+    if(p.status!="complete" && p.status!="error" && p.percent > 0.0){ last=(p.percent as i64) }el{}
+  };
+  if(last < 0){ <"" }el{};
+  <"\(str.fromint(last))%"
 };

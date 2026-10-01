@@ -62,6 +62,33 @@ f=clearcalls(base:str):bool{
   <touch("\(base)/argv.log")
 };
 
+(* Whether any record carries this whole percent. *)
+f=sawpercent(ps:@$pullprogress;pct:i64):bool{
+  let seen=mut.false;
+  lp(let k=0;k<ps.len;k=k+1){
+    if((ps.get(k).percent as i64)==pct){ seen=true }el{}
+  };
+  <seen
+};
+
+(* F10.43. A pull that writes more than a pipe buffer to stderr before exiting. A reader
+   that waits for the child before draining stderr never returns: the stand-in blocks on a
+   full pipe and never exits. The parent runs this child under a perl alarm, so a hang is a
+   kill within the bound, never a hung gate. *)
+f=bigchild(base:str):i64{
+  let who=cli.run(@("ollama";"--whoami");false);
+  if(!who.ran || !str.contains(who.out;"FAKE-OLLAMA")){
+    io.println("refusing to go on: `ollama` is not the stand-in");
+    <1
+  }el{};
+  touch("\(base)/bigerr");
+  let pm=pull.pullmodel("fake:latest");
+  file.delete("\(base)/bigerr");
+  let done=pm.len > 0 && pm.get(pm.len-1).status=="complete";
+  io.println("test_ollama_cli (big stderr): \(pm.len) records, complete=\(done)");
+  if(done && sawpercent(pm;97)){ <0 }el{ <1 }
+};
+
 f=child(base:str):i64{
   let pass=mut.0;
   let fail=mut.0;
@@ -170,6 +197,27 @@ f=child(base:str):i64{
   if(t.assert(upd.updatemodel("fake:latest");"pull: a clean `ollama pull` is an update")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(upd.getinstalleddigest("fake:latest");"fedcba987654";"pull: and the listed id is the new one")){pass=pass+1}el{fail=fail+1};
 
+  (* ── pull.pullmodel: the first-run download (F10.43) ─────────────────────── *)
+  clearcalls(base);
+  file.delete("\(base)/digest");
+  let pm=pull.pullmodel("fake:latest");
+  if(t.asserteq(calls(base);"<pull><fake:latest>
+";"pullmodel: ran exactly `ollama pull fake:latest`")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pm.len > 0 && pm.get(pm.len-1).status=="complete";"pullmodel: a clean pull ends complete")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sawpercent(pm;42) && sawpercent(pm;97);"pullmodel: the 42% and 97% ollama printed (split on CR) are reported")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sawpercent(pm;100);"pullmodel: no 100% that ollama did not print")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pull.lastpercenttext(pm);"97%";"pullmodel: the last reported percent is the last one printed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(upd.getinstalleddigest("fake:latest");"fedcba987654";"pullmodel: the pull happened")){pass=pass+1}el{fail=fail+1};
+  touch("\(base)/fail.pull");
+  let pf=pull.pullmodel("fake:latest");
+  if(t.assert(pf.len > 0 && pf.get(pf.len-1).status=="error";"pullmodel: a failing `ollama pull` ends in error")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pull.lastpercenttext(pf);"";"pullmodel: and reports no percent")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/fail.pull");
+  clearcalls(base);
+  let pv=pull.pullmodel("--help");
+  if(t.assert(pv.len==1 && pv.get(0).status=="error";"pullmodel: an id that is an option is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"";"pullmodel: and nothing ran")){pass=pass+1}el{fail=fail+1};
+
   (* ── autostart.isconfigured: `test -x ~/.loke/bin/ollama` ────────────────── *)
   let home=process.homedir();
   if(t.assert(!str.contains(home;"/.ollama");"configured: HOME is a scratch directory")){pass=pass+1}el{fail=fail+1};
@@ -189,6 +237,9 @@ f=main():i64{
   if(mode=="--child"){
     <child(mt args.get(2 as u64) { $ok:v v; $err:e "" })
   }el{};
+  if(mode=="--bigchild"){
+    <bigchild(mt args.get(2 as u64) { $ok:v v; $err:e "" })
+  }el{};
   let self=mt args.get(0 as u64) { $ok:v v; $err:e "" };
 
   let pass=mut.0;
@@ -202,10 +253,18 @@ f=main():i64{
 
   let pathenv="PATH=\(base)/bin:/usr/bin:/bin";
   let direnv="FAKE_OLLAMA_DIR=\(base)";
-  let r=cli.run(@("env";pathenv;direnv;self;"--child";base);false);
+  (* Each child runs under a perl alarm, which survives the exec into env(1) and the test
+     binary, so a child that hangs is killed within the bound and the test fails. *)
+  let alarm="alarm shift; exec @ARGV or die";
+  let r=cli.run(@("perl";"-e";alarm;"120";"env";pathenv;direnv;self;"--child";base);false);
   io.println(r.out);
   io.println(r.err);
   if(t.assert(r.ran && r.code==0;"the child's checks all passed")){pass=pass+1}el{fail=fail+1};
+
+  let rb=cli.run(@("perl";"-e";alarm;"60";"env";pathenv;direnv;self;"--bigchild";base);false);
+  io.println(rb.out);
+  io.println(rb.err);
+  if(t.assert(rb.ran && rb.code==0;"pullmodel: a pull writing over 64 KiB to stderr completes within 60s, not a hang")){pass=pass+1}el{fail=fail+1};
 
   runwait(@("rm";"-rf";base));
   io.println("test_ollama_cli: \(pass) passed, \(fail) failed");
