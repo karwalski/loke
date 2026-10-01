@@ -300,6 +300,12 @@ step_checks() {
       || { python3 ./scripts/find_interp_abi_str.py packages tests >&2; failed=1; }
   fi
 
+  if [[ -f ./scripts/find_json_untyped.py ]]; then
+    echo "  no new call to std.json's untyped ABI helpers (LS1.1w)"
+    python3 ./scripts/find_json_untyped.py --check packages >/dev/null \
+      || { python3 ./scripts/find_json_untyped.py packages >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/check_retired_models.py ]]; then
     echo "  no retired Anthropic model id in product code (F5.11b)"
     python3 ./scripts/check_retired_models.py --check packages >/dev/null \

@@ -5,6 +5,7 @@ m=core.optimiser.profiler;
 
 i=str:std.str;
 i=json:std.json;
+i=jx:shared.jsonobj;
 i=t:shared.types;
 
 t=$coltype{
@@ -146,11 +147,16 @@ f=infercoltype(samples:@str):$coltype{
   }
 };
 
-f=tryfloatorbool(row:i64;colname:str;vals:@str):@str{
-  let fval=json.tryfloatkey(row;colname);
-  <mt fval {
+(* ── LS1.1w: a row is a typed $json ─────────────────────────────────────────────
+   Each cell was read with json.trystrkey, tryintkey, tryfloatkey, tryboolkey, isnullkey,
+   haskey and keys, all of them std.json's untyped ABI helpers, over rows declared @i64. The
+   rows are the elements json.arr gives, so they are typed $json now and the cells are read with
+   json.str, json.i64, json.f64 and json.bool, tried in that order as before, and
+   shared.jsonobj's has, isnull and keys. *)
+f=tryfloatorbool(row:$json;colname:str;vals:@str):@str{
+  <mt json.f64(row;colname) {
     $ok:f vals.push(str.fromfloat(f));
-    $err:e3 tryboolval(row;colname;vals)
+    $jsonerr:e3 tryboolval(row;colname;vals)
   }
 };
 
@@ -160,46 +166,41 @@ f=formatboolval(b:bool;vals:@str):@str{
   <vals.append(bstr)
 };
 
-f=tryboolval(row:i64;colname:str;vals:@str):@str{
-  let bval=json.tryboolkey(row;colname);
-  <mt bval {
+f=tryboolval(row:$json;colname:str;vals:@str):@str{
+  <mt json.bool(row;colname) {
     $ok:b formatboolval(b;vals);
-    $err:e4 vals
+    $jsonerr:e4 vals
   }
 };
 
-f=tryintorfloat(row:i64;colname:str;vals:@str):@str{
-  let ival=json.tryintkey(row;colname);
-  <mt ival {
+(* A value with a fraction is not an integer: json.i64 is not asked about 2.5, because the
+   JSON text decides, not whatever json.i64 makes of it. *)
+f=tryintorfloat(row:$json;colname:str;vals:@str):@str{
+  let raw=jx.rawvalue(row;colname);
+  if(str.contains(raw;".") || str.contains(raw;"e") || str.contains(raw;"E")){ <tryfloatorbool(row;colname;vals) }el{};
+  <mt json.i64(row;colname) {
     $ok:n vals.push(str.fromint(n));
-    $err:e2 tryfloatorbool(row;colname;vals)
+    $jsonerr:e2 tryfloatorbool(row;colname;vals)
   }
 };
 
-f=extractcolvalues(rows:@i64;colname:str):@str{
+f=extractcolvalues(rows:@$json;colname:str):@str{
   let vals=mut.@();
-  lp(let i=0;i<rows.len;i=i+1){ let row=rows.get(i);
-    let sval=json.trystrkey(row;colname);
-    vals=mt sval {
+  lp(let i=0;i<rows.len;i=i+1){ let row:$json=rows.get(i);
+    vals=mt json.str(row;colname) {
       $ok:s vals.push(s);
-      $err:e tryintorfloat(row;colname;vals)
+      $jsonerr:e tryintorfloat(row;colname;vals)
     }
   };
   <vals
 };
 
-f=countnulls(rows:@i64;colname:str):u32{
+f=countnulls(rows:@$json;colname:str):u32{
   let count=mut.0;
-  lp(let i=0;i<rows.len;i=i+1){ let row=rows.get(i);
-    let isnull=json.isnullkey(row;colname);
-    if(isnull){
+  lp(let i=0;i<rows.len;i=i+1){ let row:$json=rows.get(i);
+    if(jx.isnull(row;colname) || !jx.has(row;colname)){
       count=count+1
-    }el{
-      let missing=json.haskey(row;colname);
-      if(missing){}el{
-        count=count+1
-      }
-    }
+    }el{}
   };
   <count
 };
@@ -312,7 +313,7 @@ f=takesamples(vals:@str;n:i64):@str{
   }
 };
 
-f=profilecol(rows:@i64;colname:str;totalrows:u32):$colprofile{
+f=profilecol(rows:@$json;colname:str;totalrows:u32):$colprofile{
   let nullcount=countnulls(rows;colname);
   let nullpct=mut.0.0;
   if(totalrows==0 as u32){}el{nullpct=(nullcount as f64/(totalrows as f64))*100.0};
@@ -336,11 +337,11 @@ f=profilecol(rows:@i64;colname:str;totalrows:u32):$colprofile{
   }
 };
 
-f=profilerowarr(rowarr:@i64;name:str):$datasetprofile!$lokeerr{
+f=profilerowarr(rowarr:@$json;name:str):$datasetprofile!$lokeerr{
   <$ok(buildprofile(rowarr;name))
 };
 
-f=buildprofile(rowarr:@i64;name:str):$datasetprofile{
+f=buildprofile(rowarr:@$json;name:str):$datasetprofile{
   let rowcount=rowarr.len;
   if(rowcount==0){
     <$datasetprofile{
@@ -351,7 +352,7 @@ f=buildprofile(rowarr:@i64;name:str):$datasetprofile{
       sensitivityhint:"no data"
     }
   }el{
-    let colnames=json.keys(rowarr.get(0));
+    let colnames=jx.keys(rowarr.get(0));
     let colcount=colnames.len;
     let columns=mut.@();
     lp(let ci=0;ci<colnames.len;ci=ci+1){ let colname=colnames.get(ci);

@@ -61,17 +61,28 @@ f=put(m:$ephemeralmap;placeholder:str;original:str):$ephemeralmap{
   <$ephemeralmap{ buf:m.buf; sessionid:m.sessionid; entrycount:m.entrycount+(1 as i32) }
 };
 
-(* json.getopt returns a null POINTER for a missing key. Comparing that to the string
-   "(null)" is false — the harness only renders it that way — but str.len handles the
-   null and returns 0, so the absent case becomes the empty string callers expect. *)
-f=get(m:$ephemeralmap;placeholder:str):str{
-  let parsed=json.decode(sm.read(m.buf));
-  let value=json.getopt(parsed;entrykey(placeholder));
-  if(str.len(value)==0){
-    <""
-  }el{
-    <value
+(* The document as a typed $json; "{}" if it does not parse. LS1.1w: get and torestoremap
+   read it with json.decode, json.getopt and json.entries, three of std.json's untyped ABI
+   helpers. A value is read with the typed json.str, not jx.strvalue: a key here holds a dot
+   ("entries.[EMAIL_1]") and json.getval, which jx.strvalue is built on, reads a dotted key as
+   a path and finds nothing (measured on toke 3.1.0). A missing key is "", as getopt's null
+   was. *)
+f=doc(m:$ephemeralmap):$json{
+  <mt json.dec(sm.read(m.buf)) {
+    $ok:j j;
+    $jsonerr:e jx.emptyobj()
   }
+};
+
+f=valueof(parsed:$json;key:str):str{
+  <mt json.str(parsed;key) {
+    $ok:v v;
+    $jsonerr:e ""
+  }
+};
+
+f=get(m:$ephemeralmap;placeholder:str):str{
+  <valueof(doc(m);entrykey(placeholder))
 };
 
 f=wipe(m:$ephemeralmap):bool{
@@ -85,16 +96,22 @@ f=sweep():i32{
   <count
 };
 
+(* One "placeholder:original" per placeholder. A repeated placeholder appears once, with
+   its newest value, which is the one get answers. *)
 f=torestoremap(m:$ephemeralmap):@str{
-  let raw=sm.read(m.buf);
-  let parsed=json.decode(raw);
-  let entries=json.entries(parsed);
+  let parsed=doc(m);
+  let keys=jx.keys(parsed);
+  let seen=mut.@();
   let out=mut.@();
-  lp(let i=0;i<entries.len;i=i+1){
-    let e=entries.get(i);
-    let cut=str.indexof(e;"=");
-    if(cut<0){}el{
-      out=out.push("\(str.trimprefix(str.slice(e;0;cut);"entries.")):\(str.slice(e;cut+1;str.len(e)))")
+  lp(let i=0;i<keys.len;i=i+1){
+    let k:str=keys.get(i);
+    let dup=mut.false;
+    lp(let j=0;j<seen.len;j=j+1){ if(str.eq(seen.get(j);k)){ dup=true }el{} };
+    if(dup || !str.startswith(k;"entries.")){}el{
+      seen=seen.push(k);
+      let placeholder=str.trimprefix(k;"entries.");
+      let original=valueof(parsed;k);
+      out=out.push("\(placeholder):\(original)")
     }
   };
   <out

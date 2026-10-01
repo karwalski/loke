@@ -243,10 +243,11 @@ f=unescapeunicode(s:str):str{
   <out
 };
 
-(* The raw JSON text of the value at `key`, or "" when the key is absent. *)
+(* The raw JSON text of the value at `key`, or "" when the key is absent. json.getval is typed
+   (Json, str) -> str and answers "" for an absent key, measured on toke 3.1.0; the json.has
+   guard it used to need is one of std.json's untyped helpers (LS1.1w). *)
 f=rawvalue(o:$json;key:str):str{
-  if(json.has(o;key)==0){ <"" }el{};
-  <str.concat("";json.getval(o;key))
+  <json.getval(o;key)
 };
 
 (* A string field, decoded. `fallback` when absent or not a string. *)
@@ -574,6 +575,104 @@ f=segments(text:str):@str{
     if(e<0){ <@() }el{};
     out=out.push(sliceor(text;k;e));
     k=e
+  };
+  <out
+};
+
+(* ── LS1.1w: typed replacements for std.json's untyped ABI helpers ───────────────
+   std.json declares about fifty names in a `gen:"abi"` block: (i64, ...) -> i64, which the
+   compiler cannot check, so they accept a str, a handle or a struct alike. The ones below
+   have no typed equivalent in std.json at toke 3.1.0 (keys, a top-level array, an array of
+   strings, a presence or null test), so they are built here on the typed calls (json.dec,
+   json.arr, json.getval) and on the text of `o.raw`. *)
+
+(* Whether `key` is present: json.getval answers "" for an absent key and the value's text,
+   never empty, for a present one. *)
+f=has(o:$json;key:str):bool{
+  <str.len(json.getval(o;key))>0
+};
+
+(* Whether `key` is present and holds JSON null. *)
+f=isnull(o:$json;key:str):bool{
+  <str.eq(json.getval(o;key);"null")
+};
+
+(* The elements of a document whose top level is an array, or none when it is not one. *)
+f=elemsof(a:$json):@$json{
+  <mt json.arr(a;"") {
+    $ok:els els;
+    $jsonerr:e @()
+  }
+};
+
+f=arrayof(raw:str):@$json{
+  <mt json.dec(raw) {
+    $ok:a elemsof(a);
+    $jsonerr:e @()
+  }
+};
+
+(* The string elements of the array at `key`, decoded. An element that is not a string is
+   skipped rather than rendered: a caller asking for strings has no use for `3` or `{}`. *)
+f=strelems(o:$json;key:str):@str{
+  let out=mut.@();
+  let els=mt json.arr(o;key) {
+    $ok:a a;
+    $jsonerr:e @()
+  };
+  lp(let i=0;i<els.len;i=i+1){
+    let item:$json=els.get(i);
+    let raw=item.raw;
+    let n=str.len(raw) as i64;
+    if(n>=2 && str.charat(raw;0)==34 && str.charat(raw;n-1)==34){
+      out=out.push(unescape(sliceor(raw;1;n-1)))
+    }el{}
+  };
+  <out
+};
+
+(* The top-level keys of an object, decoded, in document order; none when `o` is not an
+   object. A key is a string at depth one that follows the opening brace or a comma; a string
+   VALUE at depth one follows a colon, so it is never taken for a key. *)
+f=keys(o:$json):@str{
+  let s=o.raw;
+  let n=str.len(s) as i64;
+  let out=mut.@();
+  let depth=mut.0;
+  let instr=mut.false;
+  let esc=mut.false;
+  let expectkey=mut.false;
+  let keystart=mut.0-1;
+  lp(let k=0;k<n;k=k+1){
+    let c=str.charat(s;k);
+    if(esc){ esc=false }el{
+      if(instr){
+        if(c==92){ esc=true }el{
+          if(c==34){
+            instr=false;
+            if(keystart>=0){
+              out=out.push(unescape(sliceor(s;keystart;k)));
+              keystart=0-1;
+              expectkey=false
+            }el{}
+          }el{}
+        }
+      }el{
+        if(c==34){
+          instr=true;
+          if(depth==1 && expectkey){ keystart=k+1 }el{}
+        }el{
+          if(c==123 || c==91){
+            depth=depth+1;
+            if(depth==1 && c==123){ expectkey=true }el{}
+          }el{
+            if(c==125 || c==93){ depth=depth-1 }el{
+              if(c==44 && depth==1){ expectkey=true }el{}
+            }
+          }
+        }
+      }
+    }
   };
   <out
 };
