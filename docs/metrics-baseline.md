@@ -526,6 +526,9 @@ assertions. Both restored and checked with `cmp`.
 
 **Caveats:**
 
+- **Recorded before RG1.7 merged.** The harness now also carries cases for `au_medicare`,
+  `au_bsb` and `bank_account` (5 × 15 = 75 cells, run by the gate). The counts above are the
+  60-cell run and have not been re-recorded for the 75.
 - **Not a recall figure.** Each type is exercised with one value the regex layer is known to
   detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
 - **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven

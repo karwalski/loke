@@ -40,10 +40,15 @@ CASES = [
     ("ssn_us", "219-09-9999", "SSN_US"),
     ("url", "https://intranet.example.com/payroll/q3", "URL"),
     ("api_key", "sk-ant-abcdefghijklmnopqrst", "API_KEY"),
+    # RG1.7: BSB and account match only after their label, so the label is part of the
+    # value; the leak check also looks for the bare digits, which is the identifier itself.
+    ("au_medicare", "2123 45670 1", "AU_MEDICARE"),
+    ("au_bsb", "BSB 062-000", "AU_BSB"),
+    ("bank_account", "account 12345678", "BANK_ACCOUNT"),
     ("PERSON (NER layer)", "Jane Citizen", "PERSON"),
     ("none (control)", "", ""),
 ]
-REGEX_TYPES = [c[0] for c in CASES[:10]]
+REGEX_TYPES = [c[0] for c in CASES[:13]]
 GUARDIAN = "LOKE_GUARDIAN_v"
 PLACEHOLDER = re.compile(r"\[[A-Z][A-Z0-9_]*_[0-9]+\]|\[[A-Z][A-Z0-9_]*_[0-9a-f]{4,}_[0-9]+\]")
 
