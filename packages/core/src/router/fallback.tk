@@ -1,0 +1,105 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.router.fallback;
+
+i=rtr:core.router.router;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+i=log:shared.log;
+i=str:std.str;
+i=t:shared.types;
+
+(* F5.3 — dispatching a fallback chain (core.router.router.routechain).
+
+   The hops are tried in order and the first that answers is the answer. Before EACH hop is
+   sent, rtr.hopallowed is asked again, against the sensitivity the router computed and the
+   router's configuration: a hop that names a cloud provider is not sent for RESTRICTED
+   data, nor after a local first choice unless routing.fallback_to_cloud is on. The chain
+   was built under the same rule; it is checked again here because this is the line that
+   would send, and because a chain is a value a caller could build or alter by hand.
+
+   chainattempted names every hop that was actually sent, as `provider:model`, in order,
+   and nothing else. A refused hop is never in it. That is what a test reads to show that a
+   hop was not tried, without a provider being contacted to find out.
+
+   What this does not do: it records no disclosure row and checks no kill switch. Its one
+   caller, the CLI's `loke ask`, does neither for a first choice either. The browser request
+   path (page.api.pipeline) does both, per dispatch, and does not use this module. *)
+t=$chainoutcome{
+  chainanswer:$completionresponse;
+  chainattempted:@str;
+  chainfailures:str
+};
+
+f=providername(p:$provider):str{
+  <mt p {
+    $anthropic:v "anthropic";
+    $openai:v "openai";
+    $google:v "google";
+    $mistral:v "mistral";
+    $openrouter:v "openrouter";
+    $ollama:v "ollama";
+    $local:v "local"
+  }
+};
+
+f=hoplabel(d:$routingdecision):str{
+  let spec:$modelspec=d.model;
+  <"\(providername(spec.provider)):\(spec.id)"
+};
+
+(* T-26: a struct field cannot be assigned, so the request is rebuilt with the hop's model. *)
+f=requestfor(req:$completionrequest;modelid:str):$completionrequest{
+  <$completionrequest{
+    modelid:modelid;
+    messages:req.messages;
+    systemprompt:req.systemprompt;
+    maxtokens:req.maxtokens;
+    temperature:req.temperature;
+    stream:req.stream
+  }
+};
+
+f=answered(o:$chainoutcome):bool{
+  <disp.isdispatched(o.chainanswer)
+};
+
+(* overridemodel, when not empty, is a model the user named (`loke ask --model`). It
+   replaces the first hop's model id and there is no fallback: the user asked for that
+   model, not for whatever answers. The first hop is still checked before it is sent. *)
+f=dispatchchain(d:$dispatcher;chain:$fallbackchain;cfg:$routerconfig;req:$completionrequest;overridemodel:str;cid:str):$chainoutcome{
+  let hops=chain.chainhops;
+  let attempted=mut.@();
+  if(hops.len==0){
+    <$chainoutcome{chainanswer:pt.nocompletion(chain.chainnote);chainattempted:attempted;chainfailures:chain.chainnote}
+  }el{};
+  let firstlocal=!rtr.isclouddecision(hops.get(0));
+  let limit=mut.hops.len;
+  if(str.len(overridemodel)>0){ limit=1 }el{};
+  let answer=mut.pt.nocompletion("no hop of the route was permitted to be sent");
+  let failures=mut."";
+  let done=mut.false;
+  lp(let i=0;i<limit && !done;i=i+1){
+    let hop:$routingdecision=hops.get(i);
+    let label=hoplabel(hop);
+    if(rtr.hopallowed(cfg;firstlocal;hop;chain.chainsens)){
+      let spec:$modelspec=hop.model;
+      let modelid=mut.spec.id;
+      if(str.len(overridemodel)>0){ modelid=overridemodel }el{};
+      attempted=attempted.push(label);
+      let r=disp.trydispatch(d;requestfor(req;modelid);spec.provider);
+      if(disp.isdispatched(r)){
+        answer=r;
+        done=true
+      }el{
+        failures="\(failures)\(label) failed: \(disp.dispatcherror(r)); ";
+        log.warn("fallback: \(label) failed, trying the next permitted hop";"router.fallback";cid);
+        answer=r
+      }
+    }el{
+      log.warn("fallback: \(label) is not permitted for this request (sensitivity \(t.senslabel(chain.chainsens))) and was not sent";"router.fallback";cid)
+    }
+  };
+  <$chainoutcome{chainanswer:answer;chainattempted:attempted;chainfailures:failures}
+};

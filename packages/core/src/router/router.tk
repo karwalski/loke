@@ -13,13 +13,27 @@ i=reg:core.models.registry;
 i=log:shared.log;
 i=str:std.str;
 i=t:shared.types;
+i=lokecfg:shared.config;
+i=settings:core.storage.settings;
 
 t=$routerconfig{
   ollamaurl:str;
   preferlocal:bool;
   maxcostper1k:f64;
   defaulttolerance:$latencytolerance;
-  strategy:$routingstrategy
+  strategy:$routingstrategy;
+  fallbacktocloud:bool
+};
+
+(* F5.3. A fallback chain: the routed first choice and the candidates to try, in order, if
+   it fails. chainsens is the sensitivity the router computed (the PII level combined with
+   the content score), so every hop is judged against the same level as the first choice,
+   and never against one a caller supplies. An empty chainhops means not routed, and
+   chainnote says why. *)
+t=$fallbackchain{
+  chainhops:@$routingdecision;
+  chainsens:$sensitivitylevel;
+  chainnote:str
 };
 
 t=$router{
@@ -59,8 +73,55 @@ f=newconfigfull(ollamaurl:str;preferlocal:bool;maxcostper1k:f64;strategy:$routin
     preferlocal:preferlocal;
     maxcostper1k:maxcostper1k;
     defaulttolerance:$instant(0);
-    strategy:strategy
+    strategy:strategy;
+    fallbacktocloud:false
   }
+};
+
+(* F5.3. Whether a fallback chain whose first choice was LOCAL may go on to a cloud model.
+   Off unless the operator turns it on: that hop changes where the prompt goes, so it is not
+   taken because Ollama happened to be down. It never admits RESTRICTED data (hopallowed). *)
+f=withcloudfallback(c:$routerconfig;allow:bool):$routerconfig{
+  <$routerconfig{
+    ollamaurl:c.ollamaurl;
+    preferlocal:c.preferlocal;
+    maxcostper1k:c.maxcostper1k;
+    defaulttolerance:c.defaulttolerance;
+    strategy:c.strategy;
+    fallbacktocloud:allow
+  }
+};
+
+(* F5.3. The strategy a configuration names. Unlike strat.strategyfromname, an empty or
+   unrecognised name is the default, local-first, not best-quality: a typo in a setting
+   should leave routing as it was, and local-first is what it was. *)
+f=configstrategy(name:str):$routingstrategy{
+  if(strat.isstrategyname(name)){ <strat.strategyfromname(name) }el{};
+  if(str.len(name)>0){
+    log.warn("router: routing strategy \"\(name)\" is not one of cheapest-adequate, fastest, best-quality, local-first; using local-first";"router";"")
+  }el{};
+  <strat.localfirst()
+};
+
+(* F5.3. The one place a routing configuration is built from settings, whichever file they
+   came from: configfor reads config.toml's [routing] table (the CLI), configfromsettings
+   the settings store (the browser request path). *)
+f=namedconfig(ollamaurl:str;strategyname:str;preferlocal:bool;fallbacktocloud:bool):$routerconfig{
+  <withcloudfallback(newconfigfull(ollamaurl;preferlocal;0.05;configstrategy(strategyname));fallbacktocloud)
+};
+
+f=configfor(c:$lokeconfig):$routerconfig{
+  <namedconfig(c.ollamaurl;c.routingstrategy;c.routingpreferlocal;c.routingfallbacktocloud)
+};
+
+(* The settings key routing.strategy, for the browser request path. Only the strategy:
+   prefer_local stays on and fallback_to_cloud off there, because a strategy chooses
+   between the models already permitted, and those two would change WHICH destinations are
+   permitted on a path that has no user interface for them. A store that could not be
+   opened gives the defaults, the same routing as newconfig. *)
+f=configfromsettings(store:i64;ollamaurl:str):$routerconfig{
+  if(store==0){ <newconfig(ollamaurl) }el{};
+  <namedconfig(ollamaurl;settings.getstror(store;"routing.strategy";"local-first");true;false)
 };
 
 
@@ -334,14 +395,14 @@ f=routerequest(
   tolerance:$latencytolerance;
   cid:str
 ):$routingdecision{
-  
+
   let intentresult=intent.classify(text;rtr.config.ollamaurl);
   let taskstr=tasktostr(intentresult.task);
   let confstr=str.fromfloat(intentresult.confidence);
   let intentmsg=str.concat(str.concat(str.concat("intent: ";taskstr);" confidence=");confstr);
   log.info(intentmsg;"router";cid);
 
-  
+
   let piiscored=sens.scorefrompii(piisensitivity;piientitycount);
   let contentscored=sens.scorefromcontent(text);
   let finalsensitivity=sens.combine(piiscored;contentscored);
@@ -349,10 +410,6 @@ f=routerequest(
   let sensmsg=str.concat("sensitivity: ";sensstr);
   log.info(sensmsg;"router";cid);
 
-  
-  (* The annotation is load-bearing: rtr.config.preferlocal loses the middle
-     type and the field name is ambiguous across structs without it. *)
-  let cfg:$routerconfig=rtr.config;
   (* F5.11c. Whatever the intent, this routes a prompt that will be sent as a chat
      completion, and only an embedding model is declared for $embedding (nomic-embed-text),
      which cannot answer one. "Rank these by similarity" is a question for a chat model, so
@@ -364,6 +421,23 @@ f=routerequest(
     task=$tasktype{$chat:0};
     log.info("route: an embedding intent is routed as chat, because the request is a completion";"router";cid)
   }el{};
+  <routedecided(rtr;task;finalsensitivity;tolerance;cid)
+};
+
+(* The selection and the route-level safety check, for a task and a sensitivity already
+   worked out. routerequest calls it once; routechain calls it once per hop, so every
+   fallback hop passes the same selector rules and the same RESTRICTED check as the first
+   choice. *)
+f=routedecided(
+  rtr:$router;
+  task:$tasktype;
+  finalsensitivity:$sensitivitylevel;
+  tolerance:$latencytolerance;
+  cid:str
+):$routingdecision{
+  (* The annotation is load-bearing: rtr.config.preferlocal loses the middle
+     type and the field name is ambiguous across structs without it. *)
+  let cfg:$routerconfig=rtr.config;
   let criteria=$selectioncriteria{
     task:task;
     sensitivity:finalsensitivity;
@@ -373,7 +447,7 @@ f=routerequest(
     requiretools:false
   };
 
-  
+
   let selected=sel.selectmodelwith(criteria;rtr.registry;cfg.strategy);
   if(sel.isselected(selected)){}el{
     log.warn(str.concat("route: no model selected — ";selected.reason);"router";cid);
@@ -403,6 +477,79 @@ f=routerequest(
   let routemsg=str.concat(str.concat(str.concat("route: selected ";result.modelid);" via ");result.provider);
   log.info(routemsg;"router";cid);
   <decision
+};
+
+(* F5.3 — whether a fallback hop may be tried, judged on its own and not inherited from the
+   first choice. It is the check a hop must pass when the chain is built AND again
+   immediately before it is dispatched (core.router.fallback.dispatchchain), because the
+   dispatch side is where a hop would leak.
+
+   A local hop is always allowed: it does not change where the prompt goes. A cloud hop is
+   refused for RESTRICTED data, by the same rule routedecided applies to a first choice
+   (senseq for T-14, and sens.canusecloud as the second, independent reading of the level),
+   and refused when the first choice was local and the operator has not turned on
+   routing.fallback_to_cloud. *)
+f=hopallowed(cfg:$routerconfig;firstlocal:bool;hop:$routingdecision;sensitivity:$sensitivitylevel):bool{
+  if(isrouted(hop)){}el{ <false };
+  if(isclouddecision(hop)){}el{ <true };
+  if(t.senseq(sensitivity;t.restricted())){ <false }el{};
+  if(sens.canusecloud(sensitivity)){}el{ <false };
+  if(firstlocal && !cfg.fallbacktocloud){ <false }el{};
+  <true
+};
+
+(* F5.3 — the fallback chain. The first hop is exactly what routerequest returns for the
+   same input. Each further hop is the selector's answer for the same task, sensitivity,
+   tolerance, strategy and configuration with every model already considered removed from
+   the catalogue (reg.excluding), so the order is the strategy's order and the rules are the
+   first choice's rules; no second ranking is kept here. A hop hopallowed refuses is left
+   out and the search goes on past it. maxhops counts the first choice; the search looks at
+   no more than eight further candidates whatever it is.
+
+   The intent is classified once, not once per hop. *)
+f=routechain(
+  rtr:$router;
+  text:str;
+  piisensitivity:$sensitivitylevel;
+  piientitycount:u32;
+  tolerance:$latencytolerance;
+  cid:str;
+  maxhops:i64
+):$fallbackchain{
+  let intentresult=intent.classify(text;rtr.config.ollamaurl);
+  let taskstr=tasktostr(intentresult.task);
+  let finalsensitivity=sens.combine(sens.scorefrompii(piisensitivity;piientitycount);sens.scorefromcontent(text));
+  log.info("route chain: intent \(taskstr), sensitivity \(sens.leveltostr(finalsensitivity))";"router";cid);
+  let task=mut.intentresult.task;
+  if(str.eq(taskstr;"embedding")){ task=$tasktype{$chat:0} }el{};
+
+  let first=routedecided(rtr;task;finalsensitivity;tolerance;cid);
+  if(isrouted(first)){}el{
+    <$fallbackchain{chainhops:@();chainsens:finalsensitivity;chainnote:first.reason}
+  };
+  let cfg:$routerconfig=rtr.config;
+  let firstspec:$modelspec=first.model;
+  let firstlocal=!isclouddecision(first);
+  let hops=mut.@();
+  hops=hops.push(first);
+  let seen=mut.@();
+  seen=seen.push(firstspec.id);
+  let done=mut.false;
+  lp(let k=0;k<8 && !done && (hops.len as i64)<maxhops;k=k+1){
+    let next=routedecided($router{config:cfg;registry:reg.excluding(rtr.registry;seen)};task;finalsensitivity;tolerance;cid);
+    if(isrouted(next)){
+      let nspec:$modelspec=next.model;
+      seen=seen.push(nspec.id);
+      if(hopallowed(cfg;firstlocal;next;finalsensitivity)){
+        hops=hops.push(next)
+      }el{
+        log.info("route chain: \(nspec.id) is not a permitted fallback for this request";"router";cid)
+      }
+    }el{
+      done=true
+    }
+  };
+  <$fallbackchain{chainhops:hops;chainsens:finalsensitivity;chainnote:first.reason}
 };
 
 (* LS1.1j, completed 2026-09-27 — route, the $routingdecision!$lokeerr wrapper over

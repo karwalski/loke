@@ -9,6 +9,7 @@ i=out:cli.output;
 i=pipe:core.privacy.pipeline;
 i=disp:core.providers.dispatcher;
 i=router:core.router.router;
+i=fb:core.router.fallback;
 i=cfg:shared.config;
 i=ph:core.privacy.placeholder;
 i=ptypes:core.providers.types;
@@ -179,22 +180,33 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
 
      The fourth argument is the PII entity count, which sens.scorefrompii reads; it was
      being passed a token estimate. The sixth is the correlation id, which was being passed
-     the literal "chat". *)
-  let routeengine=router.new(router.newconfig(config.ollamaurl));
-  let decision=router.routerequest(
-    routeengine;
+     the literal "chat".
+
+     F5.3: the router is built from config.toml's [routing] table (strategy, prefer_local,
+     fallback_to_cloud) rather than from fixed defaults, and the route is a fallback chain:
+     the first choice and up to two further candidates, each chosen by the same selector
+     rules and each checked again by core.router.fallback before it is sent. A RESTRICTED
+     prompt is never sent to a cloud model by any hop, and a local first choice falls back to
+     a cloud one only when fallback_to_cloud is on. issafetoforward above governs every hop,
+     because it is a property of the prompt and not of the destination. *)
+  let routercfg=router.configfor(config);
+  let chain=router.routechain(
+    router.new(routercfg);
     detected.anonymised;
     detected.sensitivity;
     piperun.totalentities as u32;
     tolerancefromstr(opts.tolerance);
-    cid
+    cid;
+    3
   );
-  if(router.isrouted(decision)){}el{
-    out.printerror("not routed: \(decision.reason)");
+  if(chain.chainhops.len>0){}el{
+    out.printerror("not routed: \(chain.chainnote)");
     <1
   };
+  let decision:$routingdecision=chain.chainhops.get(0);
+  let firstspec:$modelspec=decision.model;
 
-  let modelid=mut.decision.model.id;
+  let modelid=mut.firstspec.id;
   if(str.len(opts.model)>0){ modelid=opts.model }el{};
 
   out.printpipelinestage(
@@ -211,15 +223,20 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
     temperature:0.0;
     stream:opts.stream
   };
-  (* Declared types before the call: `provider` sits at different offsets in different
-     structs, and toke needs the spec's type established before it can read the field. *)
-  let spec:$modelspec=decision.model;
-  let prov:$provider=spec.provider;
-  let response=disp.trydispatch(disp.new(disp.getapikeys();config.ollamaurl);request;prov);
-  if(disp.isdispatched(response)){}el{
-    out.printerror("dispatch failed: \(disp.dispatcherror(response))");
+  let result=fb.dispatchchain(disp.new(disp.getapikeys();config.ollamaurl);chain;routercfg;request;opts.model;cid);
+  if(fb.answered(result)){}el{
+    let why=mut.result.chainfailures;
+    if(str.len(why)==0){ why=disp.dispatcherror(result.chainanswer) }el{};
+    out.printerror("dispatch failed: \(why)");
     <1
   };
+  let tried=result.chainattempted;
+  if(tried.len>1){
+    let last=tried.get(tried.len-1);
+    let failed=result.chainfailures;
+    out.printline("  fallback: answered by \(last) after \(failed)")
+  }el{};
+  let response:$completionresponse=result.chainanswer;
   let responsetext=response.content;
   if(str.len(responsetext)>0){}el{
     out.printerror("dispatch failed: no content returned");

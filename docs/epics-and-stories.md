@@ -183,7 +183,8 @@ rather than kept as an unused value. Reinstating it means adding it here and to 
 |-------|------|--------|---------|
 | F5.1 | L | **Done** | Semantic intent classifier (< 10ms, embedding-based via ooke native inference or Ollama REST, configurable categories) |
 | F5.2 | M | **Done** | Sensitivity scorer (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED based on PII + policy — implemented in toke) |
-| F5.3 | XL | **Reopened** | Model selection engine (cheapest-adequate, fastest, best-quality, local-first bias, fallback chains)<br><br>**Status detail:** **Reopened — see X8.6.** Not done: zero matches for any of the four strategy names across `packages/` and `src/` (`docs/claims.md` D3). One fixed selection path exists in `packages/core/src/router/selector.tk` |
+| F5.3 | XL | **Partial** — 2026-10-01 | Model selection engine (cheapest-adequate, fastest, best-quality, local-first bias, fallback chains)<br><br>**Status detail:** **Reopened — see X8.6.** Not done: zero matches for any of the four strategy names across `packages/` and `src/` (`docs/claims.md` D3). One fixed selection path exists in `packages/core/src/router/selector.tk`<br><br>**Partial 2026-10-01.** Read against X8.6, which built the four strategies in `core/router/strategy.tk`. What was missing: (1) no request path could select a strategy, because every router was built with `router.newconfig`, fixed local-first; (2) there were no fallback chains, since a provider failure ended the request. Local-first bias was already there and is unchanged: `local-first` is the default strategy (any local model ranks above any cloud one), and `prefer_local` is on by default, which keeps the candidate pool local unless no local model fits. There is no tunable bias weight. **Built.** *Selection from config:* `config.toml` `[routing]` `strategy`, `prefer_local`, `fallback_to_cloud` (`shared.config`, read by `router.configfor`; used by `loke ask` and `browser.extensions.core`). The settings key `routing.strategy` is read by `router.configfromsettings`, which `page.api.pipeline.routerfor(store)` now uses. That is the one pipeline.tk edit, two lines. On the browser path only the strategy is settable. `prefer_local` stays on and `fallback_to_cloud` off there, because those would widen where data may go on a path with no UI for them. An empty or unknown name is local-first, not best-quality. *Fallback chains:* `router.routechain` builds the first choice plus further candidates by asking the selector again with each model already considered removed (`reg.excluding`), so every hop goes through the same selector rules, strategy and RESTRICTED re-check (`routedecided`, split out of `routerequest` unchanged) as the first choice. The sensitivity is the router's own computed level (PII combined with content), never a caller's. `router.hopallowed` judges every hop: a local hop is always allowed; a cloud hop is refused for RESTRICTED data, and also refused after a local first choice unless `fallback_to_cloud` is on (off by default, because that hop changes where the prompt goes). `core.router.fallback.dispatchchain` (new) tries the hops in order and asks `hopallowed` again immediately before each send. `loke ask` now routes and dispatches through the chain (3 hops; `--model` disables fallback). *cheapest-adequate and prices:* no prices were added. The strategy ranks by `strategy.costin1k`, whose Anthropic rates are published list prices read 2026-09-27 (F5.11b), whose OpenAI rates were not re-checked, and whose unknown cloud models get a non-zero placeholder. A real, maintained price table is CB1.5's and VM1.7's. **Evidence:** `tests/unit/router/test_fallback_chain.tk` (new) runs against the production modules. It tests config to strategy to a different routed model (gemma3:4b vs qwen2.5:7b) through both `config.toml` and the settings store; chain order and no cloud hop without `fallback_to_cloud`, with a control that has one with it on; and no cloud hop in a RESTRICTED chain under the most cloud-favouring config, with a PUBLIC control. At dispatch, with `scripts/lib/http_recorder.py` as Ollama, it tests that a failing first hop falls to the next and that a RESTRICTED chain's cloud hops are never sent, with a PUBLIC control. The test's cloud hops are google and mistral, which have no client, so a wrongly admitted hop fails in-process and nothing leaves the machine. **Mutants** (file kept outside the tree, restored and verified with `cmp`): `hopallowed` with its two sensitivity lines removed fails 2 assertions ("A RESTRICTED REQUEST'S CLOUD HOPS ARE NOT SENT": attempted `google:gemini-test,mistral:mistral-test,ollama:fake:latest`); `namedconfig` ignoring the configured name fails 5 (toml and settings strategy, and both routes). **Not done:** the browser request path (`page.api.pipeline`) does not fall back on provider failure, filed as **F5.3a**. `loke ask` writes no disclosure row and checks no kill switch, for a first choice or a fallback hop. The registry's quality and speed figures are still unmeasured (VM1.4, F9.1). `docs/features-loke.md` still says the strategies do not exist; per decision **R** no outward text was added. |
+| F5.3a | M |  | **The browser request path does not fall back when a provider fails** — Found by F5.3. `page.api.pipeline` routes one decision (`routepreferinstalled`) and its dispatchers (`toollama`, `toanthropic`) answer a failure with a 502 directly (`providerfailed`), so there is no point at which a next hop could be tried. To do: route with `router.routechain` and dispatch hop by hop. Each hop must keep this path's per-dispatch controls: the kill switch per provider, the disclosure reservation per hop (a failed hop's reserved row completed as failed), the installed-model check, and `router.hopallowed` before each send. Settings `routing.prefer_local` / `routing.fallback_to_cloud` would need a UI before being read here. pipeline.tk was being edited by other workers, so it was left out of F5.3. |
 | F5.4 | L | **Done** | Provider abstraction layer in toke (Ollama, OpenAI, Anthropic, Google, Mistral, OpenRouter — all via REST; streaming; tool calling) `[R4.8, R8.1]` |
 | F5.5 | L | **Done** | Cost-optimised routing via RouteLLM signal integration (85% cost reduction, 95% quality retention — RouteLLM called via REST or subprocess) |
 | F5.6 | M | **Done** | Latency tolerance routing dimension (`instant` < 2s / `patient` < 30s / `background` minutes-hours; determined by request source, task type, AG1 agent declaration, or user flag; unlocks larger local models in Considered/Background tiers for non-urgent tasks; cost vs speed comparison shown when tolerance is `background`; logged in audit trail for explainability) |
@@ -1094,7 +1095,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 
 | Layer | Epics | Stories | Done | Partial | Reopened | Blocked | Queued | Superseded | On hold | Not started |
 |---|---|---|---|---|---|---|---|---|---|---|
-| FOUNDATION LAYER | 10 | 87 | 69 | 9 | 5 | — | — | — | — | 4 |
+| FOUNDATION LAYER | 10 | 88 | 69 | 10 | 4 | — | — | — | — | 5 |
 | PLATFORM LAYER | 6 | 32 | 32 | — | — | — | — | — | — | — |
 | APPLICATION LAYER | 6 | 27 | 27 | — | — | — | — | — | — | — |
 | ACCOUNTABLE AI SYSTEMS LAYER | 3 | 11 | 10 | 1 | — | — | — | — | — | — |
@@ -1110,7 +1111,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 44 | 41 | — | 2 | 1 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 40 | 34 | 1 | — | — | — | — | — | 5 |
 | VERIFICATION PROGRAMME | 14 | 148 | 116 | 6 | — | 7 | 3 | — | — | 16 |
-| **Total** | **88** | **766** | **646** | **23** | **7** | **35** | **3** | **1** | — | **51** |
+| **Total** | **88** | **767** | **646** | **24** | **6** | **35** | **3** | **1** | — | **52** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1121,7 +1122,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | F3 | 1 | 13 | 10 | 1 | — | — | — | — | — | 2 |
 | F3b | 1 | 14 | 6 | 8 | — | — | — | — | — | — |
 | F4 | 1 | 5 | 5 | — | — | — | — | — | — | — |
-| F5 | 1 | 16 | 13 | — | 1 | — | — | — | — | 2 |
+| F5 | 1 | 17 | 13 | 1 | — | — | — | — | — | 3 |
 | F6 | 1 | 8 | 8 | — | — | — | — | — | — | — |
 | F7 | 1 | 5 | 5 | — | — | — | — | — | — | — |
 | F8 | 1 | 4 | — | — | 4 | — | — | — | — | — |
@@ -1204,9 +1205,9 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 3 | — | — | — | — | 3 | — | — | — |
 | LS1 | 1 | 31 | 27 | 3 | — | — | — | — | — | 1 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **766** | **646** | **23** | **7** | **35** | **3** | **1** | — | **51** |
+| **Total** | **88** | **767** | **646** | **24** | **6** | **35** | **3** | **1** | — | **52** |
 
-Rows parsed: **766**, across **88** epics and **16** level-1 headings.
+Rows parsed: **767**, across **88** epics and **16** level-1 headings.
 
 Filed under the `# SUMMARY` heading rather than a layer: MK8, MK9. That is where those epics physically sit in the document; the grouping above reports it rather than hiding it.
 

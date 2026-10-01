@@ -1,0 +1,276 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.router.testfallbackchain;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=toml:std.toml;
+i=sh:shared.types;
+i=cfg:shared.config;
+i=sdb:core.storage.db;
+i=settings:core.storage.settings;
+i=strat:core.router.strategy;
+i=rtr:core.router.router;
+i=fb:core.router.fallback;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+
+(* F5.3 — strategy selection from configuration, the fallback chain, and the rule every
+   fallback hop is held to, against the production modules.
+
+   Three things are asserted.
+
+   1. The strategy is selected by configuration and the selection reaches the route: a
+      config.toml [routing] table naming "fastest" routes the same prompt to a different
+      model from the default (gemma3:4b, the fastest local chat model in the catalogue, where
+      the default local-first gives qwen2.5:7b); and the settings key routing.strategy, which
+      the browser request path reads, does the same.
+
+   2. The chain is built under the first choice's rules: a RESTRICTED request under the most
+      cloud-favouring configuration this repository can build has no cloud hop, and a local
+      first choice is followed by a cloud hop only when routing.fallback_to_cloud is on.
+
+   3. Every hop is checked again before it is sent (core.router.fallback.dispatchchain). The
+      chains for this part are built by hand, so they can hold the hops a correct router
+      would never produce: that is the point of checking at dispatch. Their cloud hops are
+      google and mistral, which core.providers.dispatcher has no client for, so a hop that
+      wrongly passes the check fails inside this process and is recorded in chainattempted
+      without anything leaving the machine. That is what makes a mutant of the check safe to
+      run. The local hop is answered by scripts/lib/http_recorder.py standing in for Ollama.
+
+   Every routed text classifies through core.router.intent.classifyfast above its
+   short-circuit, so routing opens no socket; the Ollama URL in the router configs is a
+   closed port so that a future dependence on a live Ollama shows here. *)
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=haiku():str{
+  <"write a haiku about autumn"
+};
+
+f=routed(c:$routerconfig;sens:$sensitivitylevel):str{
+  let d=rtr.routerequest(rtr.new(c);haiku();sens;0 as u32;$latencytolerance{$instant:0};"fb-route");
+  let spec:$modelspec=d.model;
+  <spec.id
+};
+
+f=fromtoml(src:str):$lokeconfig{
+  <mt toml.load(src) {
+    $ok:doc cfg.configfromtoml(doc);
+    $err:e cfg.defaultconfig()
+  }
+};
+
+f=hop(id:str;p:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:p;
+      contextwindow:8000 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"hand-built hop";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=localhop():$routingdecision{
+  <hop("fake:latest";$provider{$ollama:0})
+};
+
+f=googlehop():$routingdecision{
+  <hop("gemini-test";$provider{$google:0})
+};
+
+f=mistralhop():$routingdecision{
+  <hop("mistral-test";$provider{$mistral:0})
+};
+
+f=chainof(hops:@$routingdecision;sens:$sensitivitylevel):$fallbackchain{
+  <$fallbackchain{chainhops:hops;chainsens:sens;chainnote:""}
+};
+
+f=request():$completionrequest{
+  <$completionrequest{
+    modelid:"";
+    messages:@(pt.usermsg("an anonymised prompt"));
+    systemprompt:"";
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=nokeys():$apikeys{
+  <$apikeys{anthropic:"";openai:""}
+};
+
+f=attemptedlist(o:$chainoutcome):str{
+  <str.join(",";o.chainattempted)
+};
+
+f=anycloud(c:$fallbackchain):bool{
+  let found=mut.false;
+  lp(let i=0;i<c.chainhops.len;i=i+1){
+    let h:$routingdecision=c.chainhops.get(i);
+    if(rtr.isclouddecision(h)){ found=true }el{}
+  };
+  <found
+};
+
+f=hopid(c:$fallbackchain;i:i64):str{
+  if(i<(c.chainhops.len as i64)){}el{ <"" };
+  let h:$routingdecision=c.chainhops.get(i);
+  let spec:$modelspec=h.model;
+  <spec.id
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=openfreshstore(dir:str):i64{
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let pub=$sensitivitylevel{$public:0};
+
+  (* ── 1. The strategy is chosen by configuration, and the choice reaches the route ── *)
+  let dflt=rtr.configfor(cfg.defaultconfig());
+  if(t.asserteq(strat.strategyname(dflt.strategy);"local-first";"with no [routing] table the strategy is local-first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dflt.preferlocal && !dflt.fallbacktocloud;"prefer_local is on and fallback_to_cloud off by default")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routed(dflt;pub);"qwen2.5:7b";"the default configuration routes the haiku to qwen2.5:7b")){pass=pass+1}el{fail=fail+1};
+
+  let fastcfg=rtr.configfor(fromtoml("[routing]\nstrategy = \"fastest\"\n"));
+  if(t.asserteq(strat.strategyname(fastcfg.strategy);"fastest";"routing.strategy = fastest in config.toml selects fastest")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routed(fastcfg;pub);"gemma3:4b";"and the route follows it: the fastest local chat model, not the default's")){pass=pass+1}el{fail=fail+1};
+
+  let cheapcfg=rtr.configfor(fromtoml("[routing]\nstrategy = \"cheapest-adequate\"\nprefer_local = false\nfallback_to_cloud = true\n"));
+  if(t.asserteq(strat.strategyname(cheapcfg.strategy);"cheapest-adequate";"cheapest-adequate is selectable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cheapcfg.preferlocal && cheapcfg.fallbacktocloud;"prefer_local and fallback_to_cloud are read from the same table")){pass=pass+1}el{fail=fail+1};
+
+  let typocfg=rtr.configfor(fromtoml("[routing]\nstrategy = \"fastset\"\n"));
+  if(t.asserteq(strat.strategyname(typocfg.strategy);"local-first";"an unrecognised strategy name is local-first, the default, not best-quality")){pass=pass+1}el{fail=fail+1};
+
+  (* The settings store, which page.api.pipeline.routerfor reads. *)
+  let dir="/tmp/loke-tests/router-fallback-chain";
+  let store=openfreshstore(dir);
+  if(t.assert(store!=0;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
+  let before=rtr.configfromsettings(store;deadurl());
+  if(t.asserteq(strat.strategyname(before.strategy);"local-first";"with routing.strategy unset the browser path is local-first")){pass=pass+1}el{fail=fail+1};
+  let wrote=mt settings.setstr(store;"routing.strategy";"fastest";"routing") { $ok:v true; $err:e false };
+  let wrotepl=mt settings.setbool(store;"routing.prefer_local";false;"routing") { $ok:v true; $err:e false };
+  if(t.assert(wrote && wrotepl;"routing.strategy and routing.prefer_local are written to the store")){pass=pass+1}el{fail=fail+1};
+  let fromstore=rtr.configfromsettings(store;deadurl());
+  if(t.asserteq(strat.strategyname(fromstore.strategy);"fastest";"routing.strategy in the settings store selects the strategy")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(routed(fromstore;pub);"gemma3:4b";"and the route follows it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fromstore.preferlocal && !fromstore.fallbacktocloud;"the settings store cannot widen the destinations: prefer_local stays on and fallback_to_cloud off")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(strat.strategyname(rtr.configfromsettings(0;deadurl()).strategy);"local-first";"no store gives the default")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 2. The chain is built under the first choice's rules ─────────────────────── *)
+  let localonly=rtr.routechain(rtr.new(rtr.newconfig(deadurl()));haiku();pub;0 as u32;$latencytolerance{$instant:0};"fb-chain-local";3);
+  if(t.asserteq(hopid(localonly;0);"qwen2.5:7b";"the chain's first hop is the first choice")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(hopid(localonly;1);"gemma3:4b";"its second is the next local model by the same strategy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anycloud(localonly);"with fallback_to_cloud off, a local first choice has no cloud hop")){pass=pass+1}el{fail=fail+1};
+
+  let widened=rtr.routechain(rtr.new(rtr.withcloudfallback(rtr.newconfig(deadurl());true));haiku();pub;0 as u32;$latencytolerance{$instant:0};"fb-chain-cloud";3);
+  if(t.assert(anycloud(widened) && (widened.chainhops.len as i64)==3;"CONTROL: with it on, the same request's chain goes on to a cloud model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(hopid(widened;0);"qwen2.5:7b") && str.eq(hopid(widened;1);"gemma3:4b");"and only after the local ones")){pass=pass+1}el{fail=fail+1};
+
+  (* The most cloud-favouring configuration there is: prefer_local off, best-quality, and
+     fallback to cloud on. At PUBLIC it chooses a cloud model first; at RESTRICTED no hop of
+     its chain is a cloud model. *)
+  let hostile=rtr.new(rtr.namedconfig(deadurl();"best-quality";false;true));
+  let hostilepub=rtr.routechain(hostile;"summarise this quarterly report";pub;0 as u32;$latencytolerance{$instant:0};"fb-chain-hpub";3);
+  if(t.assert(anycloud(hostilepub);"CONTROL: at PUBLIC this configuration's chain holds cloud models")){pass=pass+1}el{fail=fail+1};
+  let hostileres=rtr.routechain(hostile;"summarise this quarterly report";$sensitivitylevel{$restricted:0};1 as u32;$latencytolerance{$instant:0};"fb-chain-hres";3);
+  if(t.assert(hostileres.chainhops.len>0;"a RESTRICTED request is still routed, locally")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anycloud(hostileres);"NO HOP OF A RESTRICTED REQUEST'S CHAIN IS A CLOUD MODEL")){pass=pass+1}el{fail=fail+1};
+  let byword=rtr.routechain(hostile;"summarise this note, it contains a password";pub;0 as u32;$latencytolerance{$instant:0};"fb-chain-word";3);
+  if(t.assert(!anycloud(byword);"nor of one the content scorer finds RESTRICTED, whatever the caller passed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. Every hop is checked again before it is sent ──────────────────────────── *)
+  let base="/tmp/loke-tests/router-fallback-chain/rec";
+  let logp="\(base).log";
+  file.delete(logp);
+  file.delete("\(base).port");
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder standing in for Ollama came up")){pass=pass+1}el{fail=fail+1};
+  let live=disp.new(nokeys();"http://127.0.0.1:\(port)");
+  let dead=disp.new(nokeys();deadurl());
+  let open=rtr.namedconfig(deadurl();"best-quality";false;true);
+  let shut=rtr.namedconfig(deadurl();"best-quality";false;false);
+
+  (* Fallback works: the first hop fails, the next answers. *)
+  let falls=fb.dispatchchain(live;chainof(@(googlehop();localhop());pub);open;request();"";"fb-falls");
+  if(t.assert(fb.answered(falls);"when the first hop fails, the chain is answered by the next")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(attemptedlist(falls);"google:gemini-test,ollama:fake:latest";"both hops were tried, in order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /api/chat") && str.contains(readfile(logp);"fake:latest");"and the local hop's request arrived at the local model")){pass=pass+1}el{fail=fail+1};
+
+  (* THE SAFETY PROPERTY AT DISPATCH. Every setting permits cloud; only the sensitivity
+     forbids it. *)
+  let res=$sensitivitylevel{$restricted:0};
+  let guarded=fb.dispatchchain(live;chainof(@(googlehop();mistralhop();localhop());res);open;request();"";"fb-res");
+  if(t.asserteq(attemptedlist(guarded);"ollama:fake:latest";"A RESTRICTED REQUEST'S CLOUD HOPS ARE NOT SENT: only the local hop was tried")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fb.answered(guarded);"and the local hop answered it")){pass=pass+1}el{fail=fail+1};
+  let cloudonly=fb.dispatchchain(live;chainof(@(googlehop();mistralhop());res);open;request();"";"fb-res-cloud");
+  if(t.assert(!fb.answered(cloudonly) && cloudonly.chainattempted.len==0;"a RESTRICTED chain of cloud hops alone sends nothing at all")){pass=pass+1}el{fail=fail+1};
+  let pubcloud=fb.dispatchchain(live;chainof(@(googlehop();mistralhop());pub);open;request();"";"fb-pub-cloud");
+  if(t.asserteq(attemptedlist(pubcloud);"google:gemini-test,mistral:mistral-test";"CONTROL: the same hops at PUBLIC are tried")){pass=pass+1}el{fail=fail+1};
+
+  (* The routing restriction: after a LOCAL first choice fails, a cloud hop is a change of
+     destination, and is taken only when fallback_to_cloud is on. CONFIDENTIAL may go to a
+     cloud model as a first choice, so only the setting decides here. *)
+  let conf=$sensitivitylevel{$confidential:0};
+  let stays=fb.dispatchchain(dead;chainof(@(localhop();googlehop());conf);shut;request();"";"fb-conf-shut");
+  if(t.asserteq(attemptedlist(stays);"ollama:fake:latest";"with fallback_to_cloud off, a failed local first choice does not go on to the cloud")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!fb.answered(stays);"and the request fails rather than changing destination")){pass=pass+1}el{fail=fail+1};
+  let goes=fb.dispatchchain(dead;chainof(@(localhop();googlehop());conf);open;request();"";"fb-conf-open");
+  if(t.asserteq(attemptedlist(goes);"ollama:fake:latest,google:gemini-test";"with it on, it does")){pass=pass+1}el{fail=fail+1};
+
+  (* A model the user named is the only one tried. *)
+  let named=fb.dispatchchain(dead;chainof(@(localhop();hop("qwen2.5:7b";$provider{$ollama:0}));pub);open;request();"llama3";"fb-named");
+  if(t.assert(named.chainattempted.len==1 && !fb.answered(named);"with --model there is no fallback")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(str.concat(logp;".headers"));
+  file.delete(str.concat(logp;".bodies"));
+  file.delete("\(base).port");
+  <fail
+};
