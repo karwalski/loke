@@ -129,6 +129,78 @@ def bsb_nonzero(rng: random.Random) -> str:
     return f"{rng.randint(10, 99)}{rng.randint(0, 9)}{rng.randint(100, 999)}"
 
 
+NHS_WEIGHTS = [10, 9, 8, 7, 6, 5, 4, 3, 2]
+
+
+def _nhs_check(nine: list[int]) -> int:
+    """NHS Data Dictionary, NHS NUMBER: 11 minus (weighted sum mod 11); 11 -> 0; 10 means
+    the number is invalid and never issued (returned as 10)."""
+    c = 11 - sum(w * d for w, d in zip(NHS_WEIGHTS, nine)) % 11
+    return 0 if c == 11 else c
+
+
+def nhs_valid(rng: random.Random) -> str:
+    """Ten digits with a correct NHS modulus 11 check digit. The first digit is 7, so
+    no Australian phone (0...) or Medicare (2-6) pattern can also claim the run."""
+    while True:
+        nine = [7] + [rng.randint(0, 9) for _ in range(8)]
+        c = _nhs_check(nine)
+        if c != 10:
+            return "".join(map(str, nine)) + str(c)
+
+
+def nhs_invalid(rng: random.Random) -> str:
+    """An NHS-shaped ten digits whose check digit is wrong."""
+    v = nhs_valid(rng)
+    return v[:9] + str((int(v[9]) + rng.randint(1, 9)) % 10)
+
+
+def nhs_check_ten(rng: random.Random) -> str:
+    """Nine digits whose check computes to 10, with any tenth digit: never issued."""
+    while True:
+        nine = [7] + [rng.randint(0, 9) for _ in range(8)]
+        if _nhs_check(nine) == 10:
+            return "".join(map(str, nine)) + str(rng.randint(0, 9))
+
+
+NINO_FIRST = "ABCEGHJKLMNOPRSTWXYZ"   # HMRC NIM39110: never D F I Q U V
+NINO_SECOND = "ABCEGHJKLMNPRSTWXYZ"   # nor O as the second letter
+NINO_UNUSED = {"BG", "GB", "KN", "NK", "NT", "TN", "ZZ"}
+
+
+def nino_parts(rng: random.Random) -> tuple[str, str, str]:
+    """A NINO's prefix, six digits and suffix, following HMRC NIM39110's rules."""
+    while True:
+        p = rng.choice(NINO_FIRST) + rng.choice(NINO_SECOND)
+        if p not in NINO_UNUSED:
+            return p, "".join(str(rng.randint(0, 9)) for _ in range(6)), rng.choice("ABCD")
+
+
+def sort_code_nonzero(rng: random.Random) -> str:
+    return f"{rng.randint(10, 99)}{rng.randint(10, 99)}{rng.randint(10, 99)}"
+
+
+def uk_driver_number(rng: random.Random, surname: str, female: bool) -> str:
+    """DVLA leaflet INS57P's sixteen characters: surname (padded with 9), decade, month
+    (+50 for a woman), day, year, two initials (9 for none), three check characters."""
+    year = rng.randint(1950, 2005)
+    month = rng.randint(1, 12) + (50 if female else 0)
+    initials = rng.choice("ABCDEJKLMPRST") + rng.choice(["9", "A", "M", "R"])
+    checks = "".join(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(2))
+    return (f"{(surname.upper() + '99999')[:5]}{(year // 10) % 10}{month:02d}"
+            f"{rng.randint(1, 28):02d}{year % 10}{initials}9{checks}")
+
+
+def nric_like(rng: random.Random, series: str) -> str:
+    """A series letter, seven digits and a check letter. The letter is computed with the
+    algorithm in circulation (Ngiam 2003), which the ICA has not published, so loke does
+    not validate it; it is here only so the examples look like real numbers."""
+    d = [rng.randint(0, 9) for _ in range(7)]
+    total = sum(w * x for w, x in zip([2, 7, 6, 5, 4, 3, 2], d)) + (4 if series in "TG" else 0)
+    table = "JZIHGFEDCBA" if series in "ST" else "XWUTRQPNMLK"
+    return f"{series}{''.join(map(str, d))}{table[total % 11]}"
+
+
 def luhn_valid(rng: random.Random, prefix: str, length: int) -> str:
     """Card-shaped number passing the Luhn check."""
     body = prefix + "".join(str(rng.randint(0, 9)) for _ in range(length - len(prefix) - 1))
@@ -496,6 +568,81 @@ def cases(rng: random.Random) -> list[dict]:
         "Driver's licence {y} renewal is due.",
         {"y": ("NOT_PII", str(rng.randint(2020, 2030)), False,
                "four digits after the words: a year, too short for a licence")})
+
+    # --- RG1.7b and the UK/SG identifiers --------------------------------
+    # Appended after RG1.7a's cases, so every earlier case keeps its values. NHS
+    # numbers carry the NHS Data Dictionary's modulus 11 check and are gated on the
+    # word NHS; NINOs follow HMRC NIM39110's prefix rules; driver numbers follow DVLA
+    # leaflet INS57P's structure; sort codes and NRIC/FIN numbers are gated on their
+    # words (no published check). The near misses break exactly one rule each.
+    for template, fmt, note in [
+        ("NHS number {nhs} is on the referral.", lambda v: f"{v[:3]} {v[3:6]} {v[6:]}",
+         "3-3-4 as printed, after 'NHS number'"),
+        ("NHS No: {nhs} (GP practice copy).", lambda v: v, "unspaced, after 'NHS No:'"),
+        ("Patient nhs no. {nhs} was re-registered.", lambda v: f"{v[:3]}-{v[3:6]}-{v[6:]}",
+         "hyphenated, lower-case context"),
+    ]:
+        add("adversarial", template, {"nhs": ("UK_NHS_NUMBER", fmt(nhs_valid(rng)), True, note)})
+
+    for template, fmt, note in [
+        ("National Insurance number {ni} on the P45.", lambda p, d, s: f"{p}{d}{s}", "unspaced"),
+        ("Her NI number is {ni}, per the payslip.", lambda p, d, s: f"{p} {d[:2]} {d[2:4]} {d[4:]} {s}",
+         "spaced in pairs, as HMRC prints it"),
+        ("ni: {ni}", lambda p, d, s: f"{p}{d}{s}".lower(), "lower case"),
+    ]:
+        p, d, s = nino_parts(rng)
+        add("adversarial", template, {"ni": ("UK_NINO", fmt(p, d, s), True, note)})
+
+    for template, fmt, note in [
+        ("Sort code {sc} for the transfer.", lambda v: f"{v[:2]}-{v[2:4]}-{v[4:]}", "nn-nn-nn after 'sort code'"),
+        ("sort-code: {sc}", lambda v: v, "unseparated after 'sort-code:'"),
+    ]:
+        add("adversarial", template, {"sc": ("UK_SORT_CODE", fmt(sort_code_nonzero(rng)), True, note)})
+
+    for surname, female, spaced, note in [
+        ("MORGAN", False, False, "male, five surname letters"),
+        ("LEE", True, False, "female (month + 50), surname padded with 9"),
+        ("OKAFOR", False, True, "spaced in its four groups"),
+    ]:
+        v = uk_driver_number(rng, surname, female)
+        if spaced:
+            v = f"{v[:5]} {v[5:11]} {v[11:13]} {v[13:]}"
+        add("adversarial", "Driving licence {dl} was checked online.",
+            {"dl": ("UK_DRIVING_LICENCE", v, True, note)})
+
+    for template, series, note in [
+        ("NRIC {ic} was verified at the counter.", "S", "S series after 'NRIC'"),
+        ("FIN: {ic} on the work pass.", "G", "G series after 'FIN:'"),
+        ("NRIC/FIN no. {ic} for the booking.", "T", "T series after 'NRIC/FIN no.'"),
+    ]:
+        add("adversarial", template, {"ic": ("SG_NRIC", nric_like(rng, series), True, note)})
+
+    v = nhs_valid(rng)
+    add("negative", "Reference {r} was logged.",
+        {"r": ("NOT_PII", v, False,
+               "checksum-valid ten digits with no NHS context: not reported")})
+    add("negative", "NHS number {n} was mistyped.",
+        {"n": ("NOT_PII", nhs_invalid(rng), False, "after 'NHS number' but failing modulus 11")})
+    add("negative", "The NHS {n} entry is a placeholder.",
+        {"n": ("NOT_PII", nhs_check_ten(rng), False,
+               "modulus 11 gives 10: the Data Dictionary says no such number is issued")})
+    add("negative", "The manual's example {n} is not issued.",
+        {"n": ("NOT_PII", "QQ123456C", False, "prefix QQ: Q is never a NINO prefix letter")})
+    add("negative", "Code {n} refers to the country.",
+        {"n": ("NOT_PII", f"GB{rng.randint(100000, 999999)}A", False, "prefix GB is not allocated")})
+    add("negative", "Item {n} is in stock.",
+        {"n": ("NOT_PII", f"Z{nino_parts(rng)[0]}{rng.randint(100000, 999999)}C", False,
+               "a NINO-shaped run inside a longer token")})
+    add("negative", "Order dated {d} was shipped.",
+        {"d": ("NOT_PII", f"{rng.randint(10, 28)}-0{rng.randint(1, 9)}-2{rng.randint(0, 9)}", False,
+               "nn-nn-nn with no sort-code context: a date")})
+    add("negative", "The form had sort code {n} as a placeholder.",
+        {"n": ("NOT_PII", "00-00-00", False, "the all-zero sort code placeholder")})
+    add("negative", "Batch {n} passed inspection.",
+        {"n": ("NOT_PII", f"ABCDE{rng.randint(1, 9)}{rng.randint(13, 49)}{rng.randint(10, 28)}{rng.randint(0, 9)}XY9AB",
+               False, "driver-number shape with month 13-49, which DVLA never issues")})
+    add("negative", "Order {n} shipped from the depot.",
+        {"n": ("NOT_PII", nric_like(rng, "S"), False, "an NRIC-shaped run with no NRIC or FIN context")})
 
     return out
 

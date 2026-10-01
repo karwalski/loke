@@ -18,10 +18,16 @@ t=$patterndef{
   confidence:f64
 };
 
-
+(* ORDER MATTERS where two patterns can report the same value. pipeline.dedupentities keeps
+   the FIRST of two detections with equal values, and the pipeline's sensitivity is taken
+   over what it keeps. An NHS number printed 3-3-4 ("943 476 5919") is also a phone_us
+   match, so uk_nhs_number comes before the phone patterns: otherwise the deduplicated
+   entity is the phone number, rated CONFIDENTIAL, and the NHS number's RESTRICTED rating
+   is lost. Asserted in tests/unit/privacy/test_uk_sg_identifiers.tk. *)
 f=getpatterns():@$patterndef{
   <@(
     $patterndef{name:"email";pattern:pat.patemail();sensitivity:$sensitivitylevel{$confidential:0};confidence:0.95};
+    $patterndef{name:"uk_nhs_number";pattern:pat.patnhsnumber();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.95};
     $patterndef{name:"phone_au";pattern:pat.patphoneau();sensitivity:$sensitivitylevel{$confidential:0};confidence:0.92};
     $patterndef{name:"phone_us";pattern:pat.patphoneus();sensitivity:$sensitivitylevel{$confidential:0};confidence:0.92};
     $patterndef{name:"credit_card";pattern:pat.patcreditcard();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.99};
@@ -37,7 +43,11 @@ f=getpatterns():@$patterndef{
     $patterndef{name:"au_crn";pattern:pat.patcrn();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
     $patterndef{name:"passport";pattern:pat.patpassport();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
     $patterndef{name:"driver_licence";pattern:pat.patdriverlicence();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
-    $patterndef{name:"au_super_member";pattern:pat.patsupermember();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.85}
+    $patterndef{name:"au_super_member";pattern:pat.patsupermember();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.85};
+    $patterndef{name:"uk_nino";pattern:pat.patnino();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
+    $patterndef{name:"uk_sort_code";pattern:pat.patsortcode();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
+    $patterndef{name:"uk_driving_licence";pattern:pat.patukdrivinglicence();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
+    $patterndef{name:"sg_nric";pattern:pat.patnric();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90}
   )
 };
 
@@ -101,7 +111,7 @@ f=digitrunpattern(name:str):bool{
               if(str.eq(name;"ip_v4")){bounded=true}el{
                 if(str.eq(name;"au_medicare")){bounded=true}el{
                   if(str.eq(name;"au_bsb")){bounded=true}el{
-                    if(str.eq(name;"bank_account") || contextonlypattern(name)){bounded=true}el{}
+                    if(str.eq(name;"bank_account") || contextonlypattern(name) || ukpattern(name)){bounded=true}el{}
                   }
                 }
               }
@@ -226,21 +236,144 @@ f=bsbvalid(value:str):bool{
 (* RG1.7a. The patterns that are their context words and nothing more: no check digit
    exists, or none is published, so the words in front are the whole of the validation. *)
 f=contextonlypattern(name:str):bool{
-  <str.eq(name;"au_crn") || str.eq(name;"passport") || str.eq(name;"driver_licence") || str.eq(name;"au_super_member")
+  <str.eq(name;"au_crn") || str.eq(name;"passport") || str.eq(name;"driver_licence") || str.eq(name;"au_super_member") || str.eq(name;"sg_nric")
+};
+
+(* The UK identifiers, each validated in this module (NHS number on its check digit, NINO
+   on HMRC's prefix rules, the driver number on its structure, the sort code on the one
+   rejection that cannot lose a real one). All are digit-boundary checked. *)
+f=ukpattern(name:str):bool{
+  <str.eq(name;"uk_nhs_number") || str.eq(name;"uk_nino") || str.eq(name;"uk_sort_code") || str.eq(name;"uk_driving_licence")
 };
 
 (* The patterns whose match carries a context word (BSB, account, CRN, passport, licence,
-   super member) in front of the number. *)
+   super member, NHS, sort code, NRIC or FIN) in front of the number. *)
 f=contextpattern(name:str):bool{
-  <str.eq(name;"au_bsb") || str.eq(name;"bank_account") || contextonlypattern(name)
+  <str.eq(name;"au_bsb") || str.eq(name;"bank_account") || str.eq(name;"uk_nhs_number") || str.eq(name;"uk_sort_code") || contextonlypattern(name)
 };
 
 (* RG1.7a. The patterns whose identifier may begin with letters: a passport (N1234567,
-   PA1234567) or a licence (SA's S12345). Their patterns require a separator after the
-   words, so walking back from the first digit over at most two letters reaches the
-   identifier's start and never the tail of a word. *)
+   PA1234567), a licence (SA's S12345) or an NRIC (S1234567D). Their patterns require a
+   separator after the words, so walking back from the first digit over at most two
+   letters reaches the identifier's start and never the tail of a word. *)
 f=letteredpattern(name:str):bool{
-  <str.eq(name;"passport") || str.eq(name;"driver_licence")
+  <str.eq(name;"passport") || str.eq(name;"driver_licence") || str.eq(name;"sg_nric")
+};
+
+(* RG1.7b. The patterns a LETTER next to the match also rejects, not only a digit.
+
+   After the match: au_tfn, because nine checksum-valid digits followed by a letter are a
+   part or reference number (984593866N), or the digits of a CRN (123456789A), and not a
+   TFN; measured on the corpus, no real TFN is followed by a letter, so none is lost. The
+   cost is a TFN typed against a word with no space ("123456782and"), which is no longer
+   reported. And the three identifiers that end in a letter or check character (NINO, the
+   driver number, NRIC/FIN), whose last character is part of the shape: one more letter
+   means the match is a fragment of a longer token.
+
+   Before the match: only the two bare patterns that start with letters (NINO and the
+   driver number), so "ZAB123456C" is not the NINO AB123456C. au_tfn is not checked
+   before: "TFN123456782", a TFN written against its label, is still a TFN. *)
+f=letterafterpattern(name:str):bool{
+  <str.eq(name;"au_tfn") || str.eq(name;"uk_nino") || str.eq(name;"uk_driving_licence") || str.eq(name;"sg_nric")
+};
+
+f=letterbeforepattern(name:str):bool{
+  <str.eq(name;"uk_nino") || str.eq(name;"uk_driving_licence")
+};
+
+f=letterboundaryclear(name:str;text:str;start:i64;end:i64):bool{
+  let clear=mut.true;
+  if(letterafterpattern(name) && letteratindex(text;end)){ clear=false }el{};
+  if(letterbeforepattern(name) && letteratindex(text;start-1)){ clear=false }el{};
+  <clear
+};
+
+(* The digits and letters of a value, spaces and hyphens dropped, letters upper-cased. *)
+f=compactupper(value:str):str{
+  let out=mut."";
+  let len=str.len(value) as i64;
+  lp(let i=0;i<len;i=i+1){
+    if(digitatindex(value;i) || letteratindex(value;i)){ out="\(out)\(str.substr(value;i;i+1))" }el{}
+  };
+  <str.upper(out)
+};
+
+(* NHS number check digit, as the NHS Data Dictionary (attribute NHS NUMBER) defines it:
+   the first nine digits weighted 10,9,8,7,6,5,4,3,2 and summed; the check digit is 11 minus
+   the sum modulo 11, where 11 becomes 0 and 10 means the number is invalid and is never
+   issued. Ten digits, separators ignored; any other length is false. *)
+f=nhschecksumvalid(value:str):bool{
+  let digits=digitsof(value);
+  if((str.len(digits) as i64)!=10){ <false }el{};
+  let total=mut.0;
+  lp(let k=0;k<9;k=k+1){
+    total=total+(str.charat(digits;k)-48)*(10-k)
+  };
+  let check=mut.(11-(total-(total/11)*11));
+  if(check==11){ check=0 }el{};
+  <check!=10 && check==str.charat(digits;9)-48
+};
+
+(* National Insurance number, HMRC National Insurance Manual NIM39110: D, F, I, Q, U and V
+   are never the first or second prefix letter, O is never the second, the prefixes BG, GB,
+   KN, NK, NT, TN and ZZ are not used, and the suffix is A, B, C or D. Nine characters
+   once spaces are dropped, any case. *)
+f=ninovalid(value:str):bool{
+  let v=compactupper(value);
+  if((str.len(v) as i64)!=9){ <false }el{};
+  let a=str.substr(v;0;1);
+  let b=str.substr(v;1;2);
+  let prefix=str.substr(v;0;2);
+  let never="DFIQUV";
+  if(str.indexof(never;a)>=0 || str.indexof(never;b)>=0 || str.eq(b;"O")){ <false }el{};
+  let unused=@("BG";"GB";"KN";"NK";"NT";"TN";"ZZ");
+  let bad=mut.false;
+  lp(let i=0;i<unused.len;i=i+1){
+    if(str.eq(prefix;unused.get(i))){ bad=true }el{}
+  };
+  let suffix=str.charat(v;8);
+  <!bad && suffix>=65 && suffix<=68
+};
+
+(* A sort code has no check digit; as with BSB the only rejection is the all-zero
+   placeholder, which no bank uses. *)
+f=sortcodevalid(value:str):bool{
+  let digits=digitsof(value);
+  <(str.len(digits) as i64)==6 && !str.eq(digits;"000000")
+};
+
+(* The UK identifiers' validation, by pattern name; true for every other pattern. *)
+f=ukvalid(name:str;value:str):bool{
+  if(str.eq(name;"uk_nhs_number")){ <nhschecksumvalid(value) }el{};
+  if(str.eq(name;"uk_nino")){ <ninovalid(value) }el{};
+  if(str.eq(name;"uk_sort_code")){ <sortcodevalid(value) }el{};
+  if(str.eq(name;"uk_driving_licence")){ <ukdrivinglicencevalid(value) }el{};
+  <true
+};
+
+(* GB driver number structure, DVLA leaflet INS57P. Sixteen characters once spaces are
+   dropped: 1-5 the surname, a letter first and, once a 9 pads it, 9s to the end; 6 a
+   digit (decade of birth); 7-8 the month, 01-12, or 51-62 for a woman; 9-10 the day,
+   01-31; 11 a digit (year); 12 a letter and 13 a letter or 9 (initials); 14-16 the
+   computer check characters, which the DVLA does not publish a rule for and are not
+   judged. *)
+f=ukdrivinglicencevalid(value:str):bool{
+  let v=compactupper(value);
+  if((str.len(v) as i64)!=16){ <false }el{};
+  let ok=mut.letteratindex(v;0);
+  let padded=mut.false;
+  lp(let i=1;i<5;i=i+1){
+    if(str.charat(v;i)==57){ padded=true }el{
+      if(padded || !letteratindex(v;i)){ ok=false }el{}
+    }
+  };
+  lp(let i=5;i<11;i=i+1){
+    if(!digitatindex(v;i)){ ok=false }el{}
+  };
+  if(!ok){ <false }el{};
+  let month=(str.charat(v;6)-48)*10+(str.charat(v;7)-48);
+  let day=(str.charat(v;8)-48)*10+(str.charat(v;9)-48);
+  <((month>=1 && month<=12) || (month>=51 && month<=62)) && day>=1 && day<=31 && letteratindex(v;11) && (letteratindex(v;12) || str.charat(v;12)==57)
 };
 
 f=letteratindex(text:str;idx:i64):bool{
@@ -392,6 +525,10 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
           if(spanned){
             if(digitrunpattern(pdef.name)){
               keep=boundaryclear(text;start;end)
+            }el{};
+            (* RG1.7b: for these, a neighbouring letter rejects the match as well. *)
+            if(keep){
+              keep=letterboundaryclear(pdef.name;text;start;end)
             }el{}
           }el{};
           (* au_tfn is gated on its checksum, and the measurement that justifies it:
@@ -424,7 +561,9 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
               }el{
                 if(str.eq(pdef.name;"au_bsb")){
                   keep=bsbvalid(matchedvalue)
-                }el{}
+                }el{
+                  keep=ukvalid(pdef.name;matchedvalue)
+                }
               }
             }
           }el{};

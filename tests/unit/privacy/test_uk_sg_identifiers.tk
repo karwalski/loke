@@ -1,0 +1,158 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.ukidentifiers;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+i=pl:core.privacy.pipeline;
+
+(* RG1.7a (completed) — the UK and Singapore identifiers the uk-gdpr and sg-pdpa presets
+   block: NHS number (modulus 11, gated on the word NHS), National Insurance number (HMRC's
+   prefix rules), sort code (gated on its words), GB driver number (DVLA's structure) and
+   NRIC/FIN (gated on its words; its check letter is not published). For each detector:
+   the forms that must be found, with value and span; one case per validation rule that
+   must reject; the shape without its words where words are required; and a fragment of a
+   longer token. RG1.7b's letter boundary on au_tfn is asserted here too. Every assertion
+   goes through the production detector, rx.detect, or the production predicate. *)
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=valueoftype(entities:@$piientity;wanted:str):str{
+  let v=mut."";
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ v=e.value }el{}
+  };
+  <v
+};
+
+f=startoftype(entities:@$piientity;wanted:str):i64{
+  let at=mut.(0-1);
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ at=e.start as i64 }el{}
+  };
+  <at
+};
+
+f=found(text:str;wanted:str):i64{
+  let res:$piidetectionresult=rx.detect(text);
+  <countoftype(res.entities;wanted)
+};
+
+f=value(text:str;wanted:str):str{
+  let res:$piidetectionresult=rx.detect(text);
+  <valueoftype(res.entities;wanted)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── RG1.7b: a letter after nine TFN-valid digits ─────────────────────────────── *)
+  if(t.assert(found("Part 984593866N ships on Tuesday";"au_tfn")==0;"RG1.7b: a TFN-valid nine digits followed by a letter is a part number, not a TFN")){pass=pass+1}el{fail=fail+1};
+  let crntfn:$piidetectionresult=rx.detect("Centrelink CRN 123 456 782A on file");
+  if(t.assert(countoftype(crntfn.entities;"au_tfn")==0;"RG1.7b: a CRN whose digits pass the TFN checksum is not also a TFN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(crntfn.entities;"au_crn")==1;"while it is still the CRN")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("My TFN is 123 456 782.";"au_tfn");"123 456 782";"a TFN followed by punctuation is still found")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("TFN123456782 on the form";"au_tfn");"123456782";"and one written against its label (a letter BEFORE it) is still found")){pass=pass+1}el{fail=fail+1};
+
+  (* ── NHS number: ten digits, modulus 11, after the word NHS ─────────────────────── *)
+  let nhs:$piidetectionresult=rx.detect("NHS number 943 476 5919 is on the referral");
+  if(t.assert(countoftype(nhs.entities;"uk_nhs_number")==1;"an NHS number after 'NHS number' is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(nhs.entities;"uk_nhs_number");"943 476 5919";"as the number alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(nhs.entities;"uk_nhs_number")==11;"its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(nhs.sensitivity);"restricted";"an NHS number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(nhs.anonymised;"5919")<0;"the anonymised text does not carry it")){pass=pass+1}el{fail=fail+1};
+  (* 943 476 5919 is also a phone_us match with the same value; the pipeline keeps one of
+     the two and rates what it keeps, so it must keep the NHS number. *)
+  let nhskept=pl.dedupentities(nhs.entities);
+  if(t.assert(countoftype(nhskept;"uk_nhs_number")==1 && countoftype(nhskept;"phone_us")==0;"deduplicated, the NHS number survives and the phone_us match of the same digits does not")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(nhskept));"restricted";"so the pipeline still rates the prompt RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("NHS No: 9434765919 (GP copy)";"uk_nhs_number");"9434765919";"unspaced, after 'NHS No:'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("patient nhs no. 943-476-5900 today";"uk_nhs_number");"943-476-5900";"hyphenated; a check of 11 is written 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("NHS number 943 476 5918 was mistyped";"uk_nhs_number")==0;"check: a wrong check digit is rejected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("NHS 943 476 5960 placeholder";"uk_nhs_number")==0;"check: a number whose check computes to 10 is never issued")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.nhschecksumvalid("9434765919") && !rx.nhschecksumvalid("9434765918") && !rx.nhschecksumvalid("943476591");"the predicate: valid, wrong check, nine digits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Reference 9434765919 was logged";"uk_nhs_number")==0;"context guard: a checksum-valid ten digits without the word NHS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("NHS number 943 476 59191 here";"uk_nhs_number")==0;"near miss: an eleventh digit makes it a fragment")){pass=pass+1}el{fail=fail+1};
+
+  (* ── National Insurance number: HMRC NIM39110 ──────────────────────────────────── *)
+  let ni:$piidetectionresult=rx.detect("National Insurance number AB123456C on the P45");
+  if(t.assert(countoftype(ni.entities;"uk_nino")==1;"a NINO is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(ni.entities;"uk_nino");"AB123456C";"with its value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(ni.entities;"uk_nino")==26;"and its span")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(ni.sensitivity);"restricted";"a NINO is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Her NI number is AB 12 34 56 C, per the payslip";"uk_nino");"AB 12 34 56 C";"spaced in pairs")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("ni: ab123456c";"uk_nino");"ab123456c";"lower case")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Specimen QQ123456C from the manual";"uk_nino")==0;"rule: Q is never a prefix letter (HMRC's own specimen)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Code DA123456A here";"uk_nino")==0;"rule: D is never the first letter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Code AO123456A here";"uk_nino")==0;"rule: O is never the second letter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Code GB123456A here";"uk_nino")==0;"rule: the prefix GB is not used")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Code AB123456E here";"uk_nino")==0;"rule: the suffix is A to D")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.ninovalid("AB123456C") && !rx.ninovalid("TN123456C") && !rx.ninovalid("AV123456C");"the predicate: valid, TN unused, V never second")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Item ZAB123456C is in stock";"uk_nino")==0;"near miss: a letter before it makes it part of a longer token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Item AB123456CD is in stock";"uk_nino")==0;"near miss: a letter after it, likewise")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Item 9AB123456C is in stock";"uk_nino")==0;"near miss: a digit before it, likewise")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Sort code: after the words sort code ─────────────────────────────────────── *)
+  let sortc:$piidetectionresult=rx.detect("Sort code 12-34-56 for the transfer");
+  if(t.assert(countoftype(sortc.entities;"uk_sort_code")==1;"a sort code after 'Sort code' is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(sortc.entities;"uk_sort_code");"12-34-56";"as the number alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(sortc.entities;"uk_sort_code")==10;"its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(sortc.sensitivity);"restricted";"a sort code is RESTRICTED, as a BSB is")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("sort-code: 123456";"uk_sort_code");"123456";"unseparated after 'sort-code:'")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("The form had sort code 00-00-00 as a placeholder";"uk_sort_code")==0;"the all-zero placeholder is rejected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Order dated 12-03-24 was shipped";"uk_sort_code")==0;"context guard: nn-nn-nn without the words is a date")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("sort code 12-34-567 here";"uk_sort_code")==0;"near miss: a seventh digit makes it a fragment")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GB driver number: DVLA INS57P's sixteen characters ──────────────────────── *)
+  let dl:$piidetectionresult=rx.detect("Driving licence MORGA657054SM9IJ was checked");
+  if(t.assert(countoftype(dl.entities;"uk_driving_licence")==1;"the DVLA leaflet's own example driver number is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(dl.entities;"uk_driving_licence");"MORGA657054SM9IJ";"with its value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(dl.entities;"uk_driving_licence")==16;"and its span")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(dl.sensitivity);"restricted";"a driver number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("licence LEE99510032PM9TN on file";"uk_driving_licence");"LEE99510032PM9TN";"a short surname padded with 9")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("number MORGA 657054 SM 9IJ on file";"uk_driving_licence");"MORGA 657054 SM 9IJ";"spaced in its four groups")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Batch MORGA613054SM9IJ passed";"uk_driving_licence")==0;"rule: month 13 is not a month")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Batch MORGA663054SM9IJ passed";"uk_driving_licence")==0;"rule: month 63 is not a month plus 50")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Batch MORGA657004SM9IJ passed";"uk_driving_licence")==0;"rule: day 00 is not a day")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Batch MA9NA657054SM9IJ passed";"uk_driving_licence")==0;"rule: once 9 pads the surname, nothing but 9 follows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Batch MORGA6570549M9IJ passed";"uk_driving_licence")==0;"rule: the first initial is a letter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.ukdrivinglicencevalid("MORGA657054SM9IJ") && !rx.ukdrivinglicencevalid("MORGA600054SM9IJ") && !rx.ukdrivinglicencevalid("MORGA657054SM9I");"the predicate: valid, month 00, fifteen characters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Code XMORGA657054SM9IJ here";"uk_driving_licence")==0;"near miss: a letter before it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Code MORGA657054SM9IJK here";"uk_driving_licence")==0;"near miss: a letter after it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── NRIC/FIN: after NRIC, FIN or NRIC/FIN; the check letter is not judged ──────── *)
+  let ic:$piidetectionresult=rx.detect("NRIC S1234567D was verified");
+  if(t.assert(countoftype(ic.entities;"sg_nric")==1;"an NRIC after the word NRIC is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(ic.entities;"sg_nric");"S1234567D";"with its series letter, without the word")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(ic.entities;"sg_nric")==5;"its span starts at the series letter")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(ic.sensitivity);"restricted";"an NRIC is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("FIN: G1234567X on the work pass";"sg_nric");"G1234567X";"a FIN after 'FIN:'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("nric/fin no. m1234567k for the booking";"sg_nric");"m1234567k";"the M series, lower case, after 'nric/fin no.'")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Order S1234567D shipped";"sg_nric")==0;"context guard: the shape without NRIC or FIN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("NRIC A1234567D on file";"sg_nric")==0;"near miss: A is not a series letter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("NRIC S123456D on file";"sg_nric")==0;"near miss: six digits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("NRIC S1234567DX on file";"sg_nric")==0;"near miss: a letter after the check letter")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The pipeline rates them as the regex layer does ──────────────────────────── *)
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(nhs.entities));"restricted";"the pipeline rates an NHS number RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(ni.entities));"restricted";"and a NINO")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(sortc.entities));"restricted";"and a sort code")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(dl.entities));"restricted";"and a driver number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(ic.entities));"restricted";"and an NRIC")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(nhs.entities)==1 && pl.countrestricted(ni.entities)==1 && pl.countrestricted(sortc.entities)==1 && pl.countrestricted(dl.entities)==1 && pl.countrestricted(ic.entities)==1;"each counts as restricted")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

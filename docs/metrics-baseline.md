@@ -537,8 +537,10 @@ restored and checked with `cmp`.
   marker at the start of the system prompt the stand-in received. Whether a model obeys it is
   unmeasured (AD1.5).
 - **Recorded before RG1.7a merged.** The harness now also carries cases for `au_crn`, `passport`,
-  `driver_licence` and `au_super_member` (RG1.7a): 5 × 19 = 95 matrix cells, run by the gate. The
-  counts above are the 75-cell run and have not been re-recorded for the 95.
+  `driver_licence` and `au_super_member` (RG1.7a), and for `uk_nhs_number`, `uk_nino`,
+  `uk_sort_code`, `uk_driving_licence` and `sg_nric` (RG1.7a, completed 2026-10-01): 5 × 24 = 120
+  matrix cells, run by the gate. The counts above are the 75-cell run and have not been re-recorded
+  for the 120.
 - **Not a recall figure.** Each type is exercised with one value the regex layer is known to
   detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
 - **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven

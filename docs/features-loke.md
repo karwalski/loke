@@ -40,7 +40,7 @@ It reduces what is disclosed; it does not ensure that everything sensitive is fo
 
 | Layer | Module | Description | Confidence |
 |-------|--------|-------------|-----------|
-| Regex | `core/privacy/regex.tk` | 17 deterministic patterns: email, phone (AU/US), credit card, IP, TFN/ABN, SSN, URL, API key, Medicare, and (only after their label) BSB, bank account, CRN, passport, driver licence, super member number | 0.60–0.99 |
+| Regex | `core/privacy/regex.tk` | 22 deterministic patterns: email, phone (AU/US), credit card, IP, TFN/ABN, SSN, URL, API key, Medicare, National Insurance number, GB driver number, and (only after their label) BSB, bank account, CRN, passport, driver licence, super member number, NHS number, sort code, NRIC/FIN | 0.60–0.99 |
 | Local NER | `core/privacy/ner.tk` | SLM-based named entity recognition via Ollama — contextual understanding of names, organisations, addresses | Configurable |
 | Presidio | `core/privacy/presidio.tk` | Microsoft Presidio via REST API (optional sidecar) — 180+ entity types, enterprise-grade | Configurable |
 | Sidecar | `core/privacy/sidecar_client.tk` | OpenAI Privacy Filter model (1.5B params) on port 11435 — detect and anonymise via local inference | Model-dependent |

@@ -35,6 +35,9 @@ import argparse, json, re, sys, time, urllib.error, urllib.request
 # (detector type, raw value, placeholder type prefix). Values from test_regex.tk.
 CASES = [
     ("email", "harness.probe@example.com", "EMAIL"),
+    # Second, as in getpatterns: an NHS number printed 3-3-4 is also a phone_us match, and
+    # the pipeline keeps the first of two equal values. The label is part of the value.
+    ("uk_nhs_number", "NHS number 943 476 5919", "UK_NHS_NUMBER"),
     ("phone_au", "0412 345 678", "PHONE_AU"),
     ("phone_us", "(555) 234-5678", "PHONE_US"),
     ("credit_card", "4111 1111 1111 1111", "CREDIT_CARD"),
@@ -54,10 +57,16 @@ CASES = [
     ("passport", "passport number PA1234567", "PASSPORT"),
     ("driver_licence", "driver's licence 12345678", "DRIVER_LICENCE"),
     ("au_super_member", "super member number 987654321", "AU_SUPER_MEMBER"),
+    # The UK and Singapore identifiers: values tests/unit/privacy/test_uk_sg_identifiers.tk
+    # shows detected. Sort code and NRIC carry their label for the same reason.
+    ("uk_nino", "AB123456C", "UK_NINO"),
+    ("uk_sort_code", "sort code 12-34-56", "UK_SORT_CODE"),
+    ("uk_driving_licence", "MORGA657054SM9IJ", "UK_DRIVING_LICENCE"),
+    ("sg_nric", "NRIC S1234567D", "SG_NRIC"),
     ("PERSON (NER layer)", "Jane Citizen", "PERSON"),
     ("none (control)", "", ""),
 ]
-REGEX_TYPES = [c[0] for c in CASES[:17]]
+REGEX_TYPES = [c[0] for c in CASES[:22]]
 GUARDIAN = "LOKE_GUARDIAN_v"
 PLACEHOLDER = re.compile(r"\[[A-Z][A-Z0-9_]*_[0-9]+\]|\[[A-Z][A-Z0-9_]*_[0-9a-f]{4,}_[0-9]+\]")
 
