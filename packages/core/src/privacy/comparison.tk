@@ -12,6 +12,7 @@ i=lyc:core.privacy.layerconfig;
 i=cn:core.privacy.consensus;
 i=ev:core.privacy.evaluation;
 i=pl:core.privacy.pipeline;
+i=er:core.privacy.entityrouting;
 
 (* F3b.9. `loke privacy evaluate`: every configured detection layer side by side, on one text
    or on a labelled file.
@@ -20,10 +21,15 @@ i=pl:core.privacy.pipeline;
    and makes, per layer, exactly the calls core.privacy.pipeline.run makes: layerhealth.consult
    (probe, then scan only a layer that answered), layerconfig.accepted (the layer's threshold
    and entity filter), layerconfig.masks and layerconfig.vetoes, and then consensus.apply over
-   the masking layers' accepted detections with the configured strategy. What differs is what
-   is kept: run merges every layer into one list, and this keeps each layer's own list, its
-   state and its reason, so a person can see which layer found what. pipeline.tk is not
-   changed; if run ever consults layers differently, this module must follow it.
+   the masking layers' accepted detections with the configured strategy. Between the two, as
+   in run, entityrouting.apply drops a routed type's detections from layers its route does
+   not accept (F3b.5), and a routing error refuses as run's does. What differs is what is
+   kept: run merges every layer into one list, and this keeps each layer's own list, its
+   state and its reason, so a person can see which layer found what, and which of its
+   detections routing did not accept. pipeline.tk is not changed; if run ever consults
+   layers differently, this module must follow it. tests/unit/privacy/
+   test_privacy_comparison.tk compares the two decision by decision on several configs, so
+   a drift fails there rather than going unnoticed.
 
    UNAVAILABLE IS NOT EMPTY. A layer that did not complete a scan (disabled, unavailable,
    failed) reports its state and reason and no detection count at all. A count of zero is
@@ -66,7 +72,12 @@ t=$comparison{
   resolvedlayer:@str;
   voters:@str;
   strategy:str;
-  layererror:str
+  layererror:str;
+  (* F3b.5. The routing applied; accepts[k] is the layers route k accepts this run ("" for
+     every layer), as entityrouting.accepting gives it, and routedesc[k] says so in words. *)
+  routing:$routingconfig;
+  accepts:@str;
+  routedesc:@str
 };
 
 (* A layer's running score over a labelled file. texts counts the texts it scanned; a text it
@@ -110,8 +121,66 @@ f=compare(text:str;config:$pipelineconfig):$comparison{
       }
     }el{}
   };
-  let agreed:$consensusresult=cn.apply(allentities;hitlayers;voters;config.consensus;config.consensusthreshold);
-  <$comparison{layers:views;resolved:agreed.resolved;resolvedlayer:hitlayers;voters:voters;strategy:agreed.strategy;layererror:config.layererror}
+  let accepts=mut.@();
+  let routedesc=mut.@();
+  lp(let ri=0;ri<config.routing.routes.len;ri=ri+1){
+    let r:$entityroute=config.routing.routes.get(ri);
+    accepts=accepts.push(er.accepting(reg;voters;r));
+    routedesc=routedesc.push(routedescription(reg;voters;r))
+  };
+  (* F3b.5, as in pipeline.run: routing after the layers, before consensus. *)
+  let routed:$routedhits=er.apply(config.routing;reg;voters;allentities;hitlayers);
+  let cfgerror=mut.config.layererror;
+  if(str.len(cfgerror)==0 && str.len(config.routing.error)>0){ cfgerror=er.refusal(config.routing) }el{};
+  let agreed:$consensusresult=cn.apply(routed.entities;routed.layers;voters;config.consensus;config.consensusthreshold);
+  <$comparison{layers:views;resolved:agreed.resolved;resolvedlayer:routed.layers;voters:voters;strategy:agreed.strategy;layererror:cfgerror;routing:config.routing;accepts:accepts;routedesc:routedesc}
+};
+
+(* Which layers route r accepts this run, in words: the three cases of
+   entityrouting.accepting and entityrouting.note. Names types and layers, never a value. *)
+f=routedescription(reg:$filterregistry;voters:@str;r:$entityroute):str{
+  let pref=er.available(reg;voters;r.preferred;r.entitytype);
+  if(str.len(pref)>0){ <"accepted from preferred layer(s) \(pref)" }el{};
+  let fb=er.available(reg;voters;r.fallback;r.entitytype);
+  if(str.len(fb)>0){ <"no preferred layer (\(r.preferred)) is available; accepted from fallback layer(s) \(fb)" }el{};
+  <"neither a preferred (\(r.preferred)) nor a fallback (\(r.fallback)) layer is available; accepted from every layer that ran"
+};
+
+(* "; routing PERSON: accepted from ..." for a routed type, "" for an unrouted one. *)
+f=routingtext(c:$comparison;entitytype:str):str{
+  let k=er.routeindex(c.routing;entitytype);
+  if(k<0){ <"" }el{};
+  <"; routing \(entitytype): \(c.routedesc.get(k))"
+};
+
+(* The routing section: each route and what it accepts, and every detection a masking layer
+   made that routing did not accept, by type and span. *)
+f=routinglines(lines:@str;text:str;c:$comparison;showvalues:bool):@str{
+  let out=mut.lines;
+  if(c.routing.routes.len==0){ <out }el{};
+  out=out.push("");
+  out=out.push("entity routing ([[privacy.entity_routing]]), applied before consensus:");
+  lp(let k=0;k<c.routing.routes.len;k=k+1){
+    out=addline(out;"  \(c.routing.routes.get(k).entitytype): \(c.routedesc.get(k))")
+  };
+  lp(let i=0;i<c.layers.len;i=i+1){
+    let v:$layerview=c.layers.get(i);
+    if(v.completed && v.masks){
+      lp(let h=0;h<v.hits.len;h=h+1){
+        let e:$piientity=v.hits.get(h);
+        if(!er.keeps(c.routing;c.accepts;v.id;e.entitytype)){
+          out=out.push("    not accepted by routing: \(shown(e.entitytype;e.value;showvalues)) \(spanstext(spansof(text;e))) from \(v.id)")
+        }el{}
+      }
+    }el{}
+  };
+  <out
+};
+
+(* The refusal a config error causes, worded as pipeline.refusalreason words it. *)
+f=errortext(c:$comparison):str{
+  if(str.startswith(c.layererror;er.header())){ <"\(c.layererror), so the pipeline refuses every request" }el{};
+  <"privacy.layers in config.toml cannot be applied, so the pipeline refuses every request: \(c.layererror)"
 };
 
 f=completedcount(c:$comparison):i64{
@@ -235,7 +304,7 @@ f=missedby(r:$resolvedentity;voters:@str):@str{
   <out
 };
 
-f=resolvedline(text:str;r:$resolvedentity;from:str;voters:@str;showvalues:bool):str{
+f=resolvedline(text:str;r:$resolvedentity;from:str;voters:@str;showvalues:bool;route:str):str{
   let e=$piientity{entitytype:r.entitytype;value:r.value;start:r.start as u32;end:r.end as u32;confidence:r.finalconfidence;placeholder:""};
   let label=shown(r.entitytype;r.value;showvalues);
   let where=spanstext(spansof(text;e));
@@ -244,7 +313,7 @@ f=resolvedline(text:str;r:$resolvedentity;from:str;voters:@str;showvalues:bool):
   if(missed.len>0){
     agree="DISAGREEMENT, not found by \(commas(missed))"
   }el{};
-  <"    \(label) \(where) reported by \(from); found by \(r.detectinglayers); \(agree) -> \(r.action)"
+  <"    \(label) \(where) reported by \(from); found by \(r.detectinglayers); \(agree)\(route) -> \(r.action)"
 };
 
 (* The whole single-text report, one line per element. *)
@@ -257,13 +326,14 @@ f=reportlines(text:str;c:$comparison;showvalues:bool):@str{
     out=out.push("values are hidden: each detection shows its type, byte span and confidence (--show-values prints them)")
   };
   if(str.len(c.layererror)>0){
-    out=out.push("privacy.layers in config.toml cannot be applied, so the pipeline refuses every request: \(c.layererror)")
+    out=out.push(errortext(c))
   }el{};
   out=out.push("");
   out=out.push("layers, in registry order:");
   lp(let i=0;i<c.layers.len;i=i+1){
     out=layerlines(out;text;c.layers.get(i);showvalues)
   };
+  out=routinglines(out;text;c;showvalues);
   out=out.push("");
   let voters=mut.str.join(",";c.voters);
   if(c.voters.len==0){ voters="none" }el{};
@@ -277,7 +347,7 @@ f=reportlines(text:str;c:$comparison;showvalues:bool):@str{
   let overlaps=mut.0;
   lp(let i=0;i<c.resolved.len;i=i+1){
     let r:$resolvedentity=c.resolved.get(i);
-    out=out.push(resolvedline(text;r;c.resolvedlayer.get(i);c.voters;showvalues));
+    out=out.push(resolvedline(text;r;c.resolvedlayer.get(i);c.voters;showvalues;routingtext(c;r.entitytype)));
     if(str.eq(r.action;"mask")){ masked=masked+1 }el{};
     if(missedby(r;c.voters).len>0){ disagree=disagree+1 }el{};
     if(foundby(r).len>1){ overlaps=overlaps+1 }el{}
@@ -357,6 +427,7 @@ f=labelledreport(jsonl:str;config:$pipelineconfig):$labelledresult{
         let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
         let c=compare(text;config);
         layererror=c.layererror;
+        if(str.len(c.layererror)>0){ layererror=errortext(c) }el{};
         tallies=scoreline(text;ents;c;tallies);
         ntexts=ntexts+1;
         labelled=labelled+(ev.corpuslabels(text;ents;true).len as i64)
@@ -370,7 +441,7 @@ f=labelledreport(jsonl:str;config:$pipelineconfig):$labelledresult{
     <$labelledresult{text:str.join("\n";out);ok:false}
   }el{};
   if(str.len(layererror)>0){
-    out=out.push("privacy.layers in config.toml cannot be applied, so the pipeline refuses every request: \(layererror)")
+    out=out.push(layererror)
   }el{};
   out=out.push("tp = labelled entities a layer's detections overlap; fn = labelled entities they miss; fp = detection regions overlapping no real PII. Values are never printed.");
   let scannedany=mut.false;

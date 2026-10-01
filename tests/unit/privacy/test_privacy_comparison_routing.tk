@@ -1,0 +1,133 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.comparisonrouting;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=cmp:core.privacy.comparison;
+i=ev:core.privacy.evaluation;
+(* For $resolvedentity, a type only. *)
+i=cn:core.privacy.consensus;
+
+(* F3b.9 after F3b.5 — `loke privacy evaluate` must decide what core.privacy.pipeline.run
+   decides. core.privacy.comparison.compare mirrors run's layer loop by hand, so when run gained
+   the entity-routing step (F3b.5) compare silently disagreed with it whenever
+   [[privacy.entity_routing]] was configured. Two things here:
+
+   THE DRIFT GUARD. For each of several configurations -- the default, majority, a route,
+   a route under majority, a route whose preferred layer is down (fallback), a route with
+   neither layer up, a malformed route, and Presidio down -- run and compare are given the same
+   text and their consensus decisions are compared one by one: type, span, the layers in
+   the group with their confidences, and mask or pass, plus the strategy applied and the
+   refusal. Any later change to run that compare does not follow fails here.
+
+   THE ROUTING REPORT. With PERSON routed to Presidio (fallback NER), the report says which
+   layers routing accepts PERSON from, lists NER's PERSON as not accepted, by type and span,
+   and still prints no value; with Presidio down it says the fallback was used.
+
+   scripts/lib/http_recorder.py stands in for NER and Presidio, which both report "Jane
+   Citizen"; the regex layer finds the email. Nothing listens on port 1. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_cmprouting_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* One line per consensus decision, without the value: what the guard compares. *)
+f=signature(rs:@$resolvedentity):str{
+  let out=mut.@();
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$resolvedentity=rs.get(i);
+    out=out.push("\(r.entitytype) \(ev.numtext(r.start))-\(ev.numtext(r.end)) \(r.detectinglayers) \(r.action)")
+  };
+  <str.join(" | ";out)
+};
+
+f=route(pref:str;fall:str):str{
+  <"[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = \(pref)\nfallback_layers = \(fall)\n"
+};
+
+(* Run and compare agree on c. *)
+f=agree(text:str;c:$pipelineconfig;label:str):bool{
+  let r=pl.run(text;"";c);
+  let k=cmp.compare(text;c);
+  let rs=signature(r.resolved);
+  let ks=signature(k.resolved);
+  let same=str.eq(rs;ks) && str.eq(r.consensus;k.strategy) && str.eq(r.layererror;k.layererror);
+  <t.assert(same;"\(label): evaluate decides as the pipeline does (run: \(rs) [\(r.consensus)] [\(r.layererror)]; evaluate: \(ks) [\(k.strategy)] [\(k.layererror)])")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(rec!=0 && str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  let dead="http://127.0.0.1:1";
+
+  let text="Jane Citizen called Tuesday, mail jane@example.com";
+  let all=pl.newconfig(url;url);
+  let pq="[\"presidio\"]";
+  let nq="[\"ner\"]";
+  let routed=pl.withroutingconfig(all;route(pq;nq));
+  let routedmaj=pl.withconsensus(routed;"majority";"");
+  let pdown=pl.newconfig(dead;url);
+  let fallback=pl.withroutingconfig(pdown;route(pq;nq));
+  let neither=pl.withroutingconfig(pl.newconfig(dead;dead);route(pq;nq));
+  let bad=pl.withroutingconfig(all;"[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = [\"regex\"]\n");
+
+  (* ── The drift guard ──────────────────────────────────────────────────────── *)
+  if(agree(text;all;"default")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;pl.withconsensus(all;"majority";"");"majority")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;pdown;"Presidio down")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;routed;"PERSON routed to Presidio")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;routedmaj;"routed, under majority")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;fallback;"routed, Presidio down: fallback")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;neither;"routed, neither layer up")){pass=pass+1}el{fail=fail+1};
+  if(agree(text;bad;"malformed route")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The routing report ───────────────────────────────────────────────────── *)
+  let r=cmp.report(text;routed;false);
+  if(t.assert(str.contains(r;"  PERSON: accepted from preferred layer(s) presidio");"the report says routing accepts PERSON from Presidio")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"not accepted by routing: [PERSON] 0-12 from ner");"and lists NER's PERSON as not accepted, by type and span")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"[PERSON] 0-12 reported by presidio; found by presidio=") && !str.contains(r;"reported by ner");"consensus sees only Presidio's PERSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"; routing PERSON: accepted from preferred layer(s) presidio -> mask");"and each routed decision says where routing accepted it from")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(r;"Jane") && !str.contains(r;"Citizen") && !str.contains(r;"jane@");"with no value printed")){pass=pass+1}el{fail=fail+1};
+  let rm=cmp.report(text;routedmaj;false);
+  if(t.assert(str.contains(rm;"[PERSON] 0-12 reported by presidio") && str.contains(rm;"presidio -> pass");"under majority the routed name (1 of 3 voters) passes, as the pipeline decides")){pass=pass+1}el{fail=fail+1};
+  let rf=cmp.report(text;fallback;false);
+  if(t.assert(str.contains(rf;"no preferred layer (presidio) is available; accepted from fallback layer(s) ner");"with Presidio down the report says the fallback is used")){pass=pass+1}el{fail=fail+1};
+  let rn=cmp.report(text;neither;false);
+  if(t.assert(str.contains(rn;"neither a preferred (presidio) nor a fallback (ner) layer is available; accepted from every layer that ran");"and with neither up, that every layer that ran is used")){pass=pass+1}el{fail=fail+1};
+  let rb=cmp.compare(text;bad);
+  if(t.assert(!cmp.evaluated(rb) && str.startswith(rb.layererror;"privacy.entity_routing in config.toml cannot be applied");"a malformed route is a refusal, as in the pipeline")){pass=pass+1}el{fail=fail+1};
+
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  <fail
+};
