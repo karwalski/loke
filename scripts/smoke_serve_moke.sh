@@ -137,6 +137,8 @@ api POST /api/upload    ''                              400 'empty body'        
 # holds the cells, not their addresses.
 api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"filename":"sales_q3.csv"' "an upload takes its name from ?name="
 api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"preview_rows":[["north","10"]]' "and previews the rows it parsed"
+# MK6.9: the name is percent-decoded (moke.query.value); it was stored as sent.
+api POST '/api/upload?name=sales%20q3%2B.csv' $'region,amount\nnorth,10\n' 200 '"filename":"sales q3+.csv"' "a percent-encoded ?name= is decoded"
 api POST /api/routing   '{"prompt":"hello"}'            200 '"routing":{'           "routing explains a decision"
 # GA1.5c: the cost it answered was priced over a fixed 500 tokens in and 200 out, whatever the
 # prompt. No token is counted before dispatch, so it must say the cost is not measured.
