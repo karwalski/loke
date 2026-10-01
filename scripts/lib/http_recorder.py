@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A local HTTP server that records EVERY request it receives, whatever the method. (VM1.6e)
 
-Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo] [<cert.pem> <key.pem>]
+Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo|mcpecho] [<cert.pem> <key.pem>]
 
 It binds a port the OS hands out on 127.0.0.1 and writes the number to <port-file> once it
 is listening, so a test needs no fixed port and two runs cannot collide. Each request is
@@ -34,6 +34,14 @@ with the prompt it was given, as a model that repeats its input would. In `answe
 scripts/lib/fake_ollama.py is the Ollama stand-in smoke_e2e.sh uses; it logs POSTs only, and
 a GET that never arrives is precisely what VM1.6e is about, so this is a separate file.
 
+`mcpecho` (MK6.14) answers as `answer` does except a tools/call to /mcp, which answers with
+one text content item per string value of the call's arguments, in document order, encoded
+by Python's json.dumps with its default ensure_ascii, so a non-ASCII character comes back as
+a \\uXXXX escape. An upstream tool that repeats what it was given is how a test sees whether
+the broker restores a placeholder exactly, whatever escapes the upstream's encoder chose.
+In that mode /analyze reports a PERSON wherever `Jane` and `Citizen` stand together across
+whitespace, at the offsets Python gives (code points), instead of the fixed span above.
+
 F5.11: every request's headers are also appended to `<log-file>.headers`, as a
 `METHOD path` line, one `name: value` line per header in the order they arrived (a
 duplicated header appears twice), and a blank line. The hosted-provider paths
@@ -54,7 +62,7 @@ the certificate the test can see both that a connection was attempted (the `.tls
 that no request arrived (nothing in `<log-file>`). scripts/lib/tls_fixture.sh makes the
 certificates.
 """
-import http.server, json, os, ssl, sys
+import http.server, json, os, re, ssl, sys
 
 LOG = sys.argv[1]
 PORTFILE = sys.argv[2]
@@ -101,6 +109,17 @@ OPENAI = {"id": "chatcmpl-recorder", "object": "chat.completion", "model": "gpt-
 # A policy set in the shape core.policy.loader reads from a file or a URL (VM1.6h).
 POLICY = {"name": "recorder-policy", "regulations": [{"name": "recorder-reg", "jurisdiction": "AU", "version": "1",
           "rules": [{"id": "r1", "description": "no secrets", "action": "block", "severity": "high"}]}]}
+
+
+def _strings(v):
+    """Every string value in a decoded JSON value, in document order (keys excluded)."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [s for x in v for s in _strings(x)]
+    if isinstance(v, dict):
+        return [s for x in v.values() for s in _strings(x)]
+    return []
 
 
 def _field(body, key):
@@ -163,6 +182,18 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"model": "fake", "message": {"role": "assistant", "content": NER}, "done": True})
         elif p == "/api/show":
             self._send({"digest": "sha256:recorder-digest", "modelinfo": {}})
+        elif p == "/mcp" and MODE == "mcpecho" and '"tools/call"' in body:
+            try:
+                args = json.loads(body).get("params", {}).get("arguments", {})
+            except ValueError:
+                args = {}
+            items = [{"type": "text", "text": s} for s in _strings(args)]
+            b = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": items}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
         elif p == "/mcp":
             # A JSON-RPC answer carrying both an initialize result and a tools/list result,
             # so one reply serves core.mcp and the broker (VM1.6f).
@@ -195,6 +226,11 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({})
         elif p == "/health":
             self._send({"status": "ok"})
+        elif p == "/analyze" and MODE == "mcpecho":
+            # MK6.14: a PERSON wherever "Jane" and "Citizen" stand together, across any
+            # whitespace, at Python's offsets (code points), as Presidio reports them.
+            self._send([{"entity_type": "PERSON", "start": m.start(), "end": m.end(), "score": 0.85}
+                        for m in re.finditer(r"Jane\s+Citizen", _field(body, "text"))])
         elif p == "/analyze":
             self._send(PRESIDIO)
         elif p in ("/detect", "/anonymise"):

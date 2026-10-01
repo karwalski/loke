@@ -61,11 +61,115 @@ f=proxyupstreamfail(toolname:str;entry:$serverentry):$proxyresult{
   }
 };
 
+(* ── MK6.14: anonymise and restore VALUES, not JSON text ─────────────────────────
+   The broker ran the privacy pipeline over the arguments' JSON text and forwarded the
+   anonymised text. Measured through mcpbroker.server.handlerequest to a recorder: in
+   `"Call\njane.citizen@example.com today"` the regex layer matched `njane.citizen@...`,
+   taking the letter of the `\n` escape, and the upstream received `Call\[EMAIL_..._1]
+   today`, a backslash before `[`, which is not a JSON escape, so the whole tools/call was
+   invalid JSON. The same after `\t` and after `→`, and for any detector that matches
+   word characters.
+
+   So the text is split into its tokens (jx.segments) and the detectors scan the decoded
+   values, every string (keys too, as the text scan did) and every bare value (a phone
+   number sent as a JSON number), one blank line between them, in ONE pipeline run, so one
+   request id salts every placeholder and an address that occurs in two values gets one
+   placeholder. Each value the entities change is written back with jx.escape; every other
+   token is forwarded exactly as the client sent it.
+
+   An entity the scan found that lies in no single value spans two of them, and no
+   replacement inside a value can remove it, so the call is refused rather than forwarded
+   with half of it in the clear. Arguments that cannot be tokenised are refused too.
+
+   The answer is restored the same way: each string token decoded, its placeholders
+   replaced, and written back with jx.escape if that changed it. The originals are decoded
+   text now, so putting them into the JSON text as they are (what ph.restore on the answer
+   did) would break it for a value holding a quote or a backslash. An answer that cannot
+   be tokenised is restored as text, as before: it was not JSON to begin with. *)
+f=isstringtok(seg:str):bool{
+  <str.charat(seg;0)==34
+};
+
+f=isvaluetok(seg:str):bool{
+  let c=str.charat(seg;0);
+  <c==34 || !jx.isstructural(c)
+};
+
+(* A string token's decoded text; a bare value as written. *)
+f=tokvalue(seg:str):str{
+  if(isstringtok(seg)){ <jx.decodestr(jx.sliceor(seg;1;(str.len(seg) as i64)-1)) }el{};
+  <seg
+};
+
+f=scantext(segs:@str):str{
+  let b=str.buf();
+  lp(let i=0;i<segs.len;i=i+1){
+    let seg:str=segs.get(i);
+    if(isvaluetok(seg)){
+      str.add(b;tokvalue(seg));
+      str.add(b;"\n\n")
+    }el{}
+  };
+  <str.done(b)
+};
+
+f=inanyvalue(segs:@str;value:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<segs.len && !found;i=i+1){
+    let seg:str=segs.get(i);
+    if(isvaluetok(seg)){
+      if(str.contains(tokvalue(seg);value)){ found=true }el{}
+    }el{}
+  };
+  <found
+};
+
+f=spansvalues(segs:@str;entities:@$piientity):bool{
+  let spans=mut.false;
+  lp(let j=0;j<entities.len && !spans;j=j+1){
+    let e:$piientity=entities.get(j);
+    if(!inanyvalue(segs;e.value)){ spans=true }el{}
+  };
+  <spans
+};
+
+f=anonymiseargs(segs:@str;entities:@$piientity):str{
+  let b=str.buf();
+  lp(let i=0;i<segs.len;i=i+1){
+    let seg:str=segs.get(i);
+    if(isvaluetok(seg)){
+      let v=tokvalue(seg);
+      let a=ph.applytotext(v;entities);
+      if(str.eq(a;v)){ str.add(b;seg) }el{ str.add(b;jx.escape(a)) }
+    }el{
+      str.add(b;seg)
+    }
+  };
+  <str.done(b)
+};
+
+f=restoreanswer(raw:str;map:$placeholdermap):str{
+  let segs=jx.segments(raw);
+  if(segs.len==0){ <ph.restore(raw;map) }el{};
+  let b=str.buf();
+  lp(let i=0;i<segs.len;i=i+1){
+    let seg:str=segs.get(i);
+    if(isstringtok(seg)){
+      let v=tokvalue(seg);
+      let r=ph.restore(v;map);
+      if(str.eq(r;v)){ str.add(b;seg) }el{ str.add(b;jx.escape(r)) }
+    }el{
+      str.add(b;seg)
+    }
+  };
+  <str.done(b)
+};
+
 f=proxyhandleresponse(raw:str;toolname:str;entry:$serverentry;map:$placeholdermap):$proxyresult{
   log.info(str.concat("proxied ";str.concat(toolname;str.concat(" via ";entry.name)));"proxy";"proxy_call");
   <$proxyresult{
     ok:true;
-    responsebody:ph.restore(raw;map);
+    responsebody:restoreanswer(raw;map);
     upstreamserver:entry.name;
     privacyapplied:true
   }
@@ -95,14 +199,29 @@ f=proxyblocked(toolname:str;entry:$serverentry):$proxyresult{
   }
 };
 
+f=proxyrefused(toolname:str;entry:$serverentry;why:str):$proxyresult{
+  log.warn("refused: \(toolname): \(why)";"proxy";"proxy_call");
+  <$proxyresult{
+    ok:false;
+    responsebody:proto.errorresponse(1;(0-32602) as i32;"Blocked: \(why)");
+    upstreamserver:entry.name;
+    privacyapplied:true
+  }
+};
+
 f=proxyhandleentry(entry:$serverentry;toolname:str;argsjson:str;pipecfg:$pipelineconfig):$proxyresult{
-  let run=pipe.run(argsjson;"";pipecfg);
+  let segs=jx.segments(argsjson);
+  if(segs.len==0){ <proxyrefused(toolname;entry;"the arguments are not readable JSON") }el{};
+  let run=pipe.run(scantext(segs);"";pipecfg);
   let detected=run.result;
   (* Fail closed: what the policy will not forward does not go upstream. *)
   if(pipe.issafetoforward(run)){}el{
     <proxyblocked(toolname;entry)
   };
-  <proxysendrequest(detected.anonymised;toolname;entry;ph.mapfromentities(detected.entities))
+  if(spansvalues(segs;detected.entities)){
+    <proxyrefused(toolname;entry;"a detected entity spans two argument values")
+  }el{};
+  <proxysendrequest(anonymiseargs(segs;detected.entities);toolname;entry;ph.mapfromentities(detected.entities))
 };
 
 f=proxynotfound(toolname:str):$proxyresult{

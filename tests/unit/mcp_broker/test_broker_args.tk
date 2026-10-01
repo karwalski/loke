@@ -1,0 +1,145 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.mcpbroker.brokerargs;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pipe:core.privacy.pipeline;
+i=reg:mcpbroker.registry;
+i=server:mcpbroker.server;
+i=proxy:mcpbroker.proxy;
+
+(* MK6.14 and MK6.15 — a tools/call through the broker's production front end,
+   mcpbroker.server.handlerequest, to scripts/lib/http_recorder.py in `mcpecho` mode, which
+   records exactly what arrives and answers with every string value of the arguments it was
+   given. So one call shows both halves: what the upstream receives (strict JSON, no
+   address, each address replaced by a placeholder and nothing else), and what the client
+   gets back after the broker restores the answer (the original values, exactly).
+
+   Each address sits directly after a JSON escape: a newline, a tab, a quote, a backslash
+   and a unicode escape. The broker used to anonymise the arguments' JSON TEXT, so the
+   regex layer matched from the escape's letter (`njane...`, `2192ann...`) and the forwarded
+   text became `Call\[EMAIL_..._1] today`, which is not JSON.
+
+   Then the fail-closed paths (a request or arguments that cannot be read; an entity that
+   runs across two values) and a name found by a second layer (the recorder as Presidio). *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_brokerargs_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=judge(args:@str):str{
+  let h=mt process.spawn(args) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+(* The forwarded field, judged by regular expression: the placeholder's salt is random. *)
+f=sent(bodies:str;field:str;pattern:str):str{
+  <judge(@("python3";"scripts/lib/json_field.py";"--re";bodies;"/mcp";"params.arguments.\(field)";pattern))
+};
+
+f=answered(body:str;idx:i64;want:str):str{
+  <judge(@("python3";"scripts/lib/json_field.py";"--body";body;"result.content.\(idx).text";want))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let bodies="\(logp).bodies";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port";"mcpecho")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder standing in for the upstream MCP server came up")){pass=pass+1}el{fail=fail+1};
+  let none:@str=@();
+  let upstream=$serverentry{ name:"rec"; host:"127.0.0.1"; port:str.toint(port) as i32; toolprefix:"rec_"; healthy:true; lastchecked:0; tools:none };
+  let registry=reg.register(reg.newregistry();upstream);
+  (* Presidio and the NER model are not listening, so the regex layer alone scans: a
+     degraded run, which the broker forwards. *)
+  let cfg=pipe.newconfig("http://127.0.0.1:59991";"http://127.0.0.1:59992");
+
+  (* The arguments as a client sends them, JSON text. In toke source `\\n` is the two
+     characters backslash and n, which is what a JSON encoder writes for a newline. *)
+  let args="{\"a\":\"Call\\njane.citizen@example.com today\",\"b\":\"tab\\tbob.lee@example.org\",\"c\":\"say \\\"cara.ng@example.net\\\"\",\"d\":\"C:\\\\dan.oh@example.com\",\"e\":\"arrow \\u2192ann.yu@example.com caf\\u00e9\"}";
+  let req="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"rec_echo\",\"arguments\":\(args)}}";
+  let answer=server.handlerequest(req;registry;cfg);
+  let got=readfile(bodies);
+
+  let ph="\\[EMAIL_[0-9a-f]{4}_[0-9]+\\]";
+  if(t.asserteq(sent(bodies;"a";"Call\n\(ph) today");"ok";"after a newline escape: the call arrives as strict JSON and only the address is replaced")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sent(bodies;"b";"tab\t\(ph)");"ok";"after a tab escape: likewise")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sent(bodies;"c";"say \"\(ph)\"");"ok";"after a quote escape: likewise")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sent(bodies;"d";"C:\\\\\(ph)");"ok";"after a backslash escape: likewise")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sent(bodies;"e";"arrow →\(ph) café");"ok";"after a unicode escape: likewise, and the escaped characters arrive as themselves")){pass=pass+1}el{fail=fail+1};
+  let addrs=@("jane.citizen@example.com";"bob.lee@example.org";"cara.ng@example.net";"dan.oh@example.com";"ann.yu@example.com");
+  let leaked=mut.0;
+  lp(let k=0;k<addrs.len;k=k+1){
+    if(str.contains(got;addrs.get(k))){ leaked=leaked+1 }el{}
+  };
+  if(t.assert(str.len(got)>0 && leaked==0;"no address reaches the upstream")){pass=pass+1}el{fail=fail+1};
+
+  (* The upstream repeats each value; the broker must give the client back the originals. *)
+  if(t.asserteq(answered(answer;0;"Call\njane.citizen@example.com today");"ok";"restored: the value after a newline is exact")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(answered(answer;1;"tab\tbob.lee@example.org");"ok";"restored: after a tab")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(answered(answer;2;"say \"cara.ng@example.net\"");"ok";"restored: after a quote")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(answered(answer;3;"C:\\dan.oh@example.com");"ok";"restored: after a backslash")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(answered(answer;4;"arrow →ann.yu@example.com café");"ok";"restored: after a unicode escape, with the upstream's own \\u escapes decoded")){pass=pass+1}el{fail=fail+1};
+
+  (* Fail closed: arguments that cannot be read are refused, and nothing more is sent. *)
+  let before=str.len(readfile(bodies));
+  let broken="{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"rec_echo\",\"arguments\":{\"a\":\"never closed}}}";
+  let refused=server.handlerequest(broken;registry;cfg);
+  if(t.assert(str.contains(refused;"\"error\"") && str.len(readfile(bodies))==before;"a request that is not JSON is answered with an error and nothing is forwarded")){pass=pass+1}el{fail=fail+1};
+  let pr=proxy.proxycall("rec_echo";"{\"a\":\"never closed";registry;cfg);
+  if(t.assert(!pr.ok && str.contains(pr.responsebody;"Blocked") && str.len(readfile(bodies))==before;"arguments the proxy cannot tokenise are refused, not forwarded")){pass=pass+1}el{fail=fail+1};
+
+  (* With the recorder also standing in for Presidio, which reports a PERSON wherever
+     "Jane" and "Citizen" stand together: the values are scanned as one text, and an
+     entity found there is replaced in the value that holds it. This name holds a tab, so
+     the original in the map is decoded text with a raw tab in it, and the restore must
+     escape it as it puts it back into the answer. *)
+  let withpresidio=pipe.newconfig("http://127.0.0.1:\(port)";"http://127.0.0.1:59992");
+  let named="{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"rec_echo\",\"arguments\":{\"who\":\"call Jane\\tCitizen today\"}}}";
+  let a4=server.handlerequest(named;registry;withpresidio);
+  if(t.asserteq(sent(bodies;"who";"call \\[PERSON_[0-9a-f]{4}_1\\] today");"ok";"a name Presidio finds in a value is replaced in that value")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(answered(a4;0;"call Jane\tCitizen today");"ok";"and restored in the answer as strict JSON, its tab escaped")){pass=pass+1}el{fail=fail+1};
+  (* Here the name runs across two values of an array: no replacement inside one value can
+     remove it, so the call is refused. *)
+  let mcpcalls=str.split(readfile(bodies);"\"/mcp\"").len;
+  let split="{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"rec_echo\",\"arguments\":{\"name\":[\"Jane\",\"Citizen\"]}}}";
+  let a5=server.handlerequest(split;registry;withpresidio);
+  if(t.assert(str.contains(a5;"Blocked") && str.split(readfile(bodies);"\"/mcp\"").len==mcpcalls;"an entity that spans two values is refused, not forwarded")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(bodies);
+  file.delete("\(logp).headers");
+  file.delete("\(base).port");
+  <fail
+};

@@ -404,3 +404,176 @@ f=valueraw(o:$json;key:str):str{
   }el{};
   <sliceor(rest;0;bareend(rest;rlen))
 };
+
+(* ── A JSON string decoded completely, and a JSON text as its tokens (MK6.14) ──────
+   `unescape` above leaves \uXXXX as written (except the control characters `escape`
+   writes), which is right for a value that is only read and wrong for one that is changed
+   and written back: `escape` would double the backslash, and `é` would arrive as six
+   characters. The MCP broker anonymises each value of a tool call's arguments and writes
+   the changed ones back with `escape`, so it needs every escape decoded: \uXXXX to UTF-8,
+   a surrogate pair joined, a lone surrogate as U+FFFD (it cannot be UTF-8). \u0000 is left
+   as written, because a toke str cannot hold NUL, and so is an escape JSON does not
+   define. *)
+f=hexdigit(c:i64):i64{
+  if(c>=48 && c<=57){ <c-48 }el{};
+  if(c>=97 && c<=102){ <c-87 }el{};
+  if(c>=65 && c<=70){ <c-55 }el{};
+  <0-1
+};
+
+f=hex4(s:str;at:i64;n:i64):i64{
+  if(at+4>n){ <0-1 }el{};
+  let v=mut.0;
+  lp(let k=0;k<4;k=k+1){
+    let d=hexdigit(str.charat(s;at+k));
+    if(d<0){ <0-1 }el{};
+    v=v*16+d
+  };
+  <v
+};
+
+f=utf8(cp:i64):str{
+  let b=str.buf();
+  if(cp<128){
+    str.addbyte(b;cp as byte)
+  }el{
+    if(cp<2048){
+      str.addbyte(b;(192+cp/64) as byte);
+      str.addbyte(b;(128+cp%64) as byte)
+    }el{
+      if(cp<65536){
+        str.addbyte(b;(224+cp/4096) as byte);
+        str.addbyte(b;(128+(cp/64)%64) as byte);
+        str.addbyte(b;(128+cp%64) as byte)
+      }el{
+        str.addbyte(b;(240+cp/262144) as byte);
+        str.addbyte(b;(128+(cp/4096)%64) as byte);
+        str.addbyte(b;(128+(cp/64)%64) as byte);
+        str.addbyte(b;(128+cp%64) as byte)
+      }
+    }
+  };
+  <str.done(b)
+};
+
+(* The text a one-character escape stands for, or "" when `e` names none (`u` included:
+   the caller decodes that). *)
+f=simpleescape(e:i64):str{
+  if(e==110){ <"\n" }el{};
+  if(e==116){ <"\t" }el{};
+  if(e==114){ <"\r" }el{};
+  if(e==34){ <"\"" }el{};
+  if(e==92){ <"\\" }el{};
+  if(e==47){ <"/" }el{};
+  if(e==98){ <"\x08" }el{};
+  if(e==102){ <"\x0c" }el{};
+  <""
+};
+
+(* The code point of the \u escape whose backslash is at `k`, joined with a following low
+   surrogate, times 16, plus the characters it took (6 or 12); -1 when it is not one. *)
+f=unicodeat(body:str;k:i64;n:i64):i64{
+  let cp=hex4(body;k+2;n);
+  if(cp<=0){ <0-1 }el{};
+  if(cp<55296 || cp>=57344){ <cp*16+6 }el{};
+  if(cp<56320 && str.charat(body;k+6)==92 && str.charat(body;k+7)==117){
+    let lo=hex4(body;k+8;n);
+    if(lo>=56320 && lo<57344){ <(65536+(cp-55296)*1024+(lo-56320))*16+12 }el{}
+  }el{};
+  <65533*16+6
+};
+
+(* The text of a JSON string's body (the characters between its quotes). *)
+f=decodestr(body:str):str{
+  if(!str.contains(body;"\\")){ <body }el{};
+  let n=str.len(body) as i64;
+  let b=str.buf();
+  let run=mut.0;
+  let k=mut.0;
+  lp(let lv=0;k<n;lv=lv){
+    if(str.charat(body;k)==92 && k+1<n){
+      str.add(b;sliceor(body;run;k));
+      let e=str.charat(body;k+1);
+      let simple=simpleescape(e);
+      let u=mut.0-1;
+      if(e==117){ u=unicodeat(body;k;n) }el{};
+      if(str.len(simple)>0){
+        str.add(b;simple);
+        k=k+2
+      }el{
+        if(u<0){
+          str.add(b;sliceor(body;k;k+2));
+          k=k+2
+        }el{
+          str.add(b;utf8(u/16));
+          k=k+u%16
+        }
+      };
+      run=k
+    }el{
+      k=k+1
+    }
+  };
+  str.add(b;sliceor(body;run;n));
+  <str.done(b)
+};
+
+(* JSON's structural characters and its whitespace: { } [ ] , : space tab LF CR. *)
+f=isstructural(c:i64):bool{
+  <c==123 || c==125 || c==91 || c==93 || c==44 || c==58 || c==32 || c==9 || c==10 || c==13
+};
+
+(* Where the string token whose opening quote is at `from` ends (exclusive), or -1. *)
+f=strendat(s:str;from:i64;n:i64):i64{
+  let esc=mut.false;
+  let end=mut.0-1;
+  lp(let k=from+1;k<n && end<0;k=k+1){
+    let c=str.charat(s;k);
+    if(esc){
+      esc=false
+    }el{
+      if(c==92){ esc=true }el{
+        if(c==34){ end=k+1 }el{}
+      }
+    }
+  };
+  <end
+};
+
+(* Where a run of structure (or, with structural false, a bare value) starting at `from`
+   ends: at a quote, or at the first character of the other kind. *)
+f=runend(s:str;from:i64;n:i64;structural:bool):i64{
+  let end=mut.n;
+  lp(let k=from;k<n && end==n;k=k+1){
+    let c=str.charat(s;k);
+    if(c==34){
+      end=k
+    }el{
+      if(structural){
+        if(!isstructural(c)){ end=k }el{}
+      }el{
+        if(isstructural(c)){ end=k }el{}
+      }
+    }
+  };
+  <end
+};
+
+(* A JSON text as its tokens, in order and losslessly: each string with its quotes, each
+   bare value (number, true, false, null), and each run of structure and whitespace between
+   them, so that joining them gives the text back. A string that is never closed answers
+   @(): nothing is taken from a text that cannot be read. *)
+f=segments(text:str):@str{
+  let n=str.len(text) as i64;
+  let out=mut.@();
+  let k=mut.0;
+  lp(let lv=0;k<n;lv=lv){
+    let c=str.charat(text;k);
+    let e=mut.0;
+    if(c==34){ e=strendat(text;k;n) }el{ e=runend(text;k;n;isstructural(c)) };
+    if(e<0){ <@() }el{};
+    out=out.push(sliceor(text;k;e));
+    k=e
+  };
+  <out
+};
