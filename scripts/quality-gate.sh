@@ -312,6 +312,12 @@ step_checks() {
       || { python3 ./scripts/check_loopback_binds.py packages src >&2; failed=1; }
   fi
 
+  if [[ -f ./scripts/check_moke_estimates.sh ]]; then
+    echo "  moke invents no token count or saving (GA1.5c)"
+    bash ./scripts/check_moke_estimates.sh >/dev/null \
+      || { bash ./scripts/check_moke_estimates.sh >&2; failed=1; }
+  fi
+
   if [[ -x ./scripts/check_backlog.py ]] || [[ -f ./scripts/check_backlog.py ]]; then
     echo "  backlog schema and generated SUMMARY"
     python3 ./scripts/check_backlog.py --check || failed=1
@@ -393,6 +399,12 @@ step_checks() {
     echo "  cross-dataset joins hold against real columns"
     node packages/moke/static/js/tests/test-moke-relationships.js >/dev/null \
       || { echo "  a declared join names a column the data does not have" >&2; failed=1; }
+  fi
+
+  if [[ -f packages/moke/static/js/tests/test-moke-savings.js ]] && command -v node >/dev/null; then
+    echo "  moke's savings ledger records only loke's measurements (GA1.5c)"
+    node packages/moke/static/js/tests/test-moke-savings.js >/dev/null \
+      || { echo "  savings ledger tests failed — moke would show a saving nothing measured" >&2; failed=1; }
   fi
 
   # Two checks for the defect class MK20.4 fixed: presentation mode rendered

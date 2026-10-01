@@ -76,6 +76,11 @@ done
 
 node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "${UI_CHECKS:-$ROOT/tests/ui/chat_ga3.json}"
 rc=$?
+# GA1.5c: moke's savings ledger and view, judged against loke's own reply to a real request.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "$ROOT/tests/ui/savings_ga15c.json"
+  rc=$?
+fi
 # DA1.5: loke's savings page, after the chat checks above have sent requests through it.
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/savings" "$ROOT/tests/ui/savings_da15.json"

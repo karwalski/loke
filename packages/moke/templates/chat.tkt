@@ -540,7 +540,7 @@
         <div class="stat-row"><span class="stat-label">Tokens (in/out)</span><span class="stat-value" id="stat-tokens">0 / 0</span></div>
         <div class="stat-row"><span class="stat-label">Cost</span><span class="stat-value" id="stat-cost">$0.000000</span></div>
         <div class="stat-row"><span class="stat-label">Local ratio</span><span class="stat-value" id="stat-local">&mdash;</span></div>
-        <div class="stat-row"><span class="stat-label">Saved vs cloud</span><span class="stat-value" id="stat-saved">$0.00</span></div>
+        <div class="stat-row"><span class="stat-label">Saved vs cloud</span><span class="stat-value" id="stat-saved" title="No tokeniser or price table is named, so no saving is computed (GA1.5c)">not measured</span></div>
       </div>
     </div>
 
@@ -606,6 +606,7 @@
 </div>
 
 <script src="/static/js/moke-relationships.js"></script>
+<script src="/static/js/moke-savings.js"></script>
 <script>
 (function() {
   /* ── A3.3 Compliance response scanner (inline for chat page) ── */
@@ -767,22 +768,20 @@
     setViewMode(saved);
   })();
 
-  /* ── GA3.4 Pre-send cost estimation ── */
-  var COST_PER_1K = { 'claude-sonnet-5': 0.002, 'qwen2.5:3b': 0, 'qwen2.5:0.5b': 0, 'llama3.2:3b': 0, 'loke-router': 0.003 };
+  /* ── GA3.4 Pre-send size ──
+     GA1.5c: this showed "~N tokens, est. $X" from text length / 4 and a per-model rate
+     table. Neither was measured. It now shows the question's size as typed, and says that
+     tokens and cost are not measured until the provider answers. */
   var costEstimateEl = document.getElementById('cost-estimate-bar');
 
   window.updateCostEstimate = function() {
     var input = document.getElementById('chat-input');
-    var model = document.getElementById('model-select').value;
     var text = input ? input.value : '';
     if (text.trim().length === 0) {
       costEstimateEl.style.display = 'none';
       return;
     }
-    var tokenEstimate = Math.ceil(text.length / 4);
-    var costRate = COST_PER_1K[model] || 0.003;
-    var estCost = (tokenEstimate / 1000) * costRate;
-    costEstimateEl.textContent = '~' + tokenEstimate + ' tokens, est. $' + estCost.toFixed(4) + (costRate === 0 ? ' (local — free)' : '');
+    costEstimateEl.textContent = window.mokeSavings.preSend(text);
     costEstimateEl.style.display = 'block';
   };
 
@@ -881,9 +880,8 @@
     var total = sessionStats.localCount + sessionStats.cloudCount;
     if (el) el.textContent = total > 0 ? Math.round((sessionStats.localCount / total) * 100) + '%' : '\u2014';
     el = document.getElementById('stat-saved');
-    // Estimate: cloud cost ~$0.01 per request, local is free
-    var estimated = sessionStats.localCount * 0.01;
-    if (el) el.textContent = '$' + estimated.toFixed(2);
+    // GA1.5c: this was localCount * $0.01, a price per request nothing measured.
+    if (el) el.textContent = window.mokeSavings.NOT_MEASURED;
   }
   updateStatsDisplay();
 
@@ -2296,8 +2294,10 @@
     }
 
     // Provider
+    // GA1.5c: a cloud request's cost was shown here as a fixed three tenths of a cent, a price nothing
+    // measured. The provider reports tokens and loke the cost after it answers.
     var provider = 'Ollama (local)', estCost = 'Free', isCloud = false;
-    try { var s = JSON.parse(sessionStorage.getItem('moke_session_stats')||'{}'); if (s.cloudCount>0) { provider='Claude Sonnet 4 (cloud)'; estCost='~$0.003'; isCloud=true; } } catch(_) {}
+    try { var s = JSON.parse(sessionStorage.getItem('moke_session_stats')||'{}'); if (s.cloudCount>0) { provider='Claude Sonnet 4 (cloud)'; estCost=window.mokeSavings.NOT_MEASURED + ' before sending'; isCloud=true; } } catch(_) {}
     try { var settings = JSON.parse(localStorage.getItem('moke_session_stats')||'{}'); } catch(_){}
     // Check if anthropic key is configured
     try { var sk = JSON.parse(sessionStorage.getItem('moke_session_stats')||'{}'); } catch(_){}
@@ -2356,7 +2356,7 @@
       sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Provider</div>';
       sh += '<span style="font-size:0.82em; color:var(--text);">' + escHtml(provider) + '</span></div>';
       sh += '<div style="flex:1; min-width:120px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">';
-      sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Est. Cost</div>';
+      sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Cost</div>';
       sh += '<span style="font-size:0.82em; font-weight:700; color:' + (estCost==='Free'?'var(--green)':'var(--text)') + ';">' + estCost + '</span></div>';
       sh += '<div style="flex:1; min-width:120px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">';
       sh += '<div style="font-size:0.68em; text-transform:uppercase; letter-spacing:0.07em; color:var(--muted); margin-bottom:2px;">Prompt length</div>';
@@ -2852,10 +2852,7 @@
       var respCost = (json && json.cost_usd) ? json.cost_usd : 0;
       var isLocal = respProvider === 'ollama';
 
-      // GA1.5: the compress stage shows what loke's optimiser reported, measured. tokensBefore
-      // below is still the A4.3 savings estimate (text length / 4), which is not a measurement
-      // and is filed as GA1.5c; it no longer feeds this stage.
-      var tokensBefore = Math.ceil(lokeBody.text.length / 4);
+      // GA1.5: the compress stage shows what loke's optimiser reported, measured.
       var opt = (json && json.optimisation) ? json.optimisation : null;
       completeStage('compress', opt ? { method: opt.method, applied: opt.applied, reason: opt.reason,
         bytesBefore: opt.bytes_before, bytesAfter: opt.bytes_after,
@@ -2888,42 +2885,12 @@
       }
       updateStatsDisplay();
 
-      // A4.3 — Update savings data in sessionStorage
-      (function() {
-        var savings = JSON.parse(sessionStorage.getItem('moke_savings') || '{"tokensSaved":0,"costSaved":0,"piiIntercepted":0,"localRequests":0,"cloudRequests":0}');
-        var history = JSON.parse(sessionStorage.getItem('moke_savings_history') || '[]');
-
-        // Tokens saved: estimate compression savings (50% of cloud tokens) for cloud calls
-        var tokensSavedThisReq = 0;
-        if (!isLocal && tokensBefore > respTokensIn) {
-          tokensSavedThisReq = tokensBefore - respTokensIn;
-        }
-        // Cost saved: estimate vs sending uncompressed to most expensive model ($0.015/1K tokens for Claude Opus)
-        var expensiveRate = 0.015;
-        var costSavedThisReq = isLocal ? (tokensBefore / 1000) * expensiveRate : (tokensSavedThisReq / 1000) * expensiveRate;
-
-        savings.tokensSaved += tokensSavedThisReq;
-        savings.costSaved += costSavedThisReq;
-        savings.piiIntercepted += entities;
-        if (isLocal) savings.localRequests++; else savings.cloudRequests++;
-
-        var cumulativeTokens = savings.tokensSaved;
-        history.push({
-          request: history.length + 1,
-          timestamp: new Date().toISOString(),
-          model: respModel,
-          tokensIn: respTokensIn,
-          tokensOut: respTokensOut,
-          cost: respCost,
-          tokensSaved: tokensSavedThisReq,
-          costSaved: costSavedThisReq,
-          method: isLocal ? 'local' : (tokensSavedThisReq > 0 ? 'compress' : 'cloud'),
-          cumulativeTokensSaved: cumulativeTokens
-        });
-
-        sessionStorage.setItem('moke_savings', JSON.stringify(savings));
-        sessionStorage.setItem('moke_savings_history', JSON.stringify(history));
-      })();
+      // A4.3 / GA1.5c — the savings ledger records what loke measured: its optimisation
+      // octets and characters, and the provider's own token and cost figures as reported.
+      // It used to add "tokens saved" (text length / 4 minus tokens_in) and "cost saved"
+      // at a hard-coded rate, none of it measured. See static/js/moke-savings.js.
+      window.mokeSavings.record(sessionStorage, json,
+        { timestamp: new Date().toISOString(), model: respModel, isLocal: isLocal }, entities);
 
       // GA3.2 — Wire warnings into chat flow
       if (entities > 0) {

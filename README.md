@@ -254,16 +254,16 @@ moke is a data analysis demo that exercises loke's privacy pipeline, governance 
 | Pipeline transparency | Collapsible console logging each stage with timestamps |
 | Kill switch | Governance page toggle blocks all LLM traffic with pulsing banner |
 | Feedback | Thumbs up/down on every response with optional comment on thumbs-down |
-| Cost tracking | Pre-send token/cost estimation, session stats, estimated savings vs cloud |
+| Cost tracking | Session stats with the token counts and cost loke reports per reply; the optimiser's measured bytes per request |
 | Graduated warnings | 4-level system: info → advisory → caution → block |
 | Client-side ML | K-Means, Z-Score, IQR, Pearson correlation — zero data egress |
 
 > Two rows need qualifying. **Privacy pipeline** demonstrates the privacy-filter sidecar rather than
 > loke's core pipeline, and it fails open — with the sidecar down, the confirmation modal can report
-> anonymisation that did not happen (see the Privacy note above, NC1.9). **Cost tracking** is real
-> arithmetic over per-session estimates computed from a character-derived token count against a modelled
-> cloud price; it is not a measured saving and no figure from it is publishable — see
-> [docs/metrics-baseline.md](docs/metrics-baseline.md). The governance dashboard's risk breakdown,
+> anonymisation that did not happen (see the Privacy note above, NC1.9). **Cost tracking** shows
+> the token and cost figures loke reports with each reply and the bytes its optimiser measured; token and
+> cost *savings* are shown as "not measured", because no tokeniser or price table is named (GA1.5c). No
+> figure from it is publishable — see [docs/metrics-baseline.md](docs/metrics-baseline.md). The governance dashboard's risk breakdown,
 > request log and privacy score are likewise scoped to the current browser session and reset on reload.
 
 ### Demo datasets

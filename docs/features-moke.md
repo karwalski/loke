@@ -34,7 +34,7 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 | **Pipeline transparency** | Collapsible pipeline console logs each stage (anonymise, routing, compute, restore) with timestamps. |
 | **Kill switch** | Governance page has an engage/release toggle. When active, a pulsing red banner blocks all LLM traffic. |
 | **Feedback system** | Thumbs up/down buttons on every LLM response. Feedback stored locally, exportable via settings. Feedback score shown on governance dashboard. |
-| **Cost tracking** | Session stats show token counts (in/out), cost estimate, and savings vs cloud. Governance dashboard shows cumulative cost and local/cloud ratio. |
+| **Cost tracking** | Session stats show the token counts (in/out) and cost loke reports with each reply. The governance savings view shows the bytes loke's optimiser measured per request and the local/cloud ratio; token and cost savings read "not measured". |
 | **Model routing** | Settings page configures Anthropic/OpenAI keys. Pipeline auto-routes: if API key present, uses Claude; otherwise falls back to Ollama (local). |
 | **Governance dashboard** | Full risk breakdown (low/medium/high), request log with risk badges, compliance report generation, regulatory presets. |
 | **Memory palace** | Hierarchical wing/hall/room/drawer navigation with semantic search, AAAK compression, and persistent storage. |
@@ -47,10 +47,11 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 >
 > - **Privacy pipeline** — demonstrates the *sidecar*, not loke's core pipeline, and fails open when the
 >   sidecar is down. See the note at the top of this document (**NC1.9**, **AD1.6**).
-> - **Cost tracking** — real arithmetic over per-session estimates (`packages/moke/src/cost_comparison.tk`,
->   `token_optimisation.tk:57-58`), computed from a character-derived token count against a modelled cloud
->   price. It does not read loke's metrics tables, which return zeros (**DA1.6**), and no figure from it is
->   publishable (**VM1.7**).
+> - **Cost tracking** — since GA1.5c it records only what loke reported: the provider's token counts and
+>   loke's cost per reply, and the optimiser's measured bytes and characters (`packages/moke/static/js/moke-savings.js`).
+>   The savings it used to show (a text length over four as tokens, priced at a hard-coded rate) were not
+>   measured and are gone; token and cost savings read "not measured". No figure from it is publishable
+>   (**VM1.7**).
 > - **Governance dashboard** — the risk breakdown, request log and privacy score are computed over events
 >   held in the page, not over a persisted ledger; they reset on reload. Compliance report generation uses
 >   moke's own `packages/moke/src/governance.tk:135`, which works over those in-session events. loke's core
@@ -194,15 +195,15 @@ Each detector returns `{type, subtype, confidence, stats}`.
 **Session Stats:**
 - Requests count
 - Tokens in/out
-- Cost estimate
+- Cost, as loke reports it per reply
 - Local vs cloud ratio
-- Estimated savings vs cloud-only
+- Saved vs cloud: "not measured"
 
-> **"Estimated" is doing real work in that last line.** The figure is arithmetic over a
-> character-derived token count against a modelled cloud price (`packages/moke/src/token_optimisation.tk:57-58`,
-> `cost_comparison.tk`). It is a session estimate for the operator's benefit, not a measured saving, and it
-> must not be quoted outside the UI. See [metrics-baseline.md](metrics-baseline.md); measuring it properly
-> is **VM1.7** and **CB1.5**.
+> **Savings are not estimated.** Until GA1.5c this line showed a dollar figure per local request and the
+> governance view a token and cost saving, all computed from a text length over four and a hard-coded
+> rate. None of it was measured, so it now says "not measured". The savings view shows only the bytes
+> loke's optimiser measured. Measuring token and cost savings properly is **VM1.7** and **CB1.5**; see
+> [metrics-baseline.md](metrics-baseline.md).
 
 **Privacy Review (Pre-Send):**
 Before sending to the LLM, shows the privacy confirmation modal (see Confirm section below). Users see what the request will contain.

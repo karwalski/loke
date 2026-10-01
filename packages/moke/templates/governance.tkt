@@ -516,14 +516,14 @@
       <!-- Savings metric cards -->
       <div class="savings-stats">
         <div class="stat-card">
-          <div class="stat-label">Tokens Saved</div>
-          <div class="stat-value green" id="savings-tokens">0</div>
-          <div class="stat-sub">compression + local</div>
+          <div class="stat-label">Bytes Saved by Optimisation</div>
+          <div class="stat-value" id="savings-bytes">not measured</div>
+          <div class="stat-sub" id="savings-bytes-sub">measured by loke, per request</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">Cost Saved</div>
-          <div class="stat-value green" id="savings-cost">$0.00</div>
-          <div class="stat-sub">vs most expensive model</div>
+          <div class="stat-label">Tokens / Cost Saved</div>
+          <div class="stat-value" id="savings-tokens">not measured</div>
+          <div class="stat-sub" id="savings-cost">not measured: no tokeniser or price table is named</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">PII Intercepted</div>
@@ -539,7 +539,7 @@
 
       <!-- Savings trend chart -->
       <div style="margin-top:18px;">
-        <div style="font-size:0.78em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Cumulative Savings Trend</div>
+        <div style="font-size:0.78em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Cumulative Bytes Saved (measured by loke)</div>
         <div style="height:200px;">
           <canvas id="savings-trend-chart" height="200"></canvas>
         </div>
@@ -556,7 +556,8 @@
               <th>Model</th>
               <th>Tokens In/Out</th>
               <th>Cost</th>
-              <th>Method</th>
+              <th>Route</th>
+              <th>Optimisation</th>
             </tr>
           </thead>
           <tbody id="savings-tbody"></tbody>
@@ -901,6 +902,7 @@
   <ul id="tt-reasons"></ul>
 </div>
 
+<script src="/static/js/moke-savings.js"></script>
 <script>
 (function () {
   'use strict';
@@ -2240,37 +2242,31 @@
   // ── A4.3 Savings dashboard ──────────────────────────────────────────────
   var savingsTrendChart = null;
 
+  // GA1.5c: every figure here is one loke measured or the provider reported. This view
+  // used to show "tokens saved" (text length / 4 minus tokens_in) and "cost saved" at a
+  // hard-coded rate per 1K tokens; neither was measured, so both now say so.
   function refreshSavingsDashboard() {
-    var savings = {};
-    try { savings = JSON.parse(sessionStorage.getItem('moke_savings') || '{}'); } catch(_) {}
-    var history = [];
-    try { history = JSON.parse(sessionStorage.getItem('moke_savings_history') || '[]'); } catch(_) {}
+    var ledger = window.mokeSavings.load(sessionStorage);
+    var totals = ledger.totals;
+    var history = ledger.history;
+    var shown = window.mokeSavings.summary(totals);
+    var totalReqs = totals.localRequests + totals.cloudRequests;
+    var localRatio = totalReqs > 0 ? Math.round((totals.localRequests / totalReqs) * 100) : 0;
 
-    var tokensSaved = savings.tokensSaved || 0;
-    var costSaved = savings.costSaved || 0;
-    var piiIntercepted = savings.piiIntercepted || 0;
-    var localReqs = savings.localRequests || 0;
-    var cloudReqs = savings.cloudRequests || 0;
-    var totalReqs = localReqs + cloudReqs;
-    var localRatio = totalReqs > 0 ? Math.round((localReqs / totalReqs) * 100) : 0;
+    var bytesEl = document.getElementById('savings-bytes');
+    if (bytesEl) bytesEl.textContent = shown.bytesSaved;
+    var bytesSub = document.getElementById('savings-bytes-sub');
+    if (bytesSub) bytesSub.textContent = shown.bytesDetail;
 
-    // Update metric cards
     var tokensEl = document.getElementById('savings-tokens');
-    if (tokensEl) {
-      tokensEl.textContent = tokensSaved.toLocaleString();
-      tokensEl.className = 'stat-value ' + (tokensSaved > 0 ? 'green' : '');
-    }
-
+    if (tokensEl) tokensEl.textContent = shown.tokensSaved;
     var costEl = document.getElementById('savings-cost');
-    if (costEl) {
-      costEl.textContent = '$' + costSaved.toFixed(2);
-      costEl.className = 'stat-value ' + (costSaved > 0 ? 'green' : '');
-    }
+    if (costEl) costEl.textContent = shown.costSaved + ': no tokeniser or price table is named';
 
     var piiEl = document.getElementById('savings-pii');
     if (piiEl) {
-      piiEl.textContent = piiIntercepted;
-      piiEl.className = 'stat-value ' + (piiIntercepted > 0 ? 'amber' : 'green');
+      piiEl.textContent = totals.piiIntercepted;
+      piiEl.className = 'stat-value ' + (totals.piiIntercepted > 0 ? 'amber' : 'green');
     }
 
     var ratioEl = document.getElementById('savings-local-ratio');
@@ -2279,18 +2275,20 @@
       ratioEl.className = 'stat-value ' + (localRatio >= 50 ? 'green' : localRatio > 0 ? 'amber' : '');
     }
 
-    // Render trend chart
+    // Trend: cumulative measured octets saved, over the requests loke measured.
+    var measured = history.filter(function(h) { return h.measured === true; });
     var trendCanvas = document.getElementById('savings-trend-chart');
-    if (trendCanvas && typeof Chart !== 'undefined' && history.length > 0) {
+    if (trendCanvas && typeof Chart !== 'undefined' && measured.length > 0) {
       if (savingsTrendChart) savingsTrendChart.destroy();
-      var labels = history.map(function(h) { return h.request; });
-      var data = history.map(function(h) { return h.cumulativeTokensSaved || 0; });
+      var run = 0;
+      var labels = measured.map(function(h) { return h.request; });
+      var data = measured.map(function(h) { run += h.bytesBefore - h.bytesAfter; return run; });
       savingsTrendChart = new Chart(trendCanvas, {
         type: 'line',
         data: {
           labels: labels,
           datasets: [{
-            label: 'Cumulative Tokens Saved',
+            label: 'Cumulative bytes saved (measured by loke)',
             data: data,
             borderColor: '#14b8a6',
             backgroundColor: 'rgba(20,184,166,.1)',
@@ -2306,7 +2304,7 @@
           maintainAspectRatio: false,
           scales: {
             x: { title: { display: true, text: 'Request #', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(42,45,58,0.5)' } },
-            y: { title: { display: true, text: 'Tokens Saved', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(42,45,58,0.5)' }, beginAtZero: true }
+            y: { title: { display: true, text: 'Bytes saved', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: 'rgba(42,45,58,0.5)' }, beginAtZero: true }
           },
           plugins: {
             legend: { display: false }
@@ -2315,7 +2313,7 @@
       });
     }
 
-    // Render breakdown table
+    // Breakdown table
     var tbody = document.getElementById('savings-tbody');
     var emptyEl = document.getElementById('savings-empty');
     if (tbody && emptyEl) {
@@ -2326,19 +2324,21 @@
         emptyEl.style.display = 'none';
         tbody.innerHTML = history.slice().reverse().map(function(h) {
           var ts = h.timestamp ? new Date(h.timestamp).toLocaleTimeString() : '-';
-          var methodClass = h.method || 'cloud';
+          var route = h.route === 'local' ? 'local' : 'cloud';
           return '<tr>' +
             '<td>' + h.request + '</td>' +
             '<td>' + esc(ts) + '</td>' +
             '<td>' + esc(h.model || 'n/a') + '</td>' +
             '<td>' + (h.tokensIn || 0) + ' / ' + (h.tokensOut || 0) + '</td>' +
-            '<td>$' + (h.cost != null ? h.cost.toFixed(6) : '0.000000') + '</td>' +
-            '<td><span class="savings-method ' + methodClass + '">' + methodClass + '</span></td>' +
+            '<td>$' + (typeof h.cost === 'number' ? h.cost.toFixed(6) : '0.000000') + '</td>' +
+            '<td><span class="savings-method ' + route + '">' + route + '</span></td>' +
+            '<td class="savings-opt">' + esc(window.mokeSavings.optimisationCell(h)) + '</td>' +
           '</tr>';
         }).join('');
       }
     }
   }
+  window.refreshSavingsDashboard = refreshSavingsDashboard;
 
   // ── Init ──────────────────────────────────────────────────────────────────
   renderStats();

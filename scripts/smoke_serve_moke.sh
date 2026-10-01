@@ -76,6 +76,21 @@ for p in / /chat /insight /governance /dashboard /agents /connections /memory /s
   fi
 done
 
+# GA1.5c: the savings surfaces take their figures from static/js/moke-savings.js. Both pages
+# must load it, and it must be served, or the ledger is not written and the view is blank.
+for p in /chat /governance; do
+  if curl -s -m 20 "http://127.0.0.1:$PORT$p" | grep -qF '<script src="/static/js/moke-savings.js"></script>'; then
+    echo "  ok   GET $p loads the measured savings ledger"
+  else
+    echo "  FAIL GET $p does not load /static/js/moke-savings.js" >&2; fail=1
+  fi
+done
+if curl -s -m 20 "http://127.0.0.1:$PORT/static/js/moke-savings.js" | grep -qF "var NOT_MEASURED = 'not measured';"; then
+  echo "  ok   GET /static/js/moke-savings.js serves the ledger"
+else
+  echo "  FAIL GET /static/js/moke-savings.js is not served" >&2; fail=1
+fi
+
 # Every dataset id the registry answers to must load with at least one row.
 ids=$(grep -o 'str.eq(id;"[^"]*")' "$SRC/data/registry.tk" | sed 's/.*"\(.*\)")/\1/' | sort -u)
 for id in $ids; do
@@ -123,6 +138,9 @@ api POST /api/upload    ''                              400 'empty body'        
 api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"filename":"sales_q3.csv"' "an upload takes its name from ?name="
 api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"preview_rows":[["north","10"]]' "and previews the rows it parsed"
 api POST /api/routing   '{"prompt":"hello"}'            200 '"routing":{'           "routing explains a decision"
+# GA1.5c: the cost it answered was priced over a fixed 500 tokens in and 200 out, whatever the
+# prompt. No token is counted before dispatch, so it must say the cost is not measured.
+api POST /api/routing   '{"prompt":"hello"}'            200 '"cost":{"measured":false,"reason":"not measured' "and says its cost is not measured, not priced over invented tokens"
 api GET  /api/agents    ""                              200 '"agents":['            "agents lists the agents"
 # NC1.3 / MK6.5: the proposal route exists, takes column names only, and with loke down says
 # its suggestions are heuristic rather than presenting them as a model's.
