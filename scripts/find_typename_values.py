@@ -115,7 +115,7 @@ def main() -> int:
     args = ap.parse_args()
 
     repo = pathlib.Path(__file__).resolve().parent.parent
-    allfiles = [f for f in repo.rglob("packages/**/*.tk")
+    allfiles = [f for f in (repo / "packages").rglob("*.tk")
                 if "/build/" not in str(f) and "/archive/" not in str(f)]
     types = declared_types(allfiles)
 
