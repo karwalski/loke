@@ -72,6 +72,8 @@ listen there: RECORDER_PORT binds that port instead of one the OS hands out (the
 the fixed-port lock, scripts/lib/fixedports_lock.sh). And the router chooses from a static
 catalogue, refusing a model Ollama does not list, so RECORDER_MODELS (comma-separated names)
 is what /api/tags and /api/ps list instead of `fake:latest`. Unset, both behave as before.
+F5.3a: RECORDER_FAIL_MODELS (comma-separated) names models whose /api/generate answers as
+`silent` does, so one recorder can stand in for an Ollama on which one model fails.
 The `harness` mode answers /api/generate as `echo` does, names no task to the intent
 classifier, and reports "Jane Citizen" from the NER /api/chat only when the request holds
 that name (`answer` and `echo` report it whatever the text).
@@ -92,6 +94,10 @@ MODE = sys.argv[3] if len(sys.argv) > 3 else "answer"
 SEPS = (",", ":")
 BINDPORT = int(os.environ.get("RECORDER_PORT", "0") or 0)
 MODELS = [m for m in os.environ.get("RECORDER_MODELS", "fake:latest").split(",") if m]
+# F5.3a: models whose /api/generate answers 200 with an empty body, as a model that fails
+# to load does, in any mode. The request is still recorded. So a test can see a fallback
+# chain's first local hop fail and its next answer, judged on what each received.
+FAIL_MODELS = [m for m in os.environ.get("RECORDER_FAIL_MODELS", "").split(",") if m]
 
 # Presidio's /analyze answer for "Jane Citizen" at the start of the text, and the NER model's
 # reply, which Ollama wraps as message.content.
@@ -223,7 +229,7 @@ class H(http.server.BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p.startswith("/proxy-test/"):
             self._proxytest(p)
-        elif MODE == "silent":
+        elif MODE == "silent" or (p == "/api/generate" and _field(body, "model") in FAIL_MODELS):
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()

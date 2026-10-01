@@ -40,9 +40,12 @@
 #   LOKE_BIN=/path/to/mutant scripts/smoke_privacy_harness.sh
 #   HARNESS_REPORT=cells.json HARNESS_RECORD=benchmarks/results/x.jsonl scripts/smoke_privacy_harness.sh
 #
+# After the matrix, one fallback request (F5.3a, scripts/lib/fallback_smoke.py): the stand-in is
+# restarted with the first local choice failing, and the next local hop must answer.
+#
 # What it does NOT cover: the Anthropic route (its endpoint is fixed to the real provider, so
 # no stand-in can take its place in the binary; tests/integration/test_system_prompt_disclosure.tk
-# drives the route's own toanthropicat against a recorder instead), the
+# and test_browser_fallback.tk drive the route against a recorder instead), the
 # CLI paths (cli.ask, cli.proxy), the no-custody path, and detection recall, which is measured
 # against the corpus in tests/integration/test_detection_recall.tk. Each detector type is
 # exercised with one value the regex layer is known to detect.
@@ -107,6 +110,22 @@ python3 "$ROOT/scripts/lib/privacy_harness.py" \
 rc=$?
 # For inspection: every request the stand-in received, kept when HARNESS_BODIES names a file.
 [ -n "${HARNESS_BODIES:-}" ] && cp "$WORK/model.log.bodies" "$HARNESS_BODIES"
+
+# F5.3a: the fallback chain over the real binary. The stand-in is restarted on the same port
+# with the router's first local choice failing, and one request is judged on its reply and on
+# what each hop received (scripts/lib/fallback_smoke.py).
+kill "$RECPID" 2>/dev/null; wait "$RECPID" 2>/dev/null
+RECORDER_PORT=$OLLAMA_PORT RECORDER_MODELS="qwen2.5:7b,llama3:latest,gemma3:4b" RECORDER_FAIL_MODELS="qwen2.5:7b" \
+  python3 "$ROOT/scripts/lib/http_recorder.py" "$WORK/fallback.log" "$WORK/fallback.port" harness \
+  >/dev/null 2>&1 & PIDS="$PIDS $!"
+RECPID=$!
+for _ in $(seq 1 40); do [ -s "$WORK/fallback.port" ] && break; sleep 0.25; done
+if [ -s "$WORK/fallback.port" ] && assert_port_owner smoke_privacy_harness "$OLLAMA_PORT" "$RECPID"; then
+  python3 "$ROOT/scripts/lib/fallback_smoke.py" --loke "http://127.0.0.1:$PORT" --bodies "$WORK/fallback.log.bodies" || rc=1
+else
+  echo "smoke_privacy_harness: the fallback stand-in never came up" >&2
+  rc=1
+fi
 if [ "$rc" -ne 0 ]; then
   echo "smoke_privacy_harness: FAILED (loke log tail follows)" >&2
   tail -5 "$WORK/serve.log" >&2

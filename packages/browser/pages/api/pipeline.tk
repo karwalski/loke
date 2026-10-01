@@ -486,11 +486,17 @@ f=auditrowwritten(cid:str;eventtype:str):bool{
 };
 
 f=providerfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision;optrec:str):i64{
-  (* DA1.7 - the reserved disclosure row is completed as failed, in one transaction with the
-     outcome's audit row (DA1.9). *)
-  outcome(store;run;"llm_request_failed";false;provider;modelid;0;0;0;t.nowms()-startms;decision);
-  recordmetric(run;provider;modelid;0;0;0.0;optrec);
+  hopfailed(store;run;provider;modelid;startms;decision;optrec);
   <http.res(502;"{\"ok\":false,\"error\":\"provider request failed\"}")
+};
+
+(* A hop that was sent and did not answer. DA1.7 - its reserved disclosure row is completed
+   as failed, in one transaction with the outcome's audit row (DA1.9), and its metrics row is
+   written: the bytes left whether or not an answer came back. F5.3a: called once per failed
+   hop, so every hop that sent has its own completed row. *)
+f=hopfailed(store:i64;run:$pipelinerun;provider:str;modelid:str;startms:i64;decision:$policydecision;optrec:str):bool{
+  outcome(store;run;"llm_request_failed";false;provider;modelid;0;0;0;t.nowms()-startms;decision);
+  <recordmetric(run;provider;modelid;0;0;0.0;optrec)
 };
 
 
@@ -694,7 +700,7 @@ f=routerfor(store:i64):$router{
    the comment above says why: the provider modules' own request bodies carry neither the
    model nor the messages, measured, so routing through them would replace a request that
    works with one that cannot. When those three defects are fixed this is the shape that
-   replaces toanthropic and toollama, and tests/integration/test_pipeline_api.tk already
+   replaces anthropichop and ollamahop, and tests/integration/test_pipeline_api.tk already
    asserts the property that matters about it — that the ORIGINAL text is not reachable
    through it, only the anonymised text. *)
 f=completionfor(modelid:str;anonymised:str;sysprompt:str):$completionrequest{
@@ -760,8 +766,12 @@ f=requestcost(spec:$modelspec;tokensin:i64;tokensout:i64):f64{
 };
 
 f=refusedroute(reason:str;piifields:str):i64{
+  <http.res(503;refusedroutejson(reason;piifields))
+};
+
+f=refusedroutejson(reason:str;piifields:str):str{
   log.warn(str.concat("pipeline: no model could be routed to — ";reason);"api.pipeline";"");
-  <http.res(503;"{\"ok\":false,\"error\":\(jx.escape(reason)),\"routed\":false\(piifields)}")
+  <"{\"ok\":false,\"error\":\(jx.escape(reason)),\"routed\":false\(piifields)}"
 };
 
 f=refusedbudget(reason:str;piifields:str):i64{
@@ -784,6 +794,11 @@ f=cachedreply(run:$pipelinerun;hit:$cachehit;piifields:str):i64{
    with the anonymised response, the budget is accumulated and persisted, the audit row is
    inserted, and only then is the text restored for the user. *)
 f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision;rawbytes:i64;optrec:str):i64{
+  <http.res(200;completedbody(store;run;route;anonresponse;tin;tout;piifields;startms;decision;rawbytes;optrec))
+};
+
+(* F5.3a. completed's body, for the chain walk, which answers a status and a body. *)
+f=completedbody(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;tin:i64;tout:i64;piifields:str;startms:i64;decision:$policydecision;rawbytes:i64;optrec:str):str{
   let spec:$modelspec=route.model;
   let provstr=providerlabel(spec.provider);
   let elapsed=t.nowms()-startms;
@@ -806,7 +821,7 @@ f=completed(store:i64;run:$pipelinerun;route:$routingdecision;anonresponse:str;t
     log.warn("audit row was not written for this request";"api.pipeline";run.requestid)
   };
 
-  <http.res(200;"{\"ok\":true,\"response\":\(jx.escape(restoretext(run;anonresponse))),\"model\":\(jx.escape(spec.id)),\"provider\":\(jx.escape(provstr)),\"routing_reason\":\(jx.escape(route.reason)),\"tokens_in\":\(tin),\"tokens_out\":\(tout),\"cached\":false,\"audited\":\(logged)\(disclosurefield(run;spec.provider))\(piifields)}")
+  <"{\"ok\":true,\"response\":\(jx.escape(restoretext(run;anonresponse))),\"model\":\(jx.escape(spec.id)),\"provider\":\(jx.escape(provstr)),\"routing_reason\":\(jx.escape(route.reason)),\"answered_by\":\(jx.escape(rtr.hoplabel(route))),\"tokens_in\":\(tin),\"tokens_out\":\(tout),\"cached\":false,\"audited\":\(logged)\(disclosurefield(run;spec.provider))\(piifields)}"
 };
 
 (* DA1.5 - this request's disclosure, as recorded, for the per-request view: the octets sent,
@@ -829,19 +844,6 @@ f=pisolocal(p:$provider):bool{
     $ollama:v true;
     $local:v true
   }
-};
-
-(* F5.11. `raw` is the body the transport answered, already known to be non-empty. A body
-   with no completion text in it (Anthropic's error document, for one: the transport does
-   not see the status code) is a provider failure, not a 200 with an empty answer. *)
-f=anthropicreply(store:i64;run:$pipelinerun;route:$routingdecision;raw:str;piifields:str;startms:i64;decision:$policydecision;optrec:str):i64{
-  let spec:$modelspec=route.model;
-  let anonresponse=anthropictext(raw);
-  if(str.len(anonresponse)==0){
-    log.warn("pipeline: anthropic answered with no completion text, treating as a provider failure";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"anthropic";spec.id;startms;decision;optrec)
-  }el{};
-  <completed(store;run;route;anonresponse;usagetokens(raw;"input_tokens");usagetokens(raw;"output_tokens");piifields;startms;decision;str.len(raw);optrec)
 };
 
 (* ── DA1.7: the disclosure record ─────────────────────────────────────────────────
@@ -878,14 +880,6 @@ f=sessionrefused(code:str):i64{
   <http.res(400;ns.refusaljson(code))
 };
 
-(* A dispatch that cannot be recorded does not happen (spec section 4). It is refused and
-   audited as refused, and nothing is sent. *)
-f=unrecorded(store:i64;run:$pipelinerun;provider:str;modelid:str;piifields:str;startms:i64;decision:$policydecision):i64{
-  log.warn("pipeline: the disclosure record could not be written, so nothing was sent";"api.pipeline";run.requestid);
-  recordevent(store;run;"llm_request_refused";provider;modelid;0;0;t.nowms()-startms;decision);
-  <http.res(503;"{\"ok\":false,\"error\":\"the disclosure record could not be written, so the request was not sent\",\"disclosure_unrecorded\":true\(piifields)}")
-};
-
 (* The request body, built here so that a test can see exactly what is sent. Only the
    anonymised text goes into it.
 
@@ -913,35 +907,6 @@ f=anthropicsend(url:str;key:str;abody:str):str{
   <xport.post(url;abody;xport.anthropicheaders(key))
 };
 
-f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
-  <toanthropicat(store;run;route;optrec;key;piifields;startms;decision;fbreason;fbby;sid;xport.anthropicurl())
-};
-
-(* F3.9a, F3.9b. The system prompt sent is run.finalsystemprompt: the guardian over the caller's
-   system prompt as core.privacy.systemprompt anonymised it. It used to be the caller's system
-   prompt as received, unscanned, and without the guardian. `url` is for the recorder test
-   (tests/integration/test_system_prompt_disclosure.tk) only: the one production caller,
-   toanthropic above, passes transport.anthropicurl(), and nothing a request or a setting
-   carries reaches it. *)
-f=toanthropicat(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;url:str):i64{
-  let spec:$modelspec=route.model;
-  let sent=popt.sentof(optrec);
-  let abody=anthropicbody(spec.id;run.finalsystemprompt;sent);
-  if(reservedispatch(store;run;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;sent;fbreason;fbby;sid;decision)){}el{
-    <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
-  };
-  let raw=anthropicsend(url;key;abody);
-  if(str.len(raw)==0){
-    log.warn("pipeline: anthropic returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"anthropic";spec.id;startms;decision;optrec)
-  }el{};
-  <anthropicreply(store;run;route;raw;piifields;startms;decision;optrec)
-};
-
-(* http.posturl answers with a bare str and no result, so a dead Ollama returns "" — and the
-   old body took that "" straight through json.str and answered 200 with an empty response,
-   which reads to the user as the model having nothing to say. An empty body is now a 502,
-   and it is audited like any other provider failure. *)
 (* F5.12. Whether `id` is one of the models Ollama reports as installed. Ollama names carry a
    tag, and an untagged id means `:latest`. *)
 f=isinstalled(id:str;names:@str):bool{
@@ -992,87 +957,6 @@ f=namesof(models:@$ollamamodel):@str{
   <names
 };
 
-f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):i64{
-  let spec:$modelspec=route.model;
-  (* F5.12. The router chooses from a static catalogue, not from what is installed, so it
-     can route to a model Ollama does not have, and Ollama answers 404. This refuses with
-     the names the user can act on. It does not substitute another model: a second routing
-     decision taken here, out of the router's sight, is what GA1.7 removed. The routed model
-     not being installed is still the router's defect, and F5.12 stays open for it. *)
-  let models=installedmodelsat(obase);
-  let installed=namesof(models);
-  if(installed.len>0 && !isinstalled(spec.id;installed)){
-    recordevent(store;run;"llm_request_refused";"ollama";spec.id;0;0;t.nowms()-startms;decision);
-    let msg="the router chose \(spec.id), which is not installed in Ollama. Installed: \(str.join(", ";installed))";
-    <http.res(503;"{\"ok\":false,\"error\":\(jx.escape(msg)),\"model_not_installed\":true\(piifields)}")
-  }el{};
-  let sent=popt.sentof(optrec);
-  (* F3.9a. The guardian, over the caller's anonymised system prompt, as /api/generate's
-     `system`. This payload used to carry no system prompt at all, so the guardian the pipeline
-     built never reached a local model. *)
-  let payload="{\"model\":\(json.enc(spec.id)),\"system\":\(popt.jsonquoted(run.finalsystemprompt)),\"prompt\":\(popt.jsonquoted(sent)),\"stream\":false}";
-  if(reservedispatch(store;run;"ollama";"local";spec.id;digestof(spec.id;models);str.trimprefix(obase;"http://");payload;sent;fbreason;fbby;sid;decision)){}el{
-    <unrecorded(store;run;"ollama";spec.id;piifields;startms;decision)
-  };
-  let raw=http.posturl("\(obase)/api/generate";payload);
-  if(str.len(raw)==0){
-    log.warn("pipeline: ollama returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"ollama";spec.id;startms;decision;optrec)
-  }el{};
-  let robj=mt json.dec(raw) { $ok:o o; $jsonerr:e jx.emptyobj() };
-  let anonresponse=jx.strvalue(robj;"response";"");
-  if(str.len(anonresponse)==0){
-    log.warn("pipeline: ollama response carried no text";"api.pipeline";run.requestid);
-    <providerfailed(store;run;"ollama";spec.id;startms;decision;optrec)
-  }el{};
-  (* Ollama's /api/generate reports prompt_eval_count and eval_count, not the OpenAI names. *)
-  <completed(store;run;route;anonresponse;usagetokens(raw;"prompt_eval_count");usagetokens(raw;"eval_count");piifields;startms;decision;str.len(raw);optrec)
-};
-
-(* A cloud provider the router can name but this endpoint has no client for. It refuses
-   rather than substituting some other provider: a second routing decision taken here, out of
-   the router's sight, is exactly what GA1.7 removed. *)
-f=unsupportedprovider(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
-  let spec:$modelspec=route.model;
-  recordevent(store;run;"llm_request_refused";providerlabel(spec.provider);spec.id;0;0;t.nowms()-startms;decision);
-  <refusedroute("this endpoint has no client for provider \(providerlabel(spec.provider)) (model \(spec.id))";piifields)
-};
-
-f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision):i64{
-  let spec:$modelspec=route.model;
-  recordevent(store;run;"llm_request_refused";"anthropic";spec.id;0;0;t.nowms()-startms;decision);
-  <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
-};
-
-f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
-  let key=anthropickey();
-  if(str.len(key)>20){}el{
-    <needsanthropickey(store;run;route;piifields;startms;decision)
-  };
-  <toanthropic(store;run;route;optrec;key;piifields;startms;decision;fbreason;fbby;sid)
-};
-
-(* All seven $provider variants are named. A match on a plain user sum DOES discriminate
-   across a module boundary — it is only a result whose error side is a user sum that does
-   not (T-18) — and listing every variant is what lets the refusal say WHICH provider was
-   unsupported. *)
-(* GA1.5: `optrec` is the optimiser's record (core.optimiser.prompt), and the text a provider
-   is sent is popt.sentof(optrec): the optimised anonymised text, or the anonymised text as it
-   was when the optimiser did nothing. Never res.original. *)
-f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):i64{
-  let spec:$modelspec=route.model;
-  let prov:$provider=spec.provider;
-  <mt prov {
-    $anthropic:v toanthropicchecked(store;run;route;optrec;piifields;startms;decision;fbreason;fbby;sid);
-    $openai:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $google:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $mistral:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $openrouter:v unsupportedprovider(store;run;route;piifields;startms;decision);
-    $ollama:v toollama(store;run;route;optrec;piifields;startms;decision;fbreason;fbby;sid;obase);
-    $local:v toollama(store;run;route;optrec;piifields;startms;decision;fbreason;fbby;sid;obase)
-  }
-};
-
 (* ── GA1.5: token optimisation, between the privacy filter and dispatch ─────────────
    The optimiser is handed res.anonymised and the entity list, so the only text it, or the
    LLMLingua sidecar behind it, ever sees is text the privacy filter has already anonymised.
@@ -1114,12 +998,339 @@ f=optimisationfield(run:$pipelinerun;optrec:str):str{
   <",\"optimisation\":\(popt.reportjson(optrec;anonymisedof(run.result)))"
 };
 
-(* The production path from a routed, permitted request to a provider: forward() calls this
-   with the configured sidecar and ollamabase(). Tests call it with recorders. *)
-f=sendoptimised(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str):i64{
+(* ── F5.3a: the fallback chain on the browser request path ──────────────────────────
+   forward() routes a chain (core.router.router.routechainpreferinstalled) and hands it here.
+   The hops are tried in order and the first that answers is the answer, as
+   core.router.fallback.dispatchchain does for `loke ask`: the same chain, the same gate
+   (rtr.chainhopallowed) asked again immediately before each send. What this path adds is its
+   own per-dispatch controls, applied to EVERY hop, which is why it walks the chain itself
+   rather than through core.providers.dispatcher (see GA1.7 above on why it sends its own
+   bodies).
+
+   What every hop shares, and what it does not:
+     - the privacy run. It happened once, in post(), before anything was routed. Every hop
+       sends popt.sentof(optrec), the ANONYMISED text as optimised once here, and
+       run.finalsystemprompt, the guardian over the anonymised system prompt. Never
+       res.original. Restoration uses the run's one placeholder map, whichever hop answered.
+     - the destination rules, per hop (hoprefusal): RESTRICTED data never goes to a cloud hop
+       (rtr.chainhopallowed against the router's sensitivity, and again against the
+       pipeline's own); a cloud hop after a local first choice only when fallback_to_cloud is
+       on, which this path keeps off (rtr.configfromsettings).
+     - the approval (GA5.26), per hop. See approvalcovers.
+     - the kill switch, per hop: a provider switched off is not sent to, and the next hop is
+       tried under the same rules.
+     - the disclosure record, per hop that sends: reserved immediately before its transport
+       and completed with its outcome, failed or answered. Each hop is its own dispatch, so it
+       carries its own correlation id (hoprun): the request id for the first hop, and the
+       request id with `-h<n>` for hop n, because one id is reserved once.
+
+   The reply says what happened: `answered_by` (in completed, so only a hop that answered is
+   ever named there), and hops_attempted, hops_failed and hops_refused (chainfields). *)
+f=maxhops():i64{
+  <3
+};
+
+(* The same run under hop i's correlation id. T-26: a struct field cannot be assigned, so it
+   is rebuilt. Everything but the id is the one run: same entities, same placeholders, same
+   anonymised text and system prompt. *)
+f=hoprun(run:$pipelinerun;i:i64):$pipelinerun{
+  if(i==0){ <run }el{};
+  <$pipelinerun{
+    result:run.result;
+    stages:run.stages;
+    totalentities:run.totalentities;
+    finalsystemprompt:run.finalsystemprompt;
+    requestid:str.concat(run.requestid;"-h\(i)");
+    layerscompleted:run.layerscompleted;
+    layersdegraded:run.layersdegraded;
+    unplaced:run.unplaced;
+    consensus:run.consensus;
+    resolved:run.resolved
+  }
+};
+
+(* GA5.26 and F5.3a. An approval is bound to the text, the decision and the fallback selection
+   (approvalbinding); it records no destination, and the approval page shows none. So the
+   reading taken here is the safe one: an approval covers the destination the request was
+   first routed to, and nothing else. A fallback hop that would send it somewhere else, from
+   this machine to a cloud provider or from one cloud provider to another, is refused rather
+   than sent without an approval for that destination. A hop to the same place (another local
+   model, or another model at the same provider) is the destination that was approved. A
+   request that needed no approval is not limited by this. *)
+f=approvalcovers(decision:$policydecision;first:$routingdecision;hop:$routingdecision):bool{
+  if(isrequireapproval(decision)){}el{ <true };
+  <rtr.samedestination(first;hop)
+};
+
+f=hasclient(p:$provider):bool{
+  <mt p {
+    $anthropic:v true;
+    $openai:v false;
+    $google:v false;
+    $mistral:v false;
+    $openrouter:v false;
+    $ollama:v true;
+    $local:v true
+  }
+};
+
+(* Why hop i must not be sent, or "" when it may be. Checked in this order, immediately
+   before the hop would send, and nothing here sends or reserves anything. *)
+f=hoprefusal(store:i64;cfg:$routerconfig;chain:$fallbackchain;i:i64;run:$pipelinerun;decision:$policydecision):str{
+  let hop:$routingdecision=chain.chainhops.get(i);
+  let res:$piidetectionresult=run.result;
+  let cloud=rtr.isclouddecision(hop);
+  if(rtr.chainhopallowed(cfg;chain;i)){}el{
+    if(cloud && t.senseq(chain.chainsens;t.restricted())){ <"restricted_cloud" }el{};
+    <"not_permitted"
+  };
+  if(cloud && t.senseq(res.sensitivity;t.restricted())){ <"restricted_cloud" }el{};
+  if(approvalcovers(decision;chain.chainhops.get(0);hop)){}el{ <"approval_destination" };
+  let spec:$modelspec=hop.model;
+  if(ks.isblocked(store;providerlabel(spec.provider);"browser-chat")){ <"kill_switch" }el{};
+  if(hasclient(spec.provider)){}el{ <"no_client" };
+  <""
+};
+
+(* A sender's answer that is not a provider's body: the hop was refused before transport. A
+   provider body is a JSON document and never begins with this. *)
+f=refusedprefix():str{
+  <"loke:refused:"
+};
+
+f=isrefusal(raw:str):bool{
+  <str.startswith(raw;refusedprefix())
+};
+
+(* The Anthropic hop: the body, the disclosure reservation, the send. The raw body that came
+   back, "" when nothing did, or a refusal. `url` is transport.anthropicurl() in production
+   and a recorder in tests; nothing a request or a setting carries reaches it. *)
+f=anthropichop(store:i64;hrun:$pipelinerun;hop:$routingdecision;optrec:str;key:str;decision:$policydecision;fbreason:str;fbby:str;sid:str;url:str):str{
+  let spec:$modelspec=hop.model;
+  let sent=popt.sentof(optrec);
+  let abody=anthropicbody(spec.id;hrun.finalsystemprompt;sent);
+  if(reservedispatch(store;hrun;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;sent;fbreason;fbby;sid;decision)){}el{
+    <"\(refusedprefix())unrecorded"
+  };
+  <anthropicsend(url;key;abody)
+};
+
+(* F5.12. The router chooses from a static catalogue, so it can name a model Ollama does not
+   have; such a hop is refused before anything is reserved or sent, and the next is tried. *)
+f=ollamahop(store:i64;hrun:$pipelinerun;hop:$routingdecision;optrec:str;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):str{
+  let spec:$modelspec=hop.model;
+  let models=installedmodelsat(obase);
+  let installed=namesof(models);
+  if(installed.len>0 && !isinstalled(spec.id;installed)){
+    <"\(refusedprefix())not_installed"
+  }el{};
+  let sent=popt.sentof(optrec);
+  (* F3.9a. The guardian, over the caller's anonymised system prompt, as /api/generate's
+     `system`. *)
+  let payload="{\"model\":\(json.enc(spec.id)),\"system\":\(popt.jsonquoted(hrun.finalsystemprompt)),\"prompt\":\(popt.jsonquoted(sent)),\"stream\":false}";
+  if(reservedispatch(store;hrun;"ollama";"local";spec.id;digestof(spec.id;models);str.trimprefix(obase;"http://");payload;sent;fbreason;fbby;sid;decision)){}el{
+    <"\(refusedprefix())unrecorded"
+  };
+  <http.posturl("\(obase)/api/generate";payload)
+};
+
+f=sendhop(store:i64;hrun:$pipelinerun;hop:$routingdecision;optrec:str;key:str;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str;aurl:str):str{
+  let spec:$modelspec=hop.model;
+  let prov:$provider=spec.provider;
+  let none="\(refusedprefix())no_client";
+  <mt prov {
+    $anthropic:v anthropichop(store;hrun;hop;optrec;key;decision;fbreason;fbby;sid;aurl);
+    $openai:v none;
+    $google:v none;
+    $mistral:v none;
+    $openrouter:v none;
+    $ollama:v ollamahop(store;hrun;hop;optrec;decision;fbreason;fbby;sid;obase);
+    $local:v ollamahop(store;hrun;hop;optrec;decision;fbreason;fbby;sid;obase)
+  }
+};
+
+(* The completion text in a provider's body, "" when there is none. A body with no text in it
+   (Anthropic's error document, for one: the transport does not see the status code; or an
+   empty body from a dead Ollama) is a failed hop, not a 200 with an empty answer. *)
+f=replytext(p:$provider;raw:str):str{
+  if(str.len(raw)==0){ <"" }el{};
+  if(pisolocal(p)){
+    let robj=mt json.dec(raw) { $ok:o o; $jsonerr:e jx.emptyobj() };
+    <jx.strvalue(robj;"response";"")
+  }el{};
+  <anthropictext(raw)
+};
+
+(* Ollama's /api/generate reports prompt_eval_count and eval_count, not Anthropic's names. *)
+f=replytokens(p:$provider;raw:str;input:bool):i64{
+  if(pisolocal(p)){
+    if(input){ <usagetokens(raw;"prompt_eval_count") }el{ <usagetokens(raw;"eval_count") }
+  }el{};
+  if(input){ <usagetokens(raw;"input_tokens") }el{ <usagetokens(raw;"output_tokens") }
+};
+
+f=jsonstrs(xs:@str):str{
+  let out=mut."";
+  lp(let i=0;i<xs.len;i=i+1){
+    if(i>0){ out="\(out)," }el{};
+    out="\(out)\(jx.escape(xs.get(i)))"
+  };
+  <"[\(out)]"
+};
+
+(* hops_attempted names every hop that was SENT, in order; hops_failed those of them that did
+   not answer; hops_refused every hop not sent, with why. *)
+f=chainfields(attempted:@str;failed:@str;refused:@str):str{
+  <",\"hops_attempted\":\(jsonstrs(attempted)),\"hops_failed\":\(jsonstrs(failed)),\"hops_refused\":\(jsonstrs(refused))"
+};
+
+(* A hop refused before it sent is audited as the single route's refusal was. *)
+f=hoprefused(store:i64;hrun:$pipelinerun;hop:$routingdecision;code:str;startms:i64;decision:$policydecision):bool{
+  let spec:$modelspec=hop.model;
+  let pname=providerlabel(spec.provider);
+  log.warn("pipeline: fallback hop \(rtr.hoplabel(hop)) was not sent (\(code))";"api.pipeline";hrun.requestid);
+  if(str.eq(code;"kill_switch")){
+    <recordevent(store;hrun;"kill_switch_refused";pname;spec.id;0;0;t.nowms()-startms;decision)
+  }el{};
+  <recordevent(store;hrun;"llm_request_refused";pname;spec.id;0;0;t.nowms()-startms;decision)
+};
+
+(* When no hop was sent at all, the reply is the refusal of the first hop, as it was when the
+   route was one decision, with the chain's fields after it. A reply here, and from walkchain,
+   is the status's three digits followed by the JSON body (respond). *)
+f=chainrefusal(store:i64;code:str;hop:$routingdecision;obase:str;fields:str):str{
+  let spec:$modelspec=hop.model;
+  let pname=providerlabel(spec.provider);
+  let uc="browser-chat";
+  if(str.eq(code;"kill_switch")){
+    <"403{\"ok\":false,\"error\":\(jx.escape(ks.refusalmessage(store;pname;uc))),\"provider_blocked\":true,\"kill_switch_scope\":\(jx.escape(ks.blockedscope(store;pname;uc)))\(fields)}"
+  }el{};
+  if(str.eq(code;"not_installed")){
+    let msg=str.concat("the router chose \(spec.id), which is not installed in Ollama. Installed: ";str.join(", ";namesof(installedmodelsat(obase))));
+    <"503{\"ok\":false,\"error\":\(jx.escape(msg)),\"model_not_installed\":true\(fields)}"
+  }el{};
+  if(str.eq(code;"unrecorded")){
+    <"503{\"ok\":false,\"error\":\"the disclosure record could not be written, so the request was not sent\",\"disclosure_unrecorded\":true\(fields)}"
+  }el{};
+  if(str.eq(code;"approval_destination")){
+    <"403{\"ok\":false,\"error\":\"the approval given for this request does not cover sending it to \(pname), so nothing was sent there\",\"approval_destination_refused\":true\(fields)}"
+  }el{};
+  if(str.eq(code;"no_key")){
+    <str.concat("503";refusedroutejson("the router selected an Anthropic model but no anthropic_api_key is configured";fields))
+  }el{};
+  if(str.eq(code;"no_client")){
+    <str.concat("503";refusedroutejson("this endpoint has no client for provider \(pname) (model \(spec.id))";fields))
+  }el{};
+  if(str.eq(code;"restricted_cloud")){
+    <str.concat("503";refusedroutejson("RESTRICTED data must not be sent to a cloud provider";fields))
+  }el{};
+  <str.concat("503";refusedroutejson("no hop of the route was permitted to be sent";fields))
+};
+
+f=respond(r:str):i64{
+  let code=str.slice(r;0;3);
+  let body=str.slice(r;3;str.len(r));
+  if(str.eq(code;"200")){ <http.res(200;body) }el{};
+  if(str.eq(code;"403")){ <http.res(403;body) }el{};
+  if(str.eq(code;"502")){ <http.res(502;body) }el{};
+  <http.res(503;body)
+};
+
+(* The walk. `optrec` is the optimiser's record, made once; `fields` the reply's privacy and
+   optimisation fields. `akey` is the Anthropic key when the caller has one (a test), or "" to
+   read it from the keychain, which happens only when an Anthropic hop is about to send. *)
+f=walkchain(store:i64;run:$pipelinerun;chain:$fallbackchain;cfg:$routerconfig;optrec:str;fields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str;aurl:str;akey:str):str{
+  let hops=chain.chainhops;
+  let attempted=mut.@();
+  let failed=mut.@();
+  let refused=mut.@();
+  let firstcode=mut."";
+  let firsthop=mut.0-1;
+  let key=mut.akey;
+  let resp=mut."";
+  let done=mut.false;
+  lp(let i=0;i<hops.len && !done;i=i+1){
+    let ii=i as i64;
+    let hop:$routingdecision=hops.get(i);
+    let spec:$modelspec=hop.model;
+    let label=rtr.hoplabel(hop);
+    let hrun=hoprun(run;ii);
+    let code=mut.hoprefusal(store;cfg;chain;ii;run;decision);
+    if(str.len(code)==0 && str.eq(providerlabel(spec.provider);"anthropic")){
+      if(str.len(key)==0){ key=anthropickey() }el{};
+      if(str.len(key)>20){}el{ code="no_key" }
+    }el{};
+    if(str.len(code)==0){
+      let raw=sendhop(store;hrun;hop;optrec;key;decision;fbreason;fbby;sid;obase;aurl);
+      if(isrefusal(raw)){
+        code=str.trimprefix(raw;refusedprefix())
+      }el{
+        attempted=attempted.push(label);
+        let anon=replytext(spec.provider;raw);
+        if(str.len(anon)>0){
+          done=true;
+          resp=completedbody(store;hrun;hop;anon;replytokens(spec.provider;raw;true);replytokens(spec.provider;raw;false);str.concat(fields;chainfields(attempted;failed;refused));startms;decision;str.len(raw);optrec)
+        }el{
+          log.warn("pipeline: \(label) did not answer, so the next permitted hop is tried";"api.pipeline";hrun.requestid);
+          hopfailed(store;hrun;providerlabel(spec.provider);spec.id;startms;decision;optrec);
+          failed=failed.push(label)
+        }
+      }
+    }el{};
+    if(str.len(code)>0){
+      hoprefused(store;hrun;hop;code;startms;decision);
+      refused=refused.push("\(label) (\(code))");
+      if(firsthop<0){
+        firsthop=ii;
+        firstcode=code
+      }el{}
+    }el{}
+  };
+  if(done){ <"200\(resp)" }el{};
+  let all=str.concat(fields;chainfields(attempted;failed;refused));
+  if(failed.len>0){
+    <"502{\"ok\":false,\"error\":\"provider request failed\"\(all)}"
+  }el{};
+  if(firsthop<0){
+    <str.concat("503";refusedroutejson("the route had no hop to send";all))
+  }el{};
+  <chainrefusal(store;firstcode;hops.get(firsthop);obase;all)
+};
+
+(* The production path from a routed request to a provider: forward() calls sendchainat with
+   the configured sidecar, ollamabase() and transport.anthropicurl(). Tests call walkchainat
+   with recorders and read the reply it builds. *)
+f=walkchainat(store:i64;run:$pipelinerun;chain:$fallbackchain;cfg:$routerconfig;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str;aurl:str;akey:str):str{
   let optrec=optimisefor(run;llurl;minchars);
   log.info("pipeline: \(popt.stagesline(optrec;anonymisedof(run.result)))";"api.pipeline";run.requestid);
-  <dispatch(store;run;route;optrec;str.concat(piifields;optimisationfield(run;optrec));startms;decision;fbreason;fbby;sid;obase)
+  <walkchain(store;run;chain;cfg;optrec;str.concat(piifields;optimisationfield(run;optrec));startms;decision;fbreason;fbby;sid;obase;aurl;akey)
+};
+
+f=sendchainat(store:i64;run:$pipelinerun;chain:$fallbackchain;cfg:$routerconfig;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str;aurl:str;akey:str):i64{
+  <respond(walkchainat(store;run;chain;cfg;piifields;startms;decision;fbreason;fbby;sid;llurl;minchars;obase;aurl;akey))
+};
+
+(* A chain of one hop, judged at the run's own sensitivity, for the callers that hold a single
+   route: sendoptimised and toanthropicat below. *)
+f=onehop(res:$piidetectionresult;route:$routingdecision):$fallbackchain{
+  <$fallbackchain{chainhops:@(route);chainsens:res.sensitivity;chainnote:route.reason}
+};
+
+f=routercfg(store:i64):$routerconfig{
+  <rtr.configfromsettings(store;ollamabase())
+};
+
+(* One route, through the same walk. Tests call it with recorders. *)
+f=sendoptimised(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str):i64{
+  <sendchainat(store;run;onehop(run.result;route);routercfg(store);piifields;startms;decision;fbreason;fbby;sid;llurl;minchars;obase;xport.anthropicurl();"")
+};
+
+(* F3.9a, F3.9b. The system prompt sent is run.finalsystemprompt: the guardian over the caller's
+   system prompt as core.privacy.systemprompt anonymised it. `url` and `key` are for the
+   recorder test (tests/integration/test_system_prompt_disclosure.tk) only; forward() passes
+   transport.anthropicurl(), and nothing a request or a setting carries reaches it. *)
+f=toanthropicat(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;url:str):i64{
+  <respond(walkchain(store;run;onehop(run.result;route);routercfg(store);optrec;piifields;startms;decision;fbreason;fbby;sid;ollamabase();url;key))
 };
 
 (* NC1.8 - what every reply on this path says about itself. This endpoint IS the
@@ -1189,42 +1400,26 @@ f=forward(store:i64;run:$pipelinerun;startms:i64;decision:$policydecision;fbreas
     <refusedbudget(bcheck.reason;piifields)
   };
 
-  let route:$routingdecision=rtr.routepreferinstalled(
-    routerfor(store);
+  (* F5.3a. A fallback chain, not one decision: core.router.router.routechain's hops in the
+     strategy's order, built against what Ollama has installed as the single route was. The
+     route-level RESTRICTED check and the kill switch that used to sit here are applied to
+     EVERY hop by walkchain, immediately before that hop would send. *)
+  let router:$router=routerfor(store);
+  let chain:$fallbackchain=rtr.routechainpreferinstalled(
+    router;
     installednames();
     res.anonymised;
     res.sensitivity;
     run.totalentities;
     $latencytolerance{$instant:0};
-    run.requestid
+    run.requestid;
+    maxhops()
   );
-  if(rtr.isrouted(route)){}el{
+  if(chain.chainhops.len>0){}el{
     recordevent(store;run;"llm_request_refused";"none";"none";0;0;t.nowms()-startms;decision);
-    <refusedroute(route.reason;piifields)
+    <refusedroute(chain.chainnote;piifields)
   };
-
-  (* The route-level safety property, asserted here as well as inside routerequest.
-     core.router.router already refuses to return a cloud decision for RESTRICTED data; this
-     is the same check at the last point before a provider is called, because this is the
-     line that would leak. Two comparisons are the right price for it. *)
-  if(t.senseq(res.sensitivity;t.restricted())){
-    if(rtr.isclouddecision(route)){
-      recordevent(store;run;"llm_request_refused";"none";"none";0;0;t.nowms()-startms;decision);
-      <refusedroute("RESTRICTED data must not be sent to a cloud provider";piifields)
-    }el{}
-  }el{};
-
-  (* T10.1, G1.6. A provider or use case switched off by the kill switch is refused here,
-     after routing and before dispatch, which is the last point that knows the destination.
-     The message and kill_switch_scope name the switch that refused it. *)
-  let pspec:$modelspec=route.model;
-  let pname=providerlabel(pspec.provider);
-  if(ks.isblocked(store;pname;"browser-chat")){
-    recordevent(store;run;"kill_switch_refused";pname;pspec.id;0;0;t.nowms()-startms;decision);
-    <http.res(403;"{\"ok\":false,\"error\":\(jx.escape(ks.refusalmessage(store;pname;"browser-chat"))),\"provider_blocked\":true,\"kill_switch_scope\":\(jx.escape(ks.blockedscope(store;pname;"browser-chat")))\(piifields)}")
-  }el{};
-
-  <sendoptimised(store;run;route;piifields;startms;decision;fbreason;fbby;sid;llmlinguaurl(store);llmlinguaminchars(store);ollamabase())
+  <sendchainat(store;run;chain;router.config;piifields;startms;decision;fbreason;fbby;sid;llmlinguaurl(store);llmlinguaminchars(store);ollamabase();xport.anthropicurl();"")
 };
 
 (* ── GA5.26: hold until approved ─────────────────────────────────────────────────

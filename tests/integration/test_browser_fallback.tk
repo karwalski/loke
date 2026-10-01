@@ -1,0 +1,306 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.browserfallback;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=guardian:core.privacy.guardian;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=ks:core.governance.killswitch;
+i=rtr:core.router.router;
+i=h:page.api.pipeline;
+
+(* F5.3a. The browser request path (page.api.pipeline) falls back along the chain F5.3 built
+   (core.router.router.routechain) when a provider fails, and every hop is held to the rules
+   the single route was.
+
+   What is driven: post() is not reachable from a test (T-16), so this drives walkchainat,
+   the production walk forward() reaches through sendchainat, with the reply it builds (the
+   status and the JSON body). Its chains are built by hand, so they can hold hops a correct
+   router would never produce, which is the point of checking at each send. The providers
+   are scripts/lib/http_recorder.py on loopback:
+     - an Ollama stand-in on which fake:latest fails (RECORDER_FAIL_MODELS) and fake2:latest
+       answers by echoing its prompt;
+     - an Anthropic stand-in that answers, and one that answers nothing (silent).
+   Every hop is judged on what its stand-in RECEIVED. No real provider is contacted and the
+   key is not a key.
+
+   The rules asserted, each with a control:
+     1. Every hop sends only the anonymised text and run.finalsystemprompt, from the one
+        privacy run, and the answer is restored with that run's placeholder map.
+     2. RESTRICTED data never reaches a cloud hop; a cloud hop after a local first choice only
+        with fallback_to_cloud on (the browser path's own configuration keeps it off).
+     3. An approval covers the destination first routed to; a hop elsewhere is refused.
+     4. The kill switch and the disclosure record apply to every hop that would send.
+     5. The reply names the hop that answered, and those that failed or were refused. *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(hd != 0){ process.wait(hd); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=openfreshstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-browser-fallback");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=hop(id:str;prov:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:prov;
+      contextwindow:32768 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"hand-built hop";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=failing():$routingdecision{
+  <hop("fake";$provider{$ollama:0})
+};
+
+f=answering():$routingdecision{
+  <hop("fake2";$provider{$ollama:0})
+};
+
+f=claude():$routingdecision{
+  <hop("claude-probe";$provider{$anthropic:0})
+};
+
+f=chainof(hops:@$routingdecision;sens:$sensitivitylevel):$fallbackchain{
+  <$fallbackchain{chainhops:hops;chainsens:sens;chainnote:""}
+};
+
+f=sensof(run:$pipelinerun):$sensitivitylevel{
+  let res:$piidetectionresult=run.result;
+  <res.sensitivity
+};
+
+f=text():str{
+  <"Please write to user.probe@example.com about the invoice."
+};
+
+f=sysprompt():str{
+  <"You are helping caller.probe@example.com today."
+};
+
+f=freshrun():$pipelinerun{
+  <sp.runforward(text();sysprompt();localonly())
+};
+
+f=fakekey():str{
+  <"sk-ant-not-a-real-key-000000"
+};
+
+f=allow():$policydecision{
+  <$policydecision{$allow:""}
+};
+
+f=approval():$policydecision{
+  <$policydecision{$requireapproval:"test approval"}
+};
+
+(* Lines of a recorder log that start with `prefix`. *)
+f=countlines(logp:str;prefix:str):i64{
+  let lines=str.split(readfile(logp);"\n");
+  let n=mut.0;
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;prefix)){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* The body of the last request logged for `prefix` that contains `marker`, or "". *)
+f=lastbodywith(logp:str;prefix:str;marker:str):str{
+  let lines=str.split(readfile(logp);"\n");
+  let found=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;prefix) && str.contains(ln;marker)){ found=str.trimprefix(ln;prefix) }el{}
+  };
+  <found
+};
+
+f=noraw(body:str):bool{
+  <!str.contains(body;"user.probe@example.com") && !str.contains(body;"caller.probe@example.com")
+};
+
+f=failedrows(cid:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM disclosure_log WHERE correlation_id=? AND state='failed'";@(cid);"n";0)
+};
+
+f=startrec(base:str;mode:str;failmodels:str):i64{
+  file.delete("\(base).log");
+  file.delete("\(base).port");
+  let models="RECORDER_MODELS=fake:latest,fake2:latest";
+  let fails="RECORDER_FAIL_MODELS=\(failmodels)";
+  <mt process.spawn(@("env";models;fails;"python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port";mode)) { $ok:h h; $err:e 0 }
+};
+
+f=stoprec(rec:i64;base:str):i64{
+  if(rec != 0){ process.kill(rec); process.wait(rec); }el{};
+  file.delete("\(base).log");
+  file.delete("\(base).log.headers");
+  file.delete("\(base).log.bodies");
+  file.delete("\(base).port");
+  <0
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let pub=$sensitivitylevel{$public:0};
+  let res=$sensitivitylevel{$restricted:0};
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let hex:str=str.randhex(8);
+  let ob="/tmp/loke_fb_ollama_\(hex)";
+  let ab="/tmp/loke_fb_anthropic_\(hex)";
+  let sb="/tmp/loke_fb_silent_\(hex)";
+  let orec=startrec(ob;"echo";"fake,fake:latest");
+  let arec=startrec(ab;"answer";"");
+  let srec=startrec(sb;"silent";"");
+  let oport=waitport("\(ob).port");
+  let aport=waitport("\(ab).port");
+  let sport=waitport("\(sb).port");
+  if(t.assert(str.len(oport)>0 && str.len(aport)>0 && str.len(sport)>0;"the three stand-ins came up")){pass=pass+1}el{fail=fail+1};
+  let obase="http://127.0.0.1:\(oport)";
+  let aurl="http://127.0.0.1:\(aport)/v1/messages";
+  let surl="http://127.0.0.1:\(sport)/v1/messages";
+  let ologp="\(ob).log";
+  let alogp="\(ab).log";
+  let slogp="\(sb).log";
+
+  (* The browser path's own configuration: prefer_local on, fallback_to_cloud off. *)
+  let browsercfg=rtr.configfromsettings(store;deadurl());
+  if(t.assert(browsercfg.preferlocal && !browsercfg.fallbacktocloud;"the browser path keeps prefer_local on and fallback_to_cloud off")){pass=pass+1}el{fail=fail+1};
+  let opencfg=rtr.namedconfig(deadurl();"best-quality";false;true);
+
+  (* ── 1. A failing local hop falls to the next, from the one privacy run ──────────── *)
+  let run1=freshrun();
+  let rid1:str=run1.requestid;
+  let r1=h.walkchainat(store;run1;chainof(@(failing();answering());sensof(run1));browsercfg;h.privacyfields(run1);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(str.startswith(r1;"200");"FALLBACK: when the first local hop fails, the request is answered (got \(str.slice(r1;0;3)))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r1;"\"answered_by\":\"ollama:fake2\"");"the reply names the hop that answered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r1;"\"hops_failed\":[\"ollama:fake\"]") && str.contains(r1;"\"hops_attempted\":[\"ollama:fake\",\"ollama:fake2\"]");"and the hop that failed, and both as attempted, in order")){pass=pass+1}el{fail=fail+1};
+  let b1a=lastbodywith(ologp;"POST /api/generate ";"\"model\":\"fake\"");
+  let b1b=lastbodywith(ologp;"POST /api/generate ";"\"model\":\"fake2\"");
+  if(t.assert(str.len(b1a)>0 && str.len(b1b)>0;"both hops' requests arrived at the Ollama stand-in")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(noraw(b1a) && noraw(b1b);"NEITHER HOP SENT A RAW VALUE: no email from the text or the system prompt arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(b1a;"[EMAIL_") && str.contains(b1b;"[EMAIL_");"each hop sent the anonymised text, with its placeholders")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(guardian.isguardianpresent(b1a) && guardian.isguardianpresent(b1b);"each hop sent the guardian system prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.replace(b1a;"\"model\":\"fake\"";"");str.replace(b1b;"\"model\":\"fake2\"";"");"the two hops sent the same body but for the model: one privacy run, one placeholder map")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r1;"user.probe@example.com");"the answer (the stand-in echoes its prompt) is restored with the run's placeholder map")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(failedrows(rid1)==1;"the failed hop's disclosure row is completed as failed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(dl.sentbytes("\(rid1)-h1")>0;"the answering hop has its own disclosure row")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 2. A cloud first choice that fails falls to a local hop; two stand-ins ────────── *)
+  let run2=freshrun();
+  let r2=h.walkchainat(store;run2;chainof(@(claude();answering());sensof(run2));browsercfg;h.privacyfields(run2);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;surl;fakekey());
+  let b2=lastbodywith(slogp;"POST /v1/messages ";"claude-probe");
+  if(t.assert(str.len(b2)>0 && noraw(b2) && guardian.isguardianpresent(b2);"the failing cloud stand-in received the anonymised text and the guardian, and no raw value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(r2;"200") && str.contains(r2;"\"answered_by\":\"ollama:fake2\"") && str.contains(r2;"\"hops_failed\":[\"anthropic:claude-probe\"]");"and the local hop after it answered, the reply saying which failed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. RESTRICTED data never reaches a cloud hop ─────────────────────────────────── *)
+  let abefore=countlines(alogp;"POST /v1/messages");
+  let run3=freshrun();
+  let r3=h.walkchainat(store;run3;chainof(@(claude();answering());res);opencfg;h.privacyfields(run3);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(alogp;"POST /v1/messages")==abefore;"A RESTRICTED CHAIN'S CLOUD HOP IS NOT SENT, under the most cloud-favouring configuration")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r3;"anthropic:claude-probe (restricted_cloud)") && str.contains(r3;"\"answered_by\":\"ollama:fake2\"");"it is reported refused, and the local hop answered")){pass=pass+1}el{fail=fail+1};
+  let r3id:str=run3.requestid;
+  if(t.assert(dl.sentbytes(r3id)<0;"a refused hop writes no disclosure row")){pass=pass+1}el{fail=fail+1};
+  let run3c=freshrun();
+  let r3c=h.walkchainat(store;run3c;chainof(@(claude();answering());pub);opencfg;h.privacyfields(run3c);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(alogp;"POST /v1/messages")==abefore+1 && str.contains(r3c;"\"answered_by\":\"anthropic:claude-probe\"");"CONTROL: the same chain at PUBLIC is sent to the cloud stand-in, which answers")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 4. After a local first choice, a cloud hop only with fallback_to_cloud on ──── *)
+  let a4=countlines(alogp;"POST /v1/messages");
+  let run4=freshrun();
+  let r4=h.walkchainat(store;run4;chainof(@(failing();claude());pub);browsercfg;h.privacyfields(run4);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(alogp;"POST /v1/messages")==a4;"with fallback_to_cloud off, a failed local first choice does not go on to the cloud")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(r4;"502") && !str.contains(r4;"answered_by") && str.contains(r4;"anthropic:claude-probe (not_permitted)");"the request fails, claims no answer, and says why the cloud hop was not sent")){pass=pass+1}el{fail=fail+1};
+  let run4c=freshrun();
+  let r4c=h.walkchainat(store;run4c;chainof(@(failing();claude());pub);opencfg;h.privacyfields(run4c);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(alogp;"POST /v1/messages")==a4+1 && str.contains(r4c;"\"answered_by\":\"anthropic:claude-probe\"");"CONTROL: with it on, and no approval needed, it does")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 5. An approval covers the destination first routed to ────────────────────── *)
+  let a5=countlines(alogp;"POST /v1/messages");
+  let run5=freshrun();
+  let r5=h.walkchainat(store;run5;chainof(@(failing();claude());pub);opencfg;h.privacyfields(run5);sh.nowms();approval();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(alogp;"POST /v1/messages")==a5;"AN APPROVED REQUEST IS NOT SENT TO A DESTINATION THE APPROVAL DID NOT COVER: local first, cloud hop refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r5;"anthropic:claude-probe (approval_destination)") && str.startswith(r5;"502");"it is reported as refused for the approval, and the request fails rather than sending")){pass=pass+1}el{fail=fail+1};
+  let run5l=freshrun();
+  let r5l=h.walkchainat(store;run5l;chainof(@(failing();answering());pub);opencfg;h.privacyfields(run5l);sh.nowms();approval();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(str.contains(r5l;"\"answered_by\":\"ollama:fake2\"");"CONTROL: an approved request falls back to another local model, the same destination")){pass=pass+1}el{fail=fail+1};
+  let gpt=hop("gpt-probe";$provider{$openai:0});
+  let claude2=hop("claude-other";$provider{$anthropic:0});
+  if(t.assert(!h.approvalcovers(approval();claude();gpt);"an approval for one cloud provider does not cover another")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!h.approvalcovers(approval();claude();answering());"nor a cloud first choice's approval a local hop")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.approvalcovers(approval();claude();claude2) && h.approvalcovers(allow();failing();gpt);"another model at the approved provider is covered, and a request needing no approval is not limited")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 6. The kill switch applies to every hop ───────────────────────────────────── *)
+  let a6=countlines(alogp;"POST /v1/messages");
+  ks.engageprovider(store;"anthropic";"F5.3a test");
+  let run6=freshrun();
+  let r6=h.walkchainat(store;run6;chainof(@(claude();answering());pub);opencfg;h.privacyfields(run6);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(alogp;"POST /v1/messages")==a6 && str.contains(r6;"anthropic:claude-probe (kill_switch)");"a provider switched off is not sent to as a hop")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r6;"\"answered_by\":\"ollama:fake2\"");"and the next permitted hop answers")){pass=pass+1}el{fail=fail+1};
+  ks.releaseprovider(store;"anthropic");
+  ks.engageprovider(store;"ollama";"F5.3a test");
+  let o7=countlines(ologp;"POST /api/generate");
+  let run7=freshrun();
+  let r7=h.walkchainat(store;run7;chainof(@(failing();answering());pub);browsercfg;h.privacyfields(run7);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(countlines(ologp;"POST /api/generate")==o7 && str.startswith(r7;"403") && str.contains(r7;"\"provider_blocked\":true");"with every hop switched off nothing is sent, and the reply is the kill switch's 403")){pass=pass+1}el{fail=fail+1};
+  ks.releaseprovider(store;"ollama");
+
+  stoprec(orec;ob);
+  stoprec(arec;ab);
+  stoprec(srec;sb);
+  <fail
+};
