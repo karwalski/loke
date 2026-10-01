@@ -812,19 +812,15 @@
       throw new Error('fetchSpec: specUrl is required');
     }
 
-    var proxyUrl = lokeUrl() + '/api/proxy';
-    var response = await fetch(proxyUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: specUrl, method: 'GET' })
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to fetch spec: HTTP ' + response.status + ' ' + response.statusText);
+    // moke's proxy (MK19.9, moke-proxy.js), not loke's port: loke has no /api/proxy.
+    if (!window.MokeProxy) throw new Error('moke-proxy.js is not loaded on this page');
+    var text;
+    try {
+      text = await window.MokeProxy.text({ url: specUrl, method: 'GET' });
+    } catch (e) {
+      throw new Error('Failed to fetch spec: ' + e.message);
     }
-
-    var text = await response.text();
-    text = text.trim();
+    text = String(text).trim();
 
     // Try to parse as JSON first.
     var spec;

@@ -828,23 +828,25 @@
 
     progress('Preparing request\u2026');
 
-    // Build the proxy request
-    var proxyUrl = ((window.LOKE_URL || '') || '').replace(/\/+$/, '') + '/api/proxy';
+    // moke's proxy (MK19.9, moke-proxy.js). This used to post to LOKE_URL +
+    // '/api/proxy', which loke never had. The proxy answers an envelope and
+    // carries text only, so the envelope is read through the three calls the
+    // code below makes on a fetch response.
+    if (!window.MokeProxy) return Promise.reject(new Error('moke-proxy.js is not loaded on this page'));
 
     progress('Fetching file\u2026');
 
-    return fetch(proxyUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url: url,
-        method: 'GET',
-        responseType: 'auto'
-      })
-    }).then(function (response) {
-      if (!response.ok) {
-        throw new Error('Failed to fetch URL: HTTP ' + response.status);
+    return window.MokeProxy.request({ url: url, method: 'GET' }).then(function (env) {
+      if (!env.ok || env.status < 200 || env.status >= 300) {
+        throw new Error('Failed to fetch URL: ' + window.MokeProxy.describe(env));
       }
+      var response = {
+        headers: { get: function () { return env.contentType || ''; } },
+        text: function () { return Promise.resolve(env.body); },
+        arrayBuffer: function () {
+          return Promise.reject(new Error('an Excel file cannot come through moke\u2019s proxy, which carries text only; download it and upload it instead'));
+        }
+      };
 
       var contentType = response.headers.get('content-type') || '';
       var fileType = detectFileType(url, contentType);

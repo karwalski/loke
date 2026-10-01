@@ -425,6 +425,13 @@ step_checks() {
       || { echo "  savings ledger tests failed — moke would show a saving nothing measured" >&2; failed=1; }
   fi
 
+  if [[ -f packages/moke/static/js/tests/test-moke-proxy.js ]] && command -v node >/dev/null; then
+    echo "  every remote fetch in moke goes through its own /api/proxy (MK19.9)"
+    node packages/moke/static/js/tests/test-moke-proxy.js >/dev/null \
+      || { node packages/moke/static/js/tests/test-moke-proxy.js >&2
+           echo "  a call site bypasses moke-proxy.js or still targets loke's port" >&2; failed=1; }
+  fi
+
   # Two checks for the defect class MK20.4 fixed: presentation mode rendered
   # Math.random() figures under a "computed locally" caption, because the NC1.5
   # rule lived in one template and it had no access to it.

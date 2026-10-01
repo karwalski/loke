@@ -52,7 +52,9 @@ cp "$MOKE_BIN" "$WORK/mk/moke"
 SEEN="$WORK/model_saw.log"; : > "$SEEN"
 python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
 ( cd "$WORK/lk" && HOME="$WORK/lk/home" exec "$WORK/lk/loke" > "$WORK/lk.log" 2>&1 ) & PIDS="$PIDS $!"
-( cd "$WORK/mk" && HOME="$WORK/mk/home" exec "$WORK/mk/moke" > "$WORK/mk.log" 2>&1 ) & PIDS="$PIDS $!"
+# MK19.9: an empty proxy allowlist, whatever the caller's environment holds, so /api/proxy
+# can fetch nothing and no check below can reach a real host.
+( cd "$WORK/mk" && MOKE_PROXY_ALLOW= HOME="$WORK/mk/home" exec "$WORK/mk/moke" > "$WORK/mk.log" 2>&1 ) & PIDS="$PIDS $!"
 
 for _ in $(seq 1 40); do
   nc -z -G 1 127.0.0.1 11430 2>/dev/null && nc -z -G 1 127.0.0.1 11432 2>/dev/null \
@@ -95,6 +97,12 @@ fi
 # landing page's cards and the upload page's list, and a Load from each.
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/upload" "$ROOT/tests/ui/datasets_mk191.json"
+  rc=$?
+fi
+# MK19.9: the Connections page's Test Connection goes through moke's own /api/proxy and shows
+# its refusals with their reasons. The allowlist is empty here, so nothing is fetched.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/connections" "$ROOT/tests/ui/proxy_mk199.json"
   rc=$?
 fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2

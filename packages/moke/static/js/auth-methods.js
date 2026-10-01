@@ -236,23 +236,19 @@
       body += '&scope=' + encodeURIComponent(scopes.trim());
     }
 
-    var resp = await fetch(LOKE_URL + '/api/proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // moke's proxy (MK19.9, moke-proxy.js), not loke's port: loke has no /api/proxy.
+    if (!window.MokeProxy) throw new Error('moke-proxy.js is not loaded on this page');
+    var data;
+    try {
+      data = await window.MokeProxy.json({
         url:     tokenUrl,
         method:  'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body:    body
-      })
-    });
-
-    if (!resp.ok) {
-      var errText = await resp.text();
-      throw new Error('OAuth token request failed (' + resp.status + '): ' + errText);
+      });
+    } catch (e) {
+      throw new Error('OAuth token request failed: ' + e.message);
     }
-
-    var data = await resp.json();
 
     // Attach a local timestamp so we can check expiry later
     data._fetched_at = Date.now();

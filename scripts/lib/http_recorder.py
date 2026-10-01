@@ -75,8 +75,14 @@ is what /api/tags and /api/ps list instead of `fake:latest`. Unset, both behave 
 The `harness` mode answers /api/generate as `echo` does, names no task to the intent
 classifier, and reports "Jane Citizen" from the NER /api/chat only when the request holds
 that name (`answer` and `echo` report it whatever the text).
+
+MK19.9: paths under /proxy-test/ answer the cases moke's /api/proxy must handle, in any mode.
+/proxy-test/json answers a small JSON document with a marker; /proxy-test/redirect answers 302
+with a Location on this same recorder (/proxy-test/redirected), so a client that follows it
+is seen to; /proxy-test/big answers 300,000 bytes with no Content-Length, so only a client
+that counts as it reads can stop it; /proxy-test/slow waits six seconds before answering.
 """
-import http.server, json, os, re, ssl, sys
+import http.server, json, os, re, ssl, sys, time
 
 LOG = sys.argv[1]
 PORTFILE = sys.argv[2]
@@ -177,9 +183,30 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _proxytest(self, p):
+        if p == "/proxy-test/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/proxy-test/redirected")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif p == "/proxy-test/big":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            for _ in range(30):
+                self.wfile.write(b"x" * 10000)
+            self.close_connection = True
+        elif p == "/proxy-test/slow":
+            time.sleep(6)
+            self._send({"late": True})
+        else:
+            self._send({"proxied": "answered-by-recorder", "path": p})
+
     def _answer(self, body=""):
         p = self.path.split("?")[0]
-        if MODE == "silent":
+        if p.startswith("/proxy-test/"):
+            self._proxytest(p)
+        elif MODE == "silent":
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()

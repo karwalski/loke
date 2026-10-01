@@ -48,7 +48,11 @@ mkdir -p "$WORK/home"
 cp "$BIN" "$WORK/moke"
 sed -E "s/^([[:space:]]*port[[:space:]]*=).*/\1 $PORT/" "$SRC/ooke.toml" > "$WORK/ooke.toml"
 
-( cd "$WORK" && HOME="$WORK/home" exec ./moke > "$WORK/serve.log" 2>&1 ) &
+# MK19.9: the proxy allowlist is configured with three entries the rules must drop (a loopback
+# literal, localhost and the GCP metadata name), and nothing else. So /api/proxy can fetch
+# nothing, whatever the caller's environment holds, and the checks below also show that
+# configuration cannot allowlist what the rules refuse.
+( cd "$WORK" && MOKE_PROXY_ALLOW="127.0.0.1,localhost,metadata.google.internal" HOME="$WORK/home" exec ./moke > "$WORK/serve.log" 2>&1 ) &
 PID=$!
 
 up=0
@@ -193,6 +197,34 @@ api GET  /api/agents    ""                              200 '"agents":['        
 # its suggestions are heuristic rather than presenting them as a model's.
 api POST /api/ml/propose '{}'                            400 'at least one of'       "a proposal needs column names"
 api POST /api/ml/propose '{"num_cols":["revenue","orders","ltv"],"cat_cols":["region","plan"]}' 200 '"source":"heuristic"' "and proposes analyses from names alone, labelled heuristic"
+# MK19.9: /api/proxy, the SSRF-shaped endpoint, refuses before fetching anything. The allowlist
+# above holds only entries the rules drop, so every URL here is refused, each for its reason.
+api POST /api/proxy '{"url":"https://169.254.169.254/latest/meta-data/"}' 403 'blocked address: cloud metadata' "the metadata address is refused, by class"
+api POST /api/proxy '{"url":"https://[::ffff:127.0.0.1]:443/"}' 403 'blocked address: IPv4-mapped loopback' "IPv4-mapped loopback is refused"
+api POST /api/proxy '{"url":"https://2130706433/"}'          403 'non-canonical IPv4'   "decimal 127.0.0.1 is refused as non-canonical"
+api POST /api/proxy '{"url":"https://localhost/"}'           403 'local name'           "localhost is refused although it is configured"
+api POST /api/proxy '{"url":"https://127.0.0.1/"}'           403 'blocked address: loopback' "so is 127.0.0.1, also configured"
+api POST /api/proxy '{"url":"https://metadata.google.internal/"}' 403 'local name'     "and metadata.google.internal, also configured"
+api POST /api/proxy '{"url":"http://data.gov.au/"}'          403 'https only'           "plain http is refused"
+api POST /api/proxy '{"url":"https://user:pw@data.gov.au/"}' 403 'userinfo'             "userinfo is refused"
+api POST /api/proxy '{"url":"https://data.gov.au:8443/"}'    403 'port 8443 not allowed' "a port other than 443 is refused"
+api POST /api/proxy '{"url":"https://data.gov.au/"}'         403 'not on the proxy allowlist' "a public host nobody allowlisted is refused: default deny"
+api POST /api/proxy '{"url":"https://data.gov.au/","method":"DELETE"}' 400 'GET or POST' "DELETE is refused"
+api POST /api/proxy '{}'                                     400 'missing field: url'   "a request needs a url"
+proxyhdr() {  # extra-curl-args... -- expected-code must-contain label
+  local args=() out code
+  while [ "$1" != "--" ]; do args+=("$1"); shift; done; shift
+  out=$(curl -s -m 20 -X POST "${args[@]}" -d '{"url":"https://data.gov.au/"}' -w '\n%{http_code}' "http://127.0.0.1:$PORT/api/proxy")
+  code=$(printf '%s' "$out" | tail -1); out=$(printf '%s' "$out" | sed '$d')
+  case "$code|$out" in
+    "$1|"*"$2"*) echo "  ok   POST /api/proxy [$code] $3" ;;
+    *) echo "  FAIL POST /api/proxy [$code, wanted $1] lacks $2: $(printf '%s' "$out" | head -c 150)" >&2; fail=1 ;;
+  esac
+}
+proxyhdr -H 'Content-Type: application/json' -H 'Host: rebound.example:'"$PORT" -- 403 'addressed to this machine' "a request naming another host (DNS rebinding) is refused"
+proxyhdr -H 'Content-Type: application/json' -H 'Origin: https://evil.example' -- 403 'cross-origin' "a cross-origin request is refused"
+proxyhdr -H 'Content-Type: text/plain' -- 415 'application/json' "a simple (no-preflight) form post is refused"
+
 # MK6.5: the seven handlers that compiled with no route. Each check judges what the handler
 # computed, so a route that answers 404, or a handler that answers but ignores its input, fails.
 # MK6.6: the panels' histories are shared by every worker, which the repeated reads below check.

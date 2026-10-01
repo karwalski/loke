@@ -1,0 +1,316 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=packages.moke.tests.testproxyguard;
+
+i=t:std.test;
+i=io:std.io;
+i=str:std.str;
+i=g:moke.proxy.guard;
+
+(* MK19.9 — the URL and address rules of moke's /api/proxy, written before the module.
+
+   /api/proxy fetches a URL the browser names, on a machine that also runs loke, Ollama and
+   a database: a server-side request forgery vector by construction. These are the rules
+   moke.proxy.guard must hold, each with the encodings an attacker would try first. No
+   test here opens a socket: guard.check and guard.addressesok are pure. The fetch path,
+   the resolver and the pinning are tested against a local TLS stand-in in
+   test_proxy_fetch.tk.
+
+   What is asserted for a refusal is the REASON as well as the refusal. Every IP literal is
+   refused whatever its class (the allowlist holds names only), so a refusal alone would
+   not show that the address classifier works: the reason names the class it found. The
+   classifier is what guards a name's RESOLVED addresses, asserted directly through
+   addressesok below. *)
+
+f=chk(c:bool;label:str):i64{
+  if(t.assert(c;label)){ <0 }el{};
+  <1
+};
+
+f=policy(allow:@str):$proxypolicy{
+  <$proxypolicy{ allow:allow; maxbytes:4194304; timeouts:15; loopbackport:0; cafile:"" }
+};
+
+f=demo():$proxypolicy{
+  <policy(@("data.gov.au";"api.example.com"))
+};
+
+f=refusedwith(url:str;p:$proxypolicy;needle:str):bool{
+  let r:$proxytarget=g.check(url;p);
+  if(r.ok){
+    io.println("  accepted, expected a refusal naming '\(needle)': \(url)");
+    <false
+  }el{};
+  if(!str.contains(r.reason;needle)){
+    io.println("  refused for '\(r.reason)', expected '\(needle)': \(url)");
+    <false
+  }el{};
+  <true
+};
+
+f=refused(url:str;needle:str):bool{
+  <refusedwith(url;demo();needle)
+};
+
+f=accepted(url:str):bool{
+  let r:$proxytarget=g.check(url;demo());
+  if(!r.ok){ io.println("  refused '\(r.reason)': \(url)") }el{};
+  <r.ok
+};
+
+f=addrrefused(addrs:@str;port:i64;p:$proxypolicy;needle:str):bool{
+  let why=g.addressesok(addrs;port;p);
+  if(str.len(why)==0){
+    io.println("  addresses accepted, expected '\(needle)'");
+    <false
+  }el{};
+  if(!str.contains(why;needle)){
+    io.println("  addresses refused for '\(why)', expected '\(needle)'");
+    <false
+  }el{};
+  <true
+};
+
+f=main():i64{
+  let fail=mut.0;
+
+  (* ── What is let through, and what it is turned into ─────────────────────── *)
+  let a:$proxytarget=g.check("https://data.gov.au/data/api/3/action/package_search?q=road";demo());
+  fail=fail+chk(a.ok;"an allowlisted https URL is accepted");
+  fail=fail+chk(str.eq(a.host;"data.gov.au");"its host is the name");
+  fail=fail+chk(a.port==443;"on port 443");
+  fail=fail+chk(str.eq(a.path;"/data/api/3/action/package_search?q=road");"with its path and query");
+  fail=fail+chk(str.eq(g.canonical(a);"https://data.gov.au:443/data/api/3/action/package_search?q=road");"rebuilt canonically from the parts that were checked");
+  let b:$proxytarget=g.check("https://DATA.Gov.AU/x";demo());
+  fail=fail+chk(b.ok && str.eq(b.host;"data.gov.au");"a host in capitals is lowercased, then matched");
+  fail=fail+chk(accepted("https://data.gov.au:443/x");"an explicit :443 is accepted");
+  let c:$proxytarget=g.check("https://data.gov.au";demo());
+  fail=fail+chk(c.ok && str.eq(c.path;"/");"no path is /");
+  let d:$proxytarget=g.check("https://data.gov.au?q=1";demo());
+  fail=fail+chk(d.ok && str.eq(d.path;"/?q=1");"a query straight after the host gets its /");
+  let e:$proxytarget=g.check("https://data.gov.au/x#frag";demo());
+  fail=fail+chk(e.ok && str.eq(e.path;"/x");"a fragment is dropped: it never goes on the wire");
+
+  (* ── Default deny: the allowlist, exact names only ────────────────────────── *)
+  fail=fail+chk(refusedwith("https://data.gov.au/";policy(@());"not on the proxy allowlist");"an empty allowlist refuses everything");
+  fail=fail+chk(refused("https://example.com/";"not on the proxy allowlist");"a host not on the list is refused");
+  fail=fail+chk(refused("https://data.gov.au.evil.example/";"not on the proxy allowlist");"an allowlisted name as a PREFIX is not that name");
+  fail=fail+chk(refused("https://evildata.gov.au/";"not on the proxy allowlist");"nor as a suffix of another name");
+  fail=fail+chk(refused("https://sub.data.gov.au/";"not on the proxy allowlist");"a subdomain of an allowlisted name is not allowlisted");
+  fail=fail+chk(refused("https://example.com/data.gov.au";"not on the proxy allowlist");"an allowlisted name in the path does not count");
+
+  (* ── https only ───────────────────────────────────────────────────────────── *)
+  fail=fail+chk(refused("http://data.gov.au/";"https only");"plain http is refused");
+  fail=fail+chk(refused("HTTPS://data.gov.au/";"https only");"the scheme must be written https://");
+  fail=fail+chk(refused("file:///etc/passwd";"https only");"file: is refused");
+  fail=fail+chk(refused("gopher://data.gov.au/";"https only");"gopher: is refused");
+  fail=fail+chk(refused("dict://data.gov.au:11211/";"https only");"dict: is refused");
+  fail=fail+chk(refused("ftp://data.gov.au/";"https only");"ftp: is refused");
+  fail=fail+chk(refused("//data.gov.au/";"https only");"a scheme-relative URL is refused");
+  fail=fail+chk(refused("https:/data.gov.au/";"https only");"https:/ with one slash is refused");
+  fail=fail+chk(refused("https:data.gov.au";"https only");"https: with no slashes is refused");
+  fail=fail+chk(refused("";"https only");"an empty URL is refused");
+
+  (* ── Characters a parser might read differently from curl ─────────────────── *)
+  fail=fail+chk(refused(" https://data.gov.au/";"space, control character or backslash");"a leading space is refused");
+  fail=fail+chk(refused("https://data.gov.au/a b";"space, control character or backslash");"a space in the path is refused");
+  fail=fail+chk(refused("https://data.gov.au/\r\nHost: evil";"space, control character or backslash");"CR LF is refused");
+  fail=fail+chk(refused("https://data.gov.au/\tx";"space, control character or backslash");"a tab is refused");
+  fail=fail+chk(refused("https:\\\\data.gov.au\\x";"space, control character or backslash");"backslashes are refused: a WHATWG parser reads them as slashes");
+  fail=fail+chk(refused("https://data.gov.au\\@127.0.0.1/";"space, control character or backslash");"a backslash before @ is refused");
+  fail=fail+chk(refused("https://data.gov.au/\x7f";"space, control character or backslash");"DEL is refused");
+  let long=str.repeat("a";3000 as u64);
+  fail=fail+chk(refused("https://data.gov.au/\(long)";"too long");"a URL over 2048 bytes is refused");
+
+  (* ── userinfo and percent-encoded hosts ───────────────────────────────────── *)
+  fail=fail+chk(refused("https://user:pass@data.gov.au/";"userinfo");"user:password@ is refused");
+  fail=fail+chk(refused("https://data.gov.au@127.0.0.1/";"userinfo");"allowlisted@loopback is refused");
+  fail=fail+chk(refused("https://@data.gov.au/";"userinfo");"an empty userinfo is refused");
+  fail=fail+chk(refused("https://data.gov.au:443@evil.example/";"userinfo");"host:port@other is refused");
+  fail=fail+chk(refused("https://data.gov.au%40127.0.0.1/";"percent-encoded");"a percent-encoded @ is refused");
+  fail=fail+chk(refused("https://%31%32%37.0.0.1/";"percent-encoded");"a percent-encoded IP is refused");
+  fail=fail+chk(refused("https://data.gov.au%2F@evil.example/";"userinfo");"a percent-encoded slash before @ is refused");
+
+  (* ── Ports: 443 only ──────────────────────────────────────────────────────── *)
+  fail=fail+chk(refused("https://data.gov.au:8443/";"port");"8443 is refused");
+  fail=fail+chk(refused("https://data.gov.au:80/";"port");"80 is refused");
+  fail=fail+chk(refused("https://data.gov.au:22/";"port");"22 is refused");
+  fail=fail+chk(refused("https://data.gov.au:11430/";"port");"loke's own port is refused");
+  fail=fail+chk(refused("https://data.gov.au:0/";"port");"port 0 is refused");
+  fail=fail+chk(refused("https://data.gov.au:65536/";"port");"a port over 65535 is refused");
+  fail=fail+chk(refused("https://data.gov.au:99999999999999999999/";"port");"an overflowing port is refused");
+  fail=fail+chk(refused("https://data.gov.au:0443/";"port");"a port with a leading zero is refused");
+  fail=fail+chk(refused("https://data.gov.au:/";"port");"an empty port is refused");
+  fail=fail+chk(refused("https://data.gov.au:443:443/";"port");"two ports are refused");
+  fail=fail+chk(refused("https://data.gov.au:+443/";"port");"a signed port is refused");
+  fail=fail+chk(refused("https://data.gov.au:0x1bb/";"port");"a hex port is refused");
+
+  (* ── Local and internal names ─────────────────────────────────────────────── *)
+  fail=fail+chk(refused("https://localhost/";"local name");"localhost is refused");
+  fail=fail+chk(refused("https://LOCALHOST/";"local name");"LOCALHOST is refused");
+  fail=fail+chk(refused("https://localhost./";"non-canonical");"localhost. (trailing dot) is refused");
+  fail=fail+chk(refused("https://data.gov.au./";"non-canonical");"a trailing dot is refused, even on an allowlisted name");
+  fail=fail+chk(refused("https://.data.gov.au/";"non-canonical");"a leading dot is refused");
+  fail=fail+chk(refused("https://data..gov.au/";"non-canonical");"an empty label is refused");
+  fail=fail+chk(refused("https://foo.localhost/";"local name");"*.localhost is refused");
+  fail=fail+chk(refused("https://printer.local/";"local name");"*.local (mDNS) is refused");
+  fail=fail+chk(refused("https://router.home.arpa/";"local name");"*.home.arpa is refused");
+  fail=fail+chk(refused("https://metadata.google.internal/computeMetadata/v1/";"local name");"metadata.google.internal is refused");
+  fail=fail+chk(refused("https://METADATA.GOOGLE.INTERNAL/";"local name");"in capitals too");
+  fail=fail+chk(refused("https://anything.internal/";"local name");"*.internal is refused");
+  fail=fail+chk(refused("https://metadata/";"local name");"a single-label name (metadata) is refused");
+  fail=fail+chk(refused("https://ollama/";"local name");"a single-label name (ollama) is refused");
+  fail=fail+chk(refused("https://-data.gov.au/";"malformed host");"a label starting with - is refused");
+  fail=fail+chk(refused("https://data_gov.au/";"malformed host");"an underscore is refused");
+  fail=fail+chk(refused("https://dàta.gov.au/";"malformed host");"a non-ASCII host is refused");
+  fail=fail+chk(refused("https://127。0。0。1/";"malformed host");"ideographic full stops are refused");
+  fail=fail+chk(refused("https:///x";"malformed host");"an empty host is refused");
+
+  (* ── IPv4 literals: canonical, classified, and refused ────────────────────── *)
+  fail=fail+chk(refused("https://127.0.0.1/";"blocked address: loopback");"127.0.0.1 is loopback");
+  fail=fail+chk(refused("https://127.1.2.3/";"blocked address: loopback");"all of 127/8 is loopback");
+  fail=fail+chk(refused("https://127.255.255.254/";"blocked address: loopback");"to its top");
+  fail=fail+chk(refused("https://0.0.0.0/";"blocked address: this network");"0.0.0.0 is refused");
+  fail=fail+chk(refused("https://0.1.2.3/";"blocked address: this network");"all of 0/8 is refused");
+  fail=fail+chk(refused("https://10.0.0.1/";"blocked address: private");"10/8 is private");
+  fail=fail+chk(refused("https://172.16.0.1/";"blocked address: private");"172.16/12 is private");
+  fail=fail+chk(refused("https://172.31.255.255/";"blocked address: private");"to its top");
+  fail=fail+chk(refused("https://172.32.0.1/";"IP literal");"172.32.0.1 is outside 172.16/12, but still a literal");
+  fail=fail+chk(refused("https://192.168.1.1/";"blocked address: private");"192.168/16 is private");
+  fail=fail+chk(refused("https://169.254.169.254/latest/meta-data/";"blocked address: cloud metadata");"169.254.169.254 is cloud metadata");
+  fail=fail+chk(refused("https://169.254.1.1/";"blocked address: link-local");"169.254/16 is link-local");
+  fail=fail+chk(refused("https://100.64.0.1/";"blocked address: carrier-grade NAT");"100.64/10 is CGNAT");
+  fail=fail+chk(refused("https://100.127.255.255/";"blocked address: carrier-grade NAT");"to its top");
+  fail=fail+chk(refused("https://100.128.0.1/";"IP literal");"100.128.0.1 is outside it, but still a literal");
+  fail=fail+chk(refused("https://192.0.0.8/";"blocked address: IETF special-purpose");"192.0.0/24 is refused");
+  fail=fail+chk(refused("https://192.0.2.1/";"blocked address: documentation");"TEST-NET-1 is refused");
+  fail=fail+chk(refused("https://198.18.0.1/";"blocked address: benchmarking");"198.18/15 is refused");
+  fail=fail+chk(refused("https://224.0.0.1/";"blocked address: multicast");"multicast is refused");
+  fail=fail+chk(refused("https://255.255.255.255/";"blocked address: reserved");"broadcast is refused");
+  fail=fail+chk(refused("https://240.0.0.1/";"blocked address: reserved");"240/4 is refused");
+  fail=fail+chk(refused("https://8.8.8.8/";"IP literal");"a public IPv4 literal is refused: the allowlist holds names");
+
+  (* ── Non-canonical IPv4: what inet_aton and curl would still turn into 127.0.0.1 ── *)
+  fail=fail+chk(refused("https://2130706433/";"non-canonical IPv4");"decimal 2130706433 (127.0.0.1)");
+  fail=fail+chk(refused("https://017700000001/";"non-canonical IPv4");"octal 017700000001");
+  fail=fail+chk(refused("https://0x7f000001/";"non-canonical IPv4");"hex 0x7f000001");
+  fail=fail+chk(refused("https://0X7F000001/";"non-canonical IPv4");"hex in capitals");
+  fail=fail+chk(refused("https://0x7f.0.0.1/";"non-canonical IPv4");"one hex octet");
+  fail=fail+chk(refused("https://0x7f.0x0.0x0.0x1/";"non-canonical IPv4");"four hex octets");
+  fail=fail+chk(refused("https://0177.0.0.1/";"non-canonical IPv4");"an octal octet");
+  fail=fail+chk(refused("https://0177.0000.0000.0001/";"non-canonical IPv4");"four octal octets");
+  fail=fail+chk(refused("https://127.1/";"non-canonical IPv4");"short form 127.1");
+  fail=fail+chk(refused("https://127.0.1/";"non-canonical IPv4");"short form 127.0.1");
+  fail=fail+chk(refused("https://0x7f.1/";"non-canonical IPv4");"short hex form");
+  fail=fail+chk(refused("https://127.000.000.001/";"non-canonical IPv4");"zero-padded octets");
+  fail=fail+chk(refused("https://127.0.0.01/";"non-canonical IPv4");"one zero-padded octet");
+  fail=fail+chk(refused("https://0/";"non-canonical IPv4");"a bare 0");
+  fail=fail+chk(refused("https://1.2.3.4.5/";"non-canonical IPv4");"five numeric labels");
+  fail=fail+chk(refused("https://256.0.0.1/";"non-canonical IPv4");"an octet over 255");
+  fail=fail+chk(refused("https://2852039166/";"non-canonical IPv4");"decimal 169.254.169.254");
+  fail=fail+chk(refused("https://0xA9FEA9FE/";"non-canonical IPv4");"hex 169.254.169.254");
+  fail=fail+chk(refused("https://0251.0376.0251.0376/";"non-canonical IPv4");"octal 169.254.169.254");
+  fail=fail+chk(refused("https://169.254.43518/";"non-canonical IPv4");"short form of 169.254.169.254");
+  fail=fail+chk(refused("https://167772161/";"non-canonical IPv4");"decimal 10.0.0.1");
+  fail=fail+chk(refused("https://example.0x10/";"non-canonical IPv4");"a name whose last label is hex is read as an address");
+  fail=fail+chk(refused("https://example.123/";"non-canonical IPv4");"a name whose last label is numeric is read as an address");
+
+  (* ── IPv6 literals ─────────────────────────────────────────────────────────── *)
+  fail=fail+chk(refused("https://[::1]/";"blocked address: loopback");"[::1] is loopback");
+  fail=fail+chk(refused("https://[::1]:443/";"blocked address: loopback");"with a port too");
+  fail=fail+chk(refused("https://[0:0:0:0:0:0:0:1]/";"blocked address: loopback");"uncompressed ::1");
+  fail=fail+chk(refused("https://[0000:0000:0000:0000:0000:0000:0000:0001]/";"blocked address: loopback");"zero-padded ::1");
+  fail=fail+chk(refused("https://[::]/";"blocked address: unspecified");"[::] is refused");
+  fail=fail+chk(refused("https://[::ffff:127.0.0.1]/";"blocked address: IPv4-mapped loopback");"IPv4-mapped 127.0.0.1, dotted");
+  fail=fail+chk(refused("https://[::ffff:7f00:1]/";"blocked address: IPv4-mapped loopback");"IPv4-mapped 127.0.0.1, hex");
+  fail=fail+chk(refused("https://[::FFFF:7F00:0001]/";"blocked address: IPv4-mapped loopback");"IPv4-mapped in capitals");
+  fail=fail+chk(refused("https://[0:0:0:0:0:ffff:127.0.0.1]/";"blocked address: IPv4-mapped loopback");"IPv4-mapped, uncompressed");
+  fail=fail+chk(refused("https://[::ffff:169.254.169.254]/";"blocked address: IPv4-mapped cloud metadata");"IPv4-mapped metadata, dotted");
+  fail=fail+chk(refused("https://[::ffff:a9fe:a9fe]/";"blocked address: IPv4-mapped cloud metadata");"IPv4-mapped metadata, hex");
+  fail=fail+chk(refused("https://[::ffff:10.0.0.1]/";"blocked address: IPv4-mapped private");"IPv4-mapped 10/8");
+  fail=fail+chk(refused("https://[::ffff:192.168.0.1]/";"blocked address: IPv4-mapped private");"IPv4-mapped 192.168/16");
+  fail=fail+chk(refused("https://[::ffff:172.16.0.1]/";"blocked address: IPv4-mapped private");"IPv4-mapped 172.16/12");
+  fail=fail+chk(refused("https://[::ffff:100.64.0.1]/";"blocked address: IPv4-mapped carrier-grade NAT");"IPv4-mapped CGNAT");
+  fail=fail+chk(refused("https://[::ffff:0.0.0.0]/";"blocked address: IPv4-mapped this network");"IPv4-mapped 0.0.0.0");
+  fail=fail+chk(refused("https://[::ffff:169.254.1.1]/";"blocked address: IPv4-mapped link-local");"IPv4-mapped link-local");
+  fail=fail+chk(refused("https://[::127.0.0.1]/";"blocked address: IPv4-compatible");"IPv4-compatible ::127.0.0.1");
+  fail=fail+chk(refused("https://[::7f00:1]/";"blocked address: IPv4-compatible");"IPv4-compatible in hex");
+  fail=fail+chk(refused("https://[64:ff9b::7f00:1]/";"blocked address: NAT64 loopback");"NAT64 of 127.0.0.1");
+  fail=fail+chk(refused("https://[64:ff9b::169.254.169.254]/";"blocked address: NAT64 cloud metadata");"NAT64 of the metadata address");
+  fail=fail+chk(refused("https://[64:ff9b:1::1]/";"blocked address: NAT64");"local-use NAT64");
+  fail=fail+chk(refused("https://[fe80::1]/";"blocked address: link-local");"fe80::/10 is link-local");
+  fail=fail+chk(refused("https://[febf:ffff::1]/";"blocked address: link-local");"to its top");
+  fail=fail+chk(refused("https://[fec0::1]/";"blocked address: site-local");"fec0::/10 is refused");
+  fail=fail+chk(refused("https://[fc00::1]/";"blocked address: unique local");"fc00::/7 is ULA");
+  fail=fail+chk(refused("https://[fd12:3456::1]/";"blocked address: unique local");"fd00::/8 is ULA");
+  fail=fail+chk(refused("https://[fd00:ec2::254]/";"blocked address: cloud metadata");"fd00:ec2::254 is AWS's IPv6 metadata address");
+  fail=fail+chk(refused("https://[ff02::1]/";"blocked address: multicast");"multicast is refused");
+  fail=fail+chk(refused("https://[2002:7f00:1::]/";"blocked address: 6to4");"6to4 is refused (it embeds an IPv4 address)");
+  fail=fail+chk(refused("https://[2001::1]/";"blocked address: IETF special-purpose");"Teredo (2001::/32) is refused");
+  fail=fail+chk(refused("https://[2001:db8::1]/";"blocked address: documentation");"2001:db8::/32 is refused");
+  fail=fail+chk(refused("https://[::2]/";"blocked address");"the rest of ::/96 is refused");
+  fail=fail+chk(refused("https://[4000::1]/";"blocked address: not global unicast");"outside 2000::/3 is refused");
+  fail=fail+chk(refused("https://[2606:4700::1111]/";"IP literal");"a public IPv6 literal is refused: the allowlist holds names");
+  fail=fail+chk(refused("https://[fe80::1%25en0]/";"percent-encoded");"a zone id is refused");
+  fail=fail+chk(refused("https://[::1/";"malformed IPv6");"an unclosed bracket is refused");
+  fail=fail+chk(refused("https://[1::2::3]/";"malformed IPv6");"two :: are refused");
+  fail=fail+chk(refused("https://[12345::]/";"malformed IPv6");"a five-digit group is refused");
+  fail=fail+chk(refused("https://[1:2:3:4:5:6:7:8:9]/";"malformed IPv6");"nine groups are refused");
+  fail=fail+chk(refused("https://[1:2:3:4:5:6:7]/";"malformed IPv6");"seven groups without :: are refused");
+  fail=fail+chk(refused("https://[::ffff:0177.0.0.1]/";"malformed IPv6");"an octal embedded IPv4 is refused");
+  fail=fail+chk(refused("https://[::ffff:127.1]/";"malformed IPv6");"a short embedded IPv4 is refused");
+  fail=fail+chk(refused("https://[::1]x/";"malformed IPv6");"junk after ] is refused");
+  fail=fail+chk(refused("https://[gggg::1]/";"malformed IPv6");"a non-hex group is refused");
+  fail=fail+chk(refused("https://[]/";"malformed IPv6");"empty brackets are refused");
+
+  (* ── The RESOLVED address: what a name turned into ────────────────────────── *)
+  let p=demo();
+  fail=fail+chk(str.len(g.addressesok(@("93.184.215.14");443;p))==0;"a public IPv4 address is accepted");
+  fail=fail+chk(str.len(g.addressesok(@("2606:2800:21f:cb07:6820:80da:af6b:8b2c");443;p))==0;"a public IPv6 address is accepted");
+  fail=fail+chk(str.len(g.addressesok(@("93.184.215.14";"2606:2800:21f:cb07:6820:80da:af6b:8b2c");443;p))==0;"and both together");
+  fail=fail+chk(addrrefused(@("93.184.215.14";"127.0.0.1");443;p;"loopback");"one blocked address among public ones refuses the name");
+  fail=fail+chk(addrrefused(@("127.0.0.1");443;p;"loopback");"a name resolving to 127.0.0.1 is refused");
+  fail=fail+chk(addrrefused(@("127.53.0.1");443;p;"loopback");"or anywhere in 127/8");
+  fail=fail+chk(addrrefused(@("::1");443;p;"loopback");"or to ::1");
+  fail=fail+chk(addrrefused(@("::ffff:127.0.0.1");443;p;"IPv4-mapped loopback");"or to IPv4-mapped loopback");
+  fail=fail+chk(addrrefused(@("169.254.169.254");443;p;"cloud metadata");"or to the metadata address");
+  fail=fail+chk(addrrefused(@("fd00:ec2::254");443;p;"cloud metadata");"or to the IPv6 metadata address");
+  fail=fail+chk(addrrefused(@("10.1.2.3");443;p;"private");"or to 10/8");
+  fail=fail+chk(addrrefused(@("172.20.0.5");443;p;"private");"or to 172.16/12");
+  fail=fail+chk(addrrefused(@("192.168.0.10");443;p;"private");"or to 192.168/16");
+  fail=fail+chk(addrrefused(@("100.100.100.200");443;p;"carrier-grade NAT");"or to CGNAT (Alibaba's metadata address is in it)");
+  fail=fail+chk(addrrefused(@("0.0.0.0");443;p;"this network");"or to 0.0.0.0");
+  fail=fail+chk(addrrefused(@("fe80::1");443;p;"link-local");"or to IPv6 link-local");
+  fail=fail+chk(addrrefused(@("fc00::5");443;p;"unique local");"or to IPv6 ULA");
+  fail=fail+chk(addrrefused(@();443;p;"did not resolve");"a name that resolved to nothing is refused");
+  fail=fail+chk(addrrefused(@("not-an-address");443;p;"unreadable address");"an address that cannot be read is refused");
+  fail=fail+chk(addrrefused(@("0177.0.0.1");443;p;"unreadable address");"a non-canonical resolved address is refused");
+
+  (* The test-only loopback override: loopback, on the one port, and nothing else. *)
+  let tp=$proxypolicy{ allow:@("localhost"); maxbytes:100000; timeouts:3; loopbackport:47001; cafile:"" };
+  fail=fail+chk(str.len(g.addressesok(@("127.0.0.1");47001;tp))==0;"the test override lets loopback through on its own port");
+  fail=fail+chk(str.len(g.addressesok(@("::1";"127.0.0.1");47001;tp))==0;"both loopback forms");
+  fail=fail+chk(addrrefused(@("127.0.0.1");443;tp;"loopback");"not on any other port");
+  fail=fail+chk(addrrefused(@("10.0.0.1");47001;tp;"private");"and never for a private address");
+  fail=fail+chk(addrrefused(@("169.254.169.254");47001;tp;"cloud metadata");"nor for the metadata address");
+  fail=fail+chk(refusedwith("https://localhost:47002/";tp;"port");"the override's port is the only extra port");
+  fail=fail+chk(g.check("https://localhost:47001/x";tp).ok;"and localhost is accepted there, for the resolved-address check to judge");
+  fail=fail+chk(refusedwith("https://127.0.0.1:47001/";tp;"blocked address: loopback");"an IP literal is refused even on the override's port");
+
+  (* ── The configured allowlist ──────────────────────────────────────────────── *)
+  let cfg=g.configured("data.gov.au, api.example.com ,127.0.0.1,localhost,metadata.google.internal,*.gov.au,0x7f000001,[::1],intranet,DATA.EXAMPLE.ORG.,example.com:443,user@example.com,,https://x.example.com");
+  fail=fail+chk(cfg.len==2;"of fourteen configured entries only the two plain public names are kept");
+  if(cfg.len==2){
+    fail=fail+chk(str.eq(cfg.get(0);"data.gov.au") && str.eq(cfg.get(1);"api.example.com");"and they are data.gov.au and api.example.com, trimmed")
+  }el{};
+  fail=fail+chk(g.configured("").len==0;"nothing configured is an empty allowlist");
+  let prod=g.production();
+  fail=fail+chk(prod.loopbackport==0;"the production policy has no loopback override, whatever is configured");
+  fail=fail+chk(str.len(prod.cafile)==0;"and trusts only the system's certificate authorities");
+  fail=fail+chk(prod.maxbytes>0 && prod.maxbytes<=8388608;"it caps the body");
+  fail=fail+chk(prod.timeouts>0 && prod.timeouts<=30;"and the time");
+
+  io.println("test_proxy_guard: \(fail) failed");
+  <fail
+};

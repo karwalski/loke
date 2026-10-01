@@ -1,0 +1,225 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=packages.moke.tests.testproxyfetch;
+
+i=t:std.test;
+i=io:std.io;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=ty:shared.types;
+i=g:moke.proxy.guard;
+i=fetch:moke.proxy.fetch;
+
+(* MK19.9 — /api/proxy's fetch path, against a local TLS stand-in. Nothing here leaves the
+   machine: the only server is scripts/lib/http_recorder.py on 127.0.0.1, serving
+   certificates scripts/lib/tls_fixture.sh generates for this run from a CA nothing else
+   trusts, and the only name resolved is localhost.
+
+   The production module is what runs: moke.proxy.fetch.proxy and .handle, with a policy
+   built here. The test policy differs from guard.production() in exactly the two fields
+   production never sets: loopbackport (the recorder's port) and cafile (the run's CA).
+   Every other rule is the production one.
+
+   Each case is judged by what the RECORDER saw as well as by what came back: a redirect
+   is not followed when the redirected path never arrives; an untrusted certificate is
+   refused when no request arrived; a refused URL never spawned a fetch when its path
+   never arrived. *)
+
+f=chk(c:bool;label:str):i64{
+  if(t.assert(c;label)){ <0 }el{};
+  <1
+};
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_proxyfetch_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitfile(p:str):str{
+  let v=mut."";
+  lp(let k=0;k<150 && str.len(v)==0;k=k+1){
+    v=readfile(p);
+    if(str.len(v)==0){ pause() }el{}
+  };
+  <v
+};
+
+f=waitcontains(p:str;needle:str):bool{
+  let seen=mut.false;
+  lp(let k=0;k<50 && seen==false;k=k+1){
+    seen=str.contains(readfile(p);needle);
+    if(seen==false){ pause() }el{}
+  };
+  <seen
+};
+
+f=recorderargv(base:str;name:str;certs:str):@str{
+  <@("python3";"scripts/lib/http_recorder.py";"\(base).\(name).log";"\(base).\(name).port";"answer";"\(certs)/\(name).pem";"\(certs)/\(name).key")
+};
+
+f=policy(port:i64;ca:str;maxbytes:i64;timeouts:i64):$proxypolicy{
+  <$proxypolicy{ allow:@("localhost"); maxbytes:maxbytes; timeouts:timeouts; loopbackport:port; cafile:ca }
+};
+
+f=get(url:str):$proxyrequest{
+  <$proxyrequest{ url:url; method:"GET"; hnames:@(); hvalues:@(); body:"" }
+};
+
+f=has(a:@str;s:str):bool{
+  lp(let k=0;k<a.len;k=k+1){
+    if(str.eq(a.get(k);s)){ <true }el{}
+  };
+  <false
+};
+
+(* `x` immediately followed by `y` somewhere in `a`: an option and its value. *)
+f=pair(a:@str;x:str;y:str):bool{
+  lp(let k=0;k+1<a.len;k=k+1){
+    if(str.eq(a.get(k);x) && str.eq(a.get(k+1);y)){ <true }el{}
+  };
+  <false
+};
+
+f=main():i64{
+  let fail=mut.0;
+  let base=scratch();
+  let certs="\(base).certs";
+  let gen=mt process.spawn(@("sh";"scripts/lib/tls_fixture.sh";certs)) { $ok:h h; $err:e @() };
+  if(!(gen == @())){ process.wait(gen); }el{};
+  let ca="\(certs)/ca.pem";
+  fail=fail+chk(str.len(waitfile("\(certs)/done"))>0 && str.len(readfile("\(certs)/localhost.pem"))>0;"the throwaway CA and the localhost certificate were generated");
+
+  let lrec=mt process.spawn(recorderargv(base;"localhost";certs)) { $ok:h h; $err:e @() };
+  let orec=mt process.spawn(recorderargv(base;"other";certs)) { $ok:h h; $err:e @() };
+  let lportstr=waitfile("\(base).localhost.port");
+  let oportstr=waitfile("\(base).other.port");
+  fail=fail+chk(str.len(lportstr)>0 && str.len(oportstr)>0;"two TLS recorders came up on loopback");
+  let lport=mt str.toint(lportstr) { $ok:n n; $err:e 0 };
+  let oport=mt str.toint(oportstr) { $ok:n n; $err:e 0 };
+  let llog="\(base).localhost.log";
+  let root="https://localhost:\(lport)";
+  let tp=policy(lport;ca;100000;3);
+
+  (* ── The resolver, and the address it pins ────────────────────────────────── *)
+  let addrs=fetch.resolve("localhost");
+  fail=fail+chk(has(addrs;"127.0.0.1") || has(addrs;"::1");"the system resolver answers localhost with a loopback address");
+  let pinned=fetch.pinfrom(@("::1";"127.0.0.1");lport;tp);
+  fail=fail+chk(pinned.ok && str.eq(pinned.addr;"127.0.0.1");"the first IPv4 address is the one pinned");
+  let strict=$proxypolicy{ allow:@("localhost"); maxbytes:100000; timeouts:3; loopbackport:0; cafile:ca };
+  let realpin=fetch.pinfrom(fetch.resolve("localhost");443;strict);
+  fail=fail+chk(!realpin.ok && str.contains(realpin.reason;"loopback");"what localhost REALLY resolves to is refused without the test override: the resolved-address check");
+  let wrongport=fetch.pinfrom(fetch.resolve("localhost");443;tp);
+  fail=fail+chk(!wrongport.ok;"and with it, on any port but the recorder's");
+
+  (* ── (a) a GET reaches the stand-in and its answer comes back ─────────────── *)
+  let ra=fetch.proxy(get("\(root)/proxy-test/json?q=1");tp);
+  fail=fail+chk(ra.ok;"(a) an allowlisted https URL is fetched");
+  fail=fail+chk(ra.status==200;"(a) with the upstream's status");
+  fail=fail+chk(str.contains(ra.body;"answered-by-recorder");"(a) and its body");
+  fail=fail+chk(str.contains(ra.ctype;"application/json");"(a) and its content type");
+  fail=fail+chk(str.contains(readfile(llog);"GET /proxy-test/json?q=1");"(a) the recorder saw the GET, with its query");
+  fail=fail+chk(str.contains(readfile("\(llog).tls");"handshake ok");"(a) over a verified TLS handshake");
+
+  (* ── (b) a POST carries its headers, and a body that starts with @ as text ─── *)
+  let rb=fetch.proxy($proxyrequest{ url:"\(root)/proxy-test/post"; method:"POST"; hnames:@("X-Probe";"Content-Type"); hvalues:@("mk199";"text/plain"); body:"@/etc/hosts" };tp);
+  fail=fail+chk(rb.ok;"(b) a POST is fetched");
+  fail=fail+chk(str.contains(readfile("\(llog).bodies");"[\"POST\", \"/proxy-test/post\", \"@/etc/hosts\"]");"(b) its body arrived as the text @/etc/hosts, not as the file curl would read for @");
+  fail=fail+chk(str.contains(readfile("\(llog).headers");"X-Probe: mk199");"(b) with the caller's header");
+
+  (* ── (c) a redirect is reported, never followed ─────────────────────────── *)
+  let rc=fetch.proxy(get("\(root)/proxy-test/redirect");tp);
+  fail=fail+chk(!rc.ok && str.contains(rc.reason;"redirect");"(c) a 302 is refused as a redirect");
+  fail=fail+chk(rc.status==302;"(c) and its status is reported");
+  fail=fail+chk(str.contains(readfile(llog);"GET /proxy-test/redirect ");"(c) the recorder saw the request that redirected");
+  fail=fail+chk(!str.contains(readfile(llog);"/proxy-test/redirected");"(c) and never the request the redirect pointed at");
+
+  (* ── (d) the body cap stops a body with no Content-Length as it arrives ───── *)
+  let rd=fetch.proxy(get("\(root)/proxy-test/big");tp);
+  fail=fail+chk(!rd.ok && str.contains(rd.reason;"larger than the 100000-byte cap");"(d) a 300,000-byte body over a 100,000-byte cap is refused");
+  fail=fail+chk(str.len(rd.body)==0;"(d) and none of it is passed on");
+
+  (* ── (e) the timeout bounds the whole transfer ─────────────────────────────── *)
+  let t0=ty.nowms();
+  let re=fetch.proxy(get("\(root)/proxy-test/slow");policy(lport;ca;100000;2));
+  let took=ty.nowms()-t0;
+  fail=fail+chk(!re.ok && str.contains(re.reason;"did not finish within 2 seconds");"(e) an upstream slower than the timeout is refused");
+  fail=fail+chk(took<5000;"(e) within the timeout, not after the upstream's six seconds");
+
+  (* ── (f) certificates are verified ────────────────────────────────────────── *)
+  let rf=fetch.proxy(get("\(root)/proxy-test/untrusted");policy(lport;"";100000;3));
+  fail=fail+chk(!rf.ok && str.contains(rf.reason;"TLS failed");"(f) the stand-in's CA not trusted: refused");
+  fail=fail+chk(!str.contains(readfile(llog);"/proxy-test/untrusted");"(f) and no request arrived");
+  let rf2=fetch.proxy(get("https://localhost:\(oport)/proxy-test/othername");policy(oport;ca;100000;3));
+  fail=fail+chk(!rf2.ok && str.contains(rf2.reason;"TLS failed");"(f) a trusted certificate for another name (other.invalid): refused");
+  fail=fail+chk(str.len(readfile("\(base).other.log"))==0;"(f) and that recorder received no request");
+
+  (* ── (g) a refused URL is never fetched ────────────────────────────────────── *)
+  let rg=fetch.proxy(get("https://127.0.0.1:\(lport)/proxy-test/literal");tp);
+  fail=fail+chk(!rg.ok && rg.code==403;"(g) the loopback literal on the recorder's own port is refused, 403");
+  let rg2=fetch.proxy(get("\(root)/proxy-test/nooverride");strict);
+  fail=fail+chk(!rg2.ok && rg2.code==403;"(g) localhost without the test override is refused, 403");
+  let rg3=fetch.proxy(get("https://localhost/proxy-test/port443");tp);
+  fail=fail+chk(!rg3.ok && rg3.code==403;"(g) localhost on 443 is refused even with the override");
+  let seen=readfile(llog);
+  fail=fail+chk(!str.contains(seen;"/proxy-test/literal") && !str.contains(seen;"/proxy-test/nooverride") && !str.contains(seen;"/proxy-test/port443");"(g) none of the three reached the recorder");
+
+  (* ── The argv curl is given ──────────────────────────────────────────────── *)
+  let tg=g.check("\(root)/p?x=1";tp);
+  let argv=fetch.curlargv(tg;"127.0.0.1";tp;$proxyrequest{ url:""; method:"POST"; hnames:@("Accept"); hvalues:@("text/csv"); body:"q" });
+  fail=fail+chk(str.startswith(argv.get(0);"/") && str.endswith(argv.get(0);"/curl") && str.eq(argv.get(1);"-q");"curl by absolute path, with -q first so no .curlrc is read");
+  fail=fail+chk(pair(argv;"--resolve";"localhost:\(lport):127.0.0.1");"--resolve pins the connection to the judged address: no second lookup can rebind it");
+  fail=fail+chk(pair(argv;"--proto";"=https") && pair(argv;"--proto-redir";"=https");"https is the only protocol");
+  fail=fail+chk(pair(argv;"--max-redirs";"0") && !has(argv;"-L") && !has(argv;"--location");"no redirect is followed");
+  fail=fail+chk(pair(argv;"--noproxy";"*");"no proxy variable is honoured");
+  fail=fail+chk(has(argv;"-g");"no URL globbing");
+  fail=fail+chk(pair(argv;"--max-filesize";"100000") && pair(argv;"--max-time";"3");"the cap and the timeout are the policy's");
+  fail=fail+chk(pair(argv;"--data-raw";"q") && !has(argv;"--data-binary") && !has(argv;"-d");"a body goes as --data-raw, never as an option that reads @file");
+  fail=fail+chk(pair(argv;"-H";"Accept: text/csv");"a header goes as one -H argument");
+  fail=fail+chk(pair(argv;"--url";"https://localhost:\(lport)/p?x=1");"the URL is the canonical one check() built");
+  let argv6=fetch.curlargv(tg;"::1";tp;get(""));
+  fail=fail+chk(pair(argv6;"--resolve";"localhost:\(lport):[::1]");"an IPv6 pin is bracketed");
+  fail=fail+chk(!has(argv6;"--data-raw");"a GET sends no body");
+  let prodargv=fetch.curlargv(tg;"127.0.0.1";g.production();get(""));
+  fail=fail+chk(!has(prodargv;"--cacert");"the production policy adds no CA: only the system's are trusted");
+
+  (* ── The endpoint: what /api/proxy runs ──────────────────────────────────── *)
+  let okbody="{\"url\":\"\(root)/proxy-test/json\",\"method\":\"GET\"}";
+  let h1=fetch.handle("evil.example";"";"application/json";okbody;tp);
+  fail=fail+chk(h1.code==403 && str.contains(h1.body;"addressed to this machine");"a request whose Host is not this machine is refused (DNS rebinding against moke)");
+  let h2=fetch.handle("127.0.0.1:11432";"https://evil.example";"application/json";okbody;tp);
+  fail=fail+chk(h2.code==403 && str.contains(h2.body;"cross-origin");"a request with a foreign Origin is refused");
+  let h3=fetch.handle("127.0.0.1:11432";"http://localhost:11432";"text/plain";okbody;tp);
+  fail=fail+chk(h3.code==415;"a request that is not application/json is refused: a form post cannot reach the proxy without a preflight");
+  let h4=fetch.handle("localhost:11432";"";"application/json";"not json";tp);
+  fail=fail+chk(h4.code==400 && str.contains(h4.body;"missing field: url");"a body that is not JSON is a 400");
+  let h5=fetch.handle("localhost:11432";"";"application/json";"{\"url\":\"\(root)/x\",\"method\":\"DELETE\"}";tp);
+  fail=fail+chk(h5.code==400 && str.contains(h5.body;"GET or POST");"DELETE is refused");
+  let h6=fetch.handle("localhost:11432";"";"application/json";"{\"url\":\"\(root)/x\",\"headers\":[{\"name\":\"Host\",\"value\":\"evil.example\"}]}";tp);
+  fail=fail+chk(h6.code==400 && str.contains(h6.body;"header refused");"a Host header from the caller is refused");
+  let h7=fetch.handle("localhost:11432";"";"application/json";"{\"url\":\"\(root)/x\",\"headers\":[{\"name\":\"X-A\",\"value\":\"a\\r\\nX-Injected: 1\"}]}";tp);
+  fail=fail+chk(h7.code==400 && str.contains(h7.body;"control character");"a header value carrying CR LF is refused");
+  let h8=fetch.handle("[::1]:11432";"";"application/json";"{\"url\":\"https://169.254.169.254/latest/meta-data/\"}";tp);
+  fail=fail+chk(h8.code==403 && str.contains(h8.body;"cloud metadata");"the metadata address is refused through the endpoint, and the reason says so");
+  let h9=fetch.handle("127.0.0.1:11432";"http://127.0.0.1:11432";"application/json; charset=utf-8";okbody;tp);
+  fail=fail+chk(h9.code==200 && str.contains(h9.body;"\"ok\":true") && str.contains(h9.body;"\"status\":200");"an allowed request through the endpoint answers the ok envelope");
+  fail=fail+chk(str.contains(h9.body;"answered-by-recorder");"with the upstream body inside it");
+
+  if(!(lrec == @())){ process.kill(lrec); process.wait(lrec); }el{};
+  if(!(orec == @())){ process.kill(orec); process.wait(orec); }el{};
+  let rm=mt process.spawn(@("sh";"-c";"rm -rf \"$0\".*";base)) { $ok:h h; $err:e @() };
+  if(!(rm == @())){ process.wait(rm); }el{};
+  io.println("test_proxy_fetch: \(fail) failed");
+  <fail
+};

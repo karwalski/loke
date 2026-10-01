@@ -69,13 +69,13 @@
   // ---------------------------------------------------------------------------
 
   /**
-   * Resolve the loke proxy URL. Falls back to current origin if LOKE_URL is
-   * not set on the window.
+   * moke's proxy (MK19.9, moke-proxy.js). This used to post the query to
+   * an /api/proxy on loke's port with the endpoint in a custom header: loke
+   * has no such endpoint, so every query failed.
    */
-  function proxyUrl() {
-    var base = (window.LOKE_URL || '') || '';
-    // Strip trailing slash so we don't double up
-    return base.replace(/\/+$/, '') + '/api/proxy';
+  function mokeProxy() {
+    if (!window.MokeProxy) throw new Error('moke-proxy.js is not loaded on this page');
+    return window.MokeProxy;
   }
 
   /**
@@ -152,22 +152,17 @@
       body.variables = variables;
     }
 
-    var fetchHeaders = buildHeaders(headers);
-    // Tell the loke proxy which upstream endpoint to hit
-    fetchHeaders['X-Loke-Target'] = endpoint;
-
-    var response = await fetch(proxyUrl(), {
-      method: 'POST',
-      headers: fetchHeaders,
-      body: JSON.stringify(body)
-    });
-
-    if (!response.ok) {
-      var errText = await response.text();
-      throw new Error('GraphQL request failed (' + response.status + '): ' + errText);
+    var json;
+    try {
+      json = await mokeProxy().json({
+        url: endpoint,
+        method: 'POST',
+        headers: buildHeaders(headers),
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      throw new Error('GraphQL request failed: ' + e.message);
     }
-
-    var json = await response.json();
 
     // Surface GraphQL-level errors even though HTTP was 200
     if (json.errors && json.errors.length > 0) {

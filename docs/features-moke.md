@@ -394,10 +394,29 @@ Sortable preview table, column type badges, pagination, column rename.
 **File:** `templates/connections.tkt`
 
 **Connection Form:**
-Name, URL, method (GET/POST/PUT/DELETE), auth type (None/API Key/Bearer/Basic/OAuth 2.0), headers (key-value table), query parameters, request body (JSON, POST/PUT only).
+Name, URL, method (GET/POST), auth type (None/API Key/Bearer/Basic/OAuth 2.0), headers (key-value table), query parameters, request body (POST only).
 
 **Test Connection:**
-One-click test with latency measurement. Response status badge, headers, body preview (first 500 chars).
+One-click test with latency measurement. Response status badge, content type, body preview (first 500 chars).
+
+**moke's proxy (`POST /api/proxy`, MK19.9):**
+The page cannot fetch a third-party API itself, so moke's server fetches it. That is a
+server-side request forgery risk on a machine also running loke, Ollama and a database, so
+the proxy refuses by default. It fetches only:
+- `https://` URLs on port 443, whose host is on the allowlist in `MOKE_PROXY_ALLOW`
+  (comma-separated host names, exact match, no wildcards). Unset, the allowlist is empty and
+  every request is refused with the reason.
+- names that are not local or internal (`localhost`, `*.local`, `*.internal`,
+  `metadata.google.internal`, single-label names) and never an IP literal, however encoded.
+- names whose every resolved address is public: loopback, private, link-local, CGNAT, cloud
+  metadata, unique-local and IPv4-mapped forms of them are refused. The fetch then connects to
+  the address that was checked, so a second DNS answer cannot redirect it.
+
+Redirects are reported, never followed. A response is capped at 4 MiB and 15 seconds, and must
+be text. The request must come from this machine's own pages (Host, Origin and a JSON body
+are checked). The fetch is made by the system `curl`, and names are resolved with `getent` or
+`dscacheutil`; without them the proxy refuses rather than fetching unchecked. The proxy sends
+only what is typed into the connection form; it is not a path to an LLM provider.
 
 **Save & Load:**
 Connections persisted to localStorage. Credentials stored server-side via loke (never in browser).

@@ -10,6 +10,10 @@
 #   good.pem good.key   signed by that CA, for IP 127.0.0.1: what a trusted server looks like.
 #   other.pem other.key signed by that CA, for DNS other.invalid only: a trusted chain that
 #                       names another host (the host-name check).
+#   localhost.pem localhost.key  signed by that CA, for DNS localhost only: a server known
+#                       by a NAME, for a client that resolves the name and connects to the
+#                       address it judged (MK19.9, moke's /api/proxy). localhost resolves
+#                       from /etc/hosts, so no DNS query leaves the machine.
 #   self.pem self.key   self-signed, for IP 127.0.0.1: an untrusted chain for the right
 #                       address (the chain check).
 #   done                written last, so a caller polling for it never reads half a set.
@@ -38,6 +42,7 @@ leaf() {
 }
 leaf good "IP:127.0.0.1"
 leaf other "DNS:other.invalid"
+leaf localhost "DNS:localhost"
 
 q "$OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=127.0.0.1" \
   -keyout self.key -out self.pem -addext "subjectAltName=IP:127.0.0.1"

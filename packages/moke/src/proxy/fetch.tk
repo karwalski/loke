@@ -1,0 +1,353 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=moke.proxy.fetch;
+
+i=str:std.str;
+i=json:std.json;
+i=process:std.process;
+i=file:std.file;
+i=jx:shared.jsonobj;
+i=log:shared.log;
+i=g:moke.proxy.guard;
+
+(* MK19.9 — /api/proxy's fetch: judge the URL, resolve the name, judge every address,
+   then fetch from the address that was judged.
+
+   WHY curl AND NOT std.http. toke 3.1.0's client (http.clientget, http.postheaders)
+   verifies certificates, but measured against its source at the pin (src/stdlib/http.c,
+   client_do_request) it cannot do three things this endpoint needs:
+   - it resolves the name itself, inside connect (getaddrinfo in client_tcp_connect), and
+     takes no address to connect to. So the address it connects to is never the one a
+     check saw: a name that answered a public address to the check can answer 127.0.0.1 to
+     the connect (DNS rebinding), and nothing in toke exposes either answer. std has no
+     resolver at all (no export of std.net, std.http or std.tls returns an address);
+   - it reads the whole response into memory with no limit before returning, so a body
+     cap could only be applied after the memory was spent;
+   - its only clock is SO_RCVTIMEO, 30 seconds per read and not settable, so a server
+     sending a byte every 29 seconds holds a worker indefinitely.
+   std.tls.connect does not verify certificates without a pin, so a raw request over it is
+   not an option either. A toke change for all three is filed in the backlog (MK19.11).
+
+   So the fetch is curl, as shared.reachability.localdelete already uses it, run without a
+   shell (every argument one argv element). curl has the three controls: --resolve
+   connects to the address this module judged while TLS still verifies the certificate
+   against the NAME (SNI and host check), --max-filesize stops a body over the cap as it
+   arrives (measured: 1,000,000 bytes into a chunked response, exit 63), and --max-time
+   bounds the whole transfer. Redirects are not followed (no -L, --max-redirs 0): a 3xx
+   is reported, never chased to a host nothing checked. --proto =https refuses any
+   other scheme; -q ignores ~/.curlrc, --noproxy '*' ignores proxy variables, -g turns off
+   curl's URL globbing, and --data-raw sends a body that starts with @ as text, never as a
+   file to read.
+
+   THE RESOLVER is the system's: getent ahosts (Linux), or dscacheutil (macOS). Either
+   answers every address the name has, and all of them must pass guard.addressesok. When
+   neither answers, the name is refused: no answer is never read as permission.
+
+   A fetch that cannot be done safely is refused, not degraded: no curl, no resolver
+   answer, an unreadable address, a body over the cap or not UTF-8 text, a timeout, a
+   certificate that does not verify. *)
+
+t=$proxyrequest{
+  url:str;
+  method:str;
+  hnames:@str;
+  hvalues:@str;
+  body:str
+};
+
+(* code is the status /api/proxy answers with; status is the upstream's, 0 when none. *)
+t=$proxyresult{
+  ok:bool;
+  code:i64;
+  reason:str;
+  status:i64;
+  ctype:str;
+  body:str
+};
+
+t=$proxypin{
+  ok:bool;
+  reason:str;
+  addr:str
+};
+
+t=$proxyreply{
+  code:i64;
+  body:str
+};
+
+f=slen(s:str):i64{
+  <str.len(s) as i64
+};
+
+f=sub(s:str;from:i64;to:i64):str{
+  <mt str.slice(s;from as u64;to as u64) {$ok:v v; $err:e ""}
+};
+
+f=failed(code:i64;reason:str):$proxyresult{
+  <$proxyresult{ ok:false; code:code; reason:reason; status:0; ctype:""; body:"" }
+};
+
+(* A system tool by absolute path, or "" when it is not installed. Only a tool that exists
+   is ever spawned, for two reasons. No PATH lookup decides which program runs. And a spawn
+   that FAILS cannot be told apart reliably at this pin: measured while writing this
+   module, `mt process.spawn(...) { $ok:h h; $err:e @() }` followed by `h == @()` did not
+   see the failure of spawning a missing `getent` on macOS, and the process.wait after it
+   blocked for good, waiting on the test's other children. *)
+f=tool(name:str):str{
+  let dirs=@("/usr/bin";"/bin";"/usr/sbin";"/sbin");
+  lp(let k=0;k<dirs.len;k=k+1){
+    let p="\(dirs.get(k))/\(name)";
+    if(file.exists(p)){ <p }el{}
+  };
+  <""
+};
+
+(* stdout of a command run without a shell, or "" when its tool is not installed. stdout is
+   read before wait: a full pipe would otherwise deadlock (F10.37). *)
+f=runout(argv:@str):str{
+  let h=mt process.spawn(argv) { $ok:h h; $err:e @() };
+  if(h == @()){ <"" }el{};
+  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
+  process.wait(h);
+  <out
+};
+
+(* getent ahosts: "<address> STREAM <name>", one line per address and socket type. *)
+f=getentaddrs(out:str):@str{
+  let addrs=mut.@();
+  let lines=str.split(out;"\n");
+  lp(let k=0;k<lines.len;k=k+1){
+    let fs=str.fields(lines.get(k));
+    if(fs.len>0){ addrs=addrs.push(fs.get(0)) }el{}
+  };
+  <addrs
+};
+
+(* dscacheutil -q host: "ip_address: <v4>" and "ipv6_address: <v6>" lines. *)
+f=dsaddrs(out:str):@str{
+  let addrs=mut.@();
+  let lines=str.split(out;"\n");
+  lp(let k=0;k<lines.len;k=k+1){
+    let l=str.trim(lines.get(k));
+    if(str.startswith(l;"ip_address:")){ addrs=addrs.push(str.trim(sub(l;11;slen(l)))) }el{};
+    if(str.startswith(l;"ipv6_address:")){ addrs=addrs.push(str.trim(sub(l;13;slen(l)))) }el{}
+  };
+  <addrs
+};
+
+(* Every address the system resolver gives for `host`, which check() has already
+   restricted to a-z 0-9 . -, so it cannot be read as an option. *)
+f=resolve(host:str):@str{
+  let getent=tool("getent");
+  if(slen(getent)>0){
+    let a=getentaddrs(runout(@(getent;"ahosts";host)));
+    if(a.len>0){ <a }el{}
+  }el{};
+  let ds=tool("dscacheutil");
+  if(slen(ds)==0){ <@() }el{};
+  <dsaddrs(runout(@(ds;"-q";"host";"-a";"name";host)))
+};
+
+(* The address to connect to: every resolved address must pass, and the first IPv4 one is
+   used, else the first. *)
+f=pinfrom(addrs:@str;port:i64;p:$proxypolicy):$proxypin{
+  let why=g.addressesok(addrs;port;p);
+  if(slen(why)>0){ <$proxypin{ ok:false; reason:why; addr:"" } }el{};
+  lp(let k=0;k<addrs.len;k=k+1){
+    if(!str.contains(addrs.get(k);":")){ <$proxypin{ ok:true; reason:""; addr:addrs.get(k) } }el{}
+  };
+  <$proxypin{ ok:true; reason:""; addr:addrs.get(0) }
+};
+
+f=pin(t:$proxytarget;p:$proxypolicy):$proxypin{
+  <pinfrom(resolve(t.host);t.port;p)
+};
+
+f=marker():str{
+  <"\n@@moke-proxy@@"
+};
+
+(* curl's argv: one element per argument, no shell. --resolve makes curl connect to `addr`,
+   the address that was judged, for this host and port, and nowhere else. *)
+f=curlargv(t:$proxytarget;addr:str;p:$proxypolicy;req:$proxyrequest):@str{
+  let target=mut.addr;
+  if(str.contains(addr;":")){ target="[\(addr)]" }el{};
+  let connect=mut.5;
+  if(p.timeouts<5){ connect=p.timeouts }el{};
+  let wfmt="\(marker())%{http_code}@@%{content_type}";
+  let argv=mut.@(tool("curl");"-q";"-sS";"-g";"--proto";"=https";"--proto-redir";"=https";"--max-redirs";"0";"--noproxy";"*";"--max-time";"\(p.timeouts)";"--connect-timeout";"\(connect)";"--max-filesize";"\(p.maxbytes)";"--resolve";"\(t.host):\(t.port):\(target)");
+  if(slen(p.cafile)>0){
+    argv=argv.push("--cacert");
+    argv=argv.push(p.cafile)
+  }el{};
+  argv=argv.push("-X");
+  argv=argv.push(req.method);
+  lp(let k=0;k<req.hnames.len;k=k+1){
+    argv=argv.push("-H");
+    argv=argv.push("\(req.hnames.get(k)): \(req.hvalues.get(k))")
+  };
+  if(str.eq(req.method;"POST")){
+    argv=argv.push("--data-raw");
+    argv=argv.push(req.body)
+  }el{};
+  argv=argv.push("-w");
+  argv=argv.push(wfmt);
+  argv=argv.push("--url");
+  argv=argv.push(g.canonical(t));
+  <argv
+};
+
+(* What a curl exit status means for the caller. *)
+f=curlreason(code:i64;p:$proxypolicy):str{
+  if(code==28){ <"the upstream did not finish within \(p.timeouts) seconds" }el{};
+  if(code==63){ <"the upstream body is larger than the \(p.maxbytes)-byte cap" }el{};
+  if(code==7){ <"could not connect to the upstream" }el{};
+  if(code==6){ <"the upstream name did not resolve" }el{};
+  if(code==47){ <"the upstream redirected; redirects are not followed" }el{};
+  if(code==35 || code==51 || code==53 || code==54 || code==58 || code==59 || code==60 || code==64 || code==66 || code==77 || code==80 || code==82 || code==83 || code==90 || code==91){
+    <"TLS failed: the upstream's certificate did not verify for its name, or the handshake failed"
+  }el{};
+  <"the upstream fetch failed (curl exit \(code))"
+};
+
+(* Fetch a target that check() accepted, from the address pin() judged. *)
+f=fetchpinned(t:$proxytarget;addr:str;p:$proxypolicy;req:$proxyrequest):$proxyresult{
+  let argv=curlargv(t;addr;p;req);
+  if(slen(argv.get(0))==0){ <failed(502;"curl is not installed, so nothing was fetched") }el{};
+  let h=mt process.spawn(argv) { $ok:h h; $err:e @() };
+  if(h == @()){ <failed(502;"curl could not be started, so nothing was fetched") }el{};
+  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
+  let code=process.wait(h) as i64;
+  if(code!=0){ <failed(502;curlreason(code;p)) }el{};
+  let at=str.lastindex(out;marker());
+  if(at<0){ <failed(502;"the upstream gave no readable response") }el{};
+  let body=sub(out;0;at);
+  let meta=sub(out;at+slen(marker());slen(out));
+  let sep=str.indexof(meta;"@@");
+  if(sep<0){ <failed(502;"the upstream gave no readable response") }el{};
+  let status=mt str.toint(sub(meta;0;sep)) { $ok:n n; $err:e 0 };
+  let ctype=sub(meta;sep+2;slen(meta));
+  if(status>=300 && status<400){
+    <$proxyresult{ ok:false; code:502; reason:"the upstream answered \(status), a redirect; redirects are not followed"; status:status; ctype:""; body:"" }
+  }el{};
+  if(status<100){ <failed(502;"the upstream gave no status") }el{};
+  if(slen(body)>p.maxbytes){ <failed(502;"the upstream body is larger than the \(p.maxbytes)-byte cap") }el{};
+  let text=mt str.frombytes(str.bytes(body)) { $ok:s true; $err:e false };
+  if(!text){ <failed(502;"the upstream body is not UTF-8 text; binary bodies are not proxied") }el{};
+  <$proxyresult{ ok:true; code:200; reason:""; status:status; ctype:ctype; body:body }
+};
+
+(* The whole path: judge the URL, resolve and judge the addresses, fetch. A refusal is
+   logged with its reason, which names the host at most. *)
+f=proxy(req:$proxyrequest;p:$proxypolicy):$proxyresult{
+  let t=g.check(req.url;p);
+  if(!t.ok){
+    log.info("proxy refused: \(t.reason)";"moke.proxy";"");
+    <failed(403;t.reason)
+  }el{};
+  let pn=pin(t;p);
+  if(!pn.ok){
+    log.info("proxy refused \(t.host): \(pn.reason)";"moke.proxy";"");
+    <failed(403;pn.reason)
+  }el{};
+  <fetchpinned(t;pn.addr;p;req)
+};
+
+(* ── The endpoint's request and reply ───────────────────────────────────────── *)
+
+(* Host must name this machine. A page on another site that rebinds its own name to
+   127.0.0.1 can reach moke as same-origin, but its requests still carry its own name
+   in Host. *)
+f=loopbackauthority(a:str):bool{
+  let names=@("127.0.0.1";"localhost";"[::1]");
+  lp(let k=0;k<names.len;k=k+1){
+    let n=names.get(k);
+    if(str.eq(a;n)){ <true }el{};
+    if(str.startswith(a;"\(n):")){
+      let port=sub(a;slen(n)+1;slen(a));
+      if(slen(port)>0 && slen(port)<=5 && str.isdigit(port)){ <true }el{}
+    }el{}
+  };
+  <false
+};
+
+f=originok(origin:str):bool{
+  if(slen(origin)==0){ <true }el{};
+  if(!str.startswith(origin;"http://")){ <false }el{};
+  <loopbackauthority(sub(origin;7;slen(origin)))
+};
+
+f=headernameok(n:str):bool{
+  let ln=slen(n);
+  if(ln<1 || ln>64){ <false }el{};
+  lp(let k=0;k<ln;k=k+1){
+    let c=str.charat(n;k);
+    let token=(c>=97 && c<=122) || (c>=65 && c<=90) || (c>=48 && c<=57) || c==45;
+    if(!token){ <false }el{}
+  };
+  let low=str.lower(n);
+  let banned=@("host";"content-length";"transfer-encoding";"connection";"keep-alive";"te";"trailer";"upgrade";"expect";"proxy-authorization";"proxy-connection");
+  lp(let k=0;k<banned.len;k=k+1){
+    if(str.eq(low;banned.get(k))){ <false }el{}
+  };
+  <true
+};
+
+f=headervalueok(v:str):bool{
+  let ln=slen(v);
+  if(ln>4096){ <false }el{};
+  lp(let k=0;k<ln;k=k+1){
+    let c=str.charat(v;k);
+    if((c<32 && c!=9) || c==127){ <false }el{}
+  };
+  <true
+};
+
+f=reply(code:i64;body:str):$proxyreply{
+  <$proxyreply{ code:code; body:body }
+};
+
+f=errorreply(code:i64;message:str):$proxyreply{
+  <reply(code;"{\"ok\":false,\"error\":\(jx.escape(message))}")
+};
+
+f=resultreply(r:$proxyresult):$proxyreply{
+  if(!r.ok){
+    <reply(r.code;"{\"ok\":false,\"status\":\(r.status),\"error\":\(jx.escape(r.reason))}")
+  }el{};
+  <reply(200;"{\"ok\":true,\"status\":\(r.status),\"contentType\":\(jx.escape(r.ctype)),\"body\":\(jx.escape(r.body))}")
+};
+
+(* The endpoint, minus the HTTP plumbing, so a test can call exactly what the route runs.
+   The request body is {"url":..., "method":"GET"|"POST", "headers":[{"name":..,
+   "value":..}], "body":...}. *)
+f=handle(host:str;origin:str;ctype:str;body:str;p:$proxypolicy):$proxyreply{
+  if(!loopbackauthority(host)){ <errorreply(403;"refused: the request must be addressed to this machine (Host)") }el{};
+  if(!originok(origin)){ <errorreply(403;"refused: cross-origin requests are not proxied") }el{};
+  if(!str.startswith(str.lower(ctype);"application/json")){ <errorreply(415;"the request must be application/json") }el{};
+  if(slen(body)>131072){ <errorreply(400;"the request is too large") }el{};
+  let obj=mt json.dec(body) { $ok:o o; $jsonerr:e jx.emptyobj() };
+  let url=mt json.str(obj;"url") { $ok:v v; $jsonerr:e "" };
+  if(slen(url)==0){ <errorreply(400;"missing field: url") }el{};
+  let rawmethod=mt json.str(obj;"method") { $ok:v v; $jsonerr:e "GET" };
+  let method=str.upper(rawmethod);
+  if(!(str.eq(method;"GET") || str.eq(method;"POST"))){ <errorreply(400;"method must be GET or POST") }el{};
+  let rbody=mt json.str(obj;"body") { $ok:v v; $jsonerr:e "" };
+  if(slen(rbody)>65536){ <errorreply(400;"the request body is over 65536 bytes") }el{};
+  let hs=mt json.arr(obj;"headers") { $ok:a a; $jsonerr:e @() };
+  if(hs.len>16){ <errorreply(400;"at most 16 headers") }el{};
+  let names=mut.@();
+  let values=mut.@();
+  lp(let k=0;k<hs.len;k=k+1){
+    let hn=mt json.str(hs.get(k);"name") { $ok:v v; $jsonerr:e "" };
+    let hv=mt json.str(hs.get(k);"value") { $ok:v v; $jsonerr:e "" };
+    if(!headernameok(hn)){ <errorreply(400;"header refused: its name is empty, not a token, or one the proxy sets itself") }el{};
+    if(!headervalueok(hv)){ <errorreply(400;"header refused: its value holds a control character or is over 4096 bytes") }el{};
+    names=names.push(hn);
+    values=values.push(hv)
+  };
+  let req=$proxyrequest{ url:url; method:method; hnames:names; hvalues:values; body:rbody };
+  <resultreply(proxy(req;p))
+};

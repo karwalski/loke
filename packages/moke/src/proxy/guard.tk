@@ -1,0 +1,457 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=moke.proxy.guard;
+
+i=str:std.str;
+i=env:std.env;
+
+(* MK19.9 — what /api/proxy may fetch.
+
+   /api/proxy fetches a URL the browser names. It runs on a machine that also runs loke,
+   Ollama and a database, so it is a server-side request forgery vector by construction:
+   left open, any page that can make the browser POST to moke could read loke's API, a
+   cloud metadata service or a router's admin page through it. These rules close that. They
+   are pure (no socket, no process) so that every bypass encoding can be tested as a string;
+   moke.proxy.fetch applies them and then checks the addresses the name RESOLVES to.
+
+   The rules, in the order check() applies them:
+   1. At most 2048 bytes, and no space, control character or backslash anywhere. A WHATWG
+      parser reads a backslash as a slash, and curl does not; refusing it means the two
+      cannot disagree about where the host ends.
+   2. https:// exactly. Nothing else is fetched: not http, not file, not gopher or dict.
+   3. No userinfo (user:password@host) and no percent sign in the authority, where it could
+      only be an encoded host or a zone id.
+   4. A port, when given, is decimal, has no leading zero and is 443 — or the test-only
+      loopback port below.
+   5. The host is a canonical DNS name: lower case after folding, a-z 0-9 . - only, no empty
+      label (so no trailing dot), no label starting or ending with -. A host whose last label
+      is a number, or starts 0x, is an IPv4 address to inet_aton and to curl, so it is judged
+      as one: only the canonical dotted quad is readable, and every other spelling (decimal
+      2130706433, octal 0177.0.0.1, hex 0x7f000001, short 127.1) is refused as non-canonical.
+   6. Every IP literal is refused, IPv4 or bracketed IPv6. The allowlist holds names. A
+      literal is classified first so that the refusal says what it was.
+   7. No local or internal name: localhost, *.localhost, *.local, *.internal (which covers
+      metadata.google.internal), *.arpa, and any single-label name.
+   8. The host is on the allowlist, exactly. No wildcards and no suffix matching: a
+      subdomain of an allowlisted name is a different name. The allowlist is empty unless
+      the operator configures it (MOKE_PROXY_ALLOW), so the default is to refuse
+      everything.
+
+   The address classes refused are listed at classify4 and classify6. The same classifier
+   judges the resolved addresses (addressesok), which is where it matters most: a name can
+   resolve to anything.
+
+   THE TEST-ONLY OVERRIDE. A test has to fetch something, and the only server a test may
+   reach is on loopback. $proxypolicy.loopbackport is that override: when it is not 0, the
+   name `localhost` on exactly that port passes rule 7, and a loopback address on exactly
+   that port passes addressesok. Nothing else is relaxed, and no other address class. The
+   production policy is built by production() below, which sets it to 0 and reads no
+   setting for it: the only configuration production reads is the allowlist, and an
+   allowlist entry that is an address or a local name is dropped (configured). So the
+   override cannot be switched on by configuration; only code that builds its own policy,
+   which is test code, can set it. The same holds for cafile, which only a test sets. *)
+
+t=$proxypolicy{
+  allow:@str;
+  maxbytes:i64;
+  timeouts:i64;
+  loopbackport:i64;
+  cafile:str
+};
+
+t=$proxytarget{
+  ok:bool;
+  reason:str;
+  host:str;
+  port:i64;
+  path:str
+};
+
+f=refuse(reason:str):$proxytarget{
+  <$proxytarget{ ok:false; reason:reason; host:""; port:0; path:"" }
+};
+
+f=sub(s:str;from:i64;to:i64):str{
+  <mt str.slice(s;from as u64;to as u64) {$ok:v v; $err:e ""}
+};
+
+f=slen(s:str):i64{
+  <str.len(s) as i64
+};
+
+(* The production policy. The allowlist is MOKE_PROXY_ALLOW, a comma-separated list of host
+   names; unset, it is empty and every request is refused. 4 MiB and 15 seconds bound one
+   fetch: the body, and the whole transfer from connect to last byte. *)
+f=production():$proxypolicy{
+  <$proxypolicy{ allow:configured(env.getor("MOKE_PROXY_ALLOW";"")); maxbytes:4194304; timeouts:15; loopbackport:0; cafile:"" }
+};
+
+(* The allowlist from its configured text. Each entry is trimmed and lower-cased, and kept
+   only when it is a name check() could accept: an address, a local or internal name, a
+   wildcard, a URL or a host:port is dropped, so configuration cannot allowlist what the
+   rules refuse. *)
+f=configured(raw:str):@str{
+  let out=mut.@();
+  let parts=str.split(raw;",");
+  lp(let k=0;k<parts.len;k=k+1){
+    let e=str.lower(str.trim(parts.get(k)));
+    if(slen(e)>0){
+      if(entryok(e)){ out=out.push(e) }el{}
+    }el{}
+  };
+  <out
+};
+
+f=entryok(e:str):bool{
+  if(slen(hostsyntax(e))>0){ <false }el{};
+  if(ipv4ish(e)){ <false }el{};
+  <!localname(e)
+};
+
+f=allowed(host:str;p:$proxypolicy):bool{
+  lp(let k=0;k<p.allow.len;k=k+1){
+    if(str.eq(p.allow.get(k);host)){ <true }el{}
+  };
+  <false
+};
+
+(* A space, a control character, DEL or a backslash anywhere in the URL. *)
+f=badchar(url:str):bool{
+  let n=slen(url);
+  lp(let k=0;k<n;k=k+1){
+    let c=str.charat(url;k);
+    if(c<=32 || c==127 || c==92){ <true }el{}
+  };
+  <false
+};
+
+(* Where the authority ends: the first /, ? or #. *)
+f=authend(rest:str):i64{
+  let n=slen(rest);
+  lp(let k=0;k<n;k=k+1){
+    let c=str.charat(rest;k);
+    if(c==47 || c==63 || c==35){ <k }el{}
+  };
+  <n
+};
+
+(* The path and query sent upstream. The fragment never goes on the wire. *)
+f=pathof(tail:str):str{
+  let nofrag=mut.tail;
+  let hash=str.indexof(tail;"#");
+  if(hash>=0){ nofrag=sub(tail;0;hash) }el{};
+  if(slen(nofrag)==0){ <"/" }el{};
+  if(str.startswith(nofrag;"?")){ <"/\(nofrag)" }el{};
+  <nofrag
+};
+
+(* A port as written after the colon: decimal, no sign, no leading zero, 1 to 65535.
+   0-1 when it is none of those. *)
+f=portof(s:str):i64{
+  if(slen(s)==0 || slen(s)>5){ <0-1 }el{};
+  if(!str.isdigit(s)){ <0-1 }el{};
+  if(str.charat(s;0)==48){ <0-1 }el{};
+  let v=mt str.toint(s) {$ok:n n; $err:e 0-1};
+  if(v<1 || v>65535){ <0-1 }el{};
+  <v
+};
+
+f=portallowed(port:i64;p:$proxypolicy):bool{
+  if(port==443){ <true }el{};
+  <p.loopbackport>0 && port==p.loopbackport
+};
+
+f=isalnum(c:i64):bool{
+  <(c>=97 && c<=122) || (c>=48 && c<=57)
+};
+
+(* "" when `host` (already lower case) is a syntactically canonical DNS name. *)
+f=hostsyntax(host:str):str{
+  let n=slen(host);
+  if(n==0){ <"malformed host: empty" }el{};
+  if(n>253){ <"malformed host: longer than 253 bytes" }el{};
+  lp(let k=0;k<n;k=k+1){
+    let c=str.charat(host;k);
+    if(!(isalnum(c) || c==45 || c==46)){ <"malformed host: only a-z, 0-9, . and - are allowed" }el{}
+  };
+  let labels=str.split(host;".");
+  lp(let k=0;k<labels.len;k=k+1){
+    let l=labels.get(k);
+    let ln=slen(l);
+    if(ln==0){ <"non-canonical host: an empty label or a leading or trailing dot" }el{};
+    if(ln>63){ <"malformed host: a label longer than 63 bytes" }el{};
+    if(str.charat(l;0)==45 || str.charat(l;ln-1)==45){ <"malformed host: a label starts or ends with -" }el{}
+  };
+  <""
+};
+
+(* True when inet_aton, curl or a WHATWG parser would read the host as an IPv4 address:
+   its last label is all digits or starts 0x. *)
+f=ipv4ish(host:str):bool{
+  let labels=str.split(host;".");
+  if(labels.len==0){ <false }el{};
+  let last=labels.get(labels.len-1);
+  if(slen(last)==0){ <false }el{};
+  if(str.isdigit(last)){ <true }el{};
+  <str.startswith(last;"0x")
+};
+
+(* The four octets of a CANONICAL dotted quad, or an empty array: exactly four decimal
+   labels, each 0 to 255 with no leading zero. *)
+f=parse4(s:str):@i64{
+  let out=mut.@();
+  let labels=str.split(s;".");
+  if(labels.len!=4){ <@() }el{};
+  lp(let k=0;k<4;k=k+1){
+    let l=labels.get(k);
+    let ln=slen(l);
+    if(ln==0 || ln>3 || !str.isdigit(l)){ <@() }el{};
+    if(ln>1 && str.charat(l;0)==48){ <@() }el{};
+    let v=mt str.toint(l) {$ok:n n; $err:e 0-1};
+    if(v<0 || v>255){ <@() }el{};
+    out=out.push(v)
+  };
+  <out
+};
+
+(* The class of an IPv4 address, or "" for a public one. *)
+f=classify4(a:i64;b:i64;c:i64;d:i64):str{
+  if(a==0){ <"this network (0.0.0.0/8)" }el{};
+  if(a==10){ <"private (10.0.0.0/8)" }el{};
+  if(a==100 && b>=64 && b<=127){ <"carrier-grade NAT (100.64.0.0/10)" }el{};
+  if(a==127){ <"loopback (127.0.0.0/8)" }el{};
+  if(a==169 && b==254 && c==169 && d==254){ <"cloud metadata (169.254.169.254)" }el{};
+  if(a==169 && b==254){ <"link-local (169.254.0.0/16)" }el{};
+  if(a==172 && b>=16 && b<=31){ <"private (172.16.0.0/12)" }el{};
+  if(a==192 && b==0 && c==0){ <"IETF special-purpose (192.0.0.0/24)" }el{};
+  if(a==192 && b==0 && c==2){ <"documentation (192.0.2.0/24)" }el{};
+  if(a==192 && b==88 && c==99){ <"6to4 relay (192.88.99.0/24)" }el{};
+  if(a==192 && b==168){ <"private (192.168.0.0/16)" }el{};
+  if(a==198 && (b==18 || b==19)){ <"benchmarking (198.18.0.0/15)" }el{};
+  if(a==198 && b==51 && c==100){ <"documentation (198.51.100.0/24)" }el{};
+  if(a==203 && b==0 && c==113){ <"documentation (203.0.113.0/24)" }el{};
+  if(a>=224 && a<=239){ <"multicast (224.0.0.0/4)" }el{};
+  if(a>=240){ <"reserved (240.0.0.0/4)" }el{};
+  <""
+};
+
+f=classifyquad(q:@i64):str{
+  <classify4(q.get(0);q.get(1);q.get(2);q.get(3))
+};
+
+f=hexval(c:i64):i64{
+  if(c>=48 && c<=57){ <c-48 }el{};
+  if(c>=97 && c<=102){ <c-87 }el{};
+  if(c>=65 && c<=70){ <c-55 }el{};
+  <0-1
+};
+
+(* One IPv6 group, 1 to 4 hex digits; 0-1 when it is not one. *)
+f=group6(s:str):i64{
+  let n=slen(s);
+  if(n<1 || n>4){ <0-1 }el{};
+  let v=mut.0;
+  lp(let k=0;k<n;k=k+1){
+    let h=hexval(str.charat(s;k));
+    if(h<0){ <0-1 }el{};
+    v=v*16+h
+  };
+  <v
+};
+
+(* The groups of one side of an IPv6 address (either side of ::). `tail` says whether this
+   side ends the address, the one place a dotted IPv4 may stand. An element that is not a
+   group comes back as 0-1. *)
+f=side6(s:str;tail:bool):@i64{
+  let out=mut.@();
+  if(slen(s)==0){ <out }el{};
+  let parts=str.split(s;":");
+  lp(let k=0;k<parts.len;k=k+1){
+    let p=parts.get(k);
+    if(tail && k==parts.len-1 && str.contains(p;".")){
+      let q=parse4(p);
+      if(q.len!=4){ out=out.push(0-1) }el{
+        out=out.push(q.get(0)*256+q.get(1));
+        out=out.push(q.get(2)*256+q.get(3))
+      }
+    }el{
+      out=out.push(group6(p))
+    }
+  };
+  <out
+};
+
+f=hasneg(a:@i64):bool{
+  lp(let k=0;k<a.len;k=k+1){
+    if(a.get(k)<0){ <true }el{}
+  };
+  <false
+};
+
+(* The eight groups of an IPv6 address, or an empty array. At most one ::, which stands for
+   at least one zero group; a dotted IPv4 only at the end, and only canonical. A zone id
+   (%) never reaches here: check() refuses % in the authority. *)
+f=parse6(s:str):@i64{
+  if(slen(s)==0){ <@() }el{};
+  let dc=str.indexof(s;"::");
+  if(dc<0){
+    let all=side6(s;true);
+    if(all.len!=8 || hasneg(all)){ <@() }el{};
+    <all
+  }el{};
+  if(str.indexfrom(s;"::";dc+1)>=0){ <@() }el{};
+  let left=side6(sub(s;0;dc);false);
+  let right=side6(sub(s;dc+2;slen(s));true);
+  if(hasneg(left) || hasneg(right)){ <@() }el{};
+  let have=left.len+right.len;
+  if(have>7){ <@() }el{};
+  let out=mut.@();
+  lp(let k=0;k<left.len;k=k+1){ out=out.push(left.get(k)) };
+  lp(let k=0;k<8-have;k=k+1){ out=out.push(0) };
+  lp(let k=0;k<right.len;k=k+1){ out=out.push(right.get(k)) };
+  <out
+};
+
+(* The IPv4 address in the last 32 bits, classified. *)
+f=embedded4(g:@i64):str{
+  <classify4(g.get(6)/256;g.get(6)%256;g.get(7)/256;g.get(7)%256)
+};
+
+(* The class of an IPv6 address, or "" for a public one. Anything outside global unicast
+   (2000::/3) is refused, and inside it the ranges that embed an IPv4 address or are not
+   globally routed. *)
+f=classify6(g:@i64):str{
+  let h0=g.get(0);
+  let h1=g.get(1);
+  let zero5=h0==0 && h1==0 && g.get(2)==0 && g.get(3)==0 && g.get(4)==0;
+  let low=g.get(5)==0 && g.get(6)==0;
+  if(zero5 && low && g.get(7)==0){ <"unspecified (::)" }el{};
+  if(zero5 && low && g.get(7)==1){ <"loopback (::1)" }el{};
+  if(zero5 && g.get(5)==65535){
+    let c=embedded4(g);
+    if(slen(c)==0){ <"" }el{};
+    <"IPv4-mapped \(c)"
+  }el{};
+  if(zero5 && g.get(5)==0){ <"IPv4-compatible (::/96, deprecated)" }el{};
+  if(h0==100 && h1==65435 && g.get(2)==0 && g.get(3)==0 && g.get(4)==0 && g.get(5)==0){
+    let c=embedded4(g);
+    if(slen(c)==0){ <"" }el{};
+    <"NAT64 \(c)"
+  }el{};
+  if(h0==100 && h1==65435 && g.get(2)==1){ <"NAT64 local-use (64:ff9b:1::/48)" }el{};
+  if(h0==64768 && h1==3778 && g.get(2)==0 && g.get(3)==0 && g.get(4)==0 && g.get(5)==0 && g.get(6)==0 && g.get(7)==596){ <"cloud metadata (fd00:ec2::254)" }el{};
+  if(h0>=64512 && h0<=65023){ <"unique local (fc00::/7)" }el{};
+  if(h0>=65152 && h0<=65215){ <"link-local (fe80::/10)" }el{};
+  if(h0>=65216 && h0<=65279){ <"site-local (fec0::/10, deprecated)" }el{};
+  if(h0>=65280){ <"multicast (ff00::/8)" }el{};
+  if(h0==8193 && h1==3512){ <"documentation (2001:db8::/32)" }el{};
+  if(h0==8193 && h1<=511){ <"IETF special-purpose (2001::/23, Teredo included)" }el{};
+  if(h0==8194){ <"6to4 (2002::/16)" }el{};
+  if(h0<8192 || h0>16383){ <"not global unicast (outside 2000::/3)" }el{};
+  <""
+};
+
+(* The class of an address as a resolver prints it, "" for a public one, or "unreadable"
+   when it is neither a canonical dotted quad nor an IPv6 address. *)
+f=classifyaddr(a:str):str{
+  if(str.contains(a;":")){
+    let g=parse6(a);
+    if(g.len!=8){ <"unreadable" }el{};
+    <classify6(g)
+  }el{};
+  let q=parse4(a);
+  if(q.len!=4){ <"unreadable" }el{};
+  <classifyquad(q)
+};
+
+f=isloopbackclass(c:str):bool{
+  <str.startswith(c;"loopback") || str.startswith(c;"IPv4-mapped loopback")
+};
+
+(* "" when every address a name resolved to may be fetched from; otherwise why not. One
+   blocked address refuses the name: the fetch is pinned to one of them, and a name that
+   mixes public and internal answers is not one to trust. *)
+f=addressesok(addrs:@str;port:i64;p:$proxypolicy):str{
+  if(addrs.len==0){ <"the name did not resolve to any address" }el{};
+  lp(let k=0;k<addrs.len;k=k+1){
+    let c=classifyaddr(addrs.get(k));
+    if(str.eq(c;"unreadable")){ <"the resolver gave an unreadable address" }el{};
+    if(slen(c)>0){
+      let testloop=isloopbackclass(c) && p.loopbackport>0 && port==p.loopbackport;
+      if(!testloop){ <"the name resolves to a blocked address: \(c)" }el{}
+    }el{}
+  };
+  <""
+};
+
+(* localhost and its subdomains, mDNS (.local), .internal (metadata.google.internal),
+   .arpa (home.arpa and the reverse zones), and every single-label name. *)
+f=localname(host:str):bool{
+  if(!str.contains(host;".")){ <true }el{};
+  if(str.eq(host;"localhost")){ <true }el{};
+  <str.endswith(host;".localhost") || str.endswith(host;".local") || str.endswith(host;".internal") || str.endswith(host;".arpa")
+};
+
+f=literal(cls:str):$proxytarget{
+  if(slen(cls)>0){ <refuse("blocked address: \(cls)") }el{};
+  <refuse("IP literal: the allowlist holds host names only")
+};
+
+(* Judge a URL. ok, with the host, port and path that may be fetched, or a refusal and its
+   reason. The reason names the host at most, never the path or query, which can carry a
+   token. *)
+f=check(url:str;p:$proxypolicy):$proxytarget{
+  if(slen(url)>2048){ <refuse("URL too long (over 2048 bytes)") }el{};
+  if(badchar(url)){ <refuse("the URL holds a space, control character or backslash") }el{};
+  if(!str.startswith(url;"https://")){ <refuse("https only: the URL must start https://") }el{};
+  let rest=sub(url;8;slen(url));
+  let ae=authend(rest);
+  let auth=sub(rest;0;ae);
+  let path=pathof(sub(rest;ae;slen(rest)));
+  if(str.contains(auth;"@")){ <refuse("userinfo (user:password@) is not allowed in the URL") }el{};
+  if(str.contains(auth;"%")){ <refuse("percent-encoded host or zone id is not allowed") }el{};
+
+  if(str.startswith(auth;"[")){
+    let close=str.indexof(auth;"]");
+    if(close<0){ <refuse("malformed IPv6 literal: no closing ]") }el{};
+    let after=sub(auth;close+1;slen(auth));
+    let port6=mut.443;
+    if(slen(after)>0){
+      if(!str.startswith(after;":")){ <refuse("malformed IPv6 literal: text after ]") }el{};
+      port6=portof(sub(after;1;slen(after)));
+      if(port6<0){ <refuse("malformed port") }el{}
+    }el{};
+    let g=parse6(sub(auth;1;close));
+    if(g.len!=8){ <refuse("malformed IPv6 literal") }el{};
+    <literal(classify6(g))
+  }el{};
+
+  let host=mut.auth;
+  let port=mut.443;
+  let colon=str.indexof(auth;":");
+  if(colon>=0){
+    host=sub(auth;0;colon);
+    port=portof(sub(auth;colon+1;slen(auth)));
+    if(port<0){ <refuse("malformed port: decimal 1 to 65535, no sign or leading zero") }el{}
+  }el{};
+  let name=str.lower(host);
+  let syn=hostsyntax(name);
+  if(slen(syn)>0){ <refuse(syn) }el{};
+  if(ipv4ish(name)){
+    let q=parse4(name);
+    if(q.len!=4){ <refuse("non-canonical IPv4 encoding (decimal, octal, hex or short form)") }el{};
+    <literal(classifyquad(q))
+  }el{};
+  if(!portallowed(port;p)){ <refuse("port \(port) not allowed: 443 only") }el{};
+  let testlocal=str.eq(name;"localhost") && p.loopbackport>0 && port==p.loopbackport;
+  if(localname(name) && !testlocal){ <refuse("local name: \(name) is never proxied") }el{};
+  if(!allowed(name;p)){ <refuse("host not on the proxy allowlist (MOKE_PROXY_ALLOW): \(name)") }el{};
+  <$proxytarget{ ok:true; reason:""; host:name; port:port; path:path }
+};
+
+(* The URL that is fetched, rebuilt from the parts check() judged, so the fetcher can never
+   read the caller's text differently. *)
+f=canonical(t:$proxytarget):str{
+  <"https://\(t.host):\(t.port)\(t.path)"
+};

@@ -55,64 +55,35 @@
   // ---------------------------------------------------------------------------
 
   /**
-   * Resolve the loke proxy URL. Falls back to current origin if LOKE_URL is
-   * not set on the window.
+   * moke's proxy (MK19.9, moke-proxy.js). These used to post to
+   * an /api/proxy on loke's port with the target in a custom header: loke has
+   * no such endpoint, so every call failed. moke's own /api/proxy decides what
+   * may be fetched; a host the operator has not allowlisted is refused, and the
+   * reason reaches the caller as the Error's message.
    */
-  function proxyUrl() {
-    var base = (window.LOKE_URL || '') || '';
-    return base.replace(/\/+$/, '') + '/api/proxy';
+  function mokeProxy() {
+    if (!window.MokeProxy) throw new Error('moke-proxy.js is not loaded on this page');
+    return window.MokeProxy;
   }
 
   /**
-   * Make a GET request through the loke proxy.
+   * GET a JSON document through moke's proxy.
    *
    * @param {string} targetUrl - The upstream URL to fetch.
    * @returns {Promise<*>} Parsed JSON response body.
    */
   async function proxyGet(targetUrl) {
-    var response = await fetch(proxyUrl(), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Loke-Target': targetUrl,
-        'X-Loke-Method': 'GET'
-      },
-      body: JSON.stringify({ _proxyMethod: 'GET' })
-    });
-
-    if (!response.ok) {
-      var errText = await response.text();
-      throw new Error('Proxy request failed (' + response.status + '): ' + errText);
-    }
-
-    return response.json();
+    return mokeProxy().json({ url: targetUrl, method: 'GET', headers: { 'Accept': 'application/json' } });
   }
 
   /**
-   * Fetch raw text content through the loke proxy.
+   * GET raw text through moke's proxy.
    *
    * @param {string} targetUrl - The upstream URL to fetch.
    * @returns {Promise<string>} Response body as text.
    */
   async function proxyGetText(targetUrl) {
-    var response = await fetch(proxyUrl(), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/csv, text/plain, */*',
-        'X-Loke-Target': targetUrl,
-        'X-Loke-Method': 'GET'
-      },
-      body: JSON.stringify({ _proxyMethod: 'GET' })
-    });
-
-    if (!response.ok) {
-      var errText = await response.text();
-      throw new Error('Proxy request failed (' + response.status + '): ' + errText);
-    }
-
-    return response.text();
+    return mokeProxy().text({ url: targetUrl, method: 'GET', headers: { 'Accept': 'text/csv, text/plain, */*' } });
   }
 
   /**

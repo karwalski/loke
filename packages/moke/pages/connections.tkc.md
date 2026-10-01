@@ -12,11 +12,12 @@ Handler for the "Connect to API" page (MK9.1).
 `templates/connections.tkt` — extends `base.tkt`
 
 ## Features (MK9.1)
-- Connection name, URL, HTTP method selector
+- Connection name, URL, HTTP method selector (GET / POST: what moke's proxy sends)
 - Auth type selector (None / API Key / Bearer Token / Basic Auth / OAuth 2.0)
 - Key-value editors for headers and query parameters
-- JSON request body editor (POST/PUT only)
-- Test Connection via loke proxy (`/api/proxy`)
+- Request body editor (POST only)
+- Test Connection via moke's own proxy (`POST /api/proxy`, `static/js/moke-proxy.js`, MK19.9);
+  a refusal is shown with its reason
 - Save/load connections from localStorage (`moke_api_connections`)
 - Placeholder sections for MK9.2–MK9.10
 

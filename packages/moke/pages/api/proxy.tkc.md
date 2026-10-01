@@ -1,0 +1,1 @@
+POST /api/proxy (MK19.9). Reads Host, Origin, Content-Type and the body, and hands them to `moke.proxy.fetch.handle` with `moke.proxy.guard.production()` — the allowlist from `MOKE_PROXY_ALLOW`, empty by default, and no test override. Answers handle's status and JSON envelope. The browser side is `static/js/moke-proxy.js`. Registered in `src/_handlers.tk`.
