@@ -4,6 +4,42 @@
 m=core.privacy.consensus;
 
 i=str:std.str;
+(* For $piientity. The linter reports this import unused because only a type is taken
+   from it; without it $piientity is undeclared. *)
+i=t:shared.types;
+
+(* F3b.4. Consensus between detection layers: when more than one layer reports the same or
+   an overlapping entity, privacy.consensus_strategy decides what is masked.
+
+   GROUPS. Two detections belong to one group when both have spans and the spans overlap, or
+   when their values are equal (which is how a layer that reports no span, and the same value
+   found twice, joins a group). Membership is transitive. A group is the unit every strategy
+   decides on.
+
+   VOTERS. The layers that completed a scan of this text, in registry order. A layer that
+   scanned and found nothing in a group votes against it; a layer that did not scan does not
+   vote at all, so a layer being down never makes unanimity easier or harder to reach than
+   the layers that actually looked can justify.
+
+   STRATEGIES, each over one group:
+     most-restrictive     mask every detection in the group. The union. The default.
+     first-match          mask only the detections of the highest-priority (earliest in
+                          registry order) layer in the group; the others are dropped.
+     unanimous            mask the group only if every voter detected it.
+     majority             mask the group only if more than half of the voters detected it.
+     confidence-weighted  mask the group only if the mean over the voters of each voter's
+                          highest confidence in the group (0 for a voter that did not
+                          detect it) is at least the threshold.
+
+   FAIL CLOSED. An empty, unknown or mis-cased strategy name is most-restrictive, so nothing
+   but an explicit, correctly spelt choice can make the pipeline mask less than the union of
+   its layers. Every strategy but most-restrictive can leave something a layer detected in
+   the clear: that is what choosing one means, and why it is never the default.
+
+   Every detection comes back as a $resolvedentity, in input order, whose detectinglayers
+   names each layer in its group with that layer's highest confidence there ("regex=0.95,
+   ner=0.80"), whose finalconfidence is the group's score (the confidence-weighted mean,
+   the highest single confidence otherwise), and whose action is "mask" or "pass". *)
 
 t=$layerdetection{
   entitytype:str;
@@ -24,22 +60,241 @@ t=$resolvedentity{
   action:str
 };
 
-f=resolveoverlaps(detections:@$layerdetection;strategy:str):@$resolvedentity{
-  let results=mut.@();
-  lp(let i=0;i<detections.len;i=i+1){
-    let d=detections.get(i);
-    let resolved=$resolvedentity{
+(* What core.privacy.pipeline needs back: the entities to mask, the record of every
+   decision, and the strategy that was actually applied. *)
+t=$consensusresult{
+  entities:@$piientity;
+  resolved:@$resolvedentity;
+  strategy:str
+};
+
+f=defaultstrategy():str{ <"most-restrictive" };
+f=defaultthreshold():f64{ <0.5 };
+
+f=isknown(strategy:str):bool{
+  <str.eq(strategy;"most-restrictive") || str.eq(strategy;"first-match") || str.eq(strategy;"unanimous") || str.eq(strategy;"majority") || str.eq(strategy;"confidence-weighted")
+};
+
+(* The strategy that is applied for a configured name: the name itself when it is one of
+   the five, most-restrictive for anything else. *)
+f=effective(strategy:str):str{
+  if(isknown(strategy)){ <strategy }el{};
+  <defaultstrategy()
+};
+
+(* privacy.consensus_threshold as text, as std.toml gives it. Empty is the default; any
+   other value is clamped to 0..1. *)
+f=parsethreshold(s:str):f64{
+  if(str.len(s)==0){ <defaultthreshold() }el{};
+  let v=str.tof64(s);
+  if(v<0.0){ <0.0 }el{};
+  if(v>1.0){ <1.0 }el{};
+  <v
+};
+
+f=spanned(d:$layerdetection):bool{ <d.end>d.start };
+
+f=linked(a:$layerdetection;b:$layerdetection):bool{
+  if(str.eq(a.value;b.value)){ <true }el{};
+  if(spanned(a) && spanned(b)){
+    <(a.start<b.end) && (b.start<a.end)
+  }el{};
+  <false
+};
+
+(* Group label of every detection: the smallest index it is transitively linked to.
+   Relaxed until nothing changes; at most n passes. *)
+(* The smallest index detection i is linked to directly; i itself at most, since a detection
+   is linked to itself by its own value. *)
+f=firstlinked(ds:@$layerdetection;i:i64):i64{
+  lp(let j=0;j<i;j=j+1){
+    if(linked(ds.get(i);ds.get(j))){ <j }el{}
+  };
+  <i
+};
+
+f=grouplabels(ds:@$layerdetection):@i64{
+  let labels=mut.@();
+  lp(let k=0;k<ds.len;k=k+1){ labels=labels.push(firstlinked(ds;k)) };
+  let changed=mut.true;
+  lp(let pass=0;changed && pass<=ds.len;pass=pass+1){
+    changed=false;
+    let next=mut.@();
+    lp(let i=0;i<ds.len;i=i+1){
+      let best=mut.labels.get(i);
+      lp(let j=0;j<ds.len;j=j+1){
+        if(linked(ds.get(i);ds.get(j))){
+          let lj:i64=labels.get(j);
+          if(lj<best){ best=lj }el{}
+        }el{}
+      };
+      if(best<labels.get(i)){ changed=true }el{};
+      next=next.push(best)
+    };
+    labels=next
+  };
+  <labels
+};
+
+f=indexof(ids:@str;id:str):i64{
+  lp(let i=0;i<ids.len;i=i+1){
+    if(str.eq(ids.get(i);id)){ <i }el{}
+  };
+  <ids.len
+};
+
+(* The voters, or when none are given the layers in the detections in first-seen order. *)
+f=votersfor(ds:@$layerdetection;voters:@str):@str{
+  if(voters.len>0){ <voters }el{};
+  let out=mut.@();
+  lp(let i=0;i<ds.len;i=i+1){
+    let d:$layerdetection=ds.get(i);
+    if(indexof(out;d.layerid)==out.len){ out=out.push(d.layerid) }el{}
+  };
+  <out
+};
+
+(* The highest confidence layer `id` reported in group g, or -1 when it reported nothing. *)
+f=layerbest(ds:@$layerdetection;labels:@i64;g:i64;id:str):f64{
+  let best=mut.(0.0-1.0);
+  lp(let i=0;i<ds.len;i=i+1){
+    let d:$layerdetection=ds.get(i);
+    if(labels.get(i)==g && str.eq(d.layerid;id)){
+      if(d.confidence>best){ best=d.confidence }el{}
+    }el{}
+  };
+  <best
+};
+
+(* Every layer in group g with its highest confidence there, in voter order and then
+   first-seen order for a layer that is not a voter. *)
+f=credit(ds:@$layerdetection;labels:@i64;g:i64;ids:@str;out:@str):@str{
+  let acc=mut.out;
+  lp(let k=0;k<ids.len;k=k+1){
+    let id:str=ids.get(k);
+    let c=layerbest(ds;labels;g;id);
+    if(c>=0.0){ acc=acc.push(str.join("=";@(id;str.fromfloat(c)))) }el{}
+  };
+  <acc
+};
+
+f=grouplayers(ds:@$layerdetection;labels:@i64;g:i64;voters:@str):@str{
+  let others=mut.@();
+  lp(let i=0;i<ds.len;i=i+1){
+    let d:$layerdetection=ds.get(i);
+    if(indexof(voters;d.layerid)==voters.len && indexof(others;d.layerid)==others.len){ others=others.push(d.layerid) }el{}
+  };
+  <credit(ds;labels;g;others;credit(ds;labels;g;voters;@()))
+};
+
+f=votes(ds:@$layerdetection;labels:@i64;g:i64;voters:@str):i64{
+  let n=mut.0;
+  lp(let v=0;v<voters.len;v=v+1){
+    if(layerbest(ds;labels;g;voters.get(v))>=0.0){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=weighted(ds:@$layerdetection;labels:@i64;g:i64;voters:@str):f64{
+  if(voters.len==0){ <0.0 }el{};
+  let sum=mut.0.0;
+  lp(let v=0;v<voters.len;v=v+1){
+    let c=layerbest(ds;labels;g;voters.get(v));
+    if(c>0.0){ sum=sum+c }el{}
+  };
+  <sum/(voters.len as f64)
+};
+
+f=highest(ds:@$layerdetection;labels:@i64;g:i64):f64{
+  let best=mut.0.0;
+  lp(let i=0;i<ds.len;i=i+1){
+    let d:$layerdetection=ds.get(i);
+    if(labels.get(i)==g && d.confidence>best){ best=d.confidence }el{}
+  };
+  <best
+};
+
+(* The priority of the highest-priority layer in group g: its index in voters, voters.len
+   for a layer that is not a voter. *)
+f=priority(voters:@str;d:$layerdetection):i64{ <indexof(voters;d.layerid) };
+
+f=firstlayer(ds:@$layerdetection;labels:@i64;g:i64;voters:@str):i64{
+  let best=mut.voters.len;
+  lp(let i=0;i<ds.len;i=i+1){
+    if(labels.get(i)==g){
+      let p=priority(voters;ds.get(i));
+      if(p<best){ best=p }el{}
+    }el{}
+  };
+  <best
+};
+
+(* Whether detection i is masked under the (effective) strategy. *)
+f=masks(ds:@$layerdetection;labels:@i64;i:i64;voters:@str;strategy:str;threshold:f64):bool{
+  let g:i64=labels.get(i);
+  if(str.eq(strategy;"first-match")){
+    <priority(voters;ds.get(i))==firstlayer(ds;labels;g;voters)
+  }el{};
+  if(str.eq(strategy;"unanimous")){
+    <votes(ds;labels;g;voters)>=voters.len
+  }el{};
+  if(str.eq(strategy;"majority")){
+    <votes(ds;labels;g;voters)*2>voters.len
+  }el{};
+  if(str.eq(strategy;"confidence-weighted")){
+    <weighted(ds;labels;g;voters)>=threshold
+  }el{};
+  <true
+};
+
+(* Resolve detections under a strategy. voters are the layers that completed a scan, in
+   priority order; empty means the layers that appear in the detections. *)
+f=resolvewith(ds:@$layerdetection;strategy:str;voters:@str;threshold:f64):@$resolvedentity{
+  let applied=effective(strategy);
+  let vs=votersfor(ds;voters);
+  let labels=grouplabels(ds);
+  let out=mut.@();
+  lp(let i=0;i<ds.len;i=i+1){
+    let d:$layerdetection=ds.get(i);
+    let g:i64=labels.get(i);
+    let conf=mut.highest(ds;labels;g);
+    if(str.eq(applied;"confidence-weighted")){ conf=weighted(ds;labels;g;vs) }el{};
+    let action=mut."pass";
+    if(masks(ds;labels;i;vs;applied;threshold)){ action="mask" }el{};
+    out=out.push($resolvedentity{
       entitytype:d.entitytype;
       value:d.value;
       start:d.start;
       end:d.end;
-      finalconfidence:d.confidence;
-      detectinglayers:d.layerid;
-      action:"mask"
-    };
-    results=results.push(resolved)
+      finalconfidence:conf;
+      detectinglayers:str.join(",";grouplayers(ds;labels;g;vs));
+      action:action
+    })
   };
-  <results
+  <out
+};
+
+f=resolveoverlaps(detections:@$layerdetection;strategy:str):@$resolvedentity{
+  <resolvewith(detections;strategy;@();defaultthreshold())
+};
+
+f=actionof(r:$resolvedentity):str{ <r.action };
+
+(* The pipeline's entry point. entities[i] was reported by layer layerof[i]; voters are the
+   layers that completed a scan, in registry order. Returns the entities to mask, in input
+   order, and a record of every decision. *)
+f=apply(entities:@$piientity;layerof:@str;voters:@str;strategy:str;threshold:str):$consensusresult{
+  let ds=mut.@();
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    ds=ds.push($layerdetection{entitytype:e.entitytype;value:e.value;start:e.start as i64;end:e.end as i64;confidence:e.confidence;layerid:layerof.get(i)})
+  };
+  let resolved=resolvewith(ds;strategy;voters;parsethreshold(threshold));
+  let kept=mut.@();
+  lp(let i=0;i<entities.len;i=i+1){
+    if(str.eq(actionof(resolved.get(i));"mask")){ kept=kept.push(entities.get(i)) }el{}
+  };
+  <$consensusresult{entities:kept;resolved:resolved;strategy:effective(strategy)}
 };
 
 f=strategyname(strategy:str):str{
@@ -47,5 +302,6 @@ f=strategyname(strategy:str):str{
   if(str.eq(strategy;"first-match")){<"First Match (highest priority layer wins)"}el{};
   if(str.eq(strategy;"unanimous")){<"Unanimous (all layers must agree)"}el{};
   if(str.eq(strategy;"majority")){<"Majority (>50% of layers agree)"}el{};
+  if(str.eq(strategy;"confidence-weighted")){<"Confidence Weighted (mean layer confidence meets the threshold)"}el{};
   <"Unknown strategy"
 };

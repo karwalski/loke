@@ -42,9 +42,9 @@ file merely *existing* for a module is not proof and is not recorded as such.
 
 | Verdict | Count |
 |---|---|
-| `verified` | 36 |
+| `verified` | 37 |
 | `partial` | 27 |
-| `stub` | 14 |
+| `stub` | 13 |
 | `absent` | 20 |
 | **Total** | **97** |
 
@@ -53,7 +53,7 @@ By subsystem:
 | Subsystem | `verified` | `partial` | `stub` | `absent` | Rows |
 |---|---|---|---|---|---|
 | [A. Privacy detection and anonymisation](#a-privacy-detection-and-anonymisation) | 7 | 5 | 0 | 2 | 14 |
-| [B. Multi-layer composition — epic F3b](#b-multi-layer-composition--epic-f3b) | 4 | 0 | 1 | 5 | 10 |
+| [B. Multi-layer composition — epic F3b](#b-multi-layer-composition--epic-f3b) | 5 | 0 | 0 | 5 | 10 |
 | [C. Token optimisation](#c-token-optimisation) | 2 | 2 | 1 | 1 | 6 |
 | [D. Routing](#d-routing) | 4 | 2 | 1 | 1 | 8 |
 | [E. Governance, audit and compliance](#e-governance-audit-and-compliance) | 5 | 3 | 5 | 1 | 14 |
@@ -157,7 +157,7 @@ uses its own de-duplication instead. Tracked as AD1.7 — wire them or withdraw 
 
 | # | Claim as worded | Where | Verdict | Implementing code | Proof | What is actually true |
 |---|---|---|---|---|---|---|
-| B1 | Four consensus strategies: `most-restrictive` (default), `first-match`, `unanimous`, `majority` | `docs/features-loke.md:39-46`; strategy names also in the compliance table at `:262-264` | `stub` | `packages/core/src/privacy/consensus.tk:24-38` | No test of behaviour (`tests/unit/privacy/test_consensus.tk` re-declares the module). AD1.7 | `resolveoverlaps()` accepts a `strategy` argument and ignores it, marking every detection `action:"mask"` — one behaviour, not four. `strategyname()` at `:42` returns the four names as display strings. The module has no importers |
+| B1 | Five consensus strategies: `most-restrictive` (default), `first-match`, `unanimous`, `majority`, `confidence-weighted` | `docs/features-loke.md:48-61`; strategy names also in the compliance table | `verified` | `packages/core/src/privacy/consensus.tk` (`resolvewith`, `apply`, `effective`); `packages/core/src/privacy/pipeline.tk` `run` calls `cn.apply` on every layer detection before dedup; `packages/shared/src/config.tk` reads `privacy.consensus_strategy` and `privacy.consensus_threshold` | `tests/unit/privacy/test_consensus.tk` (production module, every strategy), `tests/unit/privacy/test_consensus_pipeline.tk` (production pipeline, recorder as NER and Presidio; default not weaker than any single layer nor than pre-consensus dedup). Mutants killed: unanimous-as-majority, default masking nothing, pipeline ignoring config. F3b.4 | F3b.4 (2026-10-01): each strategy decides over groups of overlapping detections, with the layers that completed a scan as voters. An empty, unknown or mis-cased strategy is applied as `most-restrictive`, which masks every detection, as the pipeline did before. Each detection is recorded on `$pipelinerun.resolved` with the layers and confidences of its group and the action taken. That record is in memory only: it does not reach `/api/pipeline` or the audit trail. Every strategy other than `most-restrictive` can leave something a layer detected in the clear, by design |
 | B2 | "Entity Routing … Different entity types assigned to the layer that handles them best" | `docs/features-loke.md:48` | `absent` | `packages/core/src/privacy/entity_routing.tk` exists; zero importers | AD1.7 | No pipeline path reads an entity-routing configuration. All layers run on all text |
 | B3 | "Layer Health … System degrades gracefully … Reports HEALTHY or DEGRADED" | `docs/features-loke.md:50` | `verified` | `packages/core/src/privacy/layer_health.tk` (`probe`, `consult`, `checkhealth`, `overall`), imported by `pipeline.tk` and `packages/browser/pages/api/health.tk` | `tests/unit/privacy/test_layer_health.tk`, `tests/unit/privacy/test_layer_registry_pipeline.tk`, `tests/unit/browser/test_health_handler.tk`, `scripts/smoke_e2e.sh`. F3b.6 | **Updated 2026-10-01 (F3b.6).** Every detection layer's health goes through layerhealth; an enabled layer that is down is skipped and counted degraded, and the pipeline still refuses when no layer completed (NC1.9). `GET /api/health` reports `privacy_layers` with healthy/degraded/unhealthy and each layer's state. Not built: the governance alert and a dashboard widget |
 | B4 | Layer ordering and trust configuration via `[[privacy.layers]]` | F3b.2 (backlog, **Done**); no claim in the four public files | `absent` | `packages/core/src/privacy/layer_config.tk` exists; zero importers | AD1.7 | The orchestrator runs a fixed layer order hardcoded in `pipeline.tk`. `priority`, `mode` and `veto` are not read |

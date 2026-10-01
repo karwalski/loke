@@ -53,6 +53,11 @@ It reduces what is disclosed; it does not ensure that everything sensitive is fo
 | `first-match` | Highest priority layer wins on overlaps | Performance-sensitive deployments |
 | `unanimous` | All layers must agree | Minimising false positives |
 | `majority` | >50% of layers agree | Balanced deployments with 3+ layers |
+| `confidence-weighted` | Mean of each layer's confidence meets `privacy.consensus_threshold` (default 0.5) | Tuned deployments with measured layers |
+
+Set with `privacy.consensus_strategy` in `config.toml`; an empty or unrecognised name is applied as
+`most-restrictive`. The voters are the layers that completed a scan of the text. Every strategy but
+`most-restrictive` can leave something a layer detected unmasked.
 
 **Entity Routing** (`core/privacy/entity_routing.tk`): Different entity types assigned to the layer that handles them best — emails and phones to regex, person names to NER, medical records to Presidio.
 
@@ -60,14 +65,13 @@ It reduces what is disclosed; it does not ensure that everything sensitive is fo
 
 > **Most of the multi-layer composition above is written but not wired.** Since 2026-10-01 the
 > pipeline runs its layers from `filter_registry.tk` (F3b.1), each through `layer_health.tk` (F3b.6),
-> and `sidecar_client.tk` is the privacy-filter layer (F3b.3). Seven Epic F3b modules —
-> `consensus.tk`, `entity_routing.tk`, `layer_config.tk`, `filter_metrics.tk`, `evaluation.tk`,
-> `org_policy.tk` and `template.tk` — still have **zero importers**, and `pipeline.tk`
-> de-duplicates overlaps itself.
+> `sidecar_client.tk` is the privacy-filter layer (F3b.3), and `pipeline.run` resolves overlapping
+> detections through `consensus.tk` under the configured strategy (F3b.4; the per-entity record of
+> detecting layers is on the in-memory run, not in `/api/pipeline` or the audit trail). Six Epic F3b
+> modules — `entity_routing.tk`, `layer_config.tk`, `filter_metrics.tk`, `evaluation.tk`,
+> `org_policy.tk` and `template.tk` — still have **zero importers**.
 >
-> Specifically: the four consensus strategies are **not implemented** —
-> `consensus.tk:24-38` accepts a `strategy` argument, ignores it, and marks every detection `mask`;
-> `strategyname()` at `:42` returns the four names as display strings only. No entity-routing or
+> Specifically: no entity-routing or
 > layer-priority configuration is read. No HEALTHY/DEGRADED status is aggregated — degradation happens
 > via each layer's own `isavailable()`. `Evaluation Mode` has no invocation point (there is no
 > `loke privacy evaluate` command) and no labelled corpus to run against (**AD1.1**). No per-layer

@@ -15,6 +15,7 @@ i=pt:core.privacy.pipelinetypes;
 i=fr:core.privacy.filterregistry;
 i=lh:core.privacy.layerhealth;
 i=cfg:shared.config;
+i=cn:core.privacy.consensus;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
    detection layers exist, which are enabled, the order they run in and the URL and setting
@@ -28,7 +29,11 @@ i=cfg:shared.config;
    registry, for callers that ask about one layer. *)
 t=$pipelineconfig{
   layers:$filterregistry;
-  dryrun:bool
+  dryrun:bool;
+  (* F3b.4. privacy.consensus_strategy and privacy.consensus_threshold, as configured;
+     core.privacy.consensus applies most-restrictive to any name it does not know. *)
+  consensus:str;
+  consensusthreshold:str
 };
 
 t=$stageresult{
@@ -55,7 +60,11 @@ t=$pipelinerun{
   (* MK6.16. Spans a completed layer reported that could not be placed in the text exactly
      (core.privacy.layerhealth.$layerresult). Each is an entity a layer found and nothing
      masked, so a run with any is not safe to forward. *)
-  unplaced:u32
+  unplaced:u32;
+  (* F3b.4. The consensus strategy applied, and every layer detection with the layers and
+     confidences of its group and whether it was masked. *)
+  consensus:str;
+  resolved:@$resolvedentity
 };
 
 
@@ -63,11 +72,11 @@ t=$pipelinerun{
    registered and OFF, so a caller that says nothing about it gets the three layers it had
    (F3b.3). *)
 f=newconfig(purl:str;ourl:str):$pipelineconfig{
-  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false}
+  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false;consensus:cn.defaultstrategy();consensusthreshold:""}
 };
 
 f=withlayers(c:$pipelineconfig;layers:$filterregistry):$pipelineconfig{
-  <$pipelineconfig{layers:layers;dryrun:c.dryrun}
+  <$pipelineconfig{layers:layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold}
 };
 
 (* One registry entry switched on or off. An id the registry does not hold is left alone. *)
@@ -76,7 +85,7 @@ f=withlayer(c:$pipelineconfig;id:str;enabled:bool):$pipelineconfig{
 };
 
 f=withdryrun(c:$pipelineconfig;dryrun:bool):$pipelineconfig{
-  <$pipelineconfig{layers:c.layers;dryrun:dryrun}
+  <$pipelineconfig{layers:c.layers;dryrun:dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold}
 };
 
 (* The privacy-filter layer switched on (or off) at a sidecar URL and operating point. The
@@ -87,8 +96,12 @@ f=withprivacyfilter(c:$pipelineconfig;enabled:bool;url:str;threshold:str):$pipel
   <withlayers(c;reg)
 };
 
+f=withconsensus(c:$pipelineconfig;strategy:str;threshold:str):$pipelineconfig{
+  <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:strategy;consensusthreshold:threshold}
+};
+
 f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
-  <withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold)
+  <withconsensus(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);lc.consensusstrategy;lc.consensusthreshold)
 };
 
 (* newconfig plus the privacy-filter settings from the user's config.toml, read now. *)
@@ -512,6 +525,8 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
 
   let stages=mut.@();
   let allentities=mut.@();
+  let hitlayers=mut.@();
+  let voters=mut.@();
   (* NC1.9: a layer counts as completed only when it actually scanned the text. *)
   let completed=mut.0;
   let degraded=mut.0;
@@ -530,8 +545,10 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     let st:$layerstatus=lr.status;
     if(lh.iscompleted(st)){
       completed=completed+1;
+      voters=voters.push(layer.id);
       lp(let hi=0;hi<lr.hits.len;hi=hi+1){
-        allentities=allentities.push(lr.hits.get(hi))
+        allentities=allentities.push(lr.hits.get(hi));
+        hitlayers=hitlayers.push(layer.id)
       };
       (* MK6.16. Logged and then forwarded until now: an entity a layer found and nothing
          masked. Counted, and issafetoforward refuses the run. *)
@@ -555,7 +572,10 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     stages=stages.push(absent.get(ai))
   };
 
-  let dedupedraw=dedupentities(allentities);
+  (* F3b.4. Overlapping detections are resolved by the configured strategy before dedup;
+     the default, most-restrictive, keeps every detection, as this list always was. *)
+  let agreed:$consensusresult=cn.apply(allentities;hitlayers;voters;config.consensus;config.consensusthreshold);
+  let dedupedraw=dedupentities(agreed.entities);
   (* PL1.1 — placeholders are assigned HERE, after dedup and before anonymisation, and
      nowhere else.
 
@@ -636,7 +656,9 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     requestid:requestid;
     layerscompleted:completed as u32;
     layersdegraded:degraded as u32;
-    unplaced:unplaced as u32
+    unplaced:unplaced as u32;
+    consensus:agreed.strategy;
+    resolved:agreed.resolved
   }
 };
 

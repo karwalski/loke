@@ -1,0 +1,198 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.consensuspipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=toml:std.toml;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=pt:core.privacy.pipelinetypes;
+i=fr:core.privacy.filterregistry;
+i=cn:core.privacy.consensus;
+i=cfg:shared.config;
+i=sh:shared.types;
+
+(* F3b.4 — core.privacy.pipeline.run resolves its layers' detections through
+   core.privacy.consensus under privacy.consensus_strategy, judged by the anonymised text the
+   production pipeline produces.
+
+   scripts/lib/http_recorder.py stands in for NER (Ollama /api/chat) and Presidio (/analyze):
+   both report "Jane Citizen" at the start of the text. The regex layer finds the email
+   address and nothing else. So with regex, NER and Presidio as the three voters:
+     "Jane Citizen"      found by NER and Presidio, 2 of 3
+     "jane@example.com"  found by regex alone,       1 of 3
+   which every strategy decides differently.
+
+   THE DEFAULT MUST NOT WEAKEN DETECTION. The pipeline before consensus masked the dedup of
+   every layer's detections. That is checked here directly: whatever any one layer masks on
+   its own, the default three-layer run masks, and its entity count is the dedup of the
+   single-layer runs' entities taken together. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_consensus_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* Regex, NER and Presidio, the last two at the recorder; the privacy filter off. *)
+f=three(url:str):$pipelineconfig{
+  <pl.newconfig(url;url)
+};
+
+f=only(url:str;id:str):$pipelineconfig{
+  let c=mut.three(url);
+  let ids=@(fr.regexid();fr.nerid();fr.presidioid());
+  lp(let i=0;i<ids.len;i=i+1){
+    let other:str=ids.get(i);
+    if(str.eq(other;id)){}el{ c=pl.withlayer(c;other;false) }
+  };
+  <c
+};
+
+f=anon(text:str;c:$pipelineconfig;strategy:str):str{
+  let r=pl.runforward(text;"";pl.withconsensus(c;strategy;""));
+  <r.result.anonymised
+};
+
+(* The values a run masked, in order, e.g. "Jane Citizen|jane@example.com". Runs are compared
+   by this and not by their anonymised text, whose placeholders are salted per request. *)
+f=masked(r:$pipelinerun):str{
+  let out=mut.@();
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    out=out.push(e.value)
+  };
+  <str.join("|";out)
+};
+
+f=maskedunder(text:str;c:$pipelineconfig;strategy:str):str{
+  <masked(pl.runforward(text;"";pl.withconsensus(c;strategy;"")))
+};
+
+(* Every value r masked is absent from `masked`. *)
+f=allabsent(r:$pipelinerun;masked:str):bool{
+  let ok=mut.true;
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    if(str.contains(masked;e.value)){ ok=false }el{}
+  };
+  <ok
+};
+
+f=resolvedfor(r:$pipelinerun;value:str):str{
+  let out=mut."";
+  lp(let i=0;i<r.resolved.len;i=i+1){
+    let re:$resolvedentity=r.resolved.get(i);
+    if(str.eq(re.value;value)){ out="\(re.action) \(re.detectinglayers)" }el{}
+  };
+  <out
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  let text="Jane Citizen called Tuesday, mail jane@example.com";
+  let name="Jane Citizen";
+  let email="jane@example.com";
+
+  (* ── The default, and the names that fall back to it ─────────────────────── *)
+  let dflt=pl.runforward(text;"";three(url));
+  let dc:str=str.fromint(dflt.layerscompleted as i64);
+  if(t.assert(dflt.layerscompleted==3 as u32;"regex, NER and Presidio all complete (completed=\(dc))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dflt.consensus;cn.defaultstrategy();"with nothing configured the run applies most-restrictive")){pass=pass+1}el{fail=fail+1};
+  let da=dflt.result.anonymised;
+  if(t.assert(!str.contains(da;name) && !str.contains(da;email);"and masks both the name and the email (\(da))")){pass=pass+1}el{fail=fail+1};
+  let dm=masked(dflt);
+  if(t.asserteq(maskedunder(text;three(url);"most-restrictive");dm;"naming most-restrictive masks the same values (\(dm))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(maskedunder(text;three(url);"");dm;"so does an empty strategy")){pass=pass+1}el{fail=fail+1};
+  let typo=pl.runforward(text;"";pl.withconsensus(three(url);"Unanimous";""));
+  if(t.asserteq(masked(typo);dm;"and a mis-cased one: Unanimous is not unanimous, it is most-restrictive")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(typo.consensus;"most-restrictive";"and the run says that is what it applied")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The default masks at least what every layer masks alone ──────────────── *)
+  let rx=pl.runforward(text;"";only(url;fr.regexid()));
+  let nr=pl.runforward(text;"";only(url;fr.nerid()));
+  let pr=pl.runforward(text;"";only(url;fr.presidioid()));
+  let singles=rx.result.entities.len+nr.result.entities.len+pr.result.entities.len;
+  if(t.assert(rx.layerscompleted==1 as u32 && nr.layerscompleted==1 as u32 && pr.layerscompleted==1 as u32 && singles>=3;"each layer, run alone, completes and finds something")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(allabsent(rx;da) && allabsent(nr;da) && allabsent(pr;da);"every value any single layer masks is masked by the default three-layer run")){pass=pass+1}el{fail=fail+1};
+  let union=mut.@();
+  lp(let i=0;i<rx.result.entities.len;i=i+1){ union=union.push(rx.result.entities.get(i)) };
+  lp(let i=0;i<nr.result.entities.len;i=i+1){ union=union.push(nr.result.entities.get(i)) };
+  lp(let i=0;i<pr.result.entities.len;i=i+1){ union=union.push(pr.result.entities.get(i)) };
+  let before=pl.dedupentities(union);
+  let bc:str=str.fromint(before.len);
+  let ac:str=str.fromint(dflt.totalentities as i64);
+  if(t.assert(dflt.totalentities as i64==before.len;"and it masks as many entities as the pre-consensus pipeline did: the dedup of every layer's detections (\(ac) vs \(bc))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Provenance ─────────────────────────────────────────────────────────── *)
+  let jr=resolvedfor(dflt;name);
+  if(t.assert(str.contains(jr;"mask") && str.contains(jr;"ner=") && str.contains(jr;"presidio=") && !str.contains(jr;"regex=");"the run records that NER and Presidio found the name, with their confidences (\(jr))")){pass=pass+1}el{fail=fail+1};
+  let er=resolvedfor(dflt;email);
+  if(t.assert(str.contains(er;"mask regex=") && !str.contains(er;"ner=");"and that regex alone found the email (\(er))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Each other strategy, through the real pipeline ───────────────────────── *)
+  let un=anon(text;three(url);"unanimous");
+  if(t.assert(str.contains(un;name) && str.contains(un;email);"unanimous masks neither: no entity was found by all three layers")){pass=pass+1}el{fail=fail+1};
+  let mj=anon(text;three(url);"majority");
+  if(t.assert(!str.contains(mj;name) && str.contains(mj;email);"majority masks the name (2 of 3) and not the email (1 of 3)")){pass=pass+1}el{fail=fail+1};
+  let fm=anon(text;three(url);"first-match");
+  if(t.assert(!str.contains(fm;name) && !str.contains(fm;email);"first-match masks both: each group has a highest-priority layer")){pass=pass+1}el{fail=fail+1};
+  let un2=pl.runforward(text;"";pl.withconsensus(three(url);"unanimous";""));
+  if(t.assert(str.contains(resolvedfor(un2;name);"pass ");"and under unanimous the record says the name was passed, not masked")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(un2.consensus;"unanimous";"and names the strategy applied")){pass=pass+1}el{fail=fail+1};
+
+  (* ── From config.toml ─────────────────────────────────────────────────── *)
+  if(t.asserteq(cfg.defaultconfig().consensusstrategy;"most-restrictive";"the configured default is most-restrictive")){pass=pass+1}el{fail=fail+1};
+  let maj=mt toml.load("[privacy]\nconsensus_strategy = \"majority\"\n") {
+    $ok:doc cfg.configfromtoml(doc);
+    $err:e cfg.defaultconfig()
+  };
+  if(t.asserteq(maj.consensusstrategy;"majority";"privacy.consensus_strategy is read from config.toml")){pass=pass+1}el{fail=fail+1};
+  let fromcfg=pl.runforward(text;"";pl.withlokeconfig(three(url);maj));
+  if(t.assert(!str.contains(fromcfg.result.anonymised;name) && str.contains(fromcfg.result.anonymised;email);"and the pipeline configured from it applies majority")){pass=pass+1}el{fail=fail+1};
+  let cw=mt toml.load("[privacy]\nconsensus_strategy = \"confidence-weighted\"\nconsensus_threshold = \"0.99\"\n") {
+    $ok:doc cfg.configfromtoml(doc);
+    $err:e cfg.defaultconfig()
+  };
+  let cwrun=pl.runforward(text;"";pl.withlokeconfig(three(url);cw));
+  if(t.assert(str.contains(cwrun.result.anonymised;name) && str.contains(cwrun.result.anonymised;email);"privacy.consensus_threshold reaches confidence-weighted: at 0.99 nothing qualifies")){pass=pass+1}el{fail=fail+1};
+  let none=mt toml.load("[privacy]\nprivacy_filter = false\n") {
+    $ok:doc cfg.configfromtoml(doc);
+    $err:e cfg.defaultconfig()
+  };
+  let nonerun=pl.runforward(text;"";pl.withlokeconfig(three(url);none));
+  if(t.asserteq(masked(nonerun);dm;"a config.toml that does not mention consensus masks what the default does")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  <fail
+};
