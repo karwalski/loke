@@ -13,6 +13,7 @@ i=dl:core.audit.disclosure;
 i=ks:core.governance.killswitch;
 i=ollama:core.models.ollama;
 i=xport:core.providers.transport;
+i=gd:core.privacy.guardian;
 
 (* NC1.12. The no-custody dispatch: a model call that carries a schema profile and a question,
    and that is recorded `no-custody` only when the payload has been checked and found to hold no
@@ -37,6 +38,24 @@ i=xport:core.providers.transport;
    check on `"stream":false`. An occurrence counts as found when the body holds more of it than
    the envelope does, so a `false` in the question still fails. The profile is NOT subtracted:
    the check exists to catch a profile that carries values, which is the defect NC1.2 fixed.
+
+   F3.9c. The `system` sent opens with the guardian (core.privacy.guardian.guardianprompt), then
+   the caller's anonymised system prompt, as on every other route. The guardian is a literal
+   compiled into loke: nothing a request, a setting or the dataset carries reaches it, so it
+   holds no value drawn from the data. It is English, though, and a cell may equal one of its
+   words (`never`, `data`, `audit`), which would refuse every clean body. So the guardian is
+   framing too, and the check proves that rather than assuming it:
+     1. The body must open with the envelope's head followed by the guardian constant exactly as
+        it sits in a JSON string, byte for byte (guardianframed). A body that does not is not
+        checked at all: it is refused as not_run, and nothing is sent.
+     2. Those exact guardian bytes are cut out, and every cell is looked for in what remains
+        (callerpart), the envelope with an empty system and prompt subtracted as before. What
+        remains is everything the caller's text and loke's envelope contributed, so a cell
+        anywhere but inside the verbatim guardian is found here.
+     3. Every cell is also looked for in the whole body, with the envelope holding the guardian
+        subtracted. That catches a cell that runs across the guardian's end into the caller's
+        system prompt, which the cut in 2 splits.
+   A cell found by either is found. Both run on the string that is then sent.
 
    What the check does not see, stated rather than implied:
      - cells shorter than 4 bytes (`NSW`, `12`). They cannot be told apart from ordinary words
@@ -143,9 +162,43 @@ f=ollamabody(model:str;system:str;prompt:str):str{
   <"{\"model\":\(jx.escape(model)),\"system\":\(jx.escape(system)),\"prompt\":\(jx.escape(prompt)),\"stream\":false}"
 };
 
-(* loke's framing: the envelope with nothing of the caller's in it. *)
+(* F3.9c. The system prompt sent: the guardian, then the caller's anonymised system prompt,
+   joined as core.privacy.guardian.buildsystemprompt joins them on every other route. *)
+f=sentsystem(system:str):str{
+  <gd.buildsystemprompt(system)
+};
+
+f=envelopehead(model:str):str{
+  <"{\"model\":\(jx.escape(model)),\"system\":\""
+};
+
+(* What every body sent opens with: the envelope's head, then the guardian constant as it sits
+   inside a JSON string. *)
+f=guardianhead(model:str):str{
+  let g=jx.escape(gd.guardianprompt());
+  <"\(envelopehead(model))\(jx.sliceor(g;1;(str.len(g) as i64)-1))"
+};
+
+f=guardianframed(body:str;model:str):bool{
+  <str.startswith(body;guardianhead(model))
+};
+
+(* The body with the verbatim guardian cut out: the envelope and the caller's text, and nothing
+   else. "" when the body does not open with the guardian. *)
+f=callerpart(body:str;model:str):str{
+  let head=guardianhead(model);
+  if(str.startswith(body;head)==false){ <"" };
+  <"\(envelopehead(model))\(jx.sliceor(body;str.len(head) as i64;str.len(body) as i64))"
+};
+
+(* loke's framing for callerpart: the envelope with an empty system prompt and prompt. *)
 f=framingof(model:str):str{
-  <ollamabody(model;"";"")
+  <"{\"model\":\(jx.escape(model)),\"system\":\"\",\"prompt\":\"\",\"stream\":false}"
+};
+
+(* loke's framing for the whole body: the envelope holding the guardian and nothing else. *)
+f=guardianframing(model:str):str{
+  <ollamabody(model;gd.guardianprompt();"")
 };
 
 (* Octets a string occupies inside the JSON body: its escaped form less the two quotes. *)
@@ -182,11 +235,18 @@ f=valuepresent(lbody:str;lframe:str;value:str):bool{
   <unaccounted(lbody;lframe;inner)
 };
 
-(* How many cells of the dataset the body holds, or -1 when no cell could be checked. `body`
-   is the string that will be sent; see sendchecked. *)
-f=valuesfound(body:str;framing:str;rows:@(@str)):i64{
+(* How many cells of the dataset the body holds, or -1 when no cell could be checked or the
+   body does not open with the guardian. `body` is the string that will be sent; see
+   sendchecked. A cell is found when it is in the body outside the verbatim guardian (callerpart
+   against framingof), or in the whole body more often than in the guardian's envelope; the
+   second catches a cell that runs across the guardian's end. *)
+f=valuesfound(body:str;model:str;rows:@(@str)):i64{
+  let cpart=callerpart(body;model);
+  if(str.len(cpart)==0){ <0-1 };
+  let lcaller=str.tolower(cpart);
+  let lframe=str.tolower(framingof(model));
   let lbody=str.tolower(body);
-  let lframe=str.tolower(framing);
+  let lguard=str.tolower(guardianframing(model));
   let checked=mut.0;
   let found=mut.0;
   lp(let i=0;i<rows.len;i=i+1){
@@ -195,7 +255,7 @@ f=valuesfound(body:str;framing:str;rows:@(@str)):i64{
       let v=str.trim(row.get(j));
       if((str.len(v) as i64)>=minvaluelen()){
         checked=checked+1;
-        if(valuepresent(lbody;lframe;v)){ found=found+1 }el{}
+        if(valuepresent(lcaller;lframe;v) || valuepresent(lbody;lguard;v)){ found=found+1 }el{}
       }el{}
     }
   };
@@ -340,9 +400,12 @@ f=tokens(raw:str;field:str):i64{
   }
 };
 
-f=refusedreason(check:str;found:i64):str{
+f=refusedreason(check:str;found:i64;framed:bool):str{
   if(str.eq(check;"sentinel_fail")){
     <"the body held \(found) value(s) drawn from the dataset, so it is not a no-custody payload and was not sent"
+  };
+  if(framed==false){
+    <"the no-custody check could not run: the body did not open with the guardian system prompt, so its custody is unknown and it was not sent"
   };
   <"the no-custody check could not run: the request carried no dataset cell of at least \(minvaluelen()) bytes to check the body against, so its custody is unknown and it was not sent"
 };
@@ -356,7 +419,7 @@ f=refusedcode(check:str):str{
    reserve sits between them, so a refused body is recorded and never reaches transport, and a
    passed one is recorded before it does (spec L1). *)
 f=sendchecked(store:i64;base:str;cid:str;requestid:str;sid:str;model:str;version:str;body:str;rows:@(@str);profile:str;question:str;headers:@str;dsname:str):str{
-  let found=valuesfound(body;framingof(model);rows);
+  let found=valuesfound(body;model;rows);
   let check=checkname(found);
   let pbytes=profilebytes(profile;question);
   let qbytes=escapedbytes(question)-pbytes;
@@ -370,7 +433,7 @@ f=sendchecked(store:i64;base:str;cid:str;requestid:str;sid:str;model:str;version
       log.warn("no-custody: a refused dispatch could not be recorded; nothing was sent";"nocustody.dispatch";requestid)
     }el{};
     log.warn("no-custody dispatch refused: \(check)";"nocustody.dispatch";requestid);
-    <refusal(refusedcode(check);check;refusedreason(check;found))
+    <refusal(refusedcode(check);check;refusedreason(check;found;guardianframed(body;model)))
   }el{};
   if(dl.reservenocustody(auditev("llm_dispatch";model;cid;0;0;0);requestid;sid;version;host;bytes;pbytes;qbytes;jsonarray(dsets);jsonarray(fields);fields.len as i64;check;found;store)==false){
     <refusal("unrecorded";"";"the disclosure record could not be written, so the request was not sent")
@@ -395,7 +458,8 @@ f=sendchecked(store:i64;base:str;cid:str;requestid:str;sid:str;model:str;version
 
 (* One attempt. `req` is the raw request, read for the dataset (headers, rows, dataset_name),
    the profile, the model and the provider. `question` and `system` are passed apart because a
-   caller may have transformed them (page.api.pipeline passes the anonymised text). `cid` is the
+   caller may have transformed them (page.api.pipeline passes the anonymised text). `system` is
+   the caller's own: the guardian is put before it here (sentsystem), never by the caller. `cid` is the
    disclosure row's correlation id and must not be one another row holds. `base` is Ollama's
    address: ollamabase() in production, a loopback recorder in tests. *)
 f=attempt(req:str;question:str;system:str;store:i64;base:str;cid:str;requestid:str;sid:str):str{
@@ -415,5 +479,5 @@ f=attempt(req:str;question:str;system:str;store:i64;base:str;cid:str;requestid:s
   if(str.len(model)==0){
     <refusal("no_local_model";"";"no local model is installed in Ollama, so there is nothing to dispatch to")
   }el{};
-  <sendchecked(store;base;cid;requestid;sid;model;digestof(models;model);ollamabody(model;system;question);rowsat(o;"rows");strat(o;"profile";"");question;strarrayat(o;"headers");strat(o;"dataset_name";""))
+  <sendchecked(store;base;cid;requestid;sid;model;digestof(models;model);ollamabody(model;sentsystem(system);question);rowsat(o;"rows");strat(o;"profile";"");question;strarrayat(o;"headers");strat(o;"dataset_name";""))
 }

@@ -545,8 +545,10 @@ restored and checked with `cmp`.
   detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
 - **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven
   through the binary (its endpoint is the real provider); `tests/integration/test_system_prompt_disclosure.tk`
-  drives its own `toanthropicat` against a recorder instead. The CLI paths and the no-custody path are
-  not covered, and the no-custody dispatch carries no guardian (F3.9c).
+  drives its own `toanthropicat` against a recorder instead. The CLI paths are not covered. The
+  no-custody dispatch has carried the guardian since F3.9c, and the harness now runs six no-custody
+  cells after the matrix (pass/fail assertions, not a published count); the figures above do not
+  include them.
 - The templates are rendered by the harness by the module's own rule; no route on the request path
   renders a template.
 

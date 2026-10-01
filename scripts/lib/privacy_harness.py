@@ -27,6 +27,13 @@ put in the caller's `system_prompt` and the text carries none. Each is judged as
 is, on what the stand-in received: the value in no request but the NER layer's, a placeholder
 of its type in the `system` the model was sent, after the guardian.
 
+Then the no-custody dispatch (F3.9c): requests carrying their dataset (`headers`, `rows`), whose
+cells include words of the guardian (`never`, `data`, `audit`) and values that are not. A clean
+question is dispatched no-custody, and the `system` the stand-in received is the guardian, byte
+for byte as core.privacy.guardian.guardianprompt holds it (read from its source), then the
+caller's system prompt. A guardian word, or another cell, in the question or the caller's system
+prompt is refused (422 sentinel_fail) and nothing reaches the model.
+
 Exit status 0 only when every assertion passes. The guardian check was an expected failure
 (XFAIL, F3.9a) until /api/pipeline sent it; it is a required pass now.
 """
@@ -94,6 +101,13 @@ def read_templates(path):
         templates.append({"id": field(b, "id"), "system": field(b, "systemprompt"),
                           "user": field(b, "usertemplate"), "params": params})
     return templates
+
+
+def read_guardian(path):
+    """core.privacy.guardian.guardianprompt's literal, as compiled into loke."""
+    src = open(path, encoding="utf-8").read()
+    m = re.search(r'f=guardianprompt\(\):str\{\s*<"(.*?)"\s*\};', src, re.S)
+    return m.group(1) if m else ""
 
 
 def read_regex_types(path):
@@ -374,6 +388,60 @@ def main():
         cell["passed"] = T.fail == before_fail
         syscells.append(cell)
 
+    # F3.9c: the no-custody dispatch carries the guardian, and the guardian's words are framing.
+    guardian = read_guardian(a.templates.replace("template.tk", "guardian.tk"))
+    gl = guardian.lower()
+    T.check(guardian.startswith(GUARDIAN) and all(w in gl for w in ("never", "data", "audit")),
+            "the guardian was read from guardian.tk and holds the words the no-custody dataset's cells equal")
+    ncsent = "ZQ-NC-SENTINEL-3917"
+    ncdata = {"dataset_name": "words", "headers": ["word", "customer"],
+              "rows": [["never", ncsent], ["data", "Harriet Oyelaran"], ["Audit", "Bo"]]}
+    ncq = "Which word appears most often?"
+    nccells = []
+    for (name, text, sysp, refused) in [
+            ("no-custody x clean", ncq, "", False),
+            ("no-custody x clean system prompt", ncq, "Answer in one sentence.", False),
+            ("no-custody x guardian word in the question", "Did any customer never renew?", "", True),
+            ("no-custody x guardian word in the system prompt", ncq, "Treat the data carefully.", True),
+            ("no-custody x other cell in the question", "What did Harriet Oyelaran choose?", "", True),
+            ("no-custody x other cell in the system prompt", ncq, "Note %s first." % ncsent, True)]:
+        cell = {"case": name, "passed": False}
+        before_fail = T.fail
+        req = dict(ncdata, text=text)
+        if sysp:
+            req["system_prompt"] = sysp
+        before = len(recorded(a.bodies))
+        status, out = post(pipeline, req)
+        got = recorded(a.bodies)[before:]
+        gens = [r for r in got if r[0] == "POST" and r[1] == "/api/generate"]
+        try:
+            reply = json.loads(out)
+        except ValueError:
+            reply = {}
+        if refused:
+            T.check(status == 422 and reply.get("refusal") == "sentinel_fail",
+                    "%s: refused as sentinel_fail (got %s %s)" % (name, status, out[:160]))
+            T.check(len(gens) == 0, "%s: nothing reached the model (got %d)" % (name, len(gens)))
+        elif T.check(status == 200 and reply.get("custody") == "no-custody" and reply.get("custody_check") == "sentinel_pass",
+                     "%s: answered no-custody, sentinel_pass (got %s %s)" % (name, status, out[:160])):
+            if T.check(len(gens) == 1, "%s: exactly one dispatch reached the model (got %d)" % (name, len(gens))):
+                sysfield = system_of(gens[0][2])
+                want = guardian + ("\n" + sysp if sysp else "")
+                cell["guardian"] = sysfield.startswith(guardian)
+                T.check(sysfield == want, "%s: the model's system is the guardian byte for byte%s" % (
+                    name, ", then the caller's" if sysp else ""))
+                try:
+                    sent = json.loads(gens[0][2])
+                except ValueError:
+                    sent = {}
+                rest = "\n".join([sysfield[len(guardian):] if cell["guardian"] else sysfield,
+                                  sent.get("prompt", ""), sent.get("model", "")])
+                T.check(not any(v.lower() in rest.lower() for row in ncdata["rows"] for v in row if len(v) >= 4),
+                        "%s: outside the guardian, the body holds no cell of the dataset" % name)
+                T.check(reply.get("response") == "echo: " + text, "%s: the reply is the question's echo" % name)
+        cell["passed"] = T.fail == before_fail
+        nccells.append(cell)
+
     # A last sweep over everything the stand-in ever received.
     allrec = recorded(a.bodies)
     T.check(len(allrec) > 0, "the stand-in recorded requests")
@@ -387,12 +455,15 @@ def main():
     sheld = sum(1 for c in syscells if c["held"])
     print("  privacy harness: %d templates x %d detector cases = %d cells, %d passed every assertion, "
           "%d held for approval first, guardian reached the model in %d; %d system-prompt cells, %d passed, "
-          "%d held first; %d assertions ok, %d failed"
-          % (len(templates), len(CASES), len(cells), npass, nheld, nguard, len(syscells), spass, sheld, T.ok, T.fail))
+          "%d held first; %d no-custody cells, %d passed, guardian reached the model in %d of the %d dispatched; "
+          "%d assertions ok, %d failed"
+          % (len(templates), len(CASES), len(cells), npass, nheld, nguard, len(syscells), spass, sheld,
+             len(nccells), sum(1 for c in nccells if c["passed"]), sum(1 for c in nccells if c.get("guardian")),
+             sum(1 for c in nccells if "guardian" in c), T.ok, T.fail))
     if a.report:
         with open(a.report, "w") as f:
             json.dump({"templates": [t["id"] for t in templates], "cases": [c[0] for c in CASES],
-                       "cells": cells, "syscells": syscells, "ok": T.ok, "fail": T.fail,
+                       "cells": cells, "syscells": syscells, "nccells": nccells, "ok": T.ok, "fail": T.fail,
                        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, f, indent=1)
     if a.record:
         record(a.record, templates, cells, syscells)

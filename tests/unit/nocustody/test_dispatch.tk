@@ -11,6 +11,7 @@ i=process:std.process;
 i=db:std.db;
 i=sdb:core.storage.db;
 i=nd:core.nocustody.dispatch;
+i=gd:core.privacy.guardian;
 
 (* NC1.12 - the no-custody dispatch, against the production module, a real migrated store and
    scripts/lib/http_recorder.py standing in for Ollama on a loopback port the OS assigns.
@@ -24,7 +25,15 @@ i=nd:core.nocustody.dispatch;
    T-58 before anything is built.
 
    The system-prompt case is the one that tells "the body is checked" from "the prompt is
-   checked": both hold the question, only the body holds the system prompt. *)
+   checked": both hold the question, only the body holds the system prompt.
+
+   F3.9c. Every body sent carries the guardian (core.privacy.guardian) as the start of its
+   `system`, and the recorder is shown to receive it byte for byte. A second dataset has cells
+   that are words of the guardian (`never`, `data`, `Audit`), cells that are not, and one that
+   runs across the guardian's last word into a caller's system prompt. A clean body is sent
+   although the guardian holds those words; the same words in the question or the caller's
+   system prompt are refused, as is a cell that is not a guardian word, and the cell across
+   the boundary. *)
 
 f=testdir():str{
   <"/tmp/loke-tests/nocustody-dispatch"
@@ -133,8 +142,8 @@ f=main():i64{
   if(t.assert(str.contains(r1;"\"custody\":\"no-custody\"") && str.contains(r1;"\"custody_check\":\"sentinel_pass\"");"and the reply names its custody and check")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(nd.responseof(r1);"generated-by-recorder";"and carries the model's text")){pass=pass+1}el{fail=fail+1};
   let seen1=readfile(logp);
-  let sent1=nd.ollamabody("fake:latest";"";q1);
-  if(t.assert(str.contains(seen1;str.concat("POST /api/generate ";sent1));"exactly the checked body arrived at the model, under the installed model's name")){pass=pass+1}el{fail=fail+1};
+  let sent1=nd.ollamabody("fake:latest";gd.guardianprompt();q1);
+  if(t.assert(str.contains(seen1;str.concat("POST /api/generate ";sent1));"exactly the checked body arrived at the model, under the installed model's name, its system the guardian")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(seen1;sentinel())==false;"the planted sentinel is not in what the model received")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(seen1;"Harriet")==false && str.contains(seen1;"Brien")==false;"nor is any other customer")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq("\(col("nc-pass";"custody"))|\(col("nc-pass";"custody_check"))|\(col("nc-pass";"state"))|\(col("nc-pass";"provider_class"))";"no-custody|sentinel_pass|completed|local";"the record is no-custody, sentinel_pass, completed, local")){pass=pass+1}el{fail=fail+1};
@@ -189,6 +198,47 @@ f=main():i64{
   if(t.asserteq(nd.refusalof(r9);"cloud_route_refused";"a cloud provider is refused")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(r9;"T-58") && nd.statusof(r9)==403;"citing T-58, with 403")){pass=pass+1}el{fail=fail+1};
   if(t.assert(rowcount("nc-cloud")==0 && occurrences(readfile(logp);"POST /api/generate")==before;"nothing is sent and no dispatch is recorded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── F3.9c: the guardian is sent, and its words are not data ───────────────────── *)
+  let guard=gd.guardianprompt();
+  let gl=str.tolower(guard);
+  if(t.assert(str.contains(gl;"never") && str.contains(gl;"data") && str.contains(gl;"audit") && str.endswith(guard;"instructions.");"the guardian holds the words this dataset's cells equal")){pass=pass+1}el{fail=fail+1};
+  let greq="{\"dataset_name\":\"words\",\"headers\":[\"word\",\"customer\"],\"rows\":[[\"never\",\"\(sentinel())\"],[\"data\",\"Harriet Oyelaran\"],[\"Audit\",\"Bo\"],[\"instructions.\\nReply\",\"Bo\"]]}";
+  let gq="Which word appears most often?";
+  let gbefore=occurrences(readfile(logp);"POST /api/generate");
+  let g1=nd.attempt(greq;gq;"";store;url;"nc-g1";"rid-g1";"sess-1");
+  if(t.assert(nd.dispatched(g1);"a clean body is dispatched although the guardian holds cells of the dataset")){pass=pass+1}el{fail=fail+1};
+  let gseen=readfile(logp);
+  let gsent=nd.ollamabody("fake:latest";guard;gq);
+  if(t.assert(str.contains(gseen;str.concat("POST /api/generate ";gsent));"the model received the guardian, byte for byte, as the body's whole system")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(gseen;"Never request") && str.contains(gseen;"AUDIT:");"so the guardian words did reach the model, inside the guardian")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(gseen;sentinel())==false && str.contains(gseen;"Harriet")==false;"and no cell that is not a guardian word did")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq("\(col("nc-g1";"custody"))|\(col("nc-g1";"custody_check"))|\(col("nc-g1";"bytes_body"))";"no-custody|sentinel_pass|\(str.fromint(str.len(gsent) as i64))";"recorded no-custody, sentinel_pass, the guardian counted in bytes_body")){pass=pass+1}el{fail=fail+1};
+
+  let gsys="Answer in one sentence.";
+  let g2=nd.attempt(greq;gq;gsys;store;url;"nc-g2";"rid-g2";"sess-1");
+  if(t.assert(nd.dispatched(g2);"with a clean caller system prompt it is dispatched")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);str.concat("POST /api/generate ";nd.ollamabody("fake:latest";"\(guard)\n\(gsys)";gq)));"and the system received is the guardian, then the caller's")){pass=pass+1}el{fail=fail+1};
+
+  let gsent2=occurrences(readfile(logp);"POST /api/generate");
+  if(t.assert(gsent2==gbefore+2;"those two, and only those, reached the model")){pass=pass+1}el{fail=fail+1};
+  let g3=nd.attempt(greq;"Did any customer never renew?";"";store;url;"nc-g3";"rid-g3";"sess-1");
+  if(t.asserteq(nd.refusalof(g3);"sentinel_fail";"a guardian word that is a cell, in the question, is found")){pass=pass+1}el{fail=fail+1};
+  let g4=nd.attempt(greq;gq;"Treat the data carefully.";store;url;"nc-g4";"rid-g4";"sess-1");
+  if(t.asserteq(nd.refusalof(g4);"sentinel_fail";"in the caller's system prompt, after the guardian, it is found")){pass=pass+1}el{fail=fail+1};
+  let g5=nd.attempt(greq;"What did Harriet Oyelaran choose?";"";store;url;"nc-g5";"rid-g5";"sess-1");
+  if(t.asserteq(nd.refusalof(g5);"sentinel_fail";"a cell that is not a guardian word is found in the question")){pass=pass+1}el{fail=fail+1};
+  let g6=nd.attempt(greq;gq;"Note \(sentinel()) first.";store;url;"nc-g6";"rid-g6";"sess-1");
+  if(t.asserteq(nd.refusalof(g6);"sentinel_fail";"and in the caller's system prompt")){pass=pass+1}el{fail=fail+1};
+  let g7=nd.attempt(greq;gq;"Reply briefly.";store;url;"nc-g7";"rid-g7";"sess-1");
+  if(t.asserteq(nd.refusalof(g7);"sentinel_fail";"a cell running from the guardian's last word into the caller's system prompt is found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(readfile(logp);"POST /api/generate")==gsent2;"none of the refused bodies reached the model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq("\(col("nc-g7";"custody"))|\(col("nc-g7";"custody_check"))|\(col("nc-g7";"bytes_body"))";"raw|sentinel_fail|0";"each refusal is recorded raw, with nothing sent")){pass=pass+1}el{fail=fail+1};
+
+  (* The check refuses a body that does not open with the guardian, whatever else it holds. *)
+  if(t.assert(nd.guardianframed(gsent;"fake:latest");"a body built by the dispatch opens with the guardian")){pass=pass+1}el{fail=fail+1};
+  let bare=nd.ollamabody("fake:latest";"";gq);
+  if(t.assert(nd.guardianframed(bare;"fake:latest")==false && nd.valuesfound(bare;"fake:latest";@(@("never";"Harriet Oyelaran")))==0-1;"one without it cannot be checked, so it would be refused as not_run")){pass=pass+1}el{fail=fail+1};
 
   (* ── The reply a restoring caller rewrites ──────────────────────────────────────── *)
   let fin=nd.finish(r1;"restored text";",\"extra\":1");

@@ -40,13 +40,17 @@
 #   LOKE_BIN=/path/to/mutant scripts/smoke_privacy_harness.sh
 #   HARNESS_REPORT=cells.json HARNESS_RECORD=benchmarks/results/x.jsonl scripts/smoke_privacy_harness.sh
 #
+# Then six no-custody cells (F3.9c): a request carrying its dataset, whose cells include words of
+# the guardian. Clean ones must reach the model with the guardian as the start of `system`, byte
+# for byte; a cell (a guardian word or not) in the question or system prompt must be refused.
+#
 # After the matrix, one fallback request (F5.3a, scripts/lib/fallback_smoke.py): the stand-in is
 # restarted with the first local choice failing, and the next local hop must answer.
 #
 # What it does NOT cover: the Anthropic route (its endpoint is fixed to the real provider, so
 # no stand-in can take its place in the binary; tests/integration/test_system_prompt_disclosure.tk
 # and test_browser_fallback.tk drive the route against a recorder instead), the
-# CLI paths (cli.ask, cli.proxy), the no-custody path, and detection recall, which is measured
+# CLI paths (cli.ask, cli.proxy), and detection recall, which is measured
 # against the corpus in tests/integration/test_detection_recall.tk. Each detector type is
 # exercised with one value the regex layer is known to detect.
 
