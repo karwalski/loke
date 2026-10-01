@@ -2,7 +2,7 @@
 
 **Goal:** Showcase as many loke features as possible through the moke conceptual demo, making it the definitive interactive demonstration of loke's capabilities.
 
-**Current state:** moke demonstrates schema-first privacy, local compute (15 operations), LLM-generated dashboards, sensitivity classification, governance rules, 17 datasets, and CSV upload. Running on ooke at port 11432.
+**Current state:** moke demonstrates schema-first privacy, local compute (15 operations), LLM-generated dashboards, sensitivity classification, governance rules, 16 listed datasets (15 synthetic, 1 real; see static/data/manifest.json), and CSV upload. Running on ooke at port 11432.
 
 **What's missing:** Token optimisation visibility, TOON before/after, MCP integration, feedback system, agent framework, Memory Palace, AAAK, companion devices, pipeline visibility, savings tracking, prompt approval, regulatory presets, compliance reporting, and streaming.
 

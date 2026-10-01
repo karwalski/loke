@@ -24,42 +24,34 @@ function eq(a, b, msg) {
   ok(a === b, msg + ' (got ' + JSON.stringify(a) + ', expected ' + JSON.stringify(b) + ')');
 }
 
-// ── Build a catalogue from the real template, not a hand-written stand-in ──
-// index.tkt holds the dataset definitions as a JS object literal. Only the id and
-// headers are needed, so they are extracted rather than the file evaluated.
-const INDEX = fs.readFileSync(
-  path.resolve(__dirname, '../../../templates/index.tkt'), 'utf8');
+// ── Build a catalogue from the real store, not a hand-written stand-in ──
+// MK19.1: the datasets live in static/data — manifest.json names each one and
+// points at its CSV, whose header line is the column list. (They used to be a JS
+// object literal inline in templates/index.tkt, which this test regex-scraped.)
+const DATA = path.resolve(__dirname, '../../data');
+const MANIFEST = JSON.parse(fs.readFileSync(path.join(DATA, 'manifest.json'), 'utf8'));
 
-function extractCatalogue(src) {
+function extractCatalogue(manifest) {
   const cat = {};
-  const entry = /'([a-z0-9_]+\.[a-z0-9_]+)':\s*\{\s*\n\s*name:\s*'([^']*)'/g;
-  let m;
-  while ((m = entry.exec(src)) !== null) {
-    const id = m[1];
-    if (cat[id]) continue;
-    // headers: [...] within the next stretch of this entry
-    const rest = src.slice(m.index, m.index + 8000);
-    const h = /headers:\s*\[([^\]]*)\]/.exec(rest);
-    cat[id] = {
-      name: m[2],
-      headers: h ? h[1].split(',').map(function (s) { return s.trim().replace(/^'|'$/g, ''); })
-                  : null
-    };
-  }
+  manifest.datasets.forEach(function (d) {
+    const file = path.join(DATA, d.data.path.replace(/^\/static\/data\//, ''));
+    const first = fs.readFileSync(file, 'utf8').split('\n')[0];
+    cat[d.id] = { name: d.name, headers: first.split(',').map(function (s) { return s.trim(); }) };
+  });
   return cat;
 }
 
-const catalogue = extractCatalogue(INDEX);
+const catalogue = extractCatalogue(MANIFEST);
 ok(Object.keys(catalogue).length >= 4,
-   'extracted at least four datasets from index.tkt (got ' + Object.keys(catalogue).length + ')');
+   'read at least four datasets from the manifest (got ' + Object.keys(catalogue).length + ')');
 
 // ── Every declared relationship must hold against the real columns ─────────
 let anyVerified = false;
 Object.keys(R.RELATIONSHIPS).forEach(function (key) {
   if (!catalogue[key] || !catalogue[key].headers) {
-    // Not a failure of the module: the dataset is not in this template. Recorded
+    // Not a failure of the module: the dataset is not in the store. Recorded
     // so the test says which, rather than silently passing on zero work.
-    console.log('  note: ' + key + ' not found in index.tkt with headers — skipped');
+    console.log('  note: ' + key + ' not in the manifest — skipped');
     return;
   }
   const v = R.verifyRelationships(key, catalogue);

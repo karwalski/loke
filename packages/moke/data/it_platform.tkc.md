@@ -1,1 +1,0 @@
-E-commerce platform demo datasets for a fictional retailer (Wattle and Co) including users (50 records with PII), orders (80 records with refund anomalies), web traffic metrics, operational incidents with recurring P1s, customer NPS feedback, and shipping records with SLA breaches. Depends on moke.compute for dataset types.

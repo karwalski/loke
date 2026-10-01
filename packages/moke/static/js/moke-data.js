@@ -11,18 +11,20 @@
  * visit to the landing page.
  *
  * This module is the third option, and the one that does not make either problem
- * worse: a static manifest plus CSV snapshots under static/data/, fetched lazily.
- * No recompilation to add a dataset, diffable and reviewable snapshots, and the
+ * worse: a static manifest plus CSV files under static/data/, fetched lazily.
+ * No recompilation to add a dataset, diffable and reviewable files, and the
  * landing page stops carrying every row of every dataset.
  *
- * MIGRATION POSITION, STATED HONESTLY
+ * WHERE THE MIGRATION STANDS
  *
- * This does not yet replace the inline object. Both paths coexist deliberately:
- * manifest datasets flow through here, the original 15 still flow through
- * index.tkt. That is a real hazard rather than a tidy transition — consumers that
- * assume `.rows` is present on the active dataset will behave differently
- * depending on which store a dataset came from. MokeActive.get() below is what
- * contains that, and it is not optional.
+ * It is the only store. The inline object and data/csv were merged into
+ * static/data in MK19.1: each dataset is one CSV named by one manifest entry, the
+ * server's /api/datasets reads the same files, and
+ * scripts/check_dataset_store.py fails the gate if a second copy of any dataset
+ * appears. The active dataset is kept in sessionStorage with its rows
+ * (MokeActive.load), because the pages that analyse it read it from there
+ * directly. That is the active dataset, not a store: every Load reads the rows
+ * from static/data.
  *
  * ON THE CSV PARSER
  *
@@ -269,14 +271,12 @@
   /* ---------------------------------------------------------------------
    * MokeActive — the compatibility shim, and the reason this file is safe
    *
-   * There are two dataset stores during the migration. A consumer reading
-   * sessionStorage directly gets rows for one and not the other. Every consumer
-   * should go through here instead, so that a manifest-backed dataset and an
-   * inline one look the same.
-   *
-   * Seventeen call sites across eight templates read sessionStorage directly
-   * today. Migrating them is a separate story; this shim is what makes the two
-   * stores coexist safely until then.
+   * The active dataset can be stored with its rows (load) or as a handle
+   * (setFromManifest). A consumer reading sessionStorage directly gets rows for
+   * the first and not the second, and the pages do read it directly (seventeen
+   * call sites across eight templates). So every page that loads a dataset uses
+   * load() (MK19.1); get() resolves either shape for a consumer that wants to be
+   * indifferent to which.
    * ------------------------------------------------------------------ */
 
   global.MokeActive = {
@@ -307,6 +307,29 @@
       // Neither: a dataset was selected but carries no data. Say so rather than
       // returning an empty row set that reads as "no results".
       return Promise.resolve(Object.assign({}, handle, { rows: [], unavailable: true }));
+    },
+
+    /* Make a dataset from the store the active one, WITH its rows, which is the
+     * shape the pages that read sessionStorage directly expect. Rejects when the
+     * file and its manifest entry disagree on the row count, because the entry's
+     * provenance no longer describes the file. `sensitivity` overrides the
+     * manifest's default when given. */
+    load: function (id, sensitivity) {
+      return meta(id).then(function (m) {
+        return rows(id).then(function (parsed) {
+          if (parsed.rowcountMismatch) {
+            throw new Error(id + ' has ' + parsed.rowcountMismatch.actual +
+                            ' rows; its manifest entry says ' + parsed.rowcountMismatch.manifest);
+          }
+          var ds = {
+            id: id, name: m.name, sensitivity: sensitivity || m.sensitivity,
+            category: m.category, headers: parsed.headers, pii: m.pii || [],
+            rows: parsed.rows, loadedAt: Date.now()
+          };
+          sessionStorage.setItem('moke_dataset', JSON.stringify(ds));
+          return ds;
+        });
+      });
     },
 
     /* Store a manifest-backed dataset as a handle rather than inline, so

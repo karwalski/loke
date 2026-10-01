@@ -480,6 +480,19 @@ step_checks() {
                 "profile leaks no cell value" >&2; failed=1; }
   fi
 
+  # MK19.1: moke has one dataset store, static/data. The test loads every dataset a page
+  # lists through the real data layer; the check fails if a second copy of any dataset
+  # (or of its column list) appears anywhere else, which is how the two stores diverged.
+  if [[ -f packages/moke/static/js/tests/test-moke-store.js ]] && command -v node >/dev/null; then
+    echo "  every dataset moke lists loads from the one store"
+    node packages/moke/static/js/tests/test-moke-store.js >/dev/null \
+      || { node packages/moke/static/js/tests/test-moke-store.js | grep FAIL >&2; failed=1; }
+  fi
+  if [[ -f scripts/check_dataset_store.py ]]; then
+    echo "  no second copy of a moke dataset (MK19.1)"
+    python3 scripts/check_dataset_store.py --check || failed=1
+  fi
+
   if [[ -f scripts/fetch_opendata.py ]]; then
     echo "  pre-baked dashboards reference real columns"
     python3 ./scripts/fetch_opendata.py --validate-dashboards >/dev/null 2>&1 \

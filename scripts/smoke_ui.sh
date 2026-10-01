@@ -43,10 +43,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$WORK/lk/home" "$WORK/mk/home" "$WORK/mk/data"
+mkdir -p "$WORK/lk/home" "$WORK/mk/home"
 ( cd "$ROOT/packages/browser" && cp -R pages templates static ooke.toml "$WORK/lk/" )
 cp "$LOKE_BIN" "$WORK/lk/loke"
-( cd "$ROOT/packages/moke" && cp -R pages templates static ooke.toml "$WORK/mk/" && cp -R data/csv "$WORK/mk/data/" )
+( cd "$ROOT/packages/moke" && cp -R pages templates static ooke.toml "$WORK/mk/" )
 cp "$MOKE_BIN" "$WORK/mk/moke"
 
 SEEN="$WORK/model_saw.log"; : > "$SEEN"
@@ -89,6 +89,12 @@ fi
 # GA5.26: loke's own chat, a restricted prompt, the approval page, and back.
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/chat" "$ROOT/tests/ui/approve_ga526.json"
+  rc=$?
+fi
+# MK19.1: moke's dataset pages read the one store (static/data) in a real browser — the
+# landing page's cards and the upload page's list, and a Load from each.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/upload" "$ROOT/tests/ui/datasets_mk191.json"
   rc=$?
 fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2

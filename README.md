@@ -292,8 +292,10 @@ and identifiers and are not government data**, despite the domains they imitate:
   users and orders
 
 Row counts are recorded in `packages/moke/static/data/manifest.json` rather than here, so that a
-figure cannot drift from the data it describes. Note the backend store still holds pre-enrichment row
-counts for the synthetic sets, which is tracked as MK19.1.
+figure cannot drift from the data it describes. That manifest and the CSV files beside it are moke's
+only dataset store: the pages and the server's `/api/datasets` both read it (MK19.1). It also holds
+12 further synthetic tables that are not listed in the UI (`"listed": false`): the smaller variants
+and extra tables that the retired backend store held, kept under their own ids rather than lost.
 
 ### Pages
 

@@ -49,10 +49,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$WORK/lk/home" "$WORK/mk/home" "$WORK/mk/data"
+mkdir -p "$WORK/lk/home" "$WORK/mk/home"
 ( cd "$ROOT/packages/browser" && cp -R pages templates static ooke.toml "$WORK/lk/" )
 cp "$LOKE_BIN" "$WORK/lk/loke"
-( cd "$ROOT/packages/moke" && cp -R pages templates static ooke.toml "$WORK/mk/" && cp -R data/csv "$WORK/mk/data/" )
+( cd "$ROOT/packages/moke" && cp -R pages templates static ooke.toml "$WORK/mk/" )
 cp "$MOKE_BIN" "$WORK/mk/moke"
 
 SEEN="$WORK/model_saw.log"; : > "$SEEN"

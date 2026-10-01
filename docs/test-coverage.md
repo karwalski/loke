@@ -1066,12 +1066,10 @@ because it will be wrong again tomorrow: the census is generated, a prose list i
 - upload.tk
 - api/ (agents, datasets, feedback, health, memory, ml, mcp, pipeline, routing, stream, upload)
 
-#### data/ (untested)
-- au_datasets.tk
-- customer_intel.tk
-- it_hardware.tk
-- it_platform.tk
-- registry.tk
+#### data/
+- loader.tk, registry.tk — tested by packages/moke/tests/test_dataset_store.tk (MK19.1). The four
+  dataset modules (au_datasets, customer_intel, it_hardware, it_platform) were removed in MK19.1;
+  their tables are in packages/moke/static/data.
 
 #### extensions/ (untested)
 - core.tk

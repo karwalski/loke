@@ -3,212 +3,74 @@
 
 m=moke.data.registry;
 i=str:std.str;
-i=au:moke.data.audatasets;
-i=hw:moke.data.ithardware;
-i=pl:moke.data.itplatform;
-i=ci:moke.data.customerintel;
+i=json:std.json;
+i=file:std.file;
+i=ld:moke.data.loader;
 i=compute:moke.compute;
 
+(* Every dataset is looked up in static/data/manifest.json, the one store the browser
+   reads too (MK19.1).
 
+   This module used to be a second catalogue. getdataset() dispatched seventeen ids to
+   four modules reading data/csv, and listall() repeated their names, sizes and
+   sensitivities by hand. Those tables were not the ones the UI showed under the same
+   ids: au.medicare here was 30 rows and 26 columns, and 500 and 28 on the landing page.
+   listall() had no caller, and its counts were wrong for half its entries (it said 392
+   customer rows for a file of 70). Both are gone. A dataset now exists when the
+   manifest names it, and is read from the file the manifest points at.
 
+   The id is matched against the manifest and never turned into a path itself, so an id
+   from a request cannot name a file outside the store. *)
 
-
-t=$datasetinfo{
-  id:str;
+t=$manifestentry{
+  found:bool;
   name:str;
-  description:str;
-  rowcount:i32;
-  colcount:i32;
-  sensitivity:str;
-  category:str
+  relpath:str
 };
 
+f=notfound():$manifestentry{
+  <$manifestentry{ found:false; name:""; relpath:"" }
+};
 
+f=manifesttext():str{
+  let dir=ld.datadir();
+  <mt file.read("\(dir)/manifest.json") {$ok:v v; $err:e ""}
+};
 
+(* The manifest's paths are site paths, /static/data/fixtures/x.csv. The loader wants
+   them relative to the store, so the prefix comes off. A path without it is not one
+   of the store's files and is refused. *)
+f=storerelative(sitepath:str):str{
+  let prefix="/static/data/";
+  if(!str.startswith(sitepath;prefix)){ <"" }el{};
+  <mt str.slice(sitepath;str.len(prefix);str.len(sitepath)) {$ok:v v; $err:e ""}
+};
 
+f=entryfor(item:$json;id:str):$manifestentry{
+  let eid=mt json.str(item;"id") {$ok:v v; $jsonerr:e ""};
+  if(!str.eq(eid;id)){ <notfound() }el{};
+  let name=mt json.str(item;"name") {$ok:v v; $jsonerr:e id};
+  let data=mt json.at(item;"data") {$ok:d d; $jsonerr:e $json{raw:"{}"}};
+  let sitepath=mt json.str(data;"path") {$ok:v v; $jsonerr:e ""};
+  let rel=storerelative(sitepath);
+  if(str.len(rel)==0){ <notfound() }el{};
+  <$manifestentry{ found:true; name:name; relpath:rel }
+};
 
-
-f=listall():@$datasetinfo{
-  (* ── Three defects in one function, and it returned an empty list ─────────────────
-     `let result=@()` with thirteen bare `result=result.push(...)` calls. An array push in toke
-     RETURNS the new array and does not mutate in place (T-24), so every one of those
-     results was discarded and **`listall()` returned an empty array** — every dataset
-     listing in moke was empty, and nothing failed.
-
-     The first entry was also behind `if(i < aulist.len()){ ...; i=i+1 }el{}` — an `if` where
-     a `lp` was meant. Written that way the body runs at most ONCE, so even with the push
-     fixed only the first Australian dataset would ever have been listed. The src worker found
-     21 of this same shape in `ml/engine.tk` alone and in seven other files; this is the one in
-     `data/`.
-
-     And `id:"au." + entry.id` does not compile: `+` on strings yields `unknown`. That is the
-     one of the three the compiler could see. *)
-  let result=mut.@();
-
-  
-  let aulist=au.listdatasets();
-  lp(let i=0;i<aulist.len();i=i+1){
-    let entry=aulist.get(i);
-    result=result.push($datasetinfo{
-      id:str.concat("au.";entry.id);
-      name:entry.name;
-      description:entry.description;
-      rowcount:entry.rowcount;
-      colcount:entry.colcount;
-      sensitivity:entry.sensitivity;
-      category:entry.category
-    })
+f=lookup(id:str):$manifestentry{
+  let text=manifesttext();
+  if(str.len(text)==0){ <notfound() }el{};
+  let doc=mt json.dec(text) {$ok:o o; $jsonerr:e $json{raw:"{}"}};
+  let items=mt json.arr(doc;"datasets") {$ok:a a; $jsonerr:e @()};
+  lp(let i=0;i<items.len;i=i+1){
+    let hit=entryfor(items.get(i);id);
+    if(hit.found){ <hit }el{}
   };
-
-  
-  result=result.push($datasetinfo{
-    id:"it_hardware.server_inventory";
-    name:"Banksia Digital — Server Inventory";
-    description:"48 server records across SYD-DC1 and MEL-DC1 with PII contact fields and deliberate anomalies";
-    rowcount:48;
-    colcount:22;
-    sensitivity:"CONFIDENTIAL";
-    category:"IT Infrastructure"
-  });
-  result=result.push($datasetinfo{
-    id:"it_hardware.performance_metrics";
-    name:"Banksia Digital — Server Performance Metrics";
-    description:"CPU, memory, and disk utilisation time-series for all servers across both data centres";
-    rowcount:48;
-    colcount:8;
-    sensitivity:"INTERNAL";
-    category:"IT Infrastructure"
-  });
-  result=result.push($datasetinfo{
-    id:"it_hardware.network_topology";
-    name:"Banksia Digital — Network Topology";
-    description:"Network interface and VLAN configuration records linking servers to rack and switch";
-    rowcount:48;
-    colcount:7;
-    sensitivity:"INTERNAL";
-    category:"IT Infrastructure"
-  });
-  result=result.push($datasetinfo{
-    id:"it_hardware.user_assignments";
-    name:"Banksia Digital — User Assignments";
-    description:"Server-to-user assignments with PII full_name and access-role data";
-    rowcount:48;
-    colcount:6;
-    sensitivity:"CONFIDENTIAL";
-    category:"IT Infrastructure"
-  });
-
-  
-  result=result.push($datasetinfo{
-    id:"it_platform.wc_users";
-    name:"Wattle & Co — Users";
-    description:"50 e-commerce user records with PII email and full_name, segmented by lifetime value";
-    rowcount:50;
-    colcount:10;
-    sensitivity:"RESTRICTED";
-    category:"IT Platform"
-  });
-  result=result.push($datasetinfo{
-    id:"it_platform.wc_orders";
-    name:"Wattle & Co — Orders";
-    description:"80 order records with SLA breach and high-value refund anomalies";
-    rowcount:80;
-    colcount:12;
-    sensitivity:"CONFIDENTIAL";
-    category:"IT Platform"
-  });
-  result=result.push($datasetinfo{
-    id:"it_platform.wc_traffic";
-    name:"Wattle & Co — Web Traffic";
-    description:"Hourly web traffic metrics with session, conversion, and error rate data";
-    rowcount:48;
-    colcount:10;
-    sensitivity:"INTERNAL";
-    category:"IT Platform"
-  });
-  result=result.push($datasetinfo{
-    id:"it_platform.wc_incidents";
-    name:"Wattle & Co — Incidents";
-    description:"Incident and outage records with severity, resolution time, and team assignment";
-    rowcount:40;
-    colcount:10;
-    sensitivity:"INTERNAL";
-    category:"IT Platform"
-  });
-  result=result.push($datasetinfo{
-    id:"it_platform.wc_feedback";
-    name:"Wattle & Co — Customer Feedback";
-    description:"NPS survey responses and free-text feedback with sentiment indicators";
-    rowcount:60;
-    colcount:8;
-    sensitivity:"CONFIDENTIAL";
-    category:"IT Platform"
-  });
-  result=result.push($datasetinfo{
-    id:"it_platform.wc_shipping";
-    name:"Wattle & Co — Shipping";
-    description:"Shipment tracking records with carrier, delivery status, and delay flags";
-    rowcount:80;
-    colcount:10;
-    sensitivity:"INTERNAL";
-    category:"IT Platform"
-  });
-
-  
-  result=result.push($datasetinfo{
-    id:"customer_intel";
-    name:"Customer Intelligence";
-    description:"392 synthetic customer behaviour records with 4 natural clusters, PII columns, and 22 deliberate anomalies";
-    rowcount:392;
-    colcount:18;
-    sensitivity:"RESTRICTED";
-    category:"Customer"
-  });
-
-  <result
+  <notfound()
 };
-
-
-
-
-
-
-
-
-
-
 
 f=getdataset(id:str):$dataset{
-  
-  
-  if(str.eq(id;"au.medicare")){ <au.getbyid("medicare") };
-  if(str.eq(id;"au.schools")){ <au.getbyid("schools") };
-  if(str.eq(id;"au.opal")){ <au.getbyid("opal") };
-  if(str.eq(id;"au.water")){ <au.getbyid("water") };
-  if(str.eq(id;"au.property")){ <au.getbyid("property") };
-  if(str.eq(id;"au.employment")){ <au.getbyid("employment") };
-
-  
-  if(str.eq(id;"it_hardware.server_inventory")){ <hw.getbyname("server_inventory") };
-  if(str.eq(id;"it_hardware.performance_metrics")){ <hw.getbyname("performance_metrics") };
-  if(str.eq(id;"it_hardware.network_topology")){ <hw.getbyname("network_topology") };
-  if(str.eq(id;"it_hardware.user_assignments")){ <hw.getbyname("user_assignments") };
-
-  
-  if(str.eq(id;"it_platform.wc_users")){ <pl.getbyname("wc_users") };
-  if(str.eq(id;"it_platform.wc_orders")){ <pl.getbyname("wc_orders") };
-  if(str.eq(id;"it_platform.wc_traffic")){ <pl.getbyname("wc_traffic") };
-  if(str.eq(id;"it_platform.wc_incidents")){ <pl.getbyname("wc_incidents") };
-  if(str.eq(id;"it_platform.wc_feedback")){ <pl.getbyname("wc_feedback") };
-  if(str.eq(id;"it_platform.wc_shipping")){ <pl.getbyname("wc_shipping") };
-
-  
-  if(str.eq(id;"customer_intel")){ <ci.getdataset() };
-
-  
-  <$dataset{
-    name:"";
-    headers:@();
-    rows:@()
-  }
+  let hit=lookup(id);
+  if(!hit.found){ <ld.emptydataset("") }el{};
+  <ld.loaddataset(hit.name;hit.relpath)
 };

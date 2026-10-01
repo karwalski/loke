@@ -44,8 +44,7 @@ cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; rm -rf "$WORK"; release_fi
 trap cleanup EXIT INT TERM
 
 for d in pages templates static; do [ -d "$SRC/$d" ] && cp -R "$SRC/$d" "$WORK/"; done
-mkdir -p "$WORK/data" "$WORK/home"
-cp -R "$SRC/data/csv" "$WORK/data/"
+mkdir -p "$WORK/home"
 cp "$BIN" "$WORK/moke"
 sed -E "s/^([[:space:]]*port[[:space:]]*=).*/\1 $PORT/" "$SRC/ooke.toml" > "$WORK/ooke.toml"
 
@@ -91,16 +90,60 @@ else
   echo "  FAIL GET /static/js/moke-savings.js is not served" >&2; fail=1
 fi
 
-# Every dataset id the registry answers to must load with at least one row.
-ids=$(grep -o 'str.eq(id;"[^"]*")' "$SRC/data/registry.tk" | sed 's/.*"\(.*\)")/\1/' | sort -u)
-for id in $ids; do
-  out=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' -d "{\"id\":\"$id\"}" \
+# MK19.1: one dataset store, static/data. Every dataset in its manifest must be served to
+# the browser byte for byte as the manifest hashed it, and /api/datasets must answer the
+# same table — the manifest's row and column counts and the file's own header row. The two
+# sides used to read different stores and disagreed on six ids. The pages that list
+# datasets must not carry a copy of them.
+manifest_json=$(curl -s -m 20 "http://127.0.0.1:$PORT/static/data/manifest.json")
+if ! printf '%s' "$manifest_json" | python3 -c 'import json,sys; d=json.load(sys.stdin)["datasets"]; assert len(d) >= 16' 2>/dev/null; then
+  echo "  FAIL GET /static/data/manifest.json is not the dataset manifest: $(printf '%s' "$manifest_json" | head -c 120)" >&2; fail=1
+fi
+entries=$(printf '%s' "$manifest_json" | python3 -c '
+import json, sys
+for d in json.load(sys.stdin)["datasets"]:
+    print(d["id"], d["data"]["path"], d["data"]["rowcount"], d["data"]["colcount"],
+          d["data"].get("sha256") or d["provenance"]["snapshot_sha256"], "listed" if d.get("listed", True) else "unlisted")
+' 2>/dev/null)
+ndatasets=0
+while read -r id path rows cols sha listed; do
+  [ -n "$id" ] || continue
+  ndatasets=$((ndatasets+1))
+  curl -s -m 20 -o "$WORK/ds.csv" "http://127.0.0.1:$PORT$path"
+  got=$(shasum -a 256 "$WORK/ds.csv" | cut -d' ' -f1)
+  if [ "$got" != "$sha" ]; then
+    echo "  FAIL GET $path is not the file the manifest hashed for $id ($(wc -c < "$WORK/ds.csv") bytes)" >&2; fail=1; continue
+  fi
+  out=$(curl -s -m 60 -X POST -H 'Content-Type: application/json' -d "{\"id\":\"$id\"}" \
           "http://127.0.0.1:$PORT/api/datasets")
-  rows=$(printf '%s' "$out" | sed -n 's/.*"row_count":\([0-9]*\).*/\1/p')
-  if [ -z "$rows" ] || [ "$rows" -eq 0 ]; then
-    echo "  FAIL dataset $id did not load: $(printf '%s' "$out" | head -c 120)" >&2; fail=1
+  if printf '%s' "$out" | python3 -c '
+import csv, json, sys
+ans = json.loads(sys.stdin.read())
+want_rows, want_cols, csvpath = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+header = next(csv.reader(open(csvpath, encoding="utf-8")))
+assert ans["ok"] is True, "not ok"
+assert ans["row_count"] == want_rows and len(ans["rows"]) == want_rows, "rows %s, manifest %d" % (ans["row_count"], want_rows)
+assert ans["col_count"] == want_cols, "cols %s, manifest %d" % (ans["col_count"], want_cols)
+assert ans["headers"] == header, "headers differ from the served file"
+' "$rows" "$cols" "$WORK/ds.csv" 2>"$WORK/ds.err"; then
+    echo "  ok   dataset $id ($listed): the page's file and /api/datasets agree [$rows rows, $cols cols]"
   else
-    echo "  ok   dataset $id [$rows rows]"
+    echo "  FAIL dataset $id: /api/datasets does not answer the store's table: $(tail -1 "$WORK/ds.err") $(printf '%s' "$out" | head -c 100)" >&2; fail=1
+  fi
+done <<EOF
+$entries
+EOF
+if [ "$ndatasets" -lt 16 ]; then
+  echo "  FAIL only $ndatasets datasets were read from the manifest" >&2; fail=1
+fi
+for p in / /upload; do
+  curl -s -m 20 -o "$WORK/page.html" "http://127.0.0.1:$PORT$p"
+  if grep -qE '(var|const|let) (BUILTIN_)?DATASETS *=' "$WORK/page.html"; then
+    echo "  FAIL GET $p carries its own copy of the datasets" >&2; fail=1
+  elif ! grep -qF '<script src="/static/js/moke-data.js"></script>' "$WORK/page.html"; then
+    echo "  FAIL GET $p does not load /static/js/moke-data.js, the store's reader" >&2; fail=1
+  else
+    echo "  ok   GET $p reads its datasets from the store [$(wc -c < "$WORK/page.html") bytes]"
   fi
 done
 
@@ -125,6 +168,8 @@ api() {  # method path body expected-code must-contain label
 }
 api GET  /api/health    ""                              503 '"loke":"unreachable"'  "reports loke unreachable, with a 503"
 api POST /api/datasets  '{}'                            400 'missing required field: id' "requires an id"
+# MK19.1: the retired backend store's file name is not an id; only the manifest names datasets.
+api POST /api/datasets  '{"id":"au_datasets_medicare"}' 404 'dataset not found' "an id the manifest does not name is a 404"
 api POST /api/feedback  '{"rating":"meh"}'              400 'thumbs_up or thumbs_down' "accepts only thumbs_up or thumbs_down"
 api POST /api/feedback  '{"rating":"thumbs_down"}'      200 '"rating":"thumbs_down"' "and records a valid rating"
 api GET  /api/memory    ""                              200 '"ok":true'             "memory API answers"
