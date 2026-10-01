@@ -27,7 +27,7 @@ Then comes the citation, written `CPS 234 para N`. Cross-references to other sta
 | 21 | Approval above confidential | `cps234-approval-above-confidential` | **evaluable** (`requireapprovalabove`) | warn / high |
 | 21 | Special categories blocked | `cps234-special-categories-blocked` | **evaluable** (`blockedentitytypes`) | block / critical |
 | 21, 23 | Credentials blocked outbound | `cps234-credential-outbound-blocked` | **evaluable** (`blockedentitytypes`) | block / critical |
-| 21 | Medicare, BSB, account number detectors | `cps234-au-identifier-detectors` | UNIMPLEMENTED RG1.7 | log / high |
+| 21 | Detector gaps among blocked types (biometric none; password, health model-only) | `cps234-au-identifier-detectors` | UNIMPLEMENTED RG1.7a | log / high |
 | 21 | Redaction is not de-identification | `cps234-redaction-is-not-deidentification` | documentation | log / medium |
 | 21 | Query channel and aggregates | `cps234-query-channel-residual-risk` | documentation (NC1.10) | log / high |
 | 21 | Encryption at rest | `cps234-encryption-at-rest` | UNIMPLEMENTED X8 | block / critical |

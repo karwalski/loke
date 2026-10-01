@@ -1,0 +1,144 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.auidentifiers;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+i=pl:core.privacy.pipeline;
+
+(* RG1.7 — the Australian identifiers the AU and APRA presets block: tax file number in
+   every separator form, Medicare card number, BSB and bank account number. Every assertion
+   goes through the production detector (rx.detect) or its predicates; for each detector a
+   valid case, a checksum-invalid case and a near miss.
+
+   Values. 123 456 782 is a TFN (weighted sum 330 = 30 x 11); 123 456 789 is not (323).
+   2123 45670 1 is a Medicare number: 2x1+1x3+2x7+3x9+4x1+5x3+6x7+7x9 = 170, so the ninth
+   digit must be 0, and 2123 45671 1 fails. 7123 45675 1 has the right check digit (175)
+   but a first digit no card has. *)
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=valueoftype(entities:@$piientity;wanted:str):str{
+  let v=mut."";
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ v=e.value }el{}
+  };
+  <v
+};
+
+f=startoftype(entities:@$piientity;wanted:str):i64{
+  let at=mut.(0-1);
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ at=e.start as i64 }el{}
+  };
+  <at
+};
+
+f=found(text:str;wanted:str):i64{
+  let res:$piidetectionresult=rx.detect(text);
+  <countoftype(res.entities;wanted)
+};
+
+f=value(text:str;wanted:str):str{
+  let res:$piidetectionresult=rx.detect(text);
+  <valueoftype(res.entities;wanted)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── Tax file number: the separator forms AD1.2 measured as missed ─────────── *)
+  if(t.assert(found("TFN 123-456-782 on the form";"au_tfn")==1;"a dash-separated checksum-valid TFN is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("TFN 123-456-782 on the form";"au_tfn");"123-456-782";"with its dashes, as written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("TFN 123 456 782 on the form";"au_tfn")==1;"the space-separated form still is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("TFN 123456782 on the form";"au_tfn")==1;"and the unseparated form")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("TFN 123-456 782 on the form";"au_tfn")==1;"and a mixed form")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.tfnchecksumvalid("123-456-782");"the TFN checksum ignores dashes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Ticket 123-456-789 reopened";"au_tfn")==0;"a dash-separated nine digits failing the checksum is NOT a TFN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.tfnchecksumvalid("123-456-789");"and the predicate says so")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Call 0412-345-678 today";"au_tfn")==0;"near miss: the last nine digits of a hyphenated mobile are not a TFN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Ref 1123-456-782 today";"au_tfn")==0;"near miss: a TFN-valid window with a digit before it is a fragment")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Medicare card number ──────────────────────────────────────────────────── *)
+  let mctext="Medicare 2123 45670 1 on file";
+  let mc:$piidetectionresult=rx.detect(mctext);
+  if(t.assert(countoftype(mc.entities;"au_medicare")==1;"a checksum-valid Medicare number, spaced 4-5-1, is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(mc.entities;"au_medicare");"2123 45670 1";"as written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(mc.entities;"au_medicare")==9;"at its own offset")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(mc.sensitivity);"restricted";"a Medicare number is RESTRICTED, as a TFN is")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Medicare 2123456701 on file";"au_medicare")==1;"unspaced")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Medicare 2123 45670 1/2 on file";"au_medicare");"2123 45670 1/2";"with the IRN after a slash, the whole number including the IRN")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Medicare 2123 45670 1-3 on file";"au_medicare");"2123 45670 1-3";"with the IRN after a hyphen")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Medicare 21234567012 on file";"au_medicare");"21234567012";"with the IRN run straight on: eleven digits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.medicarechecksumvalid("2123 45670 1");"the Medicare predicate passes a valid number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.medicarechecksumvalid("21234567012");"and with an IRN")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Medicare 2123 45671 1 on file";"au_medicare")==0;"a wrong check digit is NOT a Medicare number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.medicarechecksumvalid("2123456711");"the predicate rejects it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.medicarechecksumvalid("2223456701");"and a changed digit inside the weighted eight")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Ref 7123456751 on file";"au_medicare")==0;"near miss: right check digit, but no card starts with 7")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.medicarechecksumvalid("7123456751");"the predicate checks the first digit")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.medicarechecksumvalid("21234567010");"0 is not an IRN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Ref 21234567010 on file";"au_medicare")==0;"so a ten-digit window followed by a 0 is a fragment, not a number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Ref 212345670123 on file";"au_medicare")==0;"near miss: a valid window inside a twelve-digit run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.medicarechecksumvalid("212345670");"nine digits are not a Medicare number")){pass=pass+1}el{fail=fail+1};
+
+  (* ── BSB: the context word, and the one rejection ───────────────────────────── *)
+  let bsbtext="Pay BSB 062-000 now";
+  let bsb:$piidetectionresult=rx.detect(bsbtext);
+  if(t.assert(countoftype(bsb.entities;"au_bsb")==1;"a BSB after the word BSB is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(bsb.entities;"au_bsb");"062-000";"as the number alone, not the word")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(bsb.entities;"au_bsb")==8;"and its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(bsb.sensitivity);"restricted";"a BSB is RESTRICTED, as docs/specifications/policy-examples/apra-cps-234.yaml classifies it: it travels with the account number it routes to")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(bsb.anonymised;"062-000")<0;"and the anonymised text does not carry it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(bsb.anonymised;"BSB")>=0;"while the word BSB is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("bsb: 062 000 please";"au_bsb");"062 000";"lower case, colon, space-separated")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("BSB number 062000 please";"au_bsb");"062000";"after 'BSB number', unseparated")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("BSB No. 062-000 please";"au_bsb");"062-000";"after 'BSB No.'")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("BSB 000-000 placeholder";"au_bsb")==0;"the all-zero placeholder is NOT a BSB")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!rx.bsbvalid("000-000");"the predicate rejects it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.bsbvalid("062-000");"and passes a real-shaped one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("pages 062-000 revised";"au_bsb")==0;"near miss: 3-3 digits with no BSB context are not reported")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("BSB 062-0001 here";"au_bsb")==0;"near miss: a seventh digit makes it a fragment")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Bank account number: only in context ───────────────────────────────────── *)
+  let acctext="Refund to account 12345678 today";
+  let acc:$piidetectionresult=rx.detect(acctext);
+  if(t.assert(countoftype(acc.entities;"bank_account")==1;"an account number after the word account is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(acc.entities;"bank_account");"12345678";"as the digits alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(acc.entities;"bank_account")==18;"its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(acc.sensitivity);"restricted";"a bank account number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Account Number: 123456 ok";"bank_account");"123456";"after 'Account Number:', six digits")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("acct. 1234567890 ok";"bank_account");"1234567890";"after 'acct.', ten digits")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("a/c 9876543 ok";"bank_account");"9876543";"after 'a/c'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("ACCOUNT NO. 12345678 ok";"bank_account");"12345678";"upper case, after 'ACCOUNT NO.'")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Order 12345678 shipped";"bank_account")==0;"near miss: eight digits without the context word are not an account number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("account 12345 open";"bank_account")==0;"near miss: five digits are too short")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("account 12345678901 open";"bank_account")==0;"near miss: eleven digits are not an account number")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The pipeline rates them as the regex layer does ────────────────────────
+     core.privacy.pipeline recomputes the sensitivity of the deduplicated entities by type
+     name, and rated any name it did not list as INTERNAL. *)
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(mc.entities));"restricted";"the pipeline rates a Medicare number RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(acc.entities));"restricted";"and an account number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(bsb.entities));"restricted";"and a BSB")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(mc.entities)==1;"a Medicare number counts as restricted")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

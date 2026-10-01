@@ -374,8 +374,11 @@ step_checks() {
   fi
 
   if [[ -f tests/fixtures/pii-corpus/generate.py ]]; then
-    echo "  PII corpus spans verify"
-    python3 tests/fixtures/pii-corpus/generate.py --verify >/dev/null \
+    # Written, not only verified (RG1.7): corpus.jsonl is gitignored, and the recall tests
+    # read it, so a corpus left over from an older generator would be scored instead of
+    # the committed one. The generator verifies the spans before it writes.
+    echo "  PII corpus spans verify, and corpus.jsonl is regenerated"
+    python3 tests/fixtures/pii-corpus/generate.py >/dev/null \
       || { echo "  corpus span verification failed — every recall figure computed" \
                 "from it would be wrong" >&2; failed=1; }
   fi

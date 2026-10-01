@@ -1,0 +1,187 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.privacy.entityvocab;
+
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+
+(* RG1.7. ONE entity-type vocabulary for detectors and policy presets.
+
+   The detection layers and the presets were written apart and do not share names. The
+   regex layer reports its pattern names (au_tfn, credit_card, api_key), the NER layer the
+   labels its prompt asks for (PERSON, MEDICAL, FINANCIAL), the privacy-filter sidecar its
+   labels as core.privacy.sidecarclient.lokeentitytype renames them (PERSON, SECRET,
+   FINANCIAL), and Presidio its own (US_SSN, EMAIL_ADDRESS). The presets name what a
+   regulation names: tfn, medicare, bsb, bank_account, credit_card, api_key, password. So
+   a preset that blocks "tfn" could never match a detection called "au_tfn", and one that
+   blocks "password" could never match the sidecar's SECRET, even once presets are enforced.
+
+   This module is where the two meet, and the only place. The presets keep the names a
+   regulation uses and the detectors keep the names they report; presettypes maps every
+   detector type to the preset types it satisfies, and blocks is the one test an enforcing
+   caller makes. layertypes declares what each layer emits, and core.privacy.filterregistry
+   builds its entitytypes text from it, so the registry's declaration cannot drift from
+   this mapping. undetected lists, by name, every type a preset names that no layer emits:
+   a known gap is declared and printed by the tests, never silently unmatched.
+
+   tests/unit/privacy/test_entity_vocab.tk asserts that every entity type every registered
+   preset names is either emitted by some layer or declared here as undetected, and that
+   nothing is both. tests/integration/test_preset_detection.tk asserts that each blocked
+   type of each Australian preset that the regex layer covers is detected on a corpus
+   example. *)
+
+(* The layers, by the ids core.privacy.filterregistry gives them. Not imported from there:
+   the registry imports this module. *)
+f=layerids():@str{
+  <@("regex";"ner";"presidio";"openai-privacy-filter")
+};
+
+(* The regex layer emits its pattern names: core.privacy.regex.getpatterns is the truth,
+   so a pattern added there is in the vocabulary without a second edit. *)
+f=regextypes():@str{
+  let out=mut.@();
+  let pats=rx.getpatterns();
+  lp(let i=0;i<pats.len;i=i+1){
+    let p:$patterndef=pats.get(i);
+    out=out.push(p.name)
+  };
+  <out
+};
+
+(* What each layer reports. NER: the six labels its prompt in core.privacy.ner asks the
+   model for. Presidio: the labels core.privacy.presidio rates; Presidio can report others,
+   which are kept as reported and map to nothing here, so they block nothing until they are
+   added. The sidecar: the eight labels core.privacy.sidecarclient.lokeentitytype produces. *)
+f=layertypes(layerid:str):@str{
+  if(str.eq(layerid;"regex")){ <regextypes() }el{};
+  if(str.eq(layerid;"ner")){ <@("PERSON";"ORGANIZATION";"LOCATION";"DATE";"MEDICAL";"FINANCIAL") }el{};
+  if(str.eq(layerid;"presidio")){ <@("CREDIT_CARD";"US_SSN";"AU_TFN";"PERSON";"EMAIL_ADDRESS";"PHONE_NUMBER";"LOCATION";"ORGANIZATION") }el{};
+  if(str.eq(layerid;"openai-privacy-filter")){ <@("PERSON";"EMAIL_ADDRESS";"PHONE_NUMBER";"ADDRESS";"URL";"DATE";"FINANCIAL";"SECRET") }el{};
+  <@()
+};
+
+(* A layer's types as the comma-separated text $privacyfilter.entitytypes carries. *)
+f=layertypetext(layerid:str):str{
+  let types=layertypes(layerid);
+  let out=mut."";
+  lp(let i=0;i<types.len;i=i+1){
+    if(i>0){ out=str.concat(out;",") }el{};
+    out=str.concat(out;types.get(i))
+  };
+  <out
+};
+
+(* The preset types a detection of type dtype satisfies, matched without regard to case.
+   One detector type may satisfy several: the sidecar's SECRET is a password or an API key,
+   and a card number is also financial information. An over-wide mapping blocks more,
+   which is the safe direction; a missing one lets a blocked type through. An unknown type
+   satisfies nothing. *)
+f=presettypes(dtype:str):@str{
+  let k=sh.strlower(dtype);
+  if(str.eq(k;"email") || str.eq(k;"email_address")){ <@("email") }el{};
+  if(str.eq(k;"phone_au") || str.eq(k;"phone_us") || str.eq(k;"phone_number")){ <@("phone") }el{};
+  if(str.eq(k;"credit_card")){ <@("credit_card";"financial") }el{};
+  if(str.eq(k;"ip_v4")){ <@("ip_address") }el{};
+  if(str.eq(k;"au_tfn")){ <@("tfn";"national_id") }el{};
+  if(str.eq(k;"au_abn")){ <@("abn") }el{};
+  if(str.eq(k;"ssn_us") || str.eq(k;"us_ssn")){ <@("ssn";"national_id") }el{};
+  if(str.eq(k;"url")){ <@("url") }el{};
+  if(str.eq(k;"api_key")){ <@("api_key") }el{};
+  if(str.eq(k;"secret")){ <@("api_key";"password") }el{};
+  if(str.eq(k;"au_medicare")){ <@("medicare";"national_id") }el{};
+  if(str.eq(k;"au_bsb")){ <@("bsb";"financial") }el{};
+  if(str.eq(k;"bank_account")){ <@("bank_account";"financial") }el{};
+  (* The sidecar reports an account number as FINANCIAL, so FINANCIAL satisfies a
+     bank_account block as well as a financial one. *)
+  if(str.eq(k;"financial")){ <@("financial";"bank_account") }el{};
+  if(str.eq(k;"person") || str.eq(k;"name")){ <@("name") }el{};
+  if(str.eq(k;"address") || str.eq(k;"location")){ <@("address") }el{};
+  (* A date may be a date of birth. *)
+  if(str.eq(k;"date")){ <@("dob") }el{};
+  if(str.eq(k;"medical")){ <@("health") }el{};
+  if(str.eq(k;"organization")){ <@("organisation") }el{};
+  <@()
+};
+
+f=contains(list:@str;want:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<list.len;i=i+1){
+    if(str.eq(list.get(i);want)){ found=true }el{}
+  };
+  <found
+};
+
+(* Does a detection of type dtype hit a preset's blocked list? The one test an enforcing
+   caller makes; nothing compares a preset name with a detector name anywhere else. *)
+f=blocks(blocked:@str;dtype:str):bool{
+  let mine=presettypes(dtype);
+  let hit=mut.false;
+  lp(let i=0;i<mine.len;i=i+1){
+    if(contains(blocked;mine.get(i))){ hit=true }el{}
+  };
+  <hit
+};
+
+(* The layers whose reported types satisfy preset type ptype, as "layer:type" items, comma
+   separated; "" when none does. *)
+f=emitters(ptype:str):str{
+  let out=mut."";
+  let ids=layerids();
+  lp(let l=0;l<ids.len;l=l+1){
+    let layer=ids.get(l);
+    let types=layertypes(layer);
+    lp(let i=0;i<types.len;i=i+1){
+      let dtype=types.get(i);
+      if(contains(presettypes(dtype);ptype)){
+        if(str.len(out)>0){ out=str.concat(out;",") }el{};
+        out="\(out)\(layer):\(dtype)"
+      }el{}
+    }
+  };
+  <out
+};
+
+f=emitted(ptype:str):bool{
+  <str.len(emitters(ptype))>0
+};
+
+(* Does the regex layer, the one layer every request runs, satisfy ptype? *)
+f=regexemits(ptype:str):bool{
+  let types=regextypes();
+  let hit=mut.false;
+  lp(let i=0;i<types.len;i=i+1){
+    if(contains(presettypes(types.get(i));ptype)){ hit=true }el{}
+  };
+  <hit
+};
+
+(* Every type a registered preset names that NO layer emits. Each is a block or an
+   anonymisation rule that cannot fire, declared so the tests print it rather than letting
+   it pass unseen. RG1.7a tracks them. Special categories need a model layer that labels
+   them; the identifiers need patterns. *)
+f=undetected():@str{
+  <@(
+    "biometric";"genetic";"racial";"political";"religion";"sexual_orientation";"trade_union";
+    "criminal";"inferred";"emotion";"protected_class";"social_scoring";
+    "drivers_licence";"passport";"crn";"super_member";"insurance";"medical_record";"zip";
+    "geolocation";"nhs_number";"nino";"nric";"uk_passport";"uk_driving_licence";"sort_code"
+  )
+};
+
+f=isundetected(ptype:str):bool{
+  <contains(undetected();ptype)
+};
+
+(* The names in a preset's list that are neither emitted by some layer nor declared
+   undetected: a misspelling, or a type added to a preset with no thought for detection.
+   Empty is the only acceptable answer. *)
+f=unknownnames(names:@str):@str{
+  let out=mut.@();
+  lp(let i=0;i<names.len;i=i+1){
+    let n=names.get(i);
+    if(!emitted(n) && !isundetected(n)){ out=out.push(n) }el{}
+  };
+  <out
+};

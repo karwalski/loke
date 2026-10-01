@@ -28,11 +28,13 @@ pattern-matches. Nothing here corresponds to a real person, account or number.
 
 Known gaps in what loke detects, encoded deliberately
 ----------------------------------------------------
-`packages/core/src/privacy/patterns.tk` defines ten patterns. Several Australian
-identifiers that loke's own demo data and regulatory presets centre on have **no
-detector at all** — Medicare number, BSB, ACN, driver licence, passport. Those
-appear in the corpus marked `expected_detected: false` so that a recall figure
-computed from it reflects reality rather than only the cases loke already covers.
+`packages/core/src/privacy/patterns.tk` defines the regex layer's patterns. Some
+Australian identifiers that loke's own demo data and regulatory presets centre on
+have **no detector at all** — ACN, driver licence, passport. Those appear in the
+corpus marked `expected_detected: false` so that a recall figure computed from it
+reflects reality rather than only the cases loke already covers. Medicare, BSB and
+bank account numbers were in that list until RG1.7 gave them detectors; their
+cases are now scored, and RG1.7 added their formats and near misses at the end.
 
 Usage
 -----
@@ -87,16 +89,42 @@ def abn_valid(rng: random.Random) -> str:
                 return "".join(map(str, digits))
 
 
+MEDICARE_WEIGHTS = [1, 3, 7, 9, 1, 3, 7, 9]
+
+
 def medicare_valid(rng: random.Random) -> str:
-    """Medicare number with a correct check digit. loke has no detector for this."""
-    weights = [1, 3, 7, 9, 1, 3, 7, 9]
+    """Medicare card number (ten digits) with a correct check digit: first digit 2-6,
+    ninth digit = weighted sum of the first eight mod 10, tenth the issue number."""
     while True:
         first = rng.randint(2, 6)
         rest = [rng.randint(0, 9) for _ in range(7)]
         digits = [first] + rest
-        check = sum(w * d for w, d in zip(weights, digits)) % 10
+        check = sum(w * d for w, d in zip(MEDICARE_WEIGHTS, digits)) % 10
         issue = rng.randint(1, 9)
         return f"{''.join(map(str, digits))}{check}{issue}"
+
+
+def medicare_invalid(rng: random.Random) -> str:
+    """Ten digits in Medicare's shape (first digit 2-6) whose check digit is wrong."""
+    good = medicare_valid(rng)
+    wrong = (int(good[8]) + rng.randint(1, 9)) % 10
+    return good[:8] + str(wrong) + good[9]
+
+
+def medicare_bad_first(rng: random.Random) -> str:
+    """Ten digits whose check digit is right but whose first digit (7-9) no card has."""
+    digits = [rng.randint(7, 9)] + [rng.randint(0, 9) for _ in range(7)]
+    check = sum(w * d for w, d in zip(MEDICARE_WEIGHTS, digits)) % 10
+    return f"{''.join(map(str, digits))}{check}{rng.randint(1, 9)}"
+
+
+def tfn_invalid_dashed(rng: random.Random) -> str:
+    v = tfn_invalid(rng)
+    return f"{v[:3]}-{v[3:6]}-{v[6:]}"
+
+
+def bsb_nonzero(rng: random.Random) -> str:
+    return f"{rng.randint(10, 99)}{rng.randint(0, 9)}{rng.randint(100, 999)}"
 
 
 def luhn_valid(rng: random.Random, prefix: str, length: int) -> str:
@@ -216,24 +244,24 @@ def cases(rng: random.Random) -> list[dict]:
                                                 for _ in range(28)), True, None),
              "url": ("URL", f"https://ci.example-corp.com.au/builds/{rng.randint(1000,9999)}", True, None)})
 
-    # --- Entities loke has no detector for -------------------------------
-    # Included so a recall figure reflects a realistic Australian corpus rather
-    # than only the types already covered.
+    # --- Australian identifiers added to the regex layer by RG1.7 ---------
+    # These were expected_detected=False until RG1.7 gave Medicare, BSB and
+    # bank account numbers detectors; they now count toward recall. AU_ACN still
+    # has no detector and stays unscored.
     for _ in range(6):
         add("positive",
             "Claim lodged against Medicare number {mc} for the patient named {name}.",
-            {"mc": ("AU_MEDICARE", medicare_valid(rng), False,
-                    "no detector exists in patterns.tk — flagship demo datasets "
-                    "are built around this identifier"),
+            {"mc": ("AU_MEDICARE", medicare_valid(rng), True,
+                    "checksum-valid; unspaced ten digits"),
              "name": ("PERSON", rng.choice(["Ruth Alkinbaya", "Jorge Silveira",
                                             "Mei Lin Choo"]), True, None)})
 
     for _ in range(4):
         add("positive",
             "Refund to BSB {bsb} account {acct}; entity ACN {acn}.",
-            {"bsb": ("AU_BSB", bsb(rng), False, "no detector exists"),
-             "acct": ("BANK_ACCOUNT", str(rng.randint(10000000, 99999999)), False,
-                      "no detector exists; also indistinguishable from any 8-digit number"),
+            {"bsb": ("AU_BSB", bsb(rng), True, "after the word BSB"),
+             "acct": ("BANK_ACCOUNT", str(rng.randint(10000000, 99999999)), True,
+                      "after the word account; without it, indistinguishable from any 8-digit number"),
              "acn": ("AU_ACN", acn(rng), False, "no detector exists")})
 
     # --- Negatives: must NOT be reported ---------------------------------
@@ -304,6 +332,82 @@ def cases(rng: random.Random) -> list[dict]:
                             f"%40example-corp.com.au", True,
                      "an email is percent-encoded inside this URL; the url pattern "
                      "will match the URL but the embedded address is not separately reported")})
+
+    # --- RG1.7: Australian identifier formats and their near misses ------
+    # Appended after every earlier case so the cases above keep the values the
+    # earlier measurements were taken on (the generator is seeded and sequential).
+    for _ in range(4):
+        v = medicare_valid(rng)
+        add("adversarial",
+            "Patient's Medicare card is {mc}, valid to 09/2027.",
+            {"mc": ("AU_MEDICARE", f"{v[:4]} {v[4:9]} {v[9]}", True,
+                    "4-5-1, spaced as printed on the card")})
+
+    for sep in ("/", "-", "/"):
+        v = medicare_valid(rng)
+        add("adversarial",
+            "Medicare {mc} covers the second child on the card.",
+            {"mc": ("AU_MEDICARE", f"{v[:4]} {v[4:9]} {v[9]}{sep}{rng.randint(1, 9)}", True,
+                    "with the individual reference number after a separator")})
+
+    for _ in range(2):
+        add("adversarial",
+            "Medicare no. {mc} was quoted on the referral.",
+            {"mc": ("AU_MEDICARE", medicare_valid(rng) + str(rng.randint(1, 9)), True,
+                    "eleven digits: card number with the IRN run straight on")})
+
+    for _ in range(4):
+        add("negative",
+            "Batch {batch} closed with {count} records.",
+            {"batch": ("NOT_PII", medicare_invalid(rng), False,
+                       "Medicare-shaped ten digits with a wrong check digit"),
+             "count": ("NOT_PII", rng.choice(["forty", "sixty-two", "ninety"]), False, None)})
+
+    for _ in range(2):
+        add("negative",
+            "Consignment {ref} left the depot.",
+            {"ref": ("NOT_PII", medicare_bad_first(rng), False,
+                     "Medicare check digit right but first digit 7-9, which no card has")})
+
+    for _ in range(3):
+        add("negative",
+            "Ticket {ticket} was reopened by the service desk.",
+            {"ticket": ("NOT_PII", tfn_invalid_dashed(rng), False,
+                        "dash-separated nine digits failing the TFN checksum")})
+
+    bsb_forms = [
+        ("BSB: {bsb}, acct {acct}.", lambda b: f"{b[:3]} {b[3:]}", "space-separated after 'BSB:'",
+         "after 'acct'"),
+        ("Pay to bsb {bsb} account number: {acct} today.", lambda b: b, "unseparated after lower-case 'bsb'",
+         "after 'account number:'"),
+        ("BSB number {bsb} a/c {acct} for the refund.", lambda b: f"{b[:3]}-{b[3:]}", "after 'BSB number'",
+         "after 'a/c'"),
+        ("ACCOUNT NO. {acct} at BSB {bsb}.", lambda b: f"{b[:3]}-{b[3:]}", "upper-case context",
+         "after 'ACCOUNT NO.'"),
+    ]
+    for template, fmt, bnote, anote in bsb_forms:
+        add("adversarial", template,
+            {"bsb": ("AU_BSB", fmt(bsb_nonzero(rng)), True, bnote),
+             "acct": ("BANK_ACCOUNT", str(rng.randint(100000, 9999999999)), True, anote)})
+
+    for _ in range(3):
+        lo = rng.randint(100, 499)
+        add("negative",
+            "Pages {range} of the {doc} manual were revised.",
+            {"range": ("NOT_PII", f"{lo}-{lo + rng.randint(100, 499)}", False,
+                       "3-3 hyphenated digits with no BSB context: a page range"),
+             "doc": ("NOT_PII", f"v{rng.randint(2, 9)}", False, None)})
+
+    for _ in range(3):
+        add("negative",
+            "Order {order} shipped in {n} boxes.",
+            {"order": ("NOT_PII", str(rng.randint(10000000, 99999999)), False,
+                       "eight digits with no account context"),
+             "n": ("NOT_PII", rng.choice(["two", "three", "five"]), False, None)})
+
+    add("negative",
+        "The form had BSB {bsb} entered as a placeholder.",
+        {"bsb": ("NOT_PII", "000-000", False, "the all-zero BSB placeholder")})
 
     return out
 

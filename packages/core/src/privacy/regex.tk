@@ -30,7 +30,10 @@ f=getpatterns():@$patterndef{
     $patterndef{name:"au_abn";pattern:pat.patauabn();sensitivity:$sensitivitylevel{$confidential:0};confidence:0.85};
     $patterndef{name:"ssn_us";pattern:pat.patssnus();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.99};
     $patterndef{name:"url";pattern:pat.paturl();sensitivity:$sensitivitylevel{$internal:0};confidence:0.60};
-    $patterndef{name:"api_key";pattern:pat.patapikey();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.99}
+    $patterndef{name:"api_key";pattern:pat.patapikey();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.99};
+    $patterndef{name:"au_medicare";pattern:pat.patmedicare();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.95};
+    $patterndef{name:"au_bsb";pattern:pat.patbsb();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90};
+    $patterndef{name:"bank_account";pattern:pat.patbankaccount();sensitivity:$sensitivitylevel{$restricted:0};confidence:0.90}
   )
 };
 
@@ -91,7 +94,13 @@ f=digitrunpattern(name:str):bool{
         if(str.eq(name;"credit_card")){bounded=true}el{
           if(str.eq(name;"phone_au")){bounded=true}el{
             if(str.eq(name;"phone_us")){bounded=true}el{
-              if(str.eq(name;"ip_v4")){bounded=true}el{}
+              if(str.eq(name;"ip_v4")){bounded=true}el{
+                if(str.eq(name;"au_medicare")){bounded=true}el{
+                  if(str.eq(name;"au_bsb")){bounded=true}el{
+                    if(str.eq(name;"bank_account")){bounded=true}el{}
+                  }
+                }
+              }
             }
           }
         }
@@ -160,6 +169,72 @@ f=tfnchecksumvalid(value:str):bool{
   }el{
     <false
   }
+};
+
+
+(* The digits of a value, separators dropped. *)
+f=digitsof(value:str):str{
+  let digits=mut."";
+  let len=str.len(value) as i64;
+  lp(let i=0;i<len;i=i+1){
+    if(digitatindex(value;i)){
+      digits=str.concat(digits;str.substr(value;i;i+1))
+    }el{}
+  };
+  <digits
+};
+
+(* RG1.7. The Medicare card number check, as Services Australia defines it: the first
+   digit is 2 to 6, and the ninth digit equals the sum of the first eight weighted
+   1,3,7,9,1,3,7,9, modulo 10. The tenth digit is the card issue number and is not part of
+   the check. An eleventh digit is the individual reference number (IRN), which is 1 to 9;
+   0 is not an IRN. Ten or eleven digits are answered, separators ignored; any other length
+   is false. tests/fixtures/pii-corpus builds its Medicare numbers with the same weights,
+   and its checksum-invalid decoys must fail here. *)
+f=medicarechecksumvalid(value:str):bool{
+  let digits=digitsof(value);
+  let dlen=str.len(digits) as i64;
+  if(dlen<10 || dlen>11){ <false }el{};
+  let first=str.charat(digits;0)-48;
+  if(first<2 || first>6){ <false }el{};
+  if(dlen==11){
+    if(str.charat(digits;10)==48){ <false }el{}
+  }el{};
+  let weights=@(1;3;7;9;1;3;7;9);
+  let total=mut.0;
+  lp(let k=0;k<8;k=k+1){
+    total=total+(str.charat(digits;k)-48)*weights.get(k)
+  };
+  <total-(total/10)*10==str.charat(digits;8)-48
+};
+
+(* RG1.7. A BSB has no check digit, so the only validation is the one that cannot reject a
+   real BSB: six digits, and not 000-000, the all-zero placeholder that forms and the
+   synthetic statements in tests/fixtures/bank-statements use for "no BSB". No other range
+   is rejected. APCA's register is not available offline, the first digit names the
+   institution and every first digit is in use, and rejecting a real BSB leaks it, which
+   costs more than masking a number that only looks like one. *)
+f=bsbvalid(value:str):bool{
+  let digits=digitsof(value);
+  <(str.len(digits) as i64)==6 && !str.eq(digits;"000000")
+};
+
+(* The patterns whose match carries a context word (BSB, account) in front of the number. *)
+f=contextpattern(name:str):bool{
+  <str.eq(name;"au_bsb") || str.eq(name;"bank_account")
+};
+
+(* RG1.7. The offset of the first digit in a context match: "BSB 062-000" answers 4. The
+   word is what makes the match an identifier, but the identifier is the number, so the
+   span, the value and the placeholder cover the number alone, and the digit-boundary test
+   is applied to the number's neighbours. A match with no digit answers its length. *)
+f=firstdigit(value:str):i64{
+  let len=str.len(value) as i64;
+  let at=mut.len;
+  lp(let i=len-1;i>=0;i=i-1){
+    if(digitatindex(value;i)){ at=i }el{}
+  };
+  <at
 };
 
 
@@ -257,17 +332,24 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
         if(mi>=matchcount){
           br
         }el{
-          let matchedvalue=matches.get(mi);
+          let rawvalue=matches.get(mi);
+          let matchedvalue=mut.rawvalue;
           let start=mut.0;
           let end=mut.0;
           let spanned=mut.false;
-          let found=indexfrom(text;matchedvalue;cursor;textlen);
+          let found=indexfrom(text;rawvalue;cursor;textlen);
           if(found<0){}el{
             start=found;
-            end=start+(str.len(matchedvalue) as i64);
+            end=start+(str.len(rawvalue) as i64);
             spanned=true;
             cursor=end
           };
+          (* RG1.7: a context match reports the number, not the word in front of it. *)
+          if(contextpattern(pdef.name)){
+            let skip=firstdigit(rawvalue);
+            matchedvalue=str.substr(rawvalue;skip;str.len(rawvalue) as i64);
+            if(spanned){ start=start+skip }el{}
+          }el{};
           let keep=mut.true;
           if(spanned){
             if(digitrunpattern(pdef.name)){
@@ -295,7 +377,18 @@ f=rundetection(text:str;patterns:@$patterndef):$piidetectionresult{
           if(keep){
             if(str.eq(pdef.name;"au_tfn")){
               keep=tfnchecksumvalid(matchedvalue)
-            }el{}
+            }el{
+              (* RG1.7: Medicare on its check digit, BSB on the one rejection that cannot
+                 lose a real one. bank_account has no check to apply; its context word is
+                 its validation. *)
+              if(str.eq(pdef.name;"au_medicare")){
+                keep=medicarechecksumvalid(matchedvalue)
+              }el{
+                if(str.eq(pdef.name;"au_bsb")){
+                  keep=bsbvalid(matchedvalue)
+                }el{}
+              }
+            }
           }el{};
           if(keep){
             let entity=$piientity{

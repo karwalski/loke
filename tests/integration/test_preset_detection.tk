@@ -1,0 +1,133 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.integration.testpresetdetection;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=json:std.json;
+i=io:std.io;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+i=ev:core.privacy.evaluation;
+i=vocab:core.privacy.entityvocab;
+i=reg:core.policy.presets.registry;
+i=sch:core.policy.schema;
+
+(* RG1.7 acceptance — each type an Australian preset BLOCKS is emitted by some detector on
+   a corpus example.
+
+   For each of au-privacy, apra-cps-234 and apra-cps-230, every blocked type falls in one
+   of three classes, and the class is printed:
+
+     regex       the regex layer emits a type that satisfies it (core.privacy.entityvocab).
+                 ASSERTED: rx.detect, run over tests/fixtures/pii-corpus, reports a
+                 detection of a satisfying type that overlaps a labelled entity of a
+                 satisfying type. A pattern that stops finding its corpus examples fails
+                 here by name, not only as a dip in the recall figure.
+     model       only a model layer (NER or the privacy-filter sidecar) emits it. Not
+                 exercised in CI, which runs no model; printed as such.
+     undetected  no layer emits it; declared in vocab.undetected and tracked by RG1.7a.
+
+   A blocked name in none of the three fails (vocab.unknownnames). *)
+
+f=corpuspath():str{
+  <"tests/fixtures/pii-corpus/corpus.jsonl"
+};
+
+f=contains(list:@str;want:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<list.len;i=i+1){
+    if(str.eq(list.get(i);want)){ found=true }el{}
+  };
+  <found
+};
+
+f=overlaps(a:$labelspan;b:$labelspan):bool{
+  <a.start<b.end && b.start<a.end
+};
+
+(* The preset types that a detection in this text satisfies AND that the labelled entity it
+   overlaps is: a detection type-matched to real PII of that type. *)
+f=confirmed(acc:@str;labels:@$labelspan;dets:@$labelspan):@str{
+  let out=mut.acc;
+  lp(let i=0;i<dets.len;i=i+1){
+    let d:$labelspan=dets.get(i);
+    let dtypes=vocab.presettypes(d.kind);
+    lp(let j=0;j<labels.len;j=j+1){
+      let l:$labelspan=labels.get(j);
+      if(overlaps(d;l)){
+        let ltypes=vocab.presettypes(sh.strlower(l.kind));
+        lp(let k=0;k<dtypes.len;k=k+1){
+          let pt=dtypes.get(k);
+          if(contains(ltypes;pt) && !contains(out;pt)){ out=out.push(pt) }el{}
+        }
+      }el{}
+    }
+  };
+  <out
+};
+
+f=detectedoncorpus():@str{
+  let raw=mt file.read(corpuspath()) { $ok:s s; $err:e "" };
+  let acc=mut.@();
+  let lines=str.split(raw;"
+");
+  lp(let i=0;i<lines.len;i=i+1){
+    let line=lines.get(i);
+    if(str.len(line)>2){
+      let obj=json.dec(line);
+      let text=mt json.str(obj;"text") { $ok:s s; $err:e "" };
+      let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
+      if(str.len(text)>0){
+        let labels=ev.corpuslabels(text;ents;false);
+        let res:$piidetectionresult=rx.detect(text);
+        acc=confirmed(acc;labels;ev.entityspans(res.entities))
+      }el{}
+    }el{}
+  };
+  <acc
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let seen=detectedoncorpus();
+  if(t.assert(seen.len>0;"the corpus was read and the regex layer confirmed some type on it (a missing corpus must fail)")){pass=pass+1}el{fail=fail+1};
+
+  let aus=@("au-privacy";"apra-cps-234";"apra-cps-230");
+  lp(let p=0;p<aus.len;p=p+1){
+    let name:str=aus.get(p);
+    let pol:$policy=reg.byname(name);
+    let blocked=pol.blockedentitytypes;
+    if(t.assert(blocked.len>0;"preset \(name) blocks something")){pass=pass+1}el{fail=fail+1};
+    let unknown=vocab.unknownnames(blocked);
+    if(t.assert(unknown.len==0;"every type \(name) blocks is in the vocabulary")){pass=pass+1}el{fail=fail+1};
+    lp(let b=0;b<blocked.len;b=b+1){
+      let bt:str=blocked.get(b);
+      if(vocab.regexemits(bt)){
+        if(t.assert(contains(seen;bt);"\(name) blocks \(bt): the regex layer emits it on a labelled corpus example")){pass=pass+1}el{fail=fail+1};
+        io.println("  RG1.7 \(name) \(bt): regex, detected on the corpus")
+      }el{
+        if(vocab.emitted(bt)){
+          let who=vocab.emitters(bt);
+          io.println("  RG1.7 \(name) \(bt): model layer only (\(who)), not exercised in CI")
+        }el{
+          io.println("  RG1.7 \(name) \(bt): NO detector (RG1.7a)")
+        }
+      }
+    }
+  };
+
+  (* The identifiers RG1.7 was filed for, named, so a vocabulary change that moved one out
+     of the regex class could not pass by skipping its assertion above. *)
+  let required=@("tfn";"medicare";"bsb";"bank_account";"credit_card";"api_key");
+  lp(let r=0;r<required.len;r=r+1){
+    let want:str=required.get(r);
+    if(t.assert(contains(seen;want);"\(want) is detected by the regex layer on a labelled corpus example")){pass=pass+1}el{fail=fail+1}
+  };
+
+  <fail
+};
