@@ -1,0 +1,238 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.policy.apracps230preset;
+
+i=t:std.test;
+i=str:std.str;
+i=sch:core.policy.schema;
+i=ty:core.policy.types;
+i=reg:core.policy.presets.registry;
+i=loader:core.policy.loader;
+i=rules:core.governance.rulesengine;
+
+(* RG1.2 — the APRA CPS 230 preset, through the production registry and loader.
+
+   Paragraph numbers are those of the 2026 instrument (F2026L00475), in force from 1 July
+   2026. The checks mirror test_apra_cps234_preset.tk: every rule is classed and cites a
+   CPS 230 paragraph, every entity requirement the preset addresses is cited, nothing a
+   preset cannot evaluate may warn or block, every EVALUABLE rule is backed by its field, and
+   the third-party model dependency is treated as a candidate material service provider. *)
+
+f=presetname():str{ <"apra-cps-230" };
+
+f=rulebyid(wanted:str):$policyrule{
+  let rs=reg.rulesfor(presetname());
+  let idx=mut.0-1;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.eq(r.id;wanted)){ idx=i }el{}
+  };
+  if(idx<0){
+    <$policyrule{id:"";description:"";action:"";severity:""}
+  }el{
+    <rs.get(idx)
+  }
+};
+
+f=hasrule(wanted:str):bool{
+  let r:$policyrule=rulebyid(wanted);
+  <str.len(r.id)>0
+};
+
+(* A citation is "para N" followed by a delimiter, so para 3 never matches para 35.
+   Cross-references to other standards are written "paragraph N" and do not match. *)
+f=citespara(desc:str;n:i64):bool{
+  let ns=str.fromint(n);
+  let p="para \(ns)";
+  <str.contains(desc;str.concat(p;" ")) || str.contains(desc;str.concat(p;","))
+   || str.contains(desc;str.concat(p;".")) || str.contains(desc;str.concat(p;";"))
+   || str.contains(desc;str.concat(p;"(")) || str.contains(desc;str.concat(p;")"))
+};
+
+f=anyrulecites(n:i64):bool{
+  let rs=reg.rulesfor(presetname());
+  let found=mut.false;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(citespara(r.description;n)){ found=true }el{}
+  };
+  <found
+};
+
+f=isevaluable(r:$policyrule):bool{ <str.startswith(r.description;"EVALUABLE — ") };
+f=isdoconly(r:$policyrule):bool{ <str.startswith(r.description;"DOCUMENTATION ONLY — ") };
+f=isunimplemented(r:$policyrule):bool{ <str.startswith(r.description;"UNIMPLEMENTED ") };
+
+f=countclass(cls:str):i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.eq(cls;"evaluable") && isevaluable(r)){ n=n+1 }el{};
+    if(str.eq(cls;"doc") && isdoconly(r)){ n=n+1 }el{};
+    if(str.eq(cls;"unimplemented") && isunimplemented(r)){ n=n+1 }el{};
+    if(str.eq(cls;"none") && !isevaluable(r) && !isdoconly(r) && !isunimplemented(r)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=uncited():i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(!str.contains(r.description;"CPS 230 para ")){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=doconlynotlog():i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(isdoconly(r) && !str.eq(r.action;"log")){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=anydescriptioncontains(needle:str):bool{
+  let rs=reg.rulesfor(presetname());
+  let found=mut.false;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.contains(r.description;needle)){ found=true }el{}
+  };
+  <found
+};
+
+(* Every rule, evaluated by its own id, must yield exactly one violation carrying its own
+   action. Catches an id that is a prefix of another, and a rule the loader drops. *)
+f=evaluationmismatches():i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    let hits=loader.evaluatepreset(presetname();r.id;"confidential");
+    if(hits.len==1 as u64){
+      let v:$policyviolation=hits.get(0);
+      if(!str.eq(v.ruleid;r.id) || !str.eq(v.action;r.action)){ n=n+1 }el{}
+    }el{ n=n+1 }
+  };
+  <n
+};
+
+f=provider(p:$policy;id:str):$providerpermission{
+  let idx=mut.0-1;
+  lp(let i=0;i<p.providers.len;i=i+1){
+    let pp:$providerpermission=p.providers.get(i);
+    if(str.eq(pp.providerid;id)){ idx=i }el{}
+  };
+  if(idx<0){
+    <$providerpermission{providerid:"";allowed:false;maxsensitivity:"";requiresdpa:false;notes:""}
+  }el{
+    <p.providers.get(idx)
+  }
+};
+
+f=blocks(p:$policy;wanted:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<p.blockedentitytypes.len;i=i+1){
+    if(str.eq(p.blockedentitytypes.get(i);wanted)){ found=true }el{}
+  };
+  <found
+};
+
+f=hascompound(wanted:str;action:str):bool{
+  let cs=rules.presetrules(presetname());
+  let found=mut.false;
+  lp(let i=0;i<cs.len;i=i+1){
+    let c:$compoundrule=cs.get(i);
+    if(str.eq(c.id;wanted) && str.eq(c.action;action)){ found=true }el{}
+  };
+  <found
+};
+
+(* The entity requirements of CPS 230 this preset maps. APRA's own powers (para 18, para 36,
+   para 38, para 51, para 56) and para 27, which concerns an entity providing a material
+   service to others, are left out because nothing in loke bears on them. *)
+f=requiredparas():@i64{
+  <@(11;12;13;14;15;16;17;19;20;21;22;23;24;25;26;28;29;30;31;32;33;34;35;37;39;40;41;42;43;44;45;46;47;48;49;50;52;53;54;55;57;59;60;61)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── it loads, by name, through the loader ─────────────────────────────────── *)
+  let p:$policy=reg.byname(presetname());
+  if(t.assert(reg.isknown(p);"the CPS 230 preset loads by name")){pass=pass+1}el{fail=fail+1};
+  let ps:$policyset=loader.loadpreset(presetname());
+  if(t.assert(ps.regulations.len==1 as u64;"loading it yields one regulation")){pass=pass+1}el{fail=fail+1};
+  if(ps.regulations.len>0 as u64){
+    let rg:$regulation=ps.regulations.get(0);
+    if(t.assert((rg.rules.len as i64)==(reg.rulesfor(presetname()).len as i64);"carrying every rule the preset declares")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  if(t.assert((reg.rulesfor(presetname()).len as i64)==36;"exactly thirty-six rules, so one cannot be dropped unnoticed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── every rule is classed and cited ───────────────────────────────────────── *)
+  if(t.assert(countclass("none")==0;"every rule opens with EVALUABLE, DOCUMENTATION ONLY or UNIMPLEMENTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countclass("evaluable")==4;"four rules are evaluable from the preset's own fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countclass("unimplemented")==6;"six rules name a control loke does not have")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(uncited()==0;"every rule cites a CPS 230 paragraph")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(doconlynotlog()==0;"every documentation-only rule is log-only, so nothing unevaluable can warn or block")){pass=pass+1}el{fail=fail+1};
+
+  let want=requiredparas();
+  lp(let i=0;i<want.len;i=i+1){
+    let n=want.get(i);
+    let ns=str.fromint(n);
+    if(t.assert(anyrulecites(n);"CPS 230 para \(ns) is cited by a rule")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* ── the requirements the story names ──────────────────────────────────────── *)
+  let msp:$policyrule=rulebyid("cps230-materiality-determined-by-entity");
+  if(t.assert(citespara(msp.description;48) && citespara(msp.description;49) && str.contains(msp.description;"core technology services");"paras 48 and 49: a model provider is a candidate material service provider")){pass=pass+1}el{fail=fail+1};
+  let deny:$policyrule=rulebyid("cps230-provider-denied-until-registered");
+  if(t.assert(isevaluable(deny) && citespara(deny.description;14) && citespara(deny.description;52);"paras 14 and 52: the provider is denied until due diligence, evaluable")){pass=pass+1}el{fail=fail+1};
+  let incident:$policyrule=rulebyid("cps230-notify-apra-incident");
+  if(t.assert(citespara(incident.description;32) && str.contains(incident.description;"72 hours");"para 32: 72-hour operational risk incident notification")){pass=pass+1}el{fail=fail+1};
+  let disruption:$policyrule=rulebyid("cps230-notify-apra-disruption");
+  if(t.assert(citespara(disruption.description;41) && str.contains(disruption.description;"24 hours");"para 41: 24-hour notification of a disruption outside tolerance")){pass=pass+1}el{fail=fail+1};
+  let arrangement:$policyrule=rulebyid("cps230-notify-apra-material-arrangement");
+  if(t.assert(citespara(arrangement.description;60) && str.contains(arrangement.description;"20 business days");"para 60: 20-business-day notification of a material arrangement")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasrule("cps230-bcp-owned-by-entity") && hasrule("cps230-critical-operations-declared-by-entity");"business continuity and critical operations are the entity's")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isunimplemented(rulebyid("cps230-degrade-to-local")) && str.contains(rulebyid("cps230-degrade-to-local").description;"UNVALIDATED");"degrading to local inference is named unimplemented and unvalidated, not claimed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isunimplemented(rulebyid("cps230-service-provider-register"));"the missing service-provider register is named")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isunimplemented(rulebyid("cps230-preset-not-enforced"));"the preset says it is not enforced on the request path")){pass=pass+1}el{fail=fail+1};
+  let start:$policyrule=rulebyid("cps230-commencement");
+  if(t.assert(str.contains(start.description;"1 July 2025") && str.contains(start.description;"1 July 2026") && str.contains(start.description;"F2026L00475");"both commencement dates and the instrument cited are stated")){pass=pass+1}el{fail=fail+1};
+
+  (* ── each EVALUABLE rule is backed by the field it names ───────────────────── *)
+  let ext:$providerpermission=provider(p;"*");
+  if(t.assert(str.eq(ext.providerid;"*") && !ext.allowed && ext.requiresdpa;"external providers are denied pending due diligence")){pass=pass+1}el{fail=fail+1};
+  let loc:$providerpermission=provider(p;"local");
+  if(t.assert(loc.allowed && str.eq(loc.maxsensitivity;"restricted");"local inference is permitted as the substitute")){pass=pass+1}el{fail=fail+1};
+  let b:$budgetlimit=p.budget;
+  if(t.assert(str.eq(b.actiononexceed;"block") && b.maxcostusd>0.0;"the spend limit is set and blocks when exceeded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!p.crossborderallowed;"external scope is off until the offshoring question is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hascompound("apra-cps-230-no-cross-border";"deny");"and the rules engine derives the deny rule from it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the rules evaluate as written ─────────────────────────────────────────── *)
+  if(t.assert(evaluationmismatches()==0;"every rule evaluates by its id to exactly one violation with its own action")){pass=pass+1}el{fail=fail+1};
+  let hits=loader.evaluatepreset(presetname();"cps230-offshoring-denied";"confidential");
+  if(hits.len==1 as u64){
+    let v:$policyviolation=hits.get(0);
+    if(t.assert(str.eq(v.action;"block") && str.eq(v.severity;"high");"the offshoring rule blocks at high")){pass=pass+1}el{fail=fail+1}
+  }el{ if(t.assert(false;"the offshoring rule evaluates to one violation")){}el{fail=fail+1} };
+  let none=loader.evaluatepreset(presetname();"a request that names no rule";"confidential");
+  if(t.assert(none.len==0 as u64;"a context naming no rule raises nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── stale and overstated wording stays gone ───────────────────────────────── *)
+  if(t.assert(!anydescriptioncontains("fails OPEN");"no rule says loke fails open: NC1.9 made it fail closed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anydescriptioncontains("That is the continuity control, and it is the real one");"no rule presents an unbuilt fallback as a real continuity control")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anydescriptioncontains("Nothing calls the metrics collector");"no rule repeats the measurement gap DA1.3 closed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anydescriptioncontains("compliant") && !anydescriptioncontains("ensures compliance");"no rule claims compliance")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

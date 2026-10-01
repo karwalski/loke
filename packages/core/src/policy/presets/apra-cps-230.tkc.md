@@ -1,44 +1,55 @@
-Built-in policy preset for APRA Prudential Standard CPS 230 (Operational Risk Management), transcribed from `docs/specifications/policy-examples/apra-cps-230.yaml`. Exports `preset()`, `rules()` (27 `$policyrule`s, each description prefixed with the YAML path that produced it), and `blockingstories()`. Depends on `core.policy.schema` and `core.policy.types`.
+Built-in policy preset for APRA Prudential Standard CPS 230 Operational Risk Management. Exports `preset()`, `rules()` (36 `$policyrule`s) and `blockingstories()`. Depends on `core.policy.schema` and `core.policy.types`.
 
-CPS 230 is less amenable to being discharged by configuration than CPS 234. Identifying critical operations, setting tolerance levels, maintaining the service-provider register, notifying APRA and owning the continuity plan are all the entity's obligations. The claim this preset supports is narrower than "loke removes the provider dependency", which is false — a no-custody request still needs the provider reachable to return an artifact. It is that the dependency becomes bounded, measurable and degradable.
+**Source.** Read 2026-10-01 on the Federal Register of Legislation:
 
-Clause-to-rule mapping (YAML key → rule id):
+- F2023L01242 — determination No. 2 of 2023, made 11 September 2023, in force from **1 July 2025**. Varied by F2024L01107 (30 August 2024): pre-existing service-provider contracts from the earlier of renewal or 1 July 2026, and some continuity paragraphs deferred for non-SFIs to 1 July 2026.
+- F2026L00475 — determination No. 1 of 2026, made 23 April 2026, which revokes and remakes the standard, in force from **1 July 2026** (para 6). This is the instrument in force today, and **the paragraph numbers cited are its numbers**. The 2023 text numbered the same requirements one higher from 2026 para 7 to para 56 (it had a transitional para 7), and one lower for 2026 para 59 to para 61. 2026 para 57 and para 58, which exempt standardised terms with providers in the categories the Attachment lists, are new.
 
-| YAML source | rule id | action / severity |
-|---|---|---|
-| `critical_operations.declared_by_entity`, `entries: []` | `cps230-critical-operations-declared-by-entity` | log / high |
-| `critical_operations.default_assumed_critical` | `cps230-assume-critical-until-declared` | warn / high |
-| `critical_operations.entry_schema` tolerance fields | `cps230-tolerances-recorded-not-enforced` | log / high |
-| `service_providers.default_action` | `cps230-provider-denied-until-registered` | block / critical |
-| `service_providers.materiality_test` | `cps230-materiality-determined-by-entity` | log / high |
-| `service_providers.register` (`implemented: false`) | `cps230-service-provider-register` (UNIMPLEMENTED) | log / high |
-| `service_providers.providers[local].validation_status` | `cps230-local-degraded-mode` (UNVALIDATED, epic LC1) | warn / high |
-| `service_providers.providers[*].conditions`, `exit_plan` | `cps230-exit-plan-recorded` | block / high |
-| `service_providers.register.substitutability` | `cps230-substitutability-recorded` | log / high |
-| `service_providers.concentration.warn_below: 0.20` | `cps230-local-ratio-concentration` (UNIMPLEMENTED DA1.2, DA1.3) | warn / medium |
-| `service_providers.fourth_party` | `cps230-fourth-party-disclosure` | warn / high |
-| `disruption.on_provider_unavailable` | `cps230-degrade-to-local` | log / medium |
-| `disruption.on_local_unavailable` | `cps230-fail-visibly` | block / high |
-| `disruption.degraded_mode.must_surface_to_user` | `cps230-degraded-mode-surfaced` | warn / medium |
-| `disruption.in_flight_analysis` | `cps230-in-flight-analysis-survives` | log / low |
-| `disruption.measurement` | `cps230-disruption-measurement` (UNIMPLEMENTED DA1.2, DA1.3) | log / high |
-| `disruption.notification` | `cps230-disruption-notification` | warn / critical |
-| `disclosure.rationale` | `cps230-no-custody-simplifies-exit` | log / medium |
-| `disclosure.redact_and_forward.operational_consequence` | `cps230-forward-creates-exit-obligation` | warn / high |
-| `disclosure.fail_closed` + `fail_closed_enforced: false` | `cps230-fail-closed` (UNIMPLEMENTED NC1.9) | block / critical |
-| `change_management.provider_change_requires_reassessment` | `cps230-provider-change-reassessment` | warn / high |
-| `change_management.model_version_pinning` | `cps230-model-version-pinning` | warn / high |
-| `change_management.deprecation_watch` | `cps230-deprecation-watch` | log / medium |
-| `retention.at_rest_encryption` | `cps230-encryption-at-rest` (UNIMPLEMENTED X8) | block / critical |
-| `retention.disruption_record_days` | `cps230-disruption-record-retention` (NOT EXPRESSIBLE) | log / medium |
-| `budget_limits.rationale` | `cps230-budget-tolerance-blocks` | block / high |
-| `metadata.requires_entity_review`, `cannot_discharge` | `cps230-entity-review-required` | log / high |
+**Not compliance.** Identifying critical operations, setting tolerances, keeping the register, notifying APRA and owning the BCP are the entity's. **Not enforced.** Nothing on the request path calls `core.policy.loader.evaluate` (`cps230-preset-not-enforced`).
 
-Configuration mapping, and what loke cannot express:
+**Why this standard bites on loke.** A model provider a critical operation relies on is a *material service provider* (para 48), and core technology services are material by default unless the entity justifies otherwise (para 49(d)). The relief in para 57 for standardised terms covers only the Attachment's categories (government agencies, regulators, central banks, exchanges, clearing and settlement, payment systems, financial messaging), so a model provider's click-through terms do not escape the formal-agreement requirements of para 53 and para 54.
 
-- The CPS 230 YAML has no `data_classification`, `anonymisation` or `sensitivity_thresholds` section. Its `disclosure` section is stated as "inherited from the CPS 234 preset", and `metadata.related_presets` names `apra-cps-234`, so `classificationdefault`, `anonymisation`, `blockedentitytypes` and `requireapprovalabove` are taken from that preset rather than invented here.
-- `critical_operations.entries` is deliberately empty in the source and there is no `$policy` field for it. `allowedusecases` is left empty rather than populated with a guess.
-- `service_providers.register` has eighteen fields and `$providerpermission` has five, so the register is **not expressible**; nothing in loke maintains one.
-- `retention.disruption_record_days` is **not expressible**: `$retentionpolicy` has one audit-log period.
-- `budget_limits.monthly_usd: 500.0` and `on_exceed: block` → `budget`; `daily_usd` is not expressible, and `maxtokens` has no figure in the source.
-- `concentration.measure: local_request_ratio` has no field and no measurement behind it (DA1.2, DA1.3).
+**Classes** are the CPS 234 preset's: `EVALUABLE` (a preset field loke's policy code reads, asserted by the test), `DOCUMENTATION ONLY` (always `log`), `UNIMPLEMENTED <story>`. Citations are `CPS 230 para N`.
+
+| Paragraphs | Requirement | rule id | class | action / severity |
+|---|---|---|---|---|
+| 11, 12, 15, 16, 17 | Operational risk framework | `cps230-operational-risk-framework` | documentation | log / high |
+| 19–22 | Board accountability | `cps230-board-accountability` | documentation | log / high |
+| 23, 24 | Technology and data risk; meet CPS 234 | `cps230-technology-risk` | documentation | log / high |
+| 25, 26 | New technology assessed; resources and scenarios | `cps230-new-technology-assessment` | documentation | log / high |
+| 28, 29, 30 | Controls tested, gaps remediated | `cps230-controls-tested` | documentation | log / high |
+| 28 | Controls implemented | `cps230-preset-not-enforced` | UNIMPLEMENTED RG1.2 | log / critical |
+| 31 | Incidents recorded | `cps230-incidents-recorded` | documentation | log / medium |
+| 32 | Notify APRA within 72 hours | `cps230-notify-apra-incident` | documentation | log / critical |
+| 33, 34, 37 | Critical operations and tolerances, the entity's | `cps230-critical-operations-declared-by-entity` | documentation | log / high |
+| 35 | Supporting systems critical by default | `cps230-assume-critical-until-declared` | documentation | log / high |
+| 37, 40 | Tolerance monitoring | `cps230-tolerances-not-measured` | UNIMPLEMENTED RG1.2 | log / high |
+| 39, 42–45 | BCP, testing, update, audit | `cps230-bcp-owned-by-entity` | documentation | log / high |
+| 33, 40, 55 | Local inference as the alternative arrangement | `cps230-degrade-to-local` | UNIMPLEMENTED RG1.8, UNVALIDATED LC1 | log / high |
+| 13, 31 | Fail visibly | `cps230-fail-visibly` | documentation | log / high |
+| 41 | Notify APRA within 24 hours of disruption outside tolerance | `cps230-notify-apra-disruption` | documentation | log / critical |
+| 14, 48, 52 | Provider denied until due diligence | `cps230-provider-denied-until-registered` | **evaluable** (`providers` `*`) | block / critical |
+| 47, 55 | Substitute permitted | `cps230-local-substitute-permitted` | **evaluable** (`providers` `local`) | log / medium |
+| 15 | Limits within risk appetite | `cps230-budget-tolerance-blocks` | **evaluable** (`budget`) | block / high |
+| 60 | Offshoring notified first | `cps230-offshoring-denied` | **evaluable** (`crossborderallowed` false, derived `apra-cps-230-no-cross-border` deny) | block / high |
+| 48, 49 | Materiality, the entity's | `cps230-materiality-determined-by-entity` | documentation | log / high |
+| 48, 50 | Register, submitted annually | `cps230-service-provider-register` | UNIMPLEMENTED RG1.2 | log / high |
+| 46, 47 | Service provider management policy | `cps230-service-provider-policy` | documentation | log / medium |
+| 47, 52, 53 | Fourth parties | `cps230-fourth-party-disclosure` | documentation | log / high |
+| 52, 53, 54 | Due diligence and formal agreement | `cps230-due-diligence-and-agreement` | documentation | log / high |
+| 57, 58 | No standardised-terms relief for model providers | `cps230-standardised-terms-no-exemption` | documentation | log / high |
+| 47, 55 | Exit plan | `cps230-exit-plan-recorded` | documentation | log / high |
+| 55 | No-custody narrows the exit | `cps230-no-custody-simplifies-exit` | documentation | log / medium |
+| 52 | Concentration | `cps230-provider-concentration` | UNIMPLEMENTED RG1.2 | log / medium |
+| 52, 60 | Provider change | `cps230-provider-change-reassessment` | documentation | log / high |
+| 23, 59 | Model version pinning | `cps230-model-version-pinning` | documentation | log / high |
+| 59 | Monitoring of arrangements | `cps230-monitoring` | documentation | log / medium |
+| 60 | Notify APRA within 20 business days | `cps230-notify-apra-material-arrangement` | documentation | log / critical |
+| 45, 61 | Internal audit | `cps230-internal-audit` | documentation | log / medium |
+| 24 | Encryption at rest | `cps230-encryption-at-rest` | UNIMPLEMENTED X8 | block / critical |
+| 6 | Commencement | `cps230-commencement` | documentation | log / low |
+| 19 | Entity review | `cps230-entity-review-required` | documentation | log / high |
+
+**Not cited, deliberately:** APRA's own powers (para 18, para 36, para 38, para 51, para 56) and para 27, which concerns an entity providing a material service to others.
+
+**Corrected from the earlier transcription.** It said local degradation "is the continuity control, and it is the real one". loke has no path that retries a failed provider call locally: the router's fallback runs from local to cloud at selection time (`core.router.selector`). That is now `UNIMPLEMENTED RG1.8`. It also said nothing calls the metrics collector and that loke fails open; DA1.3 and NC1.9 closed both. The rules that warned or blocked on obligations no field can express (`cps230-assume-critical-until-declared`, `cps230-exit-plan-recorded`, `cps230-fourth-party-disclosure` and others) are now `log`. The disruption-record retention rule is dropped because CPS 230 sets no retention period; the 2555-day figure is the YAML's and is carried as `auditlogdays`.

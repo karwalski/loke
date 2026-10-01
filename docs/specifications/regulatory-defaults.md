@@ -46,6 +46,7 @@ Each preset is a **starting point**. Users and enterprise administrators can ove
 10. [Colorado AI Act](#10-colorado-ai-act)
 11. [Cross-Regulation Conflicts and Resolution](#11-cross-regulation-conflicts-and-resolution)
 12. [loke Configuration Schema Reference](#12-loke-configuration-schema-reference)
+13. [APRA Prudential Standards CPS 234 and CPS 230](#13-apra-prudential-standards-cps-234-and-cps-230)
 
 ---
 
@@ -1664,6 +1665,39 @@ interface BreachConfig {
 
 ---
 
+## 13. APRA Prudential Standards CPS 234 and CPS 230
+
+APRA's prudential standards are not privacy law. They bind APRA-regulated entities (ADIs, general, life and private health insurers, RSE licensees) and they reach loke because an external model provider that receives a request is a third party managing an information asset (CPS 234) and, where a critical operation relies on it, a material service provider (CPS 230). Both presets are **starting points that make no compliance determination**, and both are **loadable, not enforced**: nothing on loke's request path calls `core.policy.loader.evaluate`.
+
+### 13.1 Sources and dates
+
+| Standard | Instrument | In force | Read |
+|---|---|---|---|
+| CPS 234 Information Security | Determination No. 1 of 2018, F2018L01745 | 1 July 2019 (para 5); for third-party-managed assets, the earlier of contract renewal or 1 July 2020 (para 6) | 2026-10-01, APRA's July 2019 PDF; APRA's standards page still lists it as current |
+| CPS 230 Operational Risk Management | Determination No. 2 of 2023, F2023L01242, varied by F2024L01107 | 1 July 2025 until revoked; pre-existing contracts and some non-SFI continuity paragraphs from 1 July 2026 | 2026-10-01, Federal Register of Legislation |
+| CPS 230 Operational Risk Management | Determination No. 1 of 2026, F2026L00475, made 23 April 2026, revoking and remaking the 2023 instrument | 1 July 2026 (para 6) | 2026-10-01, Federal Register of Legislation |
+
+**Paragraph numbers for CPS 230 are the 2026 instrument's.** The 2023 text numbered the same requirements one higher from 2026 para 7 to para 56, and one lower for 2026 para 59 to para 61. 2026 para 57 and para 58 are new: they relieve standardised terms with providers in the categories the Attachment lists, and model providers are not among them. The cited paragraphs were compared between the two texts for numbering only. A full textual comparison was not made.
+
+### 13.2 What each preset can evaluate, and what is documentation only
+
+Each rule opens with its class and cites its paragraph. `EVALUABLE` means a field of the preset that loke's policy code reads. `DOCUMENTATION ONLY` rules are `log` and cannot warn or block. `UNIMPLEMENTED` rules name a story.
+
+| Standard | Evaluable from the preset's fields | Documentation only (the entity's) | Unimplemented in loke |
+|---|---|---|---|
+| CPS 234 | Provider deny until assessed (para 16, para 22); sensitivity classification (para 20); restricted assets local only and never forwarded, approval above confidential, special categories and credentials blocked (para 21, para 23) | Board and roles (13, 14), capability (15, 17), policy framework (18, 19), the third-party assessment itself (16, 22, 28), response plans (24–26), testing program and independence (27–31), internal audit (32–34), **notify APRA within 72 hours of a material incident (35) and within 10 business days of a material control weakness (36)** | Criticality axis (para 20, RG1.1); request-path enforcement (para 21, RG1.1); Medicare, BSB and account detectors (para 21, RG1.7); encryption at rest (para 21, X8) |
+| CPS 230 | Provider deny until due diligence (para 14, para 48, para 52); local substitute permitted (para 47, para 55); spend limit blocks (para 15); external scope off until offshoring is answered (para 60) | Framework (11–17), Board (19–22), technology risk and CPS 234 (23, 24), new technology and scenarios (25, 26), controls (28–30), incidents (31), **notify APRA within 72 hours (32), within 24 hours of a disruption outside tolerance (41), within 20 business days of a material arrangement and before material offshoring (60)**, critical operations and tolerances (33–35, 37), BCP and its testing (39, 42–45), materiality (48, 49), policy, fourth parties, due diligence and agreements (46, 47, 52–54, 57, 58), exit (55), monitoring (59), internal audit (45, 61) | Request-path enforcement (para 28, RG1.2); tolerance monitoring (para 37, para 40, RG1.2); service-provider register (para 48, para 50, RG1.2); concentration measure (para 52, RG1.2); degrade to local on provider failure (para 33, para 40, para 55, RG1.8; local inference also unvalidated on target hardware, LC1); encryption at rest (para 24, X8) |
+
+The full paragraph-to-rule tables are in `packages/core/src/policy/presets/apra-cps-234.tkc.md` and `apra-cps-230.tkc.md`. The worked YAML examples are `policy-examples/apra-cps-234.yaml` and `apra-cps-230.yaml`.
+
+### 13.3 What these presets must not be read as
+
+- Not a statement that an entity using loke meets CPS 234 or CPS 230. Every notification, the third-party assessment, the register, the BCP, tolerance setting and internal audit remain the entity's.
+- Not a statement that the no-custody path takes a provider outside CPS 234 para 16. A schema profile and an intent are information assets (para 12). What the path does is narrow what the provider holds.
+- Not a continuity claim. loke does not retry a failed provider call on local inference (RG1.8), and local inference has not been run on target hardware (LC1).
+
+---
+
 ## Appendix A: Entity Type Registry
 
 The following table lists every PII entity type referenced across all presets, which presets require it, and which detection layer handles it.
@@ -1740,5 +1774,6 @@ Regulations change. loke's preset definitions must be updated when:
 | Aug 2026 | EU AI Act | High-risk AI system requirements (Annex III) |
 | Aug 2027 | EU AI Act | High-risk AI in harmonised legislation products (Annex I) |
 | TBD 2026 | Australian Children's Online Privacy Code | Expected enforcement |
+| 1 Jul 2026 | APRA CPS 230 | Remade by F2026L00475; paragraph numbers changed (section 13.1). Done in the preset 2026-10-01 |
 | TBD 2026 | CPPA final audit regulations | Expected publication |
 | Ongoing | US state privacy laws | Connecticut, Virginia, Colorado (privacy), Utah, Iowa, Indiana, Tennessee, Montana, Oregon, Texas, Delaware, New Hampshire, New Jersey, Nebraska, Minnesota, Maryland, Kentucky, Rhode Island, Vermont — all effective by end of 2026 |
