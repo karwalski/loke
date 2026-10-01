@@ -1,0 +1,72 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.router.routellmbody;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=rl:core.router.routellm;
+
+(* MK6.15 — the body core.router.routellm sends to the RouteLLM sidecar, judged by a strict
+   JSON parser on what ARRIVES at scripts/lib/http_recorder.py. It was built as
+   `json.enc(req)` on a $routellmrequest struct, and std.json declares json.enc(str):str. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_routellm_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=judge(args:@str):str{
+  let h=mt process.spawn(args) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let bodies="\(logp).bodies";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder standing in for the RouteLLM sidecar came up")){pass=pass+1}el{fail=fail+1};
+
+  let prompt="refactor this:\n\tlet x = \"a\\b\";";
+  let r=rl.queryat("http://127.0.0.1:\(port)";prompt;0.3);
+  if(t.assert(str.contains(readfile(logp);"POST /route ");"the request arrives at /route")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(@("python3";"scripts/lib/json_field.py";bodies;"/route";"prompt";prompt));"ok";"its body is strict JSON and the multi-line prompt is exact")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(@("python3";"scripts/lib/json_field.py";"--json";bodies;"/route";"threshold";"0.3"));"ok";"and the threshold arrives as the number 0.3")){pass=pass+1}el{fail=fail+1};
+  (* The recorder answers {} on /route: no route, so the signal is reported unavailable. *)
+  if(t.assert(!r.available;"an answer without a route is not a routing signal")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(bodies);
+  file.delete("\(logp).headers");
+  file.delete("\(base).port");
+  <fail
+};

@@ -1,0 +1,86 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.mcpbroker.serverargs;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pipe:core.privacy.pipeline;
+i=reg:mcpbroker.registry;
+i=server:mcpbroker.server;
+
+(* MK6.15 — the arguments of a tools/call as the broker's front end,
+   mcpbroker.server.handlerequest, forwards them, judged on what ARRIVES at
+   scripts/lib/http_recorder.py. They were taken as `json.enc(json.getval(params;
+   "arguments"))`: on toke 3.1.0 json.getval answers the raw JSON text of the value, and
+   json.enc quoted that text as a JSON string, so the upstream received `"arguments":"{...}"`,
+   a string where MCP requires an object. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_serverargs_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=judge(args:@str):str{
+  let h=mt process.spawn(args) { $ok:h h; $err:e @() };
+  if(h == @()){ <"python3 did not start" }el{};
+  let out=mt process.stdout(h) { $ok:o o; $err:e "" };
+  process.wait(h);
+  <str.trim(out)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let bodies="\(logp).bodies";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder standing in for the upstream MCP server came up")){pass=pass+1}el{fail=fail+1};
+  let none:@str=@();
+  let upstream=$serverentry{ name:"rec"; host:"127.0.0.1"; port:str.toint(port) as i32; toolprefix:"rec_"; healthy:true; lastchecked:0; tools:none };
+  let registry=reg.register(reg.newregistry();upstream);
+  let cfg=pipe.newconfig("http://127.0.0.1:59991";"http://127.0.0.1:59992");
+
+  let args="{\"path\":\"/tmp/x\",\"depth\":2,\"flags\":[true,null],\"opts\":{\"k\":\"v\"}}";
+  let req="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"rec_echo\",\"arguments\":\(args)}}";
+  let answer=server.handlerequest(req;registry;cfg);
+  if(t.asserteq(judge(@("python3";"scripts/lib/json_field.py";"--json";bodies;"/mcp";"params.arguments";args));"ok";"the arguments arrive upstream as the JSON object the client sent")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(judge(@("python3";"scripts/lib/json_field.py";bodies;"/mcp";"params.name";"echo"));"ok";"under the upstream's own tool name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(answer;"tool-answer");"and the upstream's answer is relayed")){pass=pass+1}el{fail=fail+1};
+
+  (* No arguments at all: MCP makes them optional, and the upstream gets an empty object. *)
+  let bare="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"rec_echo\"}}";
+  let a2=server.handlerequest(bare;registry;cfg);
+  if(t.asserteq(judge(@("python3";"scripts/lib/json_field.py";"--json";bodies;"/mcp";"params.arguments";"{}"));"ok";"a call without arguments forwards an empty object")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a2;"tool-answer");"and is answered")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete(bodies);
+  file.delete("\(logp).headers");
+  file.delete("\(base).port");
+  <fail
+};

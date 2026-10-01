@@ -5,6 +5,8 @@
 
 Usage: json_field.py <log-file>.bodies <request-path> <field-path> <expected>
        json_field.py --body <json-text> <field-path> <expected>
+       json_field.py --re ...   (either form; <expected> is a regular expression)
+       json_field.py --json ... (either form; <expected> is JSON text)
 
 Takes the LAST request to <request-path> (e.g. /api/generate) from the recorder's `.bodies`
 file, parses its body with json.loads, which refuses a raw control character inside a string
@@ -13,6 +15,11 @@ e.g. `messages.1.content`) and prints `ok` if the value there equals <expected> 
 Otherwise it prints what went wrong: no such request, a body that is not strict JSON (with
 the parser's message), a missing field, or the value that was found instead.
 
+`--re` before either form (MK6.14) compares by regular expression instead: the value must
+be a string that <expected> matches in full (re.fullmatch), for a value holding a
+placeholder whose salt the test cannot know in advance. `--json` (MK6.15) instead parses
+<expected> as JSON and compares values, for a field that is a number, an object or an array.
+
 The second form judges a text given directly, for an answer a module builds rather than a
 request it sends. An empty <field-path> compares the whole decoded value.
 
@@ -20,7 +27,7 @@ request it sends. An empty <field-path> compares the whole decoded value.
 comparison is of characters, after the body has been decoded: a body that escaped a
 character wrongly fails it just as one that left it raw fails the parse.
 """
-import json, sys
+import json, re, sys
 
 
 def lastbody(bodies, reqpath):
@@ -39,6 +46,12 @@ def lastbody(bodies, reqpath):
     return "", found
 
 
+REGEX = len(sys.argv) > 1 and sys.argv[1] == "--re"
+ASJSON = len(sys.argv) > 1 and sys.argv[1] == "--json"
+if REGEX or ASJSON:
+    del sys.argv[1]
+
+
 def judge(text, field, expected):
     try:
         v = json.loads(text)
@@ -49,7 +62,13 @@ def judge(text, field, expected):
             v = v[int(k)] if isinstance(v, list) else v[k]
         except (KeyError, IndexError, ValueError, TypeError):
             return "no field %s" % field
-    return "ok" if v == expected else "value differs: %r" % (v,)
+    if ASJSON:
+        same = type(v) is type(json.loads(expected)) and v == json.loads(expected)
+    elif REGEX:
+        same = isinstance(v, str) and re.fullmatch(expected, v, re.S) is not None
+    else:
+        same = v == expected
+    return "ok" if same else "value differs: %r" % (v,)
 
 
 if sys.argv[1] == "--body":
