@@ -2243,3 +2243,20 @@ answers -1 and `process.kill` false, and `h==0` is true. loke now uses that ever
 already half does) or reject it with a diagnostic pointing at `.len`; and give
 `process.spawn` a failure value that cannot be mistaken for a handle, or have
 `process.wait` refuse an address that is not one it handed out.
+
+## T-61 — adding an untyped integer local to a u32 struct field emits invalid IR
+
+**Severity: build break (the compiler rejects its own output); not silent.**
+
+Reported 2026-10-01 at toke v3.1.0 (`86c432da`) by loke F3.9b; seen by one worker, not yet
+reduced to a standalone reproducer. In `core.privacy.systemprompt`, an expression of the shape
+`unplaced:r.unplaced+stray` (where `r.unplaced:u32` and `stray` is a local counted with
+integer literals) failed at the LLVM step with
+`'%t212' defined with type 'i64' but expected 'i32'`: the sum is typed u32 for the field
+but one operand is emitted as i64 without a truncation.
+
+Workaround in use (`packages/core/src/privacy/system_prompt.tk:82`): do the arithmetic in i64
+and narrow once, `((r.unplaced as i64)+stray) as u32`.
+
+**The ask.** Either widen or narrow the operands consistently when an untyped integer meets a
+u32, or reject the mixed expression with a type error naming both operands.
