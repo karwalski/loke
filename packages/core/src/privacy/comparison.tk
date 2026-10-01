@@ -1,0 +1,389 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.privacy.comparison;
+
+i=str:std.str;
+i=json:std.json;
+i=sh:shared.types;
+i=fr:core.privacy.filterregistry;
+i=lh:core.privacy.layerhealth;
+i=lyc:core.privacy.layerconfig;
+i=cn:core.privacy.consensus;
+i=ev:core.privacy.evaluation;
+i=pl:core.privacy.pipeline;
+
+(* F3b.9. `loke privacy evaluate`: every configured detection layer side by side, on one text
+   or on a labelled file.
+
+   THE SAME CALLS AS THE PIPELINE. `compare` walks the registry of a $pipelineconfig in order
+   and makes, per layer, exactly the calls core.privacy.pipeline.run makes: layerhealth.consult
+   (probe, then scan only a layer that answered), layerconfig.accepted (the layer's threshold
+   and entity filter), layerconfig.masks and layerconfig.vetoes, and then consensus.apply over
+   the masking layers' accepted detections with the configured strategy. What differs is what
+   is kept: run merges every layer into one list, and this keeps each layer's own list, its
+   state and its reason, so a person can see which layer found what. pipeline.tk is not
+   changed; if run ever consults layers differently, this module must follow it.
+
+   UNAVAILABLE IS NOT EMPTY. A layer that did not complete a scan (disabled, unavailable,
+   failed) reports its state and reason and no detection count at all. A count of zero is
+   printed only for a layer that scanned the text and found nothing, and a labelled file is
+   never scored for a layer on a text it did not scan.
+
+   NO VALUE IS PRINTED unless the caller asks. A detection is shown as its type in brackets,
+   its byte span and its confidence. The value appears only when showvalues is true (the
+   CLI's --show-values), and the labelled report never prints a value or a text at all.
+
+   SCORING is core.privacy.evaluation's, not a second scorer: each layer's accepted
+   detections become spans (entityspans, or valuespans for a layer that reports only
+   values, as NER does) and are scored per text with corpuslabels and scoretext, the entity-
+   level rule tests/integration/test_detection_recall.tk uses. tp is the labelled entities a
+   layer's detections overlap, fn those they miss, fp its detection regions that overlap no
+   real PII. The labelled file is the corpus JSONL of tests/fixtures/pii-corpus: one object
+   per line with "text" and "entities":[{"type","value","start","end","expected_detected"}];
+   only entities with expected_detected true count towards recall. *)
+
+(* One layer's part in one text. hits are the detections its settings accept (what the
+   pipeline would hand to consensus), rawcount what it reported before they were applied. *)
+t=$layerview{
+  id:str;
+  mode:str;
+  state:str;
+  reason:str;
+  completed:bool;
+  masks:bool;
+  vetoed:bool;
+  hits:@$piientity;
+  rawcount:i64;
+  unplaced:i64
+};
+
+(* Every layer's view, and the consensus decision over the masking layers' detections.
+   resolved[i] is the decision on the detection reported by layer resolvedlayer[i]. *)
+t=$comparison{
+  layers:@$layerview;
+  resolved:@$resolvedentity;
+  resolvedlayer:@str;
+  voters:@str;
+  strategy:str;
+  layererror:str
+};
+
+(* A layer's running score over a labelled file. texts counts the texts it scanned; a text it
+   did not scan is not scored for it, and reason says why the last one was not. *)
+t=$layertally{
+  id:str;
+  score:$entityscore;
+  texts:i64;
+  reason:str
+};
+
+t=$labelledresult{
+  text:str;
+  ok:bool
+};
+
+f=view(layer:$privacyfilter;lr:$layerresult):$layerview{
+  let st:$layerstatus=lr.status;
+  if(lh.iscompleted(st)){
+    let hits=lyc.accepted(layer;lr.hits);
+    <$layerview{id:layer.id;mode:layer.mode;state:st.state;reason:st.reason;completed:true;masks:lyc.masks(layer);vetoed:lyc.vetoes(layer;hits);hits:hits;rawcount:lr.hits.len as i64;unplaced:lr.unplaced}
+  }el{};
+  <$layerview{id:layer.id;mode:layer.mode;state:st.state;reason:st.reason;completed:false;masks:lyc.masks(layer);vetoed:false;hits:@($piientity);rawcount:0;unplaced:0}
+};
+
+f=compare(text:str;config:$pipelineconfig):$comparison{
+  let views=mut.@($layerview);
+  let allentities=mut.@($piientity);
+  let hitlayers=mut.@();
+  let voters=mut.@();
+  let reg=config.layers;
+  lp(let li=0;li<reg.filters.len;li=li+1){
+    let layer:$privacyfilter=reg.filters.get(li);
+    let v=view(layer;lh.consult(layer;text));
+    views=views.push(v);
+    if(v.completed && v.masks){
+      voters=voters.push(v.id);
+      lp(let hi=0;hi<v.hits.len;hi=hi+1){
+        allentities=allentities.push(v.hits.get(hi));
+        hitlayers=hitlayers.push(v.id)
+      }
+    }el{}
+  };
+  let agreed:$consensusresult=cn.apply(allentities;hitlayers;voters;config.consensus;config.consensusthreshold);
+  <$comparison{layers:views;resolved:agreed.resolved;resolvedlayer:hitlayers;voters:voters;strategy:agreed.strategy;layererror:config.layererror}
+};
+
+f=completedcount(c:$comparison):i64{
+  let n=mut.0;
+  lp(let i=0;i<c.layers.len;i=i+1){
+    if(c.layers.get(i).completed){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* ── Spans ─────────────────────────────────────────────────────────────────── *)
+
+(* What one detection masks, as spans: its own span when it has one, otherwise every
+   occurrence of its value, which is what placeholder.applytotext replaces. *)
+f=spansof(text:str;e:$piientity):@$labelspan{
+  if(e.end>e.start){ <ev.entityspans(@(e)) }el{};
+  <ev.valuespans(text;@(e))
+};
+
+f=allspans(text:str;ents:@$piientity):@$labelspan{
+  let out=mut.@($labelspan);
+  lp(let i=0;i<ents.len;i=i+1){
+    out=ev.joinspans(out;spansof(text;ents.get(i)))
+  };
+  <out
+};
+
+(* ev.numtext, not str.fromint, inside an interpolation: see the note on numtext there. *)
+f=spantext(s:$labelspan):str{
+  <"\(ev.numtext(s.start))-\(ev.numtext(s.end))"
+};
+
+f=spanstext(spans:@$labelspan):str{
+  if(spans.len==0){ <"(not located in the text)" }el{};
+  let joined=mut.spantext(spans.get(0));
+  lp(let i=1;i<spans.len;i=i+1){
+    joined="\(joined),\(spantext(spans.get(i)))"
+  };
+  <joined
+};
+
+(* ── Rendering ─────────────────────────────────────────────────────────────── *)
+
+(* The type in brackets, and the value after it only when asked for. *)
+f=shown(entitytype:str;value:str;showvalues:bool):str{
+  if(showvalues){ <"[\(entitytype)] \(json.enc(value))" }el{};
+  <"[\(entitytype)]"
+};
+
+f=conftext(c:f64):str{
+  <sh.f64fixed(c;2)
+};
+
+f=hitline(text:str;e:$piientity;showvalues:bool):str{
+  <"    \(shown(e.entitytype;e.value;showvalues)) \(spanstext(spansof(text;e))) confidence \(conftext(e.confidence))"
+};
+
+f=plural(n:i64;one:str;many:str):str{
+  let k:str=str.fromint(n);
+  if(n==1){ <"\(k) \(one)" }el{};
+  <"\(k) \(many)"
+};
+
+(* Named so they can be called inside an interpolation, where a string literal does not lex. *)
+f=ndetections(n:i64):str{ <plural(n;"detection";"detections") };
+f=nspans(n:i64):str{ <plural(n;"span";"spans") };
+f=nlayers(n:i64):str{ <plural(n;"layer";"layers") };
+f=commas(items:@str):str{ <str.join(",";items) };
+
+f=addline(lines:@str;line:str):@str{
+  <lines.push(line)
+};
+
+(* The lines for one layer, appended to lines. *)
+f=layerlines(lines:@str;text:str;v:$layerview;showvalues:bool):@str{
+  let out=mut.lines;
+  if(!v.completed){
+    if(str.eq(v.state;"disabled")){
+      out=out.push("  \(v.id): disabled -- not consulted, not scored");
+      <out
+    }el{};
+    out=out.push("  \(v.id): \(v.state) -- \(v.reason). The layer did not scan this text; that is not the same as finding nothing.");
+    <out
+  }el{};
+  out=out.push("  \(v.id) (\(v.mode)): completed, \(ndetections(v.hits.len as i64))");
+  let dropped=v.rawcount-(v.hits.len as i64);
+  if(dropped>0){
+    out=out.push("    (\(ndetections(dropped)) below the layer's threshold or outside its entity filter, not counted)")
+  }el{};
+  lp(let i=0;i<v.hits.len;i=i+1){
+    out=addline(out;hitline(text;v.hits.get(i);showvalues))
+  };
+  if(!v.masks){ out=out.push("    detect-only: these are reported, not masked, and the layer does not vote") }el{};
+  if(v.vetoed){ out=out.push("    veto: this layer found PII above its threshold, so the pipeline would refuse this text") }el{};
+  if(v.unplaced>0){
+    out=out.push("    \(nspans(v.unplaced)) could not be placed in the text exactly, so the pipeline would refuse this text")
+  }el{};
+  <out
+};
+
+(* The layer names in a $resolvedentity's detectinglayers ("ner=0.85,presidio=0.85"). *)
+f=foundby(r:$resolvedentity):@str{
+  let out=mut.@();
+  if(str.len(r.detectinglayers)==0){ <out }el{};
+  let parts=str.split(r.detectinglayers;",");
+  lp(let i=0;i<parts.len;i=i+1){
+    let p:str=parts.get(i);
+    let eq=str.indexof(p;"=");
+    if(eq>0){ out=out.push(str.slice(p;0;eq)) }el{ out=out.push(p) }
+  };
+  <out
+};
+
+f=missedby(r:$resolvedentity;voters:@str):@str{
+  let by=foundby(r);
+  let out=mut.@();
+  lp(let i=0;i<voters.len;i=i+1){
+    let v:str=voters.get(i);
+    if(cn.indexof(by;v)==by.len){ out=out.push(v) }el{}
+  };
+  <out
+};
+
+f=resolvedline(text:str;r:$resolvedentity;from:str;voters:@str;showvalues:bool):str{
+  let e=$piientity{entitytype:r.entitytype;value:r.value;start:r.start as u32;end:r.end as u32;confidence:r.finalconfidence;placeholder:""};
+  let label=shown(r.entitytype;r.value;showvalues);
+  let where=spanstext(spansof(text;e));
+  let missed=missedby(r;voters);
+  let agree=mut."agreed by every voter";
+  if(missed.len>0){
+    agree="DISAGREEMENT, not found by \(commas(missed))"
+  }el{};
+  <"    \(label) \(where) reported by \(from); found by \(r.detectinglayers); \(agree) -> \(r.action)"
+};
+
+(* The whole single-text report, one line per element. *)
+f=reportlines(text:str;c:$comparison;showvalues:bool):@str{
+  let out=mut.@();
+  out=out.push("loke privacy evaluate: \(nlayers(c.layers.len as i64)) configured, text of \(ev.numtext(str.len(text) as i64)) bytes");
+  if(showvalues){
+    out=out.push("values ARE shown (--show-values)")
+  }el{
+    out=out.push("values are hidden: each detection shows its type, byte span and confidence (--show-values prints them)")
+  };
+  if(str.len(c.layererror)>0){
+    out=out.push("privacy.layers in config.toml cannot be applied, so the pipeline refuses every request: \(c.layererror)")
+  }el{};
+  out=out.push("");
+  out=out.push("layers, in registry order:");
+  lp(let i=0;i<c.layers.len;i=i+1){
+    out=layerlines(out;text;c.layers.get(i);showvalues)
+  };
+  out=out.push("");
+  let voters=mut.str.join(",";c.voters);
+  if(c.voters.len==0){ voters="none" }el{};
+  let strategyname=cn.strategyname(c.strategy);
+  out=out.push("consensus: \(c.strategy), \(strategyname); voters: \(voters)");
+  if(c.voters.len==0){
+    out=out.push("    no masking layer completed a scan, so the pipeline would refuse this text")
+  }el{};
+  let masked=mut.0;
+  let disagree=mut.0;
+  let overlaps=mut.0;
+  lp(let i=0;i<c.resolved.len;i=i+1){
+    let r:$resolvedentity=c.resolved.get(i);
+    out=out.push(resolvedline(text;r;c.resolvedlayer.get(i);c.voters;showvalues));
+    if(str.eq(r.action;"mask")){ masked=masked+1 }el{};
+    if(missedby(r;c.voters).len>0){ disagree=disagree+1 }el{};
+    if(foundby(r).len>1){ overlaps=overlaps+1 }el{}
+  };
+  let total=c.resolved.len as i64;
+  out=out.push("summary: \(ndetections(total)),\(ev.numtext(overlaps)) found by more than one layer, \(ev.numtext(disagree)) not found by every voter; \(ev.numtext(masked)) would be masked, \(ev.numtext(total-masked)) passed");
+  <out
+};
+
+f=report(text:str;config:$pipelineconfig;showvalues:bool):str{
+  <str.join("\n";reportlines(text;compare(text;config);showvalues))
+};
+
+(* ── A labelled file ───────────────────────────────────────────────────────── *)
+
+(* Tally i so far, or a fresh one for id on the first text. Every text walks the same
+   registry, so position i is the same layer each time. *)
+f=prior(acc:@$layertally;i:i64;id:str):$layertally{
+  if(i<(acc.len as i64)){ <acc.get(i) }el{};
+  <$layertally{id:id;score:ev.emptyscore();texts:0;reason:""}
+};
+
+(* The detections the configured strategy would mask, as entities. *)
+f=maskedentities(c:$comparison):@$piientity{
+  let out=mut.@($piientity);
+  lp(let i=0;i<c.resolved.len;i=i+1){
+    let r:$resolvedentity=c.resolved.get(i);
+    if(str.eq(r.action;"mask")){
+      out=out.push($piientity{entitytype:r.entitytype;value:r.value;start:r.start as u32;end:r.end as u32;confidence:r.finalconfidence;placeholder:""})
+    }el{}
+  };
+  <out
+};
+
+f=tallytext(acc:$layertally;text:str;scored:@$labelspan;realpii:@$labelspan;ok:bool;dets:@$piientity;reason:str):$layertally{
+  if(!ok){ <$layertally{id:acc.id;score:acc.score;texts:acc.texts;reason:reason} }el{};
+  <$layertally{id:acc.id;score:ev.scoretext(scored;realpii;allspans(text;dets);acc.score);texts:acc.texts+1;reason:acc.reason}
+};
+
+f=scoreline(text:str;ents:@$json;c:$comparison;acc:@$layertally):@$layertally{
+  let scored=ev.corpuslabels(text;ents;true);
+  let realpii=ev.corpuslabels(text;ents;false);
+  let out=mut.@($layertally);
+  lp(let i=0;i<c.layers.len;i=i+1){
+    let v:$layerview=c.layers.get(i);
+    out=out.push(tallytext(prior(acc;i;v.id);text;scored;realpii;v.completed;v.hits;"\(v.state): \(v.reason)"))
+  };
+  out=out.push(tallytext(prior(acc;c.layers.len as i64;"consensus");text;scored;realpii;c.voters.len>0;maskedentities(c);"no masking layer completed"));
+  <out
+};
+
+f=tallyline(tl:$layertally;ntexts:i64):str{
+  if(tl.texts==0){
+    <"layer=\(tl.id) not scored: it scanned none of the texts (\(tl.reason)). That is not a recall of zero."
+  }el{};
+  let s=tl.score;
+  let line=mut."\(ev.scoreline(tl.id;s)) f1=\(ev.bplabel(ev.f1bp(ev.entityprecisionbp(s);ev.entityrecallbp(s)))) tp=\(ev.numtext(s.matched)) fp=\(ev.numtext(s.spurious)) fn=\(ev.numtext(s.labelled-s.matched)) texts=\(ev.numtext(tl.texts))/\(ev.numtext(ntexts))";
+  if(tl.texts<ntexts){ line="\(line) (not scored on the texts it did not scan: \(tl.reason))" }el{};
+  <line
+};
+
+(* The per-layer TP/FP/FN report on a labelled file. Prints no text and no value. ok is true
+   when at least one text was read, some layer scanned at least one of them, and the layer
+   config applies. *)
+f=labelledreport(jsonl:str;config:$pipelineconfig):$labelledresult{
+  let lines=str.split(jsonl;"\n");
+  let tallies=mut.@($layertally);
+  let ntexts=mut.0;
+  let labelled=mut.0;
+  let layererror=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let line:str=lines.get(i);
+    if(str.len(line)>2){
+      let obj=json.dec(line);
+      let text=mt json.str(obj;"text") { $ok:s s; $err:e "" };
+      if(str.len(text)>0){
+        let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
+        let c=compare(text;config);
+        layererror=c.layererror;
+        tallies=scoreline(text;ents;c;tallies);
+        ntexts=ntexts+1;
+        labelled=labelled+(ev.corpuslabels(text;ents;true).len as i64)
+      }el{}
+    }el{}
+  };
+  let out=mut.@();
+  out=out.push("loke privacy evaluate --file: \(ev.numtext(ntexts)) labelled texts, \(ev.numtext(labelled)) labelled entities scored (expected_detected true)");
+  if(ntexts==0){
+    out=out.push("no text could be read from the file: nothing was evaluated");
+    <$labelledresult{text:str.join("\n";out);ok:false}
+  }el{};
+  if(str.len(layererror)>0){
+    out=out.push("privacy.layers in config.toml cannot be applied, so the pipeline refuses every request: \(layererror)")
+  }el{};
+  out=out.push("tp = labelled entities a layer's detections overlap; fn = labelled entities they miss; fp = detection regions overlapping no real PII. Values are never printed.");
+  let scannedany=mut.false;
+  lp(let i=0;i<tallies.len;i=i+1){
+    let tl:$layertally=tallies.get(i);
+    if(tl.texts>0){ scannedany=true }el{};
+    out=out.push(tallyline(tl;ntexts))
+  };
+  <$labelledresult{text:str.join("\n";out);ok:scannedany && str.len(layererror)==0}
+};
+
+(* What the CLI exits with: 0 when at least one layer scanned the text and the layer config
+   applies, 1 otherwise. A report is printed either way. *)
+f=evaluated(c:$comparison):bool{
+  <completedcount(c)>0 && str.len(c.layererror)==0
+};

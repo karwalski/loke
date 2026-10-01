@@ -689,6 +689,12 @@ step_test() {
   if [[ -x ./scripts/smoke_doctor.sh ]]; then
     ./scripts/smoke_doctor.sh || return 1
   fi
+  # F3b.9: the built `loke privacy evaluate` against a recording stand-in for NER and
+  # Presidio, judged on its report (per-layer spans, no value echoed, unavailable layers
+  # named as such) and on the requests that arrived. OS-assigned port, no lock.
+  if [[ -x ./scripts/smoke_privacy_evaluate.sh ]]; then
+    ./scripts/smoke_privacy_evaluate.sh || return 1
+  fi
   # The whole path: moke -> loke -> a recording fake model -> back. Asserts the model never
   # saw the PII and the user got it back. First ran end to end on 2026-09-25.
   if [[ -x ./scripts/smoke_e2e.sh ]]; then

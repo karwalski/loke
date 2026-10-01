@@ -1,0 +1,164 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.comparison;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=cmp:core.privacy.comparison;
+i=sh:shared.types;
+
+(* F3b.9 — core.privacy.comparison, which `loke privacy evaluate` prints, against the real
+   registry and the layer calls core.privacy.pipeline.run makes.
+
+   scripts/lib/http_recorder.py stands in for NER (Ollama /api/chat) and Presidio
+   (/analyze), as in test_consensus_pipeline: both report "Jane Citizen" (NER by value
+   only, Presidio at 0-12), and the regex layer finds the email at 34-50. So each layer's
+   own list is known, and this checks:
+     - each detection is shown under the layer that reported it, and only there;
+     - no detected value is printed unless --show-values asks for it (and then it is,
+       so the hiding is not an accident of the format);
+     - a layer that is not running is reported unavailable, never as finding nothing;
+     - consensus provenance and disagreement, under two strategies;
+     - per-layer tp/fp/fn on a labelled file, through core.privacy.evaluation. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_comparison_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=layer(c:$comparison;id:str):$layerview{
+  let found=mut.$layerview{id:"";mode:"";state:"absent";reason:"";completed:false;masks:false;vetoed:false;hits:@($piientity);rawcount:0;unplaced:0};
+  lp(let i=0;i<c.layers.len;i=i+1){
+    let v:$layerview=c.layers.get(i);
+    if(str.eq(v.id;id)){ found=v }el{}
+  };
+  <found
+};
+
+(* The types a layer reported, lower-cased, joined: "email" or "person". *)
+f=types(v:$layerview):str{
+  let out=mut.@();
+  lp(let i=0;i<v.hits.len;i=i+1){
+    let e:$piientity=v.hits.get(i);
+    out=out.push(sh.strlower(e.entitytype))
+  };
+  <str.join("|";out)
+};
+
+f=lines(text:str;v:$layerview):str{
+  <str.join("\n";cmp.layerlines(@();text;v;false))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(rec!=0 && str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  (* Nothing listens on port 1. *)
+  let dead="http://127.0.0.1:1";
+
+  let text="Jane Citizen called Tuesday, mail jane@example.com";
+  let name="Jane Citizen";
+  let email="jane@example.com";
+  let all=pl.newconfig(url;url);
+
+  (* ── Each layer's own detections, under that layer ───────────────────────── *)
+  let c=cmp.compare(text;all);
+  let rx=layer(c;fr.regexid());
+  let nr=layer(c;fr.nerid());
+  let pr=layer(c;fr.presidioid());
+  if(t.assert(rx.completed && nr.completed && pr.completed;"regex, NER and Presidio all completed a scan")){pass=pass+1}el{fail=fail+1};
+  let rxtypes=types(rx);
+  let nrtypes=types(nr);
+  let prtypes=types(pr);
+  if(t.asserteq(rxtypes;"email";"the regex layer's list holds the email and nothing else (\(rxtypes))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(nrtypes;"person";"NER's list holds the person and nothing else (\(nrtypes))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(prtypes;"person";"Presidio's list holds the person and nothing else (\(prtypes))")){pass=pass+1}el{fail=fail+1};
+  let rl=lines(text;rx);
+  let nl=lines(text;nr);
+  if(t.assert(str.contains(rl;"34-50") && !str.contains(rl;"0-12");"the regex section shows the email's span and not the name's")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nl;"[PERSON] 0-12") && !str.contains(nl;"34-50");"the NER section places its value-only hit at 0-12 and shows no email")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nl;"ner (detect-and-mask): completed, 1 detection");"and says NER completed with one detection")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Values are hidden unless asked for ───────────────────────────────────── *)
+  let r=cmp.report(text;all;false);
+  if(t.assert(!str.contains(r;name) && !str.contains(r;"Jane") && !str.contains(r;"Citizen");"the report does not print the name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(r;email) && !str.contains(r;"jane@") && !str.contains(r;"example.com");"nor the email")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"[PERSON] 0-12") && str.contains(r;"34-50");"it shows each detection's type and span instead")){pass=pass+1}el{fail=fail+1};
+  let shown=cmp.report(text;all;true);
+  if(t.assert(str.contains(shown;name) && str.contains(shown;email);"with --show-values the same report prints them, so the hiding is the flag's doing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Consensus: who found what, and how the strategy resolves it ──────────── *)
+  if(t.assert(str.contains(r;"[PERSON] 0-12 reported by ner; found by ner=") && str.contains(r;"[PERSON] 0-12 reported by presidio; found by ner=");"each consensus line names the layer that reported the detection")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"presidio=") && str.contains(r;"DISAGREEMENT, not found by regex -> mask");"the name is found by NER and Presidio, missed by regex, and masked under the default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"reported by regex; found by regex=") && str.contains(r;"DISAGREEMENT, not found by ner,presidio -> mask");"the email is found by regex alone and masked under the default")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r;"consensus: most-restrictive") && str.contains(r;"voters: regex,ner,presidio");"the strategy and the voters are named")){pass=pass+1}el{fail=fail+1};
+  let mj=cmp.report(text;pl.withconsensus(all;"majority";"");false);
+  if(t.assert(str.contains(mj;"not found by ner,presidio -> pass") && str.contains(mj;"not found by regex -> mask");"under majority the email (1 of 3) passes and the name (2 of 3) is masked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An unavailable layer is not an empty one ─────────────────────────────── *)
+  let down=pl.newconfig(dead;url);
+  let cd=cmp.compare(text;down);
+  let pd=layer(cd;fr.presidioid());
+  if(t.assert(!pd.completed && str.eq(pd.state;"unavailable");"Presidio not running is unavailable, not completed (state \(pd.state))")){pass=pass+1}el{fail=fail+1};
+  let rd=str.join("\n";cmp.reportlines(text;cd;false));
+  if(t.assert(str.contains(rd;"presidio: unavailable -- Presidio sidecar unreachable") && str.contains(rd;"did not scan this text");"the report says Presidio was unreachable and did not scan")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(rd;"presidio (detect-and-mask)") && !str.contains(rd;"0 detections");"and never prints it as a layer that completed with 0 detections")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rd;"voters: regex,ner") && !str.contains(rd;"voters: regex,ner,presidio");"and it does not vote")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cmp.evaluated(cd);"one layer down still evaluates")){pass=pass+1}el{fail=fail+1};
+  let none=pl.withlayer(pl.newconfig(dead;dead);fr.regexid();false);
+  let cn2=cmp.compare(text;none);
+  if(t.assert(!cmp.evaluated(cn2);"with every enabled layer down nothing was evaluated, and the CLI exits 1")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A labelled file ──────────────────────────────────────────────────────── *)
+  let l1="{\"text\":\"Jane Citizen called Tuesday, mail jane@example.com\",\"entities\":[{\"type\":\"PERSON\",\"value\":\"Jane Citizen\",\"start\":0,\"end\":12,\"expected_detected\":true},{\"type\":\"EMAIL\",\"value\":\"jane@example.com\",\"start\":34,\"end\":50,\"expected_detected\":true}]}";
+  let l2="{\"text\":\"The weather is fine today, thanks.\",\"entities\":[]}";
+  let jsonl="\(l1)\n\(l2)\n";
+  let lr=cmp.labelledreport(jsonl;all);
+  let lt=lr.text;
+  if(t.assert(lr.ok && str.contains(lt;"2 labelled texts, 2 labelled entities");"the file is read: two texts, two scored entities")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lt;"layer=regex recall=50.00%") && str.contains(lt;"tp=1 fp=0 fn=1 texts=2/2");"regex: the email found, the name missed, nothing spurious")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lt;"layer=ner recall=50.00%");"NER: the name found, the email missed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lt;"precision=100.00% detections=1 false_positives=0 f1=66.66% tp=1");"with F1 from evaluation's precision and recall (100% and 50%)")){pass=pass+1}el{fail=fail+1};
+  (* Presidio reports 0-12 whatever it is sent: in the second text that is "The weather " and
+     overlaps nothing labelled, so it is Presidio's false positive and no one else's. *)
+  if(t.assert(str.contains(lt;"tp=1 fp=1 fn=1 texts=2/2");"Presidio: the name found, and one false positive in the unlabelled text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lt;"layer=consensus recall=100.00%") && str.contains(lt;"tp=2 fp=1 fn=0");"the default consensus masks both, with Presidio's false positive")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(lt;"Jane") && !str.contains(lt;"jane@") && !str.contains(lt;"weather");"the labelled report prints no value and no text")){pass=pass+1}el{fail=fail+1};
+  let ld=cmp.labelledreport(jsonl;down);
+  if(t.assert(str.contains(ld.text;"layer=presidio not scored") && str.contains(ld.text;"not a recall of zero") && !str.contains(ld.text;"layer=presidio recall=");"with Presidio down it is not scored, rather than scored 0 of 2")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ld.ok && str.contains(ld.text;"layer=regex recall=50.00%");"and the layers that ran are still scored")){pass=pass+1}el{fail=fail+1};
+  let empty=cmp.labelledreport("not json\n";all);
+  if(t.assert(!empty.ok;"a file with no readable text is not a clean evaluation")){pass=pass+1}el{fail=fail+1};
+
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  <fail
+};
