@@ -1,0 +1,228 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.policy.apracps234preset;
+
+i=t:std.test;
+i=str:std.str;
+i=sch:core.policy.schema;
+i=ty:core.policy.types;
+i=reg:core.policy.presets.registry;
+i=loader:core.policy.loader;
+i=rules:core.governance.rulesengine;
+
+(* RG1.1 — the APRA CPS 234 preset, through the production registry and loader.
+
+   The preset used to cite YAML keys rather than the standard, and several of its rules said
+   things that were no longer true of loke or were never in CPS 234. So this file checks the
+   grounding, not only the presence of rules: every rule opens with its class (EVALUABLE,
+   DOCUMENTATION ONLY, UNIMPLEMENTED) and cites a paragraph of CPS 234, every substantive
+   paragraph from 13 to 36 is cited by some rule, nothing a preset cannot evaluate is allowed
+   to warn or block, and every EVALUABLE rule is backed by the field it names. *)
+
+f=presetname():str{ <"apra-cps-234" };
+
+f=rulebyid(wanted:str):$policyrule{
+  let rs=reg.rulesfor(presetname());
+  let idx=mut.0-1;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.eq(r.id;wanted)){ idx=i }el{}
+  };
+  if(idx<0){
+    <$policyrule{id:"";description:"";action:"";severity:""}
+  }el{
+    <rs.get(idx)
+  }
+};
+
+f=hasrule(wanted:str):bool{
+  let r:$policyrule=rulebyid(wanted);
+  <str.len(r.id)>0
+};
+
+(* A citation is "para N" followed by a delimiter, so para 3 never matches para 35.
+   Cross-references to other standards are written "paragraph N" and do not match. *)
+f=citespara(desc:str;n:i64):bool{
+  let ns=str.fromint(n);
+  let p="para \(ns)";
+  <str.contains(desc;str.concat(p;" ")) || str.contains(desc;str.concat(p;","))
+   || str.contains(desc;str.concat(p;".")) || str.contains(desc;str.concat(p;";"))
+   || str.contains(desc;str.concat(p;"(")) || str.contains(desc;str.concat(p;")"))
+};
+
+f=anyrulecites(n:i64):bool{
+  let rs=reg.rulesfor(presetname());
+  let found=mut.false;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(citespara(r.description;n)){ found=true }el{}
+  };
+  <found
+};
+
+f=isevaluable(r:$policyrule):bool{ <str.startswith(r.description;"EVALUABLE — ") };
+f=isdoconly(r:$policyrule):bool{ <str.startswith(r.description;"DOCUMENTATION ONLY — ") };
+f=isunimplemented(r:$policyrule):bool{ <str.startswith(r.description;"UNIMPLEMENTED ") };
+
+f=countclass(cls:str):i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.eq(cls;"evaluable") && isevaluable(r)){ n=n+1 }el{};
+    if(str.eq(cls;"doc") && isdoconly(r)){ n=n+1 }el{};
+    if(str.eq(cls;"unimplemented") && isunimplemented(r)){ n=n+1 }el{};
+    if(str.eq(cls;"none") && !isevaluable(r) && !isdoconly(r) && !isunimplemented(r)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=uncited():i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(!str.contains(r.description;"CPS 234 para ")){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=doconlynotlog():i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(isdoconly(r) && !str.eq(r.action;"log")){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=anydescriptioncontains(needle:str):bool{
+  let rs=reg.rulesfor(presetname());
+  let found=mut.false;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.contains(r.description;needle)){ found=true }el{}
+  };
+  <found
+};
+
+(* Every rule, evaluated by its own id, must yield exactly one violation carrying its own
+   action. Catches an id that is a prefix of another, and a rule the loader drops. *)
+f=evaluationmismatches():i64{
+  let rs=reg.rulesfor(presetname());
+  let n=mut.0;
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    let hits=loader.evaluatepreset(presetname();r.id;"confidential");
+    if(hits.len==1 as u64){
+      let v:$policyviolation=hits.get(0);
+      if(!str.eq(v.ruleid;r.id) || !str.eq(v.action;r.action)){ n=n+1 }el{}
+    }el{ n=n+1 }
+  };
+  <n
+};
+
+f=provider(p:$policy;id:str):$providerpermission{
+  let idx=mut.0-1;
+  lp(let i=0;i<p.providers.len;i=i+1){
+    let pp:$providerpermission=p.providers.get(i);
+    if(str.eq(pp.providerid;id)){ idx=i }el{}
+  };
+  if(idx<0){
+    <$providerpermission{providerid:"";allowed:false;maxsensitivity:"";requiresdpa:false;notes:""}
+  }el{
+    <p.providers.get(idx)
+  }
+};
+
+f=blocks(p:$policy;wanted:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<p.blockedentitytypes.len;i=i+1){
+    if(str.eq(p.blockedentitytypes.get(i);wanted)){ found=true }el{}
+  };
+  <found
+};
+
+f=hascompound(wanted:str;action:str):bool{
+  let cs=rules.presetrules(presetname());
+  let found=mut.false;
+  lp(let i=0;i<cs.len;i=i+1){
+    let c:$compoundrule=cs.get(i);
+    if(str.eq(c.id;wanted) && str.eq(c.action;action)){ found=true }el{}
+  };
+  <found
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── it loads, by name, through the loader ─────────────────────────────────── *)
+  let p:$policy=reg.byname(presetname());
+  if(t.assert(reg.isknown(p);"the CPS 234 preset loads by name")){pass=pass+1}el{fail=fail+1};
+  let ps:$policyset=loader.loadpreset(presetname());
+  if(t.assert(ps.regulations.len==1 as u64;"loading it yields one regulation")){pass=pass+1}el{fail=fail+1};
+  if(ps.regulations.len>0 as u64){
+    let rg:$regulation=ps.regulations.get(0);
+    if(t.assert((rg.rules.len as i64)==(reg.rulesfor(presetname()).len as i64);"carrying every rule the preset declares")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  if(t.assert((reg.rulesfor(presetname()).len as i64)==30;"exactly thirty rules, so one cannot be dropped unnoticed")){pass=pass+1}el{fail=fail+1};
+
+  (* ── every rule is classed and cited ───────────────────────────────────────── *)
+  if(t.assert(countclass("none")==0;"every rule opens with EVALUABLE, DOCUMENTATION ONLY or UNIMPLEMENTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countclass("evaluable")==7;"seven rules are evaluable from the preset's own fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countclass("unimplemented")==4;"four rules name a control loke does not have")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(uncited()==0;"every rule cites a CPS 234 paragraph")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(doconlynotlog()==0;"every documentation-only rule is log-only, so nothing unevaluable can warn or block")){pass=pass+1}el{fail=fail+1};
+
+  (* Paragraphs 13 to 36 are the standard's requirements: roles, capability, policy
+     framework, classification, controls, incident management, testing, internal audit and
+     APRA notification. Each must be cited by at least one rule. *)
+  lp(let n=13;n<37;n=n+1){
+    let ns=str.fromint(n);
+    if(t.assert(anyrulecites(n);"CPS 234 para \(ns) is cited by a rule")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* ── the requirements the story names ──────────────────────────────────────── *)
+  let notify:$policyrule=rulebyid("cps234-notify-apra-incident");
+  if(t.assert(citespara(notify.description;35) && str.contains(notify.description;"72 hours") && str.eq(notify.action;"log");"para 35: 72-hour incident notification, the entity's obligation, log-only")){pass=pass+1}el{fail=fail+1};
+  let weak:$policyrule=rulebyid("cps234-notify-apra-control-weakness");
+  if(t.assert(citespara(weak.description;36) && str.contains(weak.description;"10 business days");"para 36: 10-business-day control weakness notification")){pass=pass+1}el{fail=fail+1};
+  let assess:$policyrule=rulebyid("cps234-provider-assessment-required");
+  if(t.assert(isevaluable(assess) && citespara(assess.description;16) && citespara(assess.description;22);"paras 16 and 22: third-party information assets, evaluable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isunimplemented(rulebyid("cps234-criticality-axis"));"para 20's criticality axis is named as unimplemented")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(isunimplemented(rulebyid("cps234-preset-not-enforced"));"the preset says it is not enforced on the request path")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hasrule("cps234-control-testing") && hasrule("cps234-independent-testing");"paras 27 to 31: control testing, and its independence")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rulebyid("cps234-commencement").description;"1 July 2019");"the commencement date is stated")){pass=pass+1}el{fail=fail+1};
+
+  (* ── each EVALUABLE rule is backed by the field it names ───────────────────── *)
+  let ext:$providerpermission=provider(p;"*");
+  if(t.assert(str.eq(ext.providerid;"*") && !ext.allowed && ext.requiresdpa;"external providers are denied and need a recorded assessment")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(ext.maxsensitivity;"confidential");"and could carry nothing above confidential if allowed")){pass=pass+1}el{fail=fail+1};
+  let loc:$providerpermission=provider(p;"local");
+  if(t.assert(loc.allowed && str.eq(loc.maxsensitivity;"restricted");"local inference may carry restricted assets")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(p.classificationdefault;"confidential");"assets default to confidential")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(blocks(p;"health") && blocks(p;"biometric") && blocks(p;"tfn");"special categories are blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(blocks(p;"api_key") && blocks(p;"password");"credentials are blocked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(p.requireapprovalabove;"confidential");"approval is required above confidential")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(hascompound("apra-cps-234-approval-required";"approve");"and the rules engine derives the approval rule from it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the rules evaluate as written ─────────────────────────────────────────── *)
+  if(t.assert(evaluationmismatches()==0;"every rule evaluates by its id to exactly one violation with its own action")){pass=pass+1}el{fail=fail+1};
+  let hits=loader.evaluatepreset(presetname();"cps234-provider-assessment-required";"confidential");
+  if(hits.len==1 as u64){
+    let v:$policyviolation=hits.get(0);
+    if(t.assert(str.eq(v.action;"block") && str.eq(v.severity;"critical");"the provider assessment rule blocks at critical")){pass=pass+1}el{fail=fail+1}
+  }el{ if(t.assert(false;"the provider assessment rule evaluates to one violation")){}el{fail=fail+1} };
+  let none=loader.evaluatepreset(presetname();"a request that names no rule";"confidential");
+  if(t.assert(none.len==0 as u64;"a context naming no rule raises nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── stale and overstated wording stays gone ───────────────────────────────── *)
+  if(t.assert(!anydescriptioncontains("fails OPEN");"no rule says loke fails open: NC1.9 made it fail closed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anydescriptioncontains("is not a third party managing one");"no rule says the no-custody path takes the provider outside para 16")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!anydescriptioncontains("compliant") && !anydescriptioncontains("ensures compliance");"no rule claims compliance")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
