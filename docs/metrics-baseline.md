@@ -307,7 +307,9 @@ checksum-valid numbers. The 2026-09-19 figures were measured against the uncorre
 - Every `EMAIL` miss is still a mixed-case address against a lower-case-only character class.
   Fixing it means changing a pattern string, which moves these figures again and is a separate
   decision.
-- Medicare, BSB, ACN and bank account numbers still have **no detector at all**.
+- ACN still has **no detector at all**. Medicare, BSB and bank account numbers gained regex
+  detectors on 2026-10-01 (RG1.7: Medicare checksum-gated, BSB and account only after their
+  label). No figure here measures them yet; the counts in this section predate them.
 - `au_tfn` still fires inside `au_abn` — `"ABN 51 824 753 556"` reports both. The boundary check
   cannot see it, because the characters either side of the TFN match are spaces. Recorded as
   PL1.10's remaining tail.
