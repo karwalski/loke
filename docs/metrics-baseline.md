@@ -496,43 +496,50 @@ TOKE_DIR=<toke at 0b0bc4e> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2,
 
 ### Privacy harness over the request path, template × detector type — 2026-10-01
 
-**Evidence: verified.** Both rows were recorded by `scripts/smoke_privacy_harness.sh` against the
-loke binary built from `6a8ab4a7` with toke `86c432da` (ooke `3cc4998`); the harness itself is
-the F3.9 commit's. Counts over fixed inputs with a recording stand-in and no model, so each is one
-deterministic observation and is stated as a count, not as a rate.
+**Evidence: verified.** The three rows were recorded by `scripts/smoke_privacy_harness.sh` against
+the loke binary built from `e273c9c4` (the F3.9a/F3.9b fix) with toke `86c432da` (ooke `3cc4998`).
+Counts over fixed inputs with a recording stand-in and no model, so each is one deterministic
+observation and is stated as a count, not as a rate. They replace the first, 60-cell run's rows
+(`6a8ab4a7`, before RG1.7's three detector types and before the fix), which recorded the guardian
+reaching the model in none of its cells; those rows stay in the ledger.
 
 **What this is.** The coverage figure F3.9 once stated was never measured, and is withdrawn. What is
 measured is this: every built-in template in `core.privacy.template` crossed with every detector
 type `core.privacy.regex` emits, plus a PERSON for the NER layer and a control with no identifier.
 Each cell is one `POST /api/pipeline` to the built binary, judged only on what
 `scripts/lib/http_recorder.py`, standing in for Ollama, received: no raw identifier in any request
-except the local NER layer's own, a placeholder of the right type where the value was, and the
-reply restored byte for byte. RESTRICTED cells are first held for approval (GA5.26), and the
-harness checks nothing was sent while held.
+except the local NER layer's own, a placeholder of the right type where the value was, the
+reply restored byte for byte, and the guardian at the start of the `system` the model was sent.
+RESTRICTED cells are first held for approval (GA5.26), and the harness checks nothing was sent
+while held. Outside the matrix, one cell per detector case puts the identifier in the caller's
+`system_prompt` and none in the text (F3.9b): it must reach no request but the NER layer's, and the
+model's `system` must carry the guardian and then a placeholder of its type.
 
-| Measure, over the template × case cells | Count |
+| Measure | Count |
 |---|---|
-| Cells passing every assertion (5 templates × 12 cases) | **60** <sub>[ev:6b9be1821caa n=60]</sub> |
-| Dispatched cells in which the guardian system prompt reached the model | **0** <sub>[ev:a93966448b01 n=60]</sub> |
+| Template × case cells passing every assertion (5 templates × 15 cases) | **75** <sub>[ev:d243a891829e n=75]</sub> |
+| Dispatched template × case cells in which the guardian system prompt reached the model | **75** <sub>[ev:33611e731fce n=75]</sub> |
+| System-prompt cells passing every assertion (one per case with an identifier) | **14** <sub>[ev:ae53a33795eb n=14]</sub> |
 
-**The second row is a defect, F3.9a.** `/api/pipeline` sends Ollama a prompt and no system prompt,
-so the guardian `core.privacy.pipeline` builds never leaves; on the Anthropic route the caller's
-`system_prompt` is sent in its place, unscanned (F3.9b).
-
-**Mutation-checked:** with `page.api.pipeline.restoretext` returning its input unchanged, 55 of
-the 60 cells fail (every cell holding an identifier; the controls pass); with `toollama` sending
-the original text in place of the anonymised one, the same 55 fail on the leak and placeholder
-assertions. Both restored and checked with `cmp`.
+**Mutation-checked.** On the first run: with `page.api.pipeline.restoretext` returning its input
+unchanged, every cell holding an identifier failed (the controls passed); with `toollama` sending
+the original text in place of the anonymised one, the same cells failed on the leak and placeholder
+assertions. On the fix (F3.9a, F3.9b): with `core.privacy.systemprompt` building the final system
+prompt from the raw caller system prompt, every system-prompt cell failed; with the guardian
+dropped from the Ollama payload and the Anthropic body, no cell of either kind passed. Each mutant
+restored and checked with `cmp`.
 
 **Caveats:**
 
-- **Recorded before RG1.7 merged.** The harness now also carries cases for `au_medicare`,
-  `au_bsb` and `bank_account` (5 × 15 = 75 cells, run by the gate). The counts above are the
-  60-cell run and have not been re-recorded for the 75.
+- **The guardian row says it was sent, not that it works.** It is judged by the guardian's version
+  marker at the start of the system prompt the stand-in received. Whether a model obeys it is
+  unmeasured (AD1.5).
 - **Not a recall figure.** Each type is exercised with one value the regex layer is known to
   detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
 - **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven
-  (its endpoint is the real provider), nor are the CLI paths or the no-custody path covered.
+  through the binary (its endpoint is the real provider); `tests/integration/test_system_prompt_disclosure.tk`
+  drives its own `toanthropicat` against a recorder instead. The CLI paths and the no-custody path are
+  not covered, and the no-custody dispatch carries no guardian (F3.9c).
 - The templates are rendered by the harness by the module's own rule; no route on the request path
   renders a template.
 
