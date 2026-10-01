@@ -1,0 +1,113 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.privacy.systemprompt;
+
+i=str:std.str;
+i=log:shared.log;
+i=t:shared.types;
+i=pt:core.privacy.pipelinetypes;
+i=pipe:core.privacy.pipeline;
+i=guardian:core.privacy.guardian;
+
+(* F3.9b. A caller's system prompt goes through the privacy pipeline with the text.
+
+   core.privacy.pipeline.run scans `text` and takes its second argument only as the base of
+   the guardian prompt, so run.finalsystemprompt was the guardian followed by the caller's
+   system prompt AS WRITTEN. Every caller that sent finalsystemprompt (cli.ask), or the raw
+   system prompt itself (page.api.pipeline's Anthropic route), sent an identifier in it in
+   clear. Found by the F3.9 harness; reproducer tests/integration/test_system_prompt_disclosure.tk.
+
+   One scan, one entity list. The system prompt and the text are joined and scanned as one,
+   so every layer, the consensus, the dedup and the placeholder numbering see both, and
+   anonymisation, which replaces by VALUE (core.privacy.placeholder.applytotext), is then
+   applied to each part apart with the same list. That gives:
+     - one placeholder per value, salted with the one request id, whichever part it was in,
+       so ph.mapfromentities(run.result.entities) restores a reply that echoes either part;
+     - sensitivity, the entity count and so the policy decision and any approval taken over
+       both parts, because they are read from the same run;
+     - run.result.original and run.result.anonymised still the TEXT alone, as every caller
+       expects, and run.finalsystemprompt the guardian over the ANONYMISED system prompt,
+       in the order core.privacy.guardian.buildsystemprompt always used.
+
+   Fail closed on the join. A detection that spans the boundary would have a value found in
+   neither part, so replacing by value would mask nothing. An entity whose value occurs in the
+   joined string and in neither part is counted as unplaced, and
+   pipe.issafetoforward refuses the run, as it refuses any span a layer reports and nothing
+   masked (MK6.16). A value found nowhere in the joined string at all is left as pipe.run
+   leaves it with no system prompt: the NER layer can report a name the text does not hold,
+   and there is nothing of it in either part to mask. Entity offsets are into the joined string; nothing on a request path reads
+   them.
+
+   An empty system prompt is exactly pipe.run(text;"";config): nothing changes for it. *)
+
+f=boundary():str{
+  <"
+
+"
+};
+
+(* How many of `entities` have a value in `joined` that is in neither part: a detection that
+   spans the join. *)
+f=unlocated(entities:@$piientity;joined:str;text:str;sysprompt:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.contains(joined;e.value) && !str.contains(text;e.value) && !str.contains(sysprompt;e.value)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=run(text:str;sysprompt:str;config:$pipelineconfig):$pipelinerun{
+  if(str.len(sysprompt)==0){ <pipe.run(text;"";config) };
+  let joined="\(sysprompt)\(boundary())\(text)";
+  let r=pipe.run(joined;"";config);
+  let res:$piidetectionresult=r.result;
+  let stray=unlocated(res.entities;joined;text;sysprompt);
+  if(stray>0){
+    log.error("privacy pipeline: \(stray) detection(s) spanned the system prompt and the text, so neither can be masked by value -- the run will be refused";"pipeline";r.requestid)
+  }el{};
+  (* A dry run leaves the text as it was, as pipe.run does; the system prompt is always
+     anonymised, so finalsystemprompt never holds a value the scan found. *)
+  let anontext=mut.text;
+  if(config.dryrun){}el{ anontext=pipe.anonymisetext(text;res.entities) };
+  <$pipelinerun{
+    result:$piidetectionresult{original:text;anonymised:anontext;entities:res.entities;sensitivity:res.sensitivity};
+    stages:r.stages;
+    totalentities:r.totalentities;
+    finalsystemprompt:guardian.buildsystemprompt(pipe.anonymisetext(sysprompt;res.entities));
+    requestid:r.requestid;
+    layerscompleted:r.layerscompleted;
+    layersdegraded:r.layersdegraded;
+    unplaced:((r.unplaced as i64)+stray) as u32;
+    consensus:r.consensus;
+    resolved:r.resolved
+  }
+};
+
+(* pipe.runforward over both parts: the same logging, and the caller checks
+   pipe.issafetoforward, which covers the system prompt now too. *)
+f=runforward(text:str;sysprompt:str;config:$pipelineconfig):$pipelinerun{
+  let r=run(text;sysprompt;config);
+  if(pipe.issafetoforward(r)){
+    if(r.layersdegraded>0 as u32){
+      log.warn("privacy pipeline degraded: \(r.layersdegraded) enabled layer(s) unavailable, \(r.layerscompleted) completed";"pipeline";r.requestid)
+    }el{}
+  }el{
+    log.error("privacy pipeline failed closed: \(pipe.refusalreason(r)), so this text and system prompt must not be forwarded";"pipeline";r.requestid)
+  };
+  <r
+};
+
+(* The caller's system prompt as it may be sent, anonymised with the run's entities, without
+   the guardian: for a path whose envelope must carry nothing but the caller's own (the
+   no-custody dispatch). *)
+f=anonymisedsystem(run:$pipelinerun;sysprompt:str):str{
+  <pipe.anonymisetext(sysprompt;run.result.entities)
+};
+
+(* Whether the run was given a caller system prompt: its final system prompt is more than
+   the guardian alone. *)
+f=hascallersystem(run:$pipelinerun):bool{
+  <!str.eq(run.finalsystemprompt;guardian.buildsystemprompt(""))
+};

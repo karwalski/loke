@@ -6,40 +6,47 @@ m=test.integration.systempromptdisclosure;
 i=t:std.test;
 i=str:std.str;
 i=file:std.file;
+i=std:std;
 i=process:std.process;
 i=sh:shared.types;
 i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
 i=guardian:core.privacy.guardian;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
 i=h:page.api.pipeline;
 
-(* F3.9b — a reproducer, not a fix. Found by the F3.9 harness (scripts/smoke_privacy_harness.sh)
-   while asking whether the guardian reaches the model.
+(* F3.9b and F3.9a. Found by the F3.9 harness (scripts/smoke_privacy_harness.sh).
 
-   POST /api/pipeline reads `system_prompt` from the request and hands it to the privacy
-   pipeline only as the base of the guardian prompt: core.privacy.pipeline.run scans `text`
-   and nothing else. post() then passes the caller's system_prompt, unscanned, through forward,
-   sendoptimised and dispatch to toanthropic, which builds the Anthropic body from it with
-   anthropicbody and sends it with anthropicsend. So an identifier a caller puts in the system
-   prompt leaves the machine in clear on a cloud route, and the guardian the pipeline built
-   (run.finalsystemprompt) is not what is sent (F3.9a).
+   The defect: POST /api/pipeline read `system_prompt` and handed it to the privacy pipeline
+   only as the base of the guardian prompt; core.privacy.pipeline.run scanned `text` and nothing
+   else. post() then passed the caller's system prompt, unscanned, through forward, sendoptimised
+   and dispatch to toanthropic, which sent it to Anthropic as the body's `system`. So an
+   identifier a caller put in the system prompt left the machine in clear on a cloud route, and
+   the guardian the pipeline built (run.finalsystemprompt) was sent on no route at all: the
+   Ollama payload had no system prompt (F3.9a).
 
-   toanthropic sends to the one production endpoint, so it is not called here; `post` is not
-   reachable from a test (T-16). This drives the two calls toanthropic makes, in its order,
-   with the same arguments post() gives it, against scripts/lib/http_recorder.py on loopback,
-   and judges what ARRIVED. No request leaves the machine and no key is real.
+   The fix: post() runs core.privacy.systemprompt.runforward, which scans the system prompt
+   WITH the text, and every route sends run.finalsystemprompt, the guardian over the anonymised
+   system prompt. Until it, this file was a reproducer whose two DEFECT assertions passed; they
+   are turned round below.
 
-   EXPECTED TO FAIL ONCE F3.9b IS FIXED. The two assertions marked DEFECT pass today because
-   the defect is present; the fix makes them fail, and whoever lands it turns them round
-   (the email must NOT arrive, the guardian MUST) and closes F3.9b. The other assertions hold
-   before and after. *)
+   What is driven: post() is not reachable from a test (T-16), so this drives what post() calls
+   after the scan, the production functions, against scripts/lib/http_recorder.py on loopback:
+     - Anthropic: page.api.pipeline.toanthropicat, the body and the send toanthropic makes,
+       given the recorder's URL where toanthropic passes transport.anthropicurl(). No request
+       leaves the machine and no key is real;
+     - Ollama: sendoptimised over an Ollama route, with the recorder as the Ollama base.
+   Each is judged on what ARRIVED. POST /api/pipeline itself, through the built binary, is the
+   harness's: its system-prompt cells. *)
 
 f=readfile(p:str):str{
   <mt file.read(p) { $ok:v v; $err:e "" }
 };
 
 f=pause():i64{
-  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:x x; $err:e 0 };
-  if(hd!=0){ process.wait(hd); }el{};
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(hd != 0){ process.wait(hd); }el{};
   <0
 };
 
@@ -52,47 +59,139 @@ f=waitport(portfile:str):str{
   <p
 };
 
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-system-prompt-disclosure")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
 (* Regex layer only: Presidio and NER point where nothing listens, as in test_request_path_e2e.tk. *)
 f=localonly():$pipelineconfig{
   <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
 };
 
+f=routeto(id:str;prov:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:prov;
+      contextwindow:32768 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"test";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=entity(value:str):$piientity{
+  <$piientity{entitytype:"email";value:value;start:0 as u32;end:0 as u32;confidence:1.0;placeholder:"[EMAIL_1]"}
+};
+
+(* The body of the last request logged for `prefix` (e.g. "POST /v1/messages "), or "". *)
+f=lastbody(logp:str;prefix:str):str{
+  let lines=str.split(readfile(logp);"\n");
+  let found=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;prefix)){ found=str.trimprefix(ln;prefix) }el{}
+  };
+  <found
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
-  let hex:str=str.randhex(8);
-  let base="/tmp/loke_sysprompt_\(hex)";
-  let logp="\(base).log";
-  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:x x; $err:e 0 };
-  let port=waitport("\(base).port");
-  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
 
   let text="Please write to user.probe@example.com about the invoice.";
   let sysprompt="You are helping caller.probe@example.com, tax file number 123 456 782.";
 
-  (* What post() does: runforward(text; system_prompt; config). *)
-  let run=pipe.runforward(text;sysprompt;localonly());
-  if(t.assert(pipe.issafetoforward(run);"the regex layer completed, so post() would forward")){pass=pass+1}el{fail=fail+1};
+  (* ── core.privacy.systemprompt: the scan ─────────────────────────────────────── *)
+  let run=sp.runforward(text;sysprompt;localonly());
   let res:$piidetectionresult=run.result;
-  if(t.assert(!str.contains(res.anonymised;"user.probe@example.com");"the email in the user text is replaced before sending")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(guardian.isguardianpresent(run.finalsystemprompt);"the pipeline builds a guardian system prompt (run.finalsystemprompt)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pipe.issafetoforward(run);"the regex layer completed, so post() would forward")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(res.original;text;"the run's original is the text alone, as every caller expects")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(res.anonymised;"user.probe@example.com") && str.contains(res.anonymised;"about the invoice");"the email in the user text is replaced, and nothing of the system prompt is added to it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(guardian.isguardianpresent(run.finalsystemprompt);"the final system prompt carries the guardian")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(run.finalsystemprompt;"caller.probe@example.com") && !str.contains(run.finalsystemprompt;"123 456 782");"and neither identifier the caller put in the system prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(run.finalsystemprompt;"You are helping [EMAIL_") && str.contains(run.finalsystemprompt;"tax file number [AU_TFN_");"they are replaced by placeholders of their types, the rest of it kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(run.finalsystemprompt;"LOKE_GUARDIAN_v");"the guardian comes first, as guardian.buildsystemprompt orders it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(res.entities.len>=3;"the one entity list holds what both parts carried (got \(res.entities.len))")){pass=pass+1}el{fail=fail+1};
+  let restored=h.restoretext(run;run.finalsystemprompt);
+  if(t.assert(str.contains(restored;"caller.probe@example.com") && str.contains(restored;"123 456 782");"the run's one placeholder map restores the system prompt's values too")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.restoretext(run;res.anonymised);"user.probe@example.com");"and the text's")){pass=pass+1}el{fail=fail+1};
 
-  (* What toanthropic does with what post() gives it: the caller's system prompt, not
-     run.finalsystemprompt, and the anonymised text (popt.sentof is the anonymised text when
-     no optimiser is configured, which is the default). *)
-  let body=h.anthropicbody("claude-probe-model";sysprompt;res.anonymised);
-  let raw=h.anthropicsend("http://127.0.0.1:\(port)/v1/messages";"sk-ant-not-a-real-key-000000";body);
-  if(t.assert(str.len(raw)>0;"the recorder answered the send")){pass=pass+1}el{fail=fail+1};
+  (* Sensitivity, and so the policy decision and any approval, covers the system prompt. *)
+  let clean="Summarise the weather report for today.";
+  let tfnsys=sp.runforward(clean;"Our tax file number is 123 456 782.";localonly());
+  let tfntext=pipe.runforward("Our tax file number is 123 456 782. \(clean)";"";localonly());
+  let tsres:$piidetectionresult=tfnsys.result;
+  let ttres:$piidetectionresult=tfntext.result;
+  if(t.assert(sh.senseq(tsres.sensitivity;ttres.sensitivity) && !sh.senseq(tsres.sensitivity;sh.public());"a tax file number in the system prompt raises sensitivity as it does in the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tfnsys.totalentities>0 as u32;"and is counted as an entity")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(h.decisionlabel(h.decide(tfnsys));h.decisionlabel(h.decide(tfntext));"so the policy decides on it as it would in the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(h.boundtext(clean;"sys A");h.boundtext(clean;"sys B")) && str.eq(h.boundtext(clean;"");clean);"an approval is bound to the system prompt as well as the text, and unchanged without one")){pass=pass+1}el{fail=fail+1};
+
+  (* No system prompt: exactly what pipe.run gives. *)
+  let plain=sp.run(text;"";localonly());
+  if(t.asserteq(plain.finalsystemprompt;guardian.buildsystemprompt("");"with no system prompt the final one is the guardian alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!sp.hascallersystem(plain) && sp.hascallersystem(run);"and hascallersystem tells the two apart")){pass=pass+1}el{fail=fail+1};
+
+  (* Fail closed on the join: a value found in neither part (a detection spanning the boundary)
+     is counted, and issafetoforward refuses such a run. *)
+  if(t.assert(sp.unlocated(@(entity("a@b.example"));"y\n\nx a@b.example";"x a@b.example";"y")==0;"a value in the text is located")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sp.unlocated(@(entity("a@b.example"));"y a@b.example\n\nx";"x";"y a@b.example")==0;"a value in the system prompt is located")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sp.unlocated(@(entity("tail\n\nhead"));"system tail\n\nhead of text";"head of text";"system tail")==1;"a value spanning the join is not, and is counted as unplaced")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(sp.unlocated(@(entity("Jane Citizen"));"system\n\ntext";"text";"system")==0;"a value found nowhere (a name the NER layer reported and the text does not hold) is left as pipe.run leaves it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The routes, against a recorder ─────────────────────────────────────────── *)
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+  let hex:str=str.randhex(8);
+  let base="/tmp/loke_sysprompt_\(hex)";
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port";"echo")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  let url="http://127.0.0.1:\(port)";
+
+  (* Anthropic: toanthropicat, as toanthropic calls it, with the recorder's URL. *)
+  let optrec=h.optimisefor(run;"";20);
+  h.toanthropicat(store;run;routeto("claude-probe-model";$provider{$anthropic:0});optrec;"sk-ant-not-a-real-key-000000";h.privacyfields(run);sh.nowms();h.decide(run);"user_choice";"user";dl.nosession();"\(url)/v1/messages");
   let seen=readfile(logp);
-  if(t.assert(str.contains(seen;"POST /v1/messages ");"the POST arrived at the recorder")){pass=pass+1}el{fail=fail+1};
+  let abody=lastbody(logp;"POST /v1/messages ");
+  if(t.assert(str.len(abody)>0;"the POST /v1/messages arrived at the recorder")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!str.contains(seen;"user.probe@example.com");"the user text's email did not arrive")){pass=pass+1}el{fail=fail+1};
+  (* Turned round from DEFECT F3.9b. *)
+  if(t.assert(!str.contains(seen;"caller.probe@example.com") && !str.contains(seen;"123 456 782");"F3.9b: neither the email nor the tax file number in the caller's system_prompt reached the provider")){pass=pass+1}el{fail=fail+1};
+  (* Turned round from DEFECT F3.9a. *)
+  if(t.assert(guardian.isguardianpresent(abody);"F3.9a: the guardian system prompt the pipeline built reached the provider")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(abody;"You are helping [EMAIL_");"with the caller's system prompt after it, anonymised")){pass=pass+1}el{fail=fail+1};
 
-  (* DEFECT F3.9b: the system prompt's identifiers arrive in clear. Flip when fixed. *)
-  if(t.assert(str.contains(seen;"caller.probe@example.com") && str.contains(seen;"123 456 782");"DEFECT F3.9b (expected to fail once fixed): the caller's system_prompt reaches the provider unscanned, email and tax file number in clear")){pass=pass+1}el{fail=fail+1};
-  (* DEFECT F3.9a: the guardian does not. Flip when fixed. *)
-  if(t.assert(!guardian.isguardianpresent(seen);"DEFECT F3.9a (expected to fail once fixed): the guardian system prompt the pipeline built is not what reaches the provider")){pass=pass+1}el{fail=fail+1};
+  (* Ollama: sendoptimised over a local route, the recorder standing in for Ollama. A run of
+     its own: the disclosure record is keyed by the request id, and one id is reserved once. *)
+  let run2=sp.runforward(text;sysprompt;localonly());
+  h.sendoptimised(store;run2;routeto("fake";$provider{$ollama:0});h.privacyfields(run2);sh.nowms();h.decide(run2);"user_choice";"user";dl.nosession();"";20;url);
+  let obody=lastbody(logp;"POST /api/generate ");
+  if(t.assert(str.len(obody)>0;"the POST /api/generate arrived at the recorder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(guardian.isguardianpresent(obody);"F3.9a: the guardian reached the local model as /api/generate's system")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(obody;"You are helping [EMAIL_");"with the caller's anonymised system prompt")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(readfile(logp);"caller.probe@example.com") && !str.contains(readfile(logp);"123 456 782") && !str.contains(readfile(logp);"user.probe@example.com");"no identifier from either part reached any recorded request")){pass=pass+1}el{fail=fail+1};
 
-  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  if(rec != 0){ process.kill(rec); process.wait(rec); }el{};
   file.delete(logp);
   file.delete("\(logp).headers");
   file.delete("\(logp).bodies");

@@ -22,9 +22,13 @@ tests/unit/privacy/test_regex.tk shows that layer detecting, plus a PERSON for t
 CASE_TYPES below must equal the regex layer's list; the harness reads that list from
 regex.tk and fails if they differ, so a new detector cannot go unexercised silently.
 
-Exit status 0 only when every assertion passes and every expected failure (XFAIL) still
-fails. An expected failure that passes (XPASS) is a failure of this script: the defect it
-records was fixed, and the expectation and its backlog row must be updated with it.
+Then, outside the matrix, one system-prompt cell per detector case (F3.9b): the identifier is
+put in the caller's `system_prompt` and the text carries none. Each is judged as a matrix cell
+is, on what the stand-in received: the value in no request but the NER layer's, a placeholder
+of its type in the `system` the model was sent, after the guardian.
+
+Exit status 0 only when every assertion passes. The guardian check was an expected failure
+(XFAIL, F3.9a) until /api/pipeline sent it; it is a required pass now.
 """
 import argparse, json, re, sys, time, urllib.error, urllib.request
 
@@ -146,9 +150,46 @@ def leaks(body, value):
     return any(f in t for f in forms for t in texts)
 
 
+def system_of(body):
+    """The `system` field of an Ollama /api/generate body, or ""."""
+    try:
+        return json.loads(body).get("system", "") or ""
+    except ValueError:
+        return ""
+
+
+def send_held(T, pipeline, approve, bodies, req, value, name, cell):
+    """POST req; if it is held for approval (GA5.26), check nothing was sent while held, approve
+    it and send it again. Returns (status, reply, the requests the stand-in received)."""
+    before = len(recorded(bodies))
+    status, out = post(pipeline, req)
+    got = recorded(bodies)[before:]
+    try:
+        reply = json.loads(out)
+    except ValueError:
+        reply = {}
+    if status == 409 and reply.get("approval_required"):
+        cell["held"] = True
+        T.check(not any(r[1] == "/api/generate" for r in got),
+                "%s: held for approval, and the model received nothing" % name)
+        T.check(not any(leaks(r[2], value) for r in got if r[1] != "/api/chat"),
+                "%s: held, and no request but the local NER layer's carried the value" % name)
+        ast, aout = post(approve, {"approval_id": reply.get("approval_id", ""), "decision": "approve"})
+        T.check(ast == 200 and '"approved"' in aout, "%s: the approval was recorded" % name)
+        req = dict(req, approval_id=reply.get("approval_id", ""))
+        before = len(recorded(bodies))
+        status, out = post(pipeline, req)
+        got = recorded(bodies)[before:]
+        try:
+            reply = json.loads(out)
+        except ValueError:
+            reply = {}
+    return status, reply, got
+
+
 class Tally:
     def __init__(self):
-        self.ok = self.fail = self.xfail = self.xpass = 0
+        self.ok = self.fail = 0
         self.rows = []
 
     def check(self, cond, label):
@@ -159,15 +200,9 @@ class Tally:
             print("  FAIL " + label, file=sys.stderr)
         return cond
 
-    def expectfail(self, cond, label):
-        if cond:
-            self.xpass += 1
-            print("  XPASS (expected to fail, F3.9a) " + label, file=sys.stderr)
-        else:
-            self.xfail += 1
 
 
-def record(path, templates, cells):
+def record(path, templates, cells, syscells):
     """The run's counts as result rows, for docs/metrics-baseline.md (through the evidence
     ledger). Counts over fixed inputs, with a recording stand-in and no model: deterministic,
     so one observation each, and stated as counts, never as rates."""
@@ -184,8 +219,16 @@ def record(path, templates, cells):
                                     "regex layer's own fixture values; not a recall figure, and the Anthropic route is not driven.",
                                     **common), path=pathlib.Path(path))
     result.write(result.Measurement(metric="privacy_harness_guardian_reached_model", value=float(sum(1 for c in dispatched if c.get("guardian"))),
-                                    n=len(dispatched), caveat="F3.9a: /api/pipeline sends Ollama no system prompt, so no guardian.",
+                                    n=len(dispatched), caveat="Ollama route only; the guardian is judged present by its version "
+                                    "marker at the start of the request's system prompt, not by what a model does with it.",
                                     **common), path=pathlib.Path(path))
+    sysworkload = "f3.9b-privacy-harness-system-prompt: %d cases (%s) with the identifier in system_prompt, POST /api/pipeline -> Ollama stand-in" % (
+        len(syscells), ",".join(c["detector"] for c in syscells))
+    result.write(result.Measurement(metric="privacy_harness_sysprompt_cells_passing", value=float(sum(1 for c in syscells if c["passed"])),
+                                    n=len(syscells), units="cells", workload=sysworkload, arm="loke-binary-api-pipeline",
+                                    notes="scripts/smoke_privacy_harness.sh; judged on what scripts/lib/http_recorder.py logged",
+                                    caveat="One request path (browser /api/pipeline to a local model); the Anthropic route is "
+                                    "driven by tests/integration/test_system_prompt_disclosure.tk, not here."), path=pathlib.Path(path))
 
 
 def main():
@@ -280,27 +323,42 @@ def main():
                     "%s: the reply is restored byte for byte" % name)
             T.check(PLACEHOLDER.search(reply.get("response", "")) is None,
                     "%s: no placeholder survives into what the user reads" % name)
-            # 5. The guardian reached the model. F3.9a: it does not, on this path.
+            # 5. The guardian reached the model, as /api/generate's `system` (F3.9a).
             cell["dispatched"] = True
-            cell["guardian"] = GUARDIAN in body
-            T.expectfail(GUARDIAN in body, "%s: the guardian system prompt reached the model" % name)
+            cell["guardian"] = system_of(body).startswith(GUARDIAN)
+            T.check(cell["guardian"], "%s: the guardian system prompt reached the model" % name)
 
             cell["passed"] = T.fail == before_fail
             cells.append(cell)
 
-    # F3.9b: the caller's system_prompt is not scanned. On this (Ollama) route no system prompt
-    # is sent at all, so this holds today; it is here so that sending one (the F3.9a fix) cannot
-    # start sending it unscanned. The Anthropic route does send it: test_system_prompt_disclosure.tk.
-    sysvalue = "sysprompt.probe@example.com"
-    before = len(recorded(a.bodies))
-    status, out = post(pipeline, {"text": "Summarise the weather report for today.",
-                                  "system_prompt": "You are assisting %s." % sysvalue,
-                                  "fallback_reason": "user_choice", "fallback_selected_by": "user"})
-    got = recorded(a.bodies)[before:]
-    T.check(status == 200 and any(r[1] == "/api/generate" for r in got),
-            "system_prompt probe: dispatched (got %s %s)" % (status, out[:160]))
-    T.check(not any(leaks(r[2], sysvalue) for r in got if r[1] != "/api/chat"),
-            "system_prompt probe: an identifier in the caller's system_prompt did not reach the model")
+    # F3.9b: an identifier in the caller's system_prompt, none in the text. One cell per case.
+    syscells = []
+    clean = "Summarise the weather report for today."
+    for (dtype, value, ptype) in CASES:
+        if not value:
+            continue
+        name = "system_prompt x %s" % dtype
+        cell = {"detector": dtype, "held": False, "passed": False}
+        req = {"text": clean, "system_prompt": "You are assisting a customer. Their record: %s. Be brief." % value,
+               "fallback_reason": "user_choice", "fallback_selected_by": "user"}
+        before_fail = T.fail
+        status, reply, got = send_held(T, pipeline, approve, a.bodies, req, value, name, cell)
+        if T.check(status == 200 and reply.get("ok") is True, "%s: answered 200 ok (got %s %s)" % (name, status, str(reply)[:160])):
+            gens = [r for r in got if r[0] == "POST" and r[1] == "/api/generate"]
+            if T.check(len(gens) == 1, "%s: exactly one dispatch reached the model (got %d)" % (name, len(gens))):
+                sysfield = system_of(gens[0][2])
+                for r in got:
+                    if r[1] == "/api/chat":
+                        continue
+                    T.check(not leaks(r[2], value), "%s: %s %s does not carry the value" % (name, r[0], r[1]))
+                T.check(sysfield.startswith(GUARDIAN), "%s: the model's system prompt starts with the guardian" % name)
+                T.check(re.search(r"\[%s_[0-9a-f]+_[0-9]+\]|\[%s_[0-9]+\]" % (ptype, ptype), sysfield) is not None,
+                        "%s: the model's system prompt carries a %s placeholder where the value was" % (name, ptype))
+                T.check("You are assisting a customer." in sysfield and "Be brief." in sysfield,
+                        "%s: the rest of the caller's system prompt reached the model" % name)
+                T.check(reply.get("response") == "echo: " + clean, "%s: the reply is the text's echo, unchanged" % name)
+        cell["passed"] = T.fail == before_fail
+        syscells.append(cell)
 
     # A last sweep over everything the stand-in ever received.
     allrec = recorded(a.bodies)
@@ -310,17 +368,21 @@ def main():
 
     npass = sum(1 for c in cells if c["passed"])
     nheld = sum(1 for c in cells if c["held"])
+    nguard = sum(1 for c in cells if c.get("guardian"))
+    spass = sum(1 for c in syscells if c["passed"])
+    sheld = sum(1 for c in syscells if c["held"])
     print("  privacy harness: %d templates x %d detector cases = %d cells, %d passed every assertion, "
-          "%d held for approval first; %d assertions ok, %d failed, %d expected failures (F3.9a), %d unexpected passes"
-          % (len(templates), len(CASES), len(cells), npass, nheld, T.ok, T.fail, T.xfail, T.xpass))
+          "%d held for approval first, guardian reached the model in %d; %d system-prompt cells, %d passed, "
+          "%d held first; %d assertions ok, %d failed"
+          % (len(templates), len(CASES), len(cells), npass, nheld, nguard, len(syscells), spass, sheld, T.ok, T.fail))
     if a.report:
         with open(a.report, "w") as f:
             json.dump({"templates": [t["id"] for t in templates], "cases": [c[0] for c in CASES],
-                       "cells": cells, "ok": T.ok, "fail": T.fail, "xfail": T.xfail, "xpass": T.xpass,
+                       "cells": cells, "syscells": syscells, "ok": T.ok, "fail": T.fail,
                        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, f, indent=1)
     if a.record:
-        record(a.record, templates, cells)
-    return 0 if T.fail == 0 and T.xpass == 0 else 1
+        record(a.record, templates, cells, syscells)
+    return 0 if T.fail == 0 else 1
 
 
 if __name__ == "__main__":

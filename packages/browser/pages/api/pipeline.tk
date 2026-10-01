@@ -11,6 +11,7 @@ i=std:std;
 i=log:shared.log;
 i=t:shared.types;
 i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
 i=ph:core.privacy.placeholder;
 i=ks:core.governance.killswitch;
 i=policy:core.governance.policy;
@@ -529,8 +530,10 @@ f=embedpool():$inferpool{
   }
 };
 
+(* F3.9b. Nor is a request with a caller system prompt: the cache is keyed on the text alone,
+   so a reply given under one system prompt would be served under another. *)
 f=cacheeligible(run:$pipelinerun):bool{
-  <run.totalentities==0 as u32
+  <run.totalentities==0 as u32 && !sp.hascallersystem(run)
 };
 
 f=cachelookup(run:$pipelinerun;prompt:str):$cachehit{
@@ -910,14 +913,24 @@ f=anthropicsend(url:str;key:str;abody:str):str{
   <xport.post(url;abody;xport.anthropicheaders(key))
 };
 
-f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;sysprompt:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+f=toanthropic(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+  <toanthropicat(store;run;route;optrec;key;piifields;startms;decision;fbreason;fbby;sid;xport.anthropicurl())
+};
+
+(* F3.9a, F3.9b. The system prompt sent is run.finalsystemprompt: the guardian over the caller's
+   system prompt as core.privacy.systemprompt anonymised it. It used to be the caller's system
+   prompt as received, unscanned, and without the guardian. `url` is for the recorder test
+   (tests/integration/test_system_prompt_disclosure.tk) only: the one production caller,
+   toanthropic above, passes transport.anthropicurl(), and nothing a request or a setting
+   carries reaches it. *)
+f=toanthropicat(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;key:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;url:str):i64{
   let spec:$modelspec=route.model;
   let sent=popt.sentof(optrec);
-  let abody=anthropicbody(spec.id;sysprompt;sent);
+  let abody=anthropicbody(spec.id;run.finalsystemprompt;sent);
   if(reservedispatch(store;run;"anthropic";"cloud";spec.id;"";"api.anthropic.com";abody;sent;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"anthropic";spec.id;piifields;startms;decision)
   };
-  let raw=anthropicsend(xport.anthropicurl();key;abody);
+  let raw=anthropicsend(url;key;abody);
   if(str.len(raw)==0){
     log.warn("pipeline: anthropic returned nothing, treating as a provider failure";"api.pipeline";run.requestid);
     <providerfailed(store;run;"anthropic";spec.id;startms;decision;optrec)
@@ -994,7 +1007,10 @@ f=toollama(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifield
     <http.res(503;"{\"ok\":false,\"error\":\(jx.escape(msg)),\"model_not_installed\":true\(piifields)}")
   }el{};
   let sent=popt.sentof(optrec);
-  let payload="{\"model\":\(json.enc(spec.id)),\"prompt\":\(popt.jsonquoted(sent)),\"stream\":false}";
+  (* F3.9a. The guardian, over the caller's anonymised system prompt, as /api/generate's
+     `system`. This payload used to carry no system prompt at all, so the guardian the pipeline
+     built never reached a local model. *)
+  let payload="{\"model\":\(json.enc(spec.id)),\"system\":\(popt.jsonquoted(run.finalsystemprompt)),\"prompt\":\(popt.jsonquoted(sent)),\"stream\":false}";
   if(reservedispatch(store;run;"ollama";"local";spec.id;digestof(spec.id;models);str.trimprefix(obase;"http://");payload;sent;fbreason;fbby;sid;decision)){}el{
     <unrecorded(store;run;"ollama";spec.id;piifields;startms;decision)
   };
@@ -1028,12 +1044,12 @@ f=needsanthropickey(store:i64;run:$pipelinerun;route:$routingdecision;piifields:
   <refusedroute("the router selected an Anthropic model but no anthropic_api_key is configured";piifields)
 };
 
-f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let key=anthropickey();
   if(str.len(key)>20){}el{
     <needsanthropickey(store;run;route;piifields;startms;decision)
   };
-  <toanthropic(store;run;route;optrec;sysprompt;key;piifields;startms;decision;fbreason;fbby;sid)
+  <toanthropic(store;run;route;optrec;key;piifields;startms;decision;fbreason;fbby;sid)
 };
 
 (* All seven $provider variants are named. A match on a plain user sum DOES discriminate
@@ -1043,11 +1059,11 @@ f=toanthropicchecked(store:i64;run:$pipelinerun;route:$routingdecision;optrec:st
 (* GA1.5: `optrec` is the optimiser's record (core.optimiser.prompt), and the text a provider
    is sent is popt.sentof(optrec): the optimised anonymised text, or the anonymised text as it
    was when the optimiser did nothing. Never res.original. *)
-f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):i64{
+f=dispatch(store:i64;run:$pipelinerun;route:$routingdecision;optrec:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;obase:str):i64{
   let spec:$modelspec=route.model;
   let prov:$provider=spec.provider;
   <mt prov {
-    $anthropic:v toanthropicchecked(store;run;route;optrec;sysprompt;piifields;startms;decision;fbreason;fbby;sid);
+    $anthropic:v toanthropicchecked(store;run;route;optrec;piifields;startms;decision;fbreason;fbby;sid);
     $openai:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $google:v unsupportedprovider(store;run;route;piifields;startms;decision);
     $mistral:v unsupportedprovider(store;run;route;piifields;startms;decision);
@@ -1100,10 +1116,10 @@ f=optimisationfield(run:$pipelinerun;optrec:str):str{
 
 (* The production path from a routed, permitted request to a provider: forward() calls this
    with the configured sidecar and ollamabase(). Tests call it with recorders. *)
-f=sendoptimised(store:i64;run:$pipelinerun;route:$routingdecision;sysprompt:str;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str):i64{
+f=sendoptimised(store:i64;run:$pipelinerun;route:$routingdecision;piifields:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str;llurl:str;minchars:i64;obase:str):i64{
   let optrec=optimisefor(run;llurl;minchars);
   log.info("pipeline: \(popt.stagesline(optrec;anonymisedof(run.result)))";"api.pipeline";run.requestid);
-  <dispatch(store;run;route;optrec;sysprompt;str.concat(piifields;optimisationfield(run;optrec));startms;decision;fbreason;fbby;sid;obase)
+  <dispatch(store;run;route;optrec;str.concat(piifields;optimisationfield(run;optrec));startms;decision;fbreason;fbby;sid;obase)
 };
 
 (* NC1.8 - what every reply on this path says about itself. This endpoint IS the
@@ -1138,7 +1154,7 @@ f=fallbackunselected():i64{
    caller learns why the no-custody path refused before it chooses the fallback. *)
 f=nocustodyfirst(store:i64;run:$pipelinerun;rawbody:str;sysprompt:str;sid:str):str{
   let res:$piidetectionresult=run.result;
-  <nd.attempt(rawbody;res.anonymised;sysprompt;store;nd.ollamabase();"\(run.requestid)-nc";run.requestid;sid)
+  <nd.attempt(rawbody;res.anonymised;sp.anonymisedsystem(run;sysprompt);store;nd.ollamabase();"\(run.requestid)-nc";run.requestid;sid)
 };
 
 f=nocustodyanswer(run:$pipelinerun;reply:str):i64{
@@ -1154,7 +1170,7 @@ f=nocustodyunselected(reply:str):i64{
    The order is the story: cache, then budget, then route, then dispatch. A hit spends
    nothing; an exhausted budget refuses before a provider is paid; and the route is what
    decides where the text is allowed to go. *)
-f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
+f=forward(store:i64;run:$pipelinerun;startms:i64;decision:$policydecision;fbreason:str;fbby:str;sid:str):i64{
   let res:$piidetectionresult=run.result;
   let piifields=str.concat(privacyfields(run);custodyfields(fbreason;fbby));
 
@@ -1208,7 +1224,7 @@ f=forward(store:i64;run:$pipelinerun;sysprompt:str;startms:i64;decision:$policyd
     <http.res(403;"{\"ok\":false,\"error\":\(jx.escape(ks.refusalmessage(store;pname;"browser-chat"))),\"provider_blocked\":true,\"kill_switch_scope\":\(jx.escape(ks.blockedscope(store;pname;"browser-chat")))\(piifields)}")
   }el{};
 
-  <sendoptimised(store;run;route;sysprompt;piifields;startms;decision;fbreason;fbby;sid;llmlinguaurl(store);llmlinguaminchars(store);ollamabase())
+  <sendoptimised(store;run;route;piifields;startms;decision;fbreason;fbby;sid;llmlinguaurl(store);llmlinguaminchars(store);ollamabase())
 };
 
 (* ── GA5.26: hold until approved ─────────────────────────────────────────────────
@@ -1222,6 +1238,14 @@ f=unsaltedtext(run:$pipelinerun;text:str):str{
 
 f=unsaltedfrom(res:$piidetectionresult;text:str):str{
   <ph.applytotext(text;ph.assignplaceholders(res.entities;""))
+};
+
+(* F3.9b. What an approval is bound to: the text, and the caller's system prompt when there is
+   one, since both are scanned and both are sent. An approval given for one system prompt does
+   not let another through. A request with none binds as it always did. *)
+f=boundtext(text:str;sysprompt:str):str{
+  if(str.len(sysprompt)==0){ <text };
+  <"\(sysprompt)\n\n\(text)"
 };
 
 f=approvalbinding(run:$pipelinerun;text:str;decision:$policydecision;fbreason:str;fbby:str):str{
@@ -1340,8 +1364,13 @@ f=post(req:i64):i64{
   (* A bool, not a result arm: toke matches the first arm of an X!$lokeerr whatever
      the value is (T-18), so a refusal returned as $err would be read here as success
      and the text forwarded unscanned — the precise failure NC1.9 forbids. *)
+  (* F3.9b. The caller's system prompt is scanned WITH the text (core.privacy.systemprompt):
+     one entity list, one placeholder map, one sensitivity, so the policy and any approval
+     below cover it, and run.finalsystemprompt, the guardian over its anonymised form, is what
+     every route sends (F3.9a). The raw value is not passed on past this point except to bind
+     an approval and to be anonymised again for the no-custody envelope. *)
   let sysprompt=jx.strvalue(pobj;"system_prompt";"");
-  let run=pipe.runforward(text;sysprompt;pipelineconfig());
+  let run=sp.runforward(text;sysprompt;pipelineconfig());
   if(pipe.issafetoforward(run)){
     (* GA1.8 — the governance gate, between detection and dispatch. policy.evaluate returns
        a PLAIN struct, so T-18 cannot touch it, which is why this one could be wired now
@@ -1357,7 +1386,7 @@ f=post(req:i64):i64{
     (* GA5.26 - held until approved. With no approval id the request is refused with one;
        with an id, it proceeds only if ag.consume spends a valid approval for THIS request. *)
     if(isrequireapproval(decision)){
-      let bind=approvalbinding(run;text;decision;fbreason;fbby);
+      let bind=approvalbinding(run;boundtext(text;sysprompt);decision;fbreason;fbby);
       let aid=json.str(parsed;"approval_id");
       if(str.len(aid)==0){
         <heldforapproval(store;run;decision;bind;startms)
@@ -1379,7 +1408,7 @@ f=post(req:i64):i64{
         <nocustodyunselected(ncreply)
       }
     }el{};
-    <forward(store;run;sysprompt;startms;decision;fbreason;fbby;sid)
+    <forward(store;run;startms;decision;fbreason;fbby;sid)
   }el{
     privacyrefusedtrace(store;run;t.nowms()-startms);
     <refused(pipe.refusalreason(run))

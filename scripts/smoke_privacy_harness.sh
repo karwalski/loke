@@ -24,11 +24,12 @@
 #      for byte (the echo makes the expected answer exact);
 #   4. a request held for approval (RESTRICTED data) sent nothing to the model at all, and
 #      after approval through POST /api/approve sends as in 1-3;
-#   (and once, outside the matrix: an identifier in the caller's system_prompt did not reach
-#      the model. It holds here only because nothing is sent as a system prompt; F3.9b.)
-#   5. the guardian system prompt reached the model. EXPECTED TO FAIL today, recorded as XFAIL:
-#      /api/pipeline sends Ollama no system prompt at all. F3.9a. An XPASS fails this script,
-#      so the fix cannot land without the expectation and the backlog row being updated.
+#   5. the guardian system prompt reached the model, at the start of /api/generate's `system`
+#      (F3.9a: an expected failure until the fix; a required pass now).
+#
+# and, outside the matrix, one system-prompt cell per detector case (F3.9b): the identifier in
+# the caller's `system_prompt`, none in the text. The value must reach no request but the NER
+# layer's, and the model's `system` must carry the guardian and then a placeholder of its type.
 #
 # loke dispatches to Ollama at the fixed address 127.0.0.1:11434, so this takes the fixed-port
 # lock that smoke_e2e.sh and smoke_ui.sh hold, and refuses to start if that port is taken.
@@ -40,7 +41,8 @@
 #   HARNESS_REPORT=cells.json HARNESS_RECORD=benchmarks/results/x.jsonl scripts/smoke_privacy_harness.sh
 #
 # What it does NOT cover: the Anthropic route (its endpoint is fixed to the real provider, so
-# no stand-in can take its place; see tests/integration/test_system_prompt_disclosure.tk), the
+# no stand-in can take its place in the binary; tests/integration/test_system_prompt_disclosure.tk
+# drives the route's own toanthropicat against a recorder instead), the
 # CLI paths (cli.ask, cli.proxy), the no-custody path, and detection recall, which is measured
 # against the corpus in tests/integration/test_detection_recall.tk. Each detector type is
 # exercised with one value the regex layer is known to detect.
