@@ -674,6 +674,13 @@ step_test() {
   if [[ -x ./scripts/smoke_e2e.sh ]]; then
     ./scripts/smoke_e2e.sh || return 1
   fi
+  # F3.9: the privacy harness. Every built-in template x every regex detector type (plus NER
+  # PERSON and a control) through the built loke's /api/pipeline, judged on what a recording
+  # stand-in for Ollama received: no raw identifier, a typed placeholder, exact restoration.
+  # Holds the fixed-port lock (it takes 11434). A few seconds.
+  if [[ -x ./scripts/smoke_privacy_harness.sh ]]; then
+    ./scripts/smoke_privacy_harness.sh || return 1
+  fi
   # GA3: moke's chat page in headless Chrome against the whole stack. Skips, loudly, if
   # node or Chrome is missing.
   if [[ -x ./scripts/smoke_ui.sh ]]; then

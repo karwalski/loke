@@ -198,7 +198,8 @@ class Markers(unittest.TestCase):
         self.assertTrue(any("must say why" in e for e in run(doc)))
 
     def test_a_page_with_nothing_verified_fails(self):
-        doc = DOC.replace("**Evidence: verified.**", "**Evidence: legacy, unverified.**", 1)
+        # Every verified marker, not only the first: the page has more than one verified section.
+        doc = DOC.replace("**Evidence: verified.**", "**Evidence: legacy, unverified.**")
         self.assertTrue(any("no section is verified" in e for e in run(doc)))
 
 

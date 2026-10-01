@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+# Copyright 2026 loke contributors
+# SPDX-License-Identifier: Apache-2.0
+"""The privacy pipeline test harness, end to end over the real request path. (F3.9)
+
+Driven by scripts/smoke_privacy_harness.sh, which starts the built loke binary and puts
+scripts/lib/http_recorder.py (echo mode) where loke expects Ollama. This script sends one
+POST /api/pipeline per (template, detector case) pair and judges each on what the recorder
+LOGGED (`<log>.bodies`, one json.dumps([method, path, body]) per request, written before the
+recorder answers), never on what loke reports about itself.
+
+Templates are read from core.privacy.template's own source, so a template added there is
+covered here without editing this file. They are rendered here, by the same rule the
+module's render applies (every `{{name}}` replaced by its value, optional parameters by their
+default): no route on loke's request path renders a template, so a client does, and the
+rendered text is what /api/pipeline receives. The renderer itself is tested by
+tests/unit/privacy/test_template.tk and test_template_render.tk.
+
+The detector cases name every type core.privacy.regex.getpatterns emits, each with a value
+tests/unit/privacy/test_regex.tk shows that layer detecting, plus a PERSON for the NER layer
+(the recorder's /api/chat always reports "Jane Citizen") and a control with no identifier.
+CASE_TYPES below must equal the regex layer's list; the harness reads that list from
+regex.tk and fails if they differ, so a new detector cannot go unexercised silently.
+
+Exit status 0 only when every assertion passes and every expected failure (XFAIL) still
+fails. An expected failure that passes (XPASS) is a failure of this script: the defect it
+records was fixed, and the expectation and its backlog row must be updated with it.
+"""
+import argparse, json, re, sys, time, urllib.error, urllib.request
+
+# (detector type, raw value, placeholder type prefix). Values from test_regex.tk.
+CASES = [
+    ("email", "harness.probe@example.com", "EMAIL"),
+    ("phone_au", "0412 345 678", "PHONE_AU"),
+    ("phone_us", "(555) 234-5678", "PHONE_US"),
+    ("credit_card", "4111 1111 1111 1111", "CREDIT_CARD"),
+    ("ip_v4", "192.168.1.1", "IP_V4"),
+    ("au_tfn", "123 456 782", "AU_TFN"),
+    ("au_abn", "51 824 753 556", "AU_ABN"),
+    ("ssn_us", "219-09-9999", "SSN_US"),
+    ("url", "https://intranet.example.com/payroll/q3", "URL"),
+    ("api_key", "sk-ant-abcdefghijklmnopqrst", "API_KEY"),
+    ("PERSON (NER layer)", "Jane Citizen", "PERSON"),
+    ("none (control)", "", ""),
+]
+REGEX_TYPES = [c[0] for c in CASES[:10]]
+GUARDIAN = "LOKE_GUARDIAN_v"
+PLACEHOLDER = re.compile(r"\[[A-Z][A-Z0-9_]*_[0-9]+\]|\[[A-Z][A-Z0-9_]*_[0-9a-f]{4,}_[0-9]+\]")
+
+
+def field(block, name):
+    m = re.search(name + r':"((?:[^"\\]|\\.)*)"', block, re.S)
+    return m.group(1).replace('\\"', '"').replace("\\\\", "\\") if m else None
+
+
+def builtin_block(src):
+    """builtintemplates' body: from its `<@(` to the next function."""
+    return src.split("f=builtintemplates()", 1)[1].split("<@(", 1)[1].split("\nf=", 1)[0]
+
+
+def read_templates(path):
+    body = builtin_block(open(path, encoding="utf-8").read())
+    blocks = body.split("$prompttemplate{")[1:]
+    templates = []
+    for b in blocks:
+        params = []
+        for pm in re.finditer(r"\$templateparam\{(.*?)\}", b, re.S):
+            p = pm.group(1)
+            params.append({"name": field(p, "name"), "required": "required:true" in p,
+                           "default": field(p, "defaultval") or ""})
+        templates.append({"id": field(b, "id"), "system": field(b, "systemprompt"),
+                          "user": field(b, "usertemplate"), "params": params})
+    return templates
+
+
+def read_regex_types(path):
+    src = open(path, encoding="utf-8").read()
+    body = src.split("f=getpatterns()", 1)[1].split("\nf=", 1)[0]
+    return re.findall(r'\$patterndef\{name:"([^"]+)"', body)
+
+
+def render(tmpl, values):
+    sysp, user = tmpl["system"], tmpl["user"]
+    for p in tmpl["params"]:
+        v = values.get(p["name"], p["default"])
+        sysp = sysp.replace("{{%s}}" % p["name"], v)
+        user = user.replace("{{%s}}" % p["name"], v)
+    return sysp, user
+
+
+def raw_data(tmpl, value):
+    """Parameter values: the identifier goes into the first required parameter, as raw data a
+    user pastes; every other required parameter gets plain prose; optional ones their default."""
+    vals, placed = {}, False
+    for p in tmpl["params"]:
+        if not p["required"]:
+            continue
+        if p["name"] == "categories":
+            vals[p["name"]] = "billing, support, other"
+        elif not placed:
+            vals[p["name"]] = ("Customer record, keep it confidential: %s. Status open." % value) if value \
+                else "Customer record with nothing personal in it. Status open."
+            placed = True
+        else:
+            vals[p["name"]] = "What should happen next with this record?"
+    return vals
+
+
+def post(url, obj):
+    req = urllib.request.Request(url, data=json.dumps(obj).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+
+
+def recorded(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def leaks(body, value):
+    """The forms of value that would count as it leaving: as typed, inside the JSON-decoded
+    body, and (for a value with separators) as its bare digits."""
+    if not value:
+        return False
+    forms = {value}
+    digits = re.sub(r"\D", "", value)
+    if len(digits) >= 8 and digits != value:
+        forms.add(digits)
+    texts = [body]
+    try:
+        texts.append(json.dumps(json.loads(body), ensure_ascii=False))
+    except ValueError:
+        pass
+    return any(f in t for f in forms for t in texts)
+
+
+class Tally:
+    def __init__(self):
+        self.ok = self.fail = self.xfail = self.xpass = 0
+        self.rows = []
+
+    def check(self, cond, label):
+        if cond:
+            self.ok += 1
+        else:
+            self.fail += 1
+            print("  FAIL " + label, file=sys.stderr)
+        return cond
+
+    def expectfail(self, cond, label):
+        if cond:
+            self.xpass += 1
+            print("  XPASS (expected to fail, F3.9a) " + label, file=sys.stderr)
+        else:
+            self.xfail += 1
+
+
+def record(path, templates, cells):
+    """The run's counts as result rows, for docs/metrics-baseline.md (through the evidence
+    ledger). Counts over fixed inputs, with a recording stand-in and no model: deterministic,
+    so one observation each, and stated as counts, never as rates."""
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
+    from benchmarks.lib import result
+    workload = "f3.9-privacy-harness: %d built-in templates (%s) x %d cases (%s), POST /api/pipeline -> Ollama stand-in" % (
+        len(templates), ",".join(t["id"] for t in templates), len(CASES), ",".join(c[0] for c in CASES))
+    dispatched = [c for c in cells if c.get("dispatched")]
+    common = dict(units="cells", workload=workload, arm="loke-binary-api-pipeline",
+                  notes="scripts/smoke_privacy_harness.sh; judged on what scripts/lib/http_recorder.py logged")
+    result.write(result.Measurement(metric="privacy_harness_cells_passing", value=float(sum(1 for c in cells if c["passed"])),
+                                    n=len(cells), caveat="One request path (browser /api/pipeline to a local model) and the "
+                                    "regex layer's own fixture values; not a recall figure, and the Anthropic route is not driven.",
+                                    **common), path=pathlib.Path(path))
+    result.write(result.Measurement(metric="privacy_harness_guardian_reached_model", value=float(sum(1 for c in dispatched if c.get("guardian"))),
+                                    n=len(dispatched), caveat="F3.9a: /api/pipeline sends Ollama no system prompt, so no guardian.",
+                                    **common), path=pathlib.Path(path))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--loke", required=True)
+    ap.add_argument("--bodies", required=True)
+    ap.add_argument("--templates", required=True)
+    ap.add_argument("--report")
+    ap.add_argument("--record", help="append the counts to this result file (benchmarks.lib.result)")
+    a = ap.parse_args()
+
+    T = Tally()
+    templates = read_templates(a.templates)
+    declared = builtin_block(open(a.templates, encoding="utf-8").read()).count("$prompttemplate{")
+    T.check(len(templates) == declared and declared > 0 and all(t["id"] and t["user"] for t in templates),
+            "every built-in template was read from template.tk (%d of %d)" % (len(templates), declared))
+    regex_types = read_regex_types(a.templates.replace("template.tk", "regex.tk"))
+    T.check(regex_types == REGEX_TYPES,
+            "the cases cover exactly the regex layer's detector types: layer has %s" % regex_types)
+
+    pipeline = a.loke + "/api/pipeline"
+    approve = a.loke + "/api/approve"
+    every_value = [c[1] for c in CASES if c[1]]
+    cells = []
+
+    for tmpl in templates:
+        for (dtype, value, ptype) in CASES:
+            name = "%s x %s" % (tmpl["id"], dtype)
+            sysp, user = render(tmpl, raw_data(tmpl, value))
+            req = {"text": user, "system_prompt": sysp,
+                   "fallback_reason": "user_choice", "fallback_selected_by": "user"}
+            cell = {"template": tmpl["id"], "detector": dtype, "held": False, "passed": False}
+
+            before = len(recorded(a.bodies))
+            status, out = post(pipeline, req)
+            got = recorded(a.bodies)[before:]
+            try:
+                reply = json.loads(out)
+            except ValueError:
+                reply = {}
+
+            if status == 409 and reply.get("approval_required"):
+                # GA5.26: held. Nothing may have reached the model while it was held.
+                cell["held"] = True
+                T.check(not any(r[1] == "/api/generate" for r in got),
+                        "%s: held for approval, and the model received nothing" % name)
+                T.check(not any(leaks(r[2], value) for r in got if r[1] != "/api/chat"),
+                        "%s: held, and no request but the local NER layer's carried the value" % name)
+                ast, aout = post(approve, {"approval_id": reply.get("approval_id", ""), "decision": "approve"})
+                T.check(ast == 200 and '"approved"' in aout, "%s: the approval was recorded" % name)
+                req["approval_id"] = reply.get("approval_id", "")
+                before = len(recorded(a.bodies))
+                status, out = post(pipeline, req)
+                got = recorded(a.bodies)[before:]
+                try:
+                    reply = json.loads(out)
+                except ValueError:
+                    reply = {}
+
+            if not T.check(status == 200 and reply.get("ok") is True,
+                           "%s: answered 200 ok (got %s %s)" % (name, status, out[:160])):
+                cells.append(cell)
+                continue
+            gens = [r for r in got if r[0] == "POST" and r[1] == "/api/generate"]
+            if not T.check(len(gens) == 1, "%s: exactly one dispatch reached the model (got %d)" % (name, len(gens))):
+                cells.append(cell)
+                continue
+            body = gens[0][2]
+            try:
+                sent = json.loads(body).get("prompt", "")
+            except ValueError:
+                sent = ""
+            before_fail = T.fail
+
+            # 1. No raw identifier left, in any request but the local NER layer's.
+            for r in got:
+                if r[1] == "/api/chat":
+                    continue
+                T.check(not any(leaks(r[2], v) for v in every_value),
+                        "%s: %s %s carries no raw identifier" % (name, r[0], r[1]))
+            # 2. The value was replaced by a placeholder of its type, and nothing else was lost.
+            if value:
+                T.check(re.search(r"\[%s_[0-9a-f]+_[0-9]+\]|\[%s_[0-9]+\]" % (ptype, ptype), sent) is not None,
+                        "%s: the model's prompt carries a %s placeholder" % (name, ptype))
+                T.check("Status open." in sent and "Customer record" in sent,
+                        "%s: the rest of the text reached the model" % name)
+            else:
+                T.check(sent == user, "%s: text with no identifier reached the model unchanged" % name)
+            # 3. Restoration: the echo answers "echo: " + prompt, so the user must read exactly
+            #    "echo: " + the text they sent.
+            T.check(reply.get("response") == "echo: " + user,
+                    "%s: the reply is restored byte for byte" % name)
+            T.check(PLACEHOLDER.search(reply.get("response", "")) is None,
+                    "%s: no placeholder survives into what the user reads" % name)
+            # 5. The guardian reached the model. F3.9a: it does not, on this path.
+            cell["dispatched"] = True
+            cell["guardian"] = GUARDIAN in body
+            T.expectfail(GUARDIAN in body, "%s: the guardian system prompt reached the model" % name)
+
+            cell["passed"] = T.fail == before_fail
+            cells.append(cell)
+
+    # F3.9b: the caller's system_prompt is not scanned. On this (Ollama) route no system prompt
+    # is sent at all, so this holds today; it is here so that sending one (the F3.9a fix) cannot
+    # start sending it unscanned. The Anthropic route does send it: test_system_prompt_disclosure.tk.
+    sysvalue = "sysprompt.probe@example.com"
+    before = len(recorded(a.bodies))
+    status, out = post(pipeline, {"text": "Summarise the weather report for today.",
+                                  "system_prompt": "You are assisting %s." % sysvalue,
+                                  "fallback_reason": "user_choice", "fallback_selected_by": "user"})
+    got = recorded(a.bodies)[before:]
+    T.check(status == 200 and any(r[1] == "/api/generate" for r in got),
+            "system_prompt probe: dispatched (got %s %s)" % (status, out[:160]))
+    T.check(not any(leaks(r[2], sysvalue) for r in got if r[1] != "/api/chat"),
+            "system_prompt probe: an identifier in the caller's system_prompt did not reach the model")
+
+    # A last sweep over everything the stand-in ever received.
+    allrec = recorded(a.bodies)
+    T.check(len(allrec) > 0, "the stand-in recorded requests")
+    T.check(not any(leaks(r[2], v) for r in allrec if r[1] != "/api/chat" for v in every_value),
+            "across all %d recorded requests, none but the NER layer's carried a raw identifier" % len(allrec))
+
+    npass = sum(1 for c in cells if c["passed"])
+    nheld = sum(1 for c in cells if c["held"])
+    print("  privacy harness: %d templates x %d detector cases = %d cells, %d passed every assertion, "
+          "%d held for approval first; %d assertions ok, %d failed, %d expected failures (F3.9a), %d unexpected passes"
+          % (len(templates), len(CASES), len(cells), npass, nheld, T.ok, T.fail, T.xfail, T.xpass))
+    if a.report:
+        with open(a.report, "w") as f:
+            json.dump({"templates": [t["id"] for t in templates], "cases": [c[0] for c in CASES],
+                       "cells": cells, "ok": T.ok, "fail": T.fail, "xfail": T.xfail, "xpass": T.xpass,
+                       "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, f, indent=1)
+    if a.record:
+        record(a.record, templates, cells)
+    return 0 if T.fail == 0 and T.xpass == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,101 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.systempromptdisclosure;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=guardian:core.privacy.guardian;
+i=h:page.api.pipeline;
+
+(* F3.9b — a reproducer, not a fix. Found by the F3.9 harness (scripts/smoke_privacy_harness.sh)
+   while asking whether the guardian reaches the model.
+
+   POST /api/pipeline reads `system_prompt` from the request and hands it to the privacy
+   pipeline only as the base of the guardian prompt: core.privacy.pipeline.run scans `text`
+   and nothing else. post() then passes the caller's system_prompt, unscanned, through forward,
+   sendoptimised and dispatch to toanthropic, which builds the Anthropic body from it with
+   anthropicbody and sends it with anthropicsend. So an identifier a caller puts in the system
+   prompt leaves the machine in clear on a cloud route, and the guardian the pipeline built
+   (run.finalsystemprompt) is not what is sent (F3.9a).
+
+   toanthropic sends to the one production endpoint, so it is not called here; `post` is not
+   reachable from a test (T-16). This drives the two calls toanthropic makes, in its order,
+   with the same arguments post() gives it, against scripts/lib/http_recorder.py on loopback,
+   and judges what ARRIVED. No request leaves the machine and no key is real.
+
+   EXPECTED TO FAIL ONCE F3.9b IS FIXED. The two assertions marked DEFECT pass today because
+   the defect is present; the fix makes them fail, and whoever lands it turns them round
+   (the email must NOT arrive, the guardian MUST) and closes F3.9b. The other assertions hold
+   before and after. *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:x x; $err:e @() };
+  if(!(hd == @())){ process.wait(hd); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* Regex layer only: Presidio and NER point where nothing listens, as in test_request_path_e2e.tk. *)
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let hex:str=str.randhex(8);
+  let base="/tmp/loke_sysprompt_\(hex)";
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:x x; $err:e @() };
+  let port=waitport("\(base).port");
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  let text="Please write to user.probe@example.com about the invoice.";
+  let sysprompt="You are helping caller.probe@example.com, tax file number 123 456 782.";
+
+  (* What post() does: runforward(text; system_prompt; config). *)
+  let run=pipe.runforward(text;sysprompt;localonly());
+  if(t.assert(pipe.issafetoforward(run);"the regex layer completed, so post() would forward")){pass=pass+1}el{fail=fail+1};
+  let res:$piidetectionresult=run.result;
+  if(t.assert(!str.contains(res.anonymised;"user.probe@example.com");"the email in the user text is replaced before sending")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(guardian.isguardianpresent(run.finalsystemprompt);"the pipeline builds a guardian system prompt (run.finalsystemprompt)")){pass=pass+1}el{fail=fail+1};
+
+  (* What toanthropic does with what post() gives it: the caller's system prompt, not
+     run.finalsystemprompt, and the anonymised text (popt.sentof is the anonymised text when
+     no optimiser is configured, which is the default). *)
+  let body=h.anthropicbody("claude-probe-model";sysprompt;res.anonymised);
+  let raw=h.anthropicsend("http://127.0.0.1:\(port)/v1/messages";"sk-ant-not-a-real-key-000000";body);
+  if(t.assert(str.len(raw)>0;"the recorder answered the send")){pass=pass+1}el{fail=fail+1};
+  let seen=readfile(logp);
+  if(t.assert(str.contains(seen;"POST /v1/messages ");"the POST arrived at the recorder")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(seen;"user.probe@example.com");"the user text's email did not arrive")){pass=pass+1}el{fail=fail+1};
+
+  (* DEFECT F3.9b: the system prompt's identifiers arrive in clear. Flip when fixed. *)
+  if(t.assert(str.contains(seen;"caller.probe@example.com") && str.contains(seen;"123 456 782");"DEFECT F3.9b (expected to fail once fixed): the caller's system_prompt reaches the provider unscanned, email and tax file number in clear")){pass=pass+1}el{fail=fail+1};
+  (* DEFECT F3.9a: the guardian does not. Flip when fixed. *)
+  if(t.assert(!guardian.isguardianpresent(seen);"DEFECT F3.9a (expected to fail once fixed): the guardian system prompt the pipeline built is not what reaches the provider")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete("\(logp).headers");
+  file.delete("\(logp).bodies");
+  file.delete("\(base).port");
+  <fail
+};

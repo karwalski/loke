@@ -1,7 +1,7 @@
 # Metrics Baseline
 
 **Version:** 1.0
-**Last updated:** 2026-09-28
+**Last updated:** 2026-10-01
 
 This file is the **only** source from which this project publishes figures. Every number here carries
 its workload, its tokenizer (or says "bytes"), its sample size and its date. Where a figure is widely
@@ -492,6 +492,52 @@ Reproduce:
 python3 tests/fixtures/pii-corpus/generate.py
 scripts/build_loke.sh && scripts/run_tests.sh tests/unit/privacy   # builds the archives
 TOKE_DIR=<toke at 0b0bc4e> python3 benchmarks/regex/run.py --sizes 0.25,0.5,1,2,10 --runs 6 --record --toke-commit 0b0bc4e
+```
+
+### Privacy harness over the request path, template × detector type — 2026-10-01
+
+**Evidence: verified.** Both rows were recorded by `scripts/smoke_privacy_harness.sh` against the
+loke binary built from `6a8ab4a7` with toke `86c432da` (ooke `3cc4998`); the harness itself is
+the F3.9 commit's. Counts over fixed inputs with a recording stand-in and no model, so each is one
+deterministic observation and is stated as a count, not as a rate.
+
+**What this is.** The coverage figure F3.9 once stated was never measured, and is withdrawn. What is
+measured is this: every built-in template in `core.privacy.template` crossed with every detector
+type `core.privacy.regex` emits, plus a PERSON for the NER layer and a control with no identifier.
+Each cell is one `POST /api/pipeline` to the built binary, judged only on what
+`scripts/lib/http_recorder.py`, standing in for Ollama, received: no raw identifier in any request
+except the local NER layer's own, a placeholder of the right type where the value was, and the
+reply restored byte for byte. RESTRICTED cells are first held for approval (GA5.26), and the
+harness checks nothing was sent while held.
+
+| Measure, over the template × case cells | Count |
+|---|---|
+| Cells passing every assertion (5 templates × 12 cases) | **60** <sub>[ev:6b9be1821caa n=60]</sub> |
+| Dispatched cells in which the guardian system prompt reached the model | **0** <sub>[ev:a93966448b01 n=60]</sub> |
+
+**The second row is a defect, F3.9a.** `/api/pipeline` sends Ollama a prompt and no system prompt,
+so the guardian `core.privacy.pipeline` builds never leaves; on the Anthropic route the caller's
+`system_prompt` is sent in its place, unscanned (F3.9b).
+
+**Mutation-checked:** with `page.api.pipeline.restoretext` returning its input unchanged, 55 of
+the 60 cells fail (every cell holding an identifier; the controls pass); with `toollama` sending
+the original text in place of the anonymised one, the same 55 fail on the leak and placeholder
+assertions. Both restored and checked with `cmp`.
+
+**Caveats:**
+
+- **Not a recall figure.** Each type is exercised with one value the regex layer is known to
+  detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
+- **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven
+  (its endpoint is the real provider), nor are the CLI paths or the no-custody path covered.
+- The templates are rendered by the harness by the module's own rule; no route on the request path
+  renders a template.
+
+Reproduce (holds the fixed-port lock; it takes 11434):
+
+```sh
+scripts/build_loke.sh
+HARNESS_RECORD=benchmarks/results/f39.jsonl scripts/smoke_privacy_harness.sh
 ```
 
 ---

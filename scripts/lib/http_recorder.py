@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A local HTTP server that records EVERY request it receives, whatever the method. (VM1.6e)
 
-Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo|mcpecho|analyzepast] [<cert.pem> <key.pem>]
+Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo|mcpecho|analyzepast|harness] [<cert.pem> <key.pem>]
 
 It binds a port the OS hands out on 127.0.0.1 and writes the number to <port-file> once it
 is listening, so a test needs no fixed port and two runs cannot collide. Each request is
@@ -64,6 +64,17 @@ The handshake happens before any request is read, and each one is appended to
 the certificate the test can see both that a connection was attempted (the `.tls` line) and
 that no request arrived (nothing in `<log-file>`). scripts/lib/tls_fixture.sh makes the
 certificates.
+
+F3.9: two environment variables, for scripts/smoke_privacy_harness.sh, which stands this
+recorder in for Ollama under the BUILT loke binary. loke's request path dispatches to Ollama
+at a fixed address (page.api.pipeline.ollamabase, 127.0.0.1:11434), so the recorder must
+listen there: RECORDER_PORT binds that port instead of one the OS hands out (the caller holds
+the fixed-port lock, scripts/lib/fixedports_lock.sh). And the router chooses from a static
+catalogue, refusing a model Ollama does not list, so RECORDER_MODELS (comma-separated names)
+is what /api/tags and /api/ps list instead of `fake:latest`. Unset, both behave as before.
+The `harness` mode answers /api/generate as `echo` does, names no task to the intent
+classifier, and reports "Jane Citizen" from the NER /api/chat only when the request holds
+that name (`answer` and `echo` report it whatever the text).
 """
 import http.server, json, os, re, ssl, sys
 
@@ -71,6 +82,8 @@ LOG = sys.argv[1]
 PORTFILE = sys.argv[2]
 MODE = sys.argv[3] if len(sys.argv) > 3 else "answer"
 SEPS = (",", ":")
+BINDPORT = int(os.environ.get("RECORDER_PORT", "0") or 0)
+MODELS = [m for m in os.environ.get("RECORDER_MODELS", "fake:latest").split(",") if m]
 
 # Presidio's /analyze answer for "Jane Citizen" at the start of the text, and the NER model's
 # reply, which Ollama wraps as message.content.
@@ -178,11 +191,20 @@ class H(http.server.BaseHTTPRequestHandler):
         elif MODE == "garbage":
             self._send({"error": "recorder in garbage mode", "message": {"role": "assistant", "content": "I could not find any entities."}})
         elif p == "/api/tags":
-            self._send({"models": [{"name": "fake:latest", "size": 7, "digest": "d1"}]})
+            self._send({"models": [{"name": m, "size": 7, "digest": "d%d" % i} for i, m in enumerate(MODELS, 1)]})
         elif p == "/api/ps":
-            self._send({"models": [{"name": "fake:latest", "size": 7}]})
+            self._send({"models": [{"name": m, "size": 7} for m in MODELS]})
         elif p == "/api/version":
             self._send({"version": "0.0.0-recorder"})
+        elif p == "/api/chat" and MODE == "harness" and "Classify the intent" in body:
+            # F3.9: no task named, so the classifier keeps its keyword result, as
+            # scripts/lib/fake_ollama.py answers it for smoke_e2e.sh.
+            self._send({"model": "fake", "message": {"role": "assistant", "content": ""}, "done": True})
+        elif p == "/api/chat" and MODE == "harness":
+            # F3.9: an NER model that reports "Jane Citizen" only when the text holds it, so
+            # a case without a name is not credited with one the text does not contain.
+            found = NER if "Jane Citizen" in body else "[]"
+            self._send({"model": "fake", "message": {"role": "assistant", "content": found}, "done": True})
         elif p == "/api/chat" and "Classify the intent" in body:
             # core.router.intent's classification request (VM1.6f): a task name.
             self._send({"model": "fake", "message": {"role": "assistant", "content": "code_review"}, "done": True})
@@ -223,7 +245,7 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"nodes": [{"id": "n1", "device": "recorder", "memory_gb": 16.0, "models": ["m"]}]})
         elif p == "/api/pipeline":
             self._send({"response": "pipeline-answer"})
-        elif p == "/api/generate" and MODE == "echo":
+        elif p == "/api/generate" and MODE in ("echo", "harness"):
             self._send({"model": "fake", "response": "echo: " + _field(body, "prompt"), "done": True,
                         "prompt_eval_count": 12, "eval_count": 9})
         elif p == "/api/generate":
@@ -300,9 +322,9 @@ class TLSServer(http.server.ThreadingHTTPServer):
 if CERT:
     TLS_CTX = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     TLS_CTX.load_cert_chain(CERT, KEY)
-    srv = TLSServer(("127.0.0.1", 0), H)
+    srv = TLSServer(("127.0.0.1", BINDPORT), H)
 else:
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", BINDPORT), H)
 tmp = PORTFILE + ".tmp"
 with open(tmp, "w") as f:
     f.write(str(srv.server_address[1]))
