@@ -1,0 +1,207 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.entityroutingpipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=cfg:shared.config;
+i=sh:shared.types;
+(* For $resolvedentity. *)
+i=cn:core.privacy.consensus;
+
+(* F3b.5 — [[privacy.entity_routing]] in config.toml, judged by what the production pipeline
+   (core.privacy.pipeline.runforward) masks, which layers each masked value is credited to,
+   and whether it lets the run be forwarded.
+
+   scripts/lib/http_recorder.py stands in for NER (Ollama /api/chat) and Presidio (/analyze):
+   both report "Jane Citizen" as a PERSON at the start of the text. Neither reports the card
+   number, which only the regex layer finds; the regex layer also finds the email. The
+   privacy-filter sidecar is off, as it is by default.
+
+   NO ROUTING MUST MASK BYTE FOR BYTE WHAT IT MASKED BEFORE. Placeholders are salted with the
+   run's random request id, so two runs never print the same placeholder; the comparison
+   puts each entity's own placeholder back as its type and position before comparing the
+   anonymised texts, and compares every entity's type, value, span and confidence, in order,
+   and every consensus record. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_routing_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=three(url:str):$pipelineconfig{
+  <pl.newconfig(url;url)
+};
+
+f=routed(c:$pipelineconfig;text:str):$pipelineconfig{
+  <pl.withlokeconfig(c;cfg.fromtext(text))
+};
+
+f=route(etype:str;pref:str;fall:str):str{
+  <"[[privacy.entity_routing]]\nentity_type = \"\(etype)\"\npreferred_layers = \(pref)\nfallback_layers = \(fall)\n"
+};
+
+(* The layers a value's consensus record credits, "action layer=conf,...". *)
+f=resolvedfor(r:$pipelinerun;value:str):str{
+  let out=mut."";
+  lp(let i=0;i<r.resolved.len;i=i+1){
+    let re:$resolvedentity=r.resolved.get(i);
+    if(str.eq(re.value;value)){ out="\(out) \(re.action) \(re.detectinglayers)" }el{}
+  };
+  <out
+};
+
+(* The anonymised text with each entity's placeholder replaced by its type and position. *)
+f=canonical(r:$pipelinerun):str{
+  let out=mut.r.result.anonymised;
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    let mark="<\(e.entitytype)#\(str.fromint(i))>";
+    out=str.replace(out;e.placeholder;mark)
+  };
+  <out
+};
+
+f=conf(x:f64):str{
+  <str.fromint((x*1000.0) as i64)
+};
+
+(* Every entity's type, value, span and confidence, in order, then every consensus record. *)
+f=fingerprint(r:$pipelinerun):str{
+  let out=mut.@();
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    out=out.push("\(e.entitytype)|\(e.value)|\(str.fromint(e.start as i64))|\(str.fromint(e.end as i64))|\(conf(e.confidence))")
+  };
+  lp(let i=0;i<r.resolved.len;i=i+1){
+    let re:$resolvedentity=r.resolved.get(i);
+    out=out.push("\(re.entitytype)|\(re.value)|\(re.detectinglayers)|\(re.action)")
+  };
+  <str.join(";";out)
+};
+
+f=identical(a:$pipelinerun;b:$pipelinerun):bool{
+  <str.eq(canonical(a);canonical(b)) && str.eq(fingerprint(a);fingerprint(b)) && a.totalentities==b.totalentities && pl.issafetoforward(a)==pl.issafetoforward(b)
+};
+
+f=writeconfig(body:str):bool{
+  let made=mt file.mkdir(sh.lokedir()) {$ok:v v;$err:e false};
+  <mt file.write(sh.configpath();body) {$ok:v v;$err:e false}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(rec!=0 && str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  (* Presidio at a loopback port nothing serves (9, discard): an enabled layer that is down. *)
+  let deadurl="http://127.0.0.1:9";
+
+  let text="Jane Citizen paid with 4111111111111111, mail jane@example.com";
+  let name="Jane Citizen";
+  let card="4111111111111111";
+  let email="jane@example.com";
+
+  (* ── No routing: byte for byte the same ────────────────────────────────────── *)
+  let before=pl.runforward(text;"";three(url));
+  let bm=before.result.anonymised;
+  if(t.assert(pl.issafetoforward(before) && !str.contains(bm;name) && !str.contains(bm;card) && !str.contains(bm;email);"without routing the run masks the name, the card and the email")){pass=pass+1}el{fail=fail+1};
+  let again=pl.runforward(text;"";three(url));
+  if(t.assert(identical(before;again);"the comparison itself is stable across two runs (\(canonical(again)))")){pass=pass+1}el{fail=fail+1};
+  let empty=pl.runforward(text;"";routed(three(url);""));
+  if(t.assert(identical(empty;before);"an empty config.toml masks byte for byte the same")){pass=pass+1}el{fail=fail+1};
+  let othertext="[privacy]\nconsensus_strategy = \"most-restrictive\"\n\n[[privacy.layers]]\nid = \"presidio\"\nenabled = true\n\n[providers]\ndefault = \"ollama\"\n";
+  let other=pl.runforward(text;"";routed(three(url);othertext));
+  if(t.assert(identical(other;before);"so does one with settings and [[privacy.layers]] but no [[privacy.entity_routing]] (\(fingerprint(other)))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Preferred layers ─────────────────────────────────────────────────────── *)
+  let pp=pl.runforward(text;"";routed(three(url);route("PERSON";"[\"presidio\"]";"[\"ner\"]")));
+  let pr=resolvedfor(pp;name);
+  if(t.assert(str.contains(pr;"presidio=") && !str.contains(pr;"ner=");"PERSON preferring Presidio is credited to Presidio alone (\(pr))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(pp) && !str.contains(pp.result.anonymised;name) && !str.contains(pp.result.anonymised;email);"and the name and email are still masked")){pass=pass+1}el{fail=fail+1};
+  let pn=pl.runforward(text;"";routed(three(url);route("PERSON";"[\"ner\"]";"[\"presidio\"]")));
+  let nr=resolvedfor(pn;name);
+  if(t.assert(str.contains(nr;"ner=") && !str.contains(nr;"presidio=");"PERSON preferring NER is credited to NER alone, though Presidio is its fallback (\(nr))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Fallback layers ──────────────────────────────────────────────────────── *)
+  let fo=pl.runforward(text;"";routed(three(url);route("PERSON";"[\"openai-privacy-filter\"]";"[\"ner\"]")));
+  let fr1=resolvedfor(fo;name);
+  if(t.assert(str.contains(fr1;"ner=") && !str.contains(fr1;"presidio=") && !str.contains(fo.result.anonymised;name);"the sidecar switched off gives way to the fallback, NER (\(fr1))")){pass=pass+1}el{fail=fail+1};
+  let offtext=str.concat("[[privacy.layers]]\nid = \"presidio\"\nenabled = false\n\n";route("PERSON";"[\"presidio\"]";"[\"ner\"]"));
+  let fd=pl.runforward(text;"";routed(three(url);offtext));
+  let fr2=resolvedfor(fd;name);
+  if(t.assert(str.contains(fr2;"ner=") && !str.contains(fd.result.anonymised;name);"so does Presidio switched off in [[privacy.layers]] (\(fr2))")){pass=pass+1}el{fail=fail+1};
+  let fx=pl.runforward(text;"";routed(pl.newconfig(deadurl;url);route("PERSON";"[\"presidio\"]";"[\"ner\"]")));
+  let fr3=resolvedfor(fx;name);
+  if(t.assert(fx.layersdegraded>0 as u32 && str.contains(fr3;"ner=") && !str.contains(fx.result.anonymised;name) && pl.issafetoforward(fx);"and Presidio down (\(fr3))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Neither available: every layer that ran ──────────────────────────────── *)
+  let nt=str.concat("[[privacy.layers]]\nid = \"ner\"\nenabled = false\n\n";route("PERSON";"[\"openai-privacy-filter\"]";"[\"ner\"]"));
+  let na=pl.runforward(text;"";routed(three(url);nt));
+  let nar=resolvedfor(na;name);
+  if(t.assert(str.contains(nar;"presidio=") && !str.contains(na.result.anonymised;name) && pl.issafetoforward(na);"with neither the sidecar nor NER available, Presidio's PERSON is accepted and the name masked (\(nar))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The regex layer's detections are never dropped ───────────────────────── *)
+  let rg=pl.runforward(text;"";routed(three(url);route("CREDIT_CARD";"[\"presidio\"]";"[]")));
+  if(t.assert(!str.contains(rg.result.anonymised;card) && pl.issafetoforward(rg);"CREDIT_CARD routed to Presidio, which finds no card, still masks the card the regex layer found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(identical(rg;before);"and masks byte for byte what no routing does")){pass=pass+1}el{fail=fail+1};
+  let tfn=pl.runforward(text;"";routed(three(url);route("au_tfn";"[\"presidio\"]";"[]")));
+  if(t.assert(identical(tfn;before);"a route for a type nothing found here changes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Malformed: every run refused, nothing applied ────────────────────────── *)
+  let badtext="[privacy]\nconsensus_strategy = \"most-restrictive\"\n\n[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = [\"regex\"]\n";
+  let bad=routed(three(url);badtext);
+  let brun=pl.runforward(text;"";bad);
+  if(t.assert(!pl.issafetoforward(brun);"a malformed [[privacy.entity_routing]] refuses the run")){pass=pass+1}el{fail=fail+1};
+  let brr=pl.refusalreason(brun);
+  if(t.assert(str.startswith(brr;"privacy.entity_routing in config.toml cannot be applied: config.toml line 4:") && str.contains(brr;"regex") && !str.contains(brr;"Jane");"saying which line and why, and no PII (\(brr))")){pass=pass+1}el{fail=fail+1};
+  let bres=resolvedfor(brun;name);
+  if(t.assert(str.contains(bres;"ner=") && str.contains(bres;"presidio=");"and none of it was applied (\(bres))")){pass=pass+1}el{fail=fail+1};
+  let clean=pl.runforward("nothing personal here";"";bad);
+  if(t.assert(!pl.issafetoforward(clean);"even text with no PII is refused while the routing is malformed")){pass=pass+1}el{fail=fail+1};
+  let both=routed(three(url);str.concat("[[privacy.layers]]\nid = \"ner\"\nmode = \"block\"\n\n";route("PERSON";"[\"spacy\"]";"[]")));
+  let bothr=pl.refusalreason(pl.runforward(text;"";both));
+  if(t.assert(str.startswith(bothr;"privacy.layers in config.toml cannot be applied");"with both malformed, the layers error is the one reported (\(bothr))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Through config.toml on disk (the test's own HOME) ────────────────────── *)
+  if(t.assert(writeconfig(str.concat("[privacy]\nprivacy_filter = false\n\n";route("PERSON";"[\"presidio\"]";"[]")));"wrote config.toml")){pass=pass+1}el{fail=fail+1};
+  let disk=pl.runforward(text;"";pl.configured(url;url));
+  let dr=resolvedfor(disk;name);
+  if(t.assert(str.contains(dr;"presidio=") && !str.contains(dr;"ner=") && !str.contains(disk.result.anonymised;name);"pl.configured reads [[privacy.entity_routing]] from config.toml (\(dr))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writeconfig("[privacy]\nprivacy_filter = false\n\n[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = \"presidio\"\n");"wrote a malformed config.toml")){pass=pass+1}el{fail=fail+1};
+  let dbad=pl.runforward(text;"";pl.configured(url;url));
+  if(t.assert(!pl.issafetoforward(dbad) && str.contains(pl.refusalreason(dbad);"line 4");"and refuses on a malformed one, naming the line")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writeconfig("[privacy]\nprivacy_filter = false\n");"wrote a config.toml with no routing")){pass=pass+1}el{fail=fail+1};
+  let plain=pl.runforward(text;"";pl.configured(url;url));
+  if(t.assert(identical(plain;before);"and one with no [[privacy.entity_routing]] masks byte for byte what the default does")){pass=pass+1}el{fail=fail+1};
+
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  <fail
+};

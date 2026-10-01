@@ -59,7 +59,7 @@ Set with `privacy.consensus_strategy` in `config.toml`; an empty or unrecognised
 `most-restrictive`. The voters are the layers that completed a scan of the text. Every strategy but
 `most-restrictive` can leave something a layer detected unmasked.
 
-**Entity Routing** (`core/privacy/entity_routing.tk`): Different entity types assigned to the layer that handles them best — emails and phones to regex, person names to NER, medical records to Presidio.
+**Entity Routing** (`core/privacy/entity_routing.tk`): `[[privacy.entity_routing]]` in config.toml names, per entity type, the layers whose detections of it are accepted, with fallback layers for when those are unavailable. Nothing is routed by default, and the regex layer's detections are never dropped by a route.
 
 **Layer Health** (`core/privacy/layer_health.tk`): Monitors availability of each layer. System degrades gracefully — remains operational with at least one layer available. Reports HEALTHY or DEGRADED status.
 

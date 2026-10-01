@@ -718,6 +718,23 @@ else
   judge "a malformed [[privacy.layers]] refuses even a request with no PII, saying why" 503 '"error":"privacy.layers in config.toml cannot be applied: config.toml line 1: mode must be detect-and-mask, detect-only or veto","refused":true'
   if [ -s "$SEEN" ]; then echo "  FAIL the model received a request the malformed config refused" >&2; fail=1
   else echo "  ok   and the model received nothing"; fi
+  # F3b.5: [[privacy.entity_routing]]. CREDIT_CARD routed to Presidio must not drop the card the
+  # regex layer finds: the request is still held for approval and the model receives nothing.
+  printf '[[privacy.entity_routing]]\nentity_type = "CREDIT_CARD"\npreferred_layers = ["presidio"]\n' > "$WORK/lk/home/.loke/config.toml"
+  : > "$SEEN"
+  pipe_post "$CARDTEXT" ""
+  judge "with CREDIT_CARD routed to Presidio, the regex layer's card still holds the request" 409 '"approval_required":true'
+  case "$BODY" in
+    *'"entity_types":"'*credit_card*) echo "  ok   and the held response names credit_card" ;;
+    *) echo "  FAIL the held response does not name credit_card: $(printf '%s' "$BODY" | head -c 300)" >&2; fail=1 ;;
+  esac
+  if [ -s "$SEEN" ]; then echo "  FAIL the model received the card request routing was configured for" >&2; fail=1
+  else echo "  ok   and the model received nothing"; fi
+  printf '[[privacy.entity_routing]]\nentity_type = "private_person"\npreferred_layers = ["ner"]\n' > "$WORK/lk/home/.loke/config.toml"
+  pipe_post "what is the capital of France" ""
+  judge "a malformed [[privacy.entity_routing]] refuses even a request with no PII, naming the line" 503 '"error":"privacy.entity_routing in config.toml cannot be applied: config.toml line 1: entity_type private_person is not a type any layer reports","refused":true'
+  if [ -s "$SEEN" ]; then echo "  FAIL the model received a request the malformed routing refused" >&2; fail=1
+  else echo "  ok   and the model received nothing"; fi
   rm -f "$WORK/lk/home/.loke/config.toml"
 fi
 # GA1.5: the token optimiser, between the privacy filter and dispatch. scripts/lib/http_recorder.py

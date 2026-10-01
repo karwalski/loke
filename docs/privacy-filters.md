@@ -17,10 +17,11 @@ Two scoping notes, so the rest of the document is read correctly:
 
 ## Architecture Overview
 
-> **What runs today (AD1.7, F3b.1–F3b.4).** `pipeline.run` walks the filter registry (regex, Ollama
+> **What runs today (AD1.7, F3b.1–F3b.5).** `pipeline.run` walks the filter registry (regex, Ollama
 > NER, Presidio and, when `privacy.privacy_filter = true`, the privacy-filter sidecar) through
 > `core.privacy.layerhealth`, in the order and with the settings `[[privacy.layers]]` gives (F3b.2),
-> and resolves overlaps by `privacy.consensus_strategy` (F3b.4). The entity-routing, org-policy,
+> accepts a routed entity type only from the layers `[[privacy.entity_routing]]` names (F3b.5),
+> and resolves overlaps by `privacy.consensus_strategy` (F3b.4). The org-policy,
 > per-layer-metrics and evaluation modules exist with unit tests and have no importer in the product.
 > See [claims.md](claims.md) §B.
 
@@ -75,7 +76,7 @@ gracefully — if a layer is unavailable, remaining layers continue processing.
 | Presidio | `privacy/presidio.tk` | Microsoft Presidio integration via REST API |
 | Layer config | `privacy/layer_config.tk` | Layer definitions, priorities, and enable/disable |
 | Consensus | `privacy/consensus.tk` | Overlap resolution and multi-layer agreement |
-| Entity routing | `privacy/entity_routing.tk` | Per-entity-type layer assignment |
+| Entity routing | `privacy/entity_routing.tk` | Per-entity-type layer assignment from `[[privacy.entity_routing]]` (F3b.5) |
 | Pipeline | `privacy/pipeline.tk` | End-to-end orchestration |
 | Placeholders | `privacy/placeholder.tk`, `placeholder_store.tk` | Reversible masking and restoration |
 | Health | `privacy/layer_health.tk` | Availability monitoring and degradation |
@@ -192,17 +193,45 @@ the mechanism specified to do that, and the four strategies below are what it sp
 
 ## Per-Entity-Type Routing
 
-The entity routing module (`entity_routing.tk`) allows different entity types to be processed by different layers. For example:
+### `[[privacy.entity_routing]]` in config.toml (F3b.5)
 
-- Email addresses and phone numbers route to the regex layer (high-precision patterns)
-- Person names and organisations route to the NER layer (contextual understanding)
-- Medical record numbers route to Presidio (domain-specific models)
+```toml
+[[privacy.entity_routing]]
+entity_type = "PERSON"
+preferred_layers = ["openai-privacy-filter"]
+fallback_layers = ["presidio", "ner"]
+```
 
-This allows each layer to focus on what it does best, reducing false positives while maintaining coverage.
+Routing decides **whose detections** of an entity type the pipeline accepts. It does not stop
+any layer scanning the text: every enabled layer still scans all of it. It applies after the
+layers have run and before consensus (`core.privacy.entityrouting`, called from
+`core.privacy.pipeline.run`).
 
-### Configuring Routes
+- `entity_type` is a type a layer reports (the names in `core.privacy.entityvocab`), matched
+  without regard to case, so `CREDIT_CARD` names both Presidio's `CREDIT_CARD` and the regex
+  layer's `credit_card`.
+- `preferred_layers` is required and not empty; `fallback_layers` is optional. Every layer named
+  must be in the registry and must report the type.
+- A routed type is accepted from its preferred layers that are **available**: completed their
+  scan of this text, not `detect-only`, and not filtering the type out with `entity_filter`. A
+  preferred layer that is switched off, down or failed is unavailable, and the available fallback
+  layers are used instead.
+- **Neither available:** the type is accepted from every layer that ran, the same as with no
+  route, and a warning is logged. Refusing was the alternative; it would take the product offline
+  whenever an optional sidecar is down, and accepting from every layer never masks less than the
+  default. If no layer ran at all, the pipeline refuses as it always has.
+- **The regex layer's detections are never dropped by routing.** A route for a type the regex
+  layer reports that does not prefer it is applied to the other layers, with a warning.
+- A veto layer's veto is decided before routing, so routing cannot suppress a veto. With a
+  consensus strategy other than `most-restrictive`, a detection routing drops does not vote.
+- Unrouted types, and a config.toml with no `[[privacy.entity_routing]]`, are masked exactly as
+  before.
+- A malformed entry (unknown key or type, a duplicate, an empty or non-array layer list, a layer
+  that does not report the type or is named twice, the table or inline form) **refuses every
+  request**, naming the line, and nothing of it is applied.
 
-Entity routes are defined as mappings from entity type to layer ID. When a route is defined for an entity type, only the specified layer processes that type. Unrouted entity types are processed by all enabled layers and resolved via the consensus strategy.
+There is no default routing: with nothing configured, every layer's detections of every type
+are accepted.
 
 ## Health Monitoring and Graceful Degradation
 

@@ -5,74 +5,149 @@ m=test.privacy.entityrouting;
 
 i=t:std.test;
 i=str:std.str;
+(* For $piientity. *)
+i=sh:shared.types;
+i=fr:core.privacy.filterregistry;
 i=er:core.privacy.entityrouting;
 
-(* X7.2 — this file used to declare its own $entityroute table and assert against it. It
-   now imports core.privacy.entityrouting.
+(* F3b.5 — core.privacy.entityrouting reads [[privacy.entity_routing]] from a config.toml
+   text and decides, after the layers have run, whose detections of a routed type the
+   pipeline accepts. This file judges the module on its own: what it reads, what it refuses
+   and names the line of, the preferred-then-fallback-then-every-layer order, and that the
+   regex layer's detections are never dropped. tests/unit/privacy/test_entity_routing_pipeline.tk
+   judges the same routes by what the production pipeline masks.
 
-   FINDING, recorded rather than asserted as correct: THE ROUTING TABLE'S ENTITY NAMES
-   MATCH NO DETECTOR'S OUTPUT. defaultrouting names its five routes "email", "phone",
-   "person", "creditcard" and "address". core.privacy.regex emits "phone_au", "phone_us",
-   "credit_card", "au_tfn", "ssn_us", "ip_v4", "url", "api_key" and "email"; Presidio
-   emits "PHONE_NUMBER", "CREDIT_CARD", "PERSON", "EMAIL_ADDRESS". So of the five routes,
-   exactly ONE — "email" — matches anything any layer actually produces, and
-   hasroute("credit_card") is false while hasroute("creditcard") is true.
+   It replaces the X7.2 test of the old module, which recorded two defects of a route table
+   nothing read: its names matched no detector's, and an unrouted type resolved to no layer
+   at all. Both are gone: a route's type must be one a layer reports, and an unrouted type is
+   accepted from every layer. *)
 
-   That interacts badly with the second finding: getroute on an unrouted type returns a
-   route whose preferred AND fallback layer lists are both EMPTY, rather than saying it has
-   no route. A caller using this to decide which layers scan an entity would conclude that
-   a credit card is scanned by nothing at all — fail-open, silently, for four of the five
-   entity types the table was written to cover.
+f=reg():$filterregistry{ <fr.defaultregistry() };
 
-   NEITHER IS FIXED HERE: this module has no importer anywhere in the repository, so the
-   defects are latent. core.privacy.pipeline runs every enabled layer over the whole text
-   and does not consult a per-entity routing table. The assertions below therefore record
-   the behaviour as it is, following the precedent in tests/unit/storage/test_backup.tk,
-   and the naming assertions turn RED when the vocabularies are reconciled — which is
-   story X7.6's business. *)
+f=route(etype:str;pref:str;fall:str):str{
+  <"[[privacy.entity_routing]]\nentity_type = \"\(etype)\"\npreferred_layers = \(pref)\nfallback_layers = \(fall)\n"
+};
+
+f=resolved(text:str):$routingconfig{
+  <er.resolve(reg();text)
+};
+
+(* A text that must be refused: an error naming a line, and no route. *)
+f=refused(text:str;why:str):bool{
+  let c=resolved(text);
+  let ok=str.len(c.error)>0 && str.contains(c.error;"config.toml line ") && c.routes.len==0;
+  <t.assert(ok;"refused, no route applied: \(why) (\(c.error))")
+};
+
+f=hit(etype:str;value:str):$piientity{
+  <$piientity{entitytype:etype;value:value;start:0 as u32;end:0 as u32;confidence:0.9;placeholder:""}
+};
+
+(* The kept detections as "layer:type" items. *)
+f=kept(r:$routedhits):str{
+  let out=mut.@();
+  lp(let i=0;i<r.entities.len;i=i+1){
+    let h:$piientity=r.entities.get(i);
+    let id:str=r.layers.get(i);
+    out=out.push("\(id):\(h.entitytype)")
+  };
+  <str.join(",";out)
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let cfg=er.defaultrouting();
+  (* ── No routing: nothing read, nothing changed ───────────────────────────── *)
+  let none=resolved("");
+  if(t.assert(str.len(none.error)==0 && !none.present && none.routes.len==0;"an empty text has no route and no error")){pass=pass+1}el{fail=fail+1};
+  let other=resolved("[privacy]\nconsensus_strategy = \"majority\"\n\n[[privacy.layers]]\nid = \"presidio\"\npriority = 0\n");
+  if(t.assert(str.len(other.error)==0 && !other.present && other.routes.len==0;"settings and [[privacy.layers]] without [[privacy.entity_routing]] are no route")){pass=pass+1}el{fail=fail+1};
 
-  (* ── The table's shape ───────────────────────────────────────────────────────
-     count is a separate field from routes.len, and every loop in the module iterates to
-     count rather than to routes.len. If the two ever disagree, routes are silently
-     skipped or the loop reads past the end — and reading a field off a mis-matched value
-     segfaults rather than returning nonsense. This is the assertion that keeps them
-     honest. *)
-  if(t.assert(cfg.count==5;"the routing table declares five routes")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(cfg.routes.len==cfg.count;"and count agrees with the actual number of routes — every loop in the module trusts count, not routes.len")){pass=pass+1}el{fail=fail+1};
+  (* ── A route as read ─────────────────────────────────────────────────────── *)
+  let one=resolved(route("PERSON";"[\"openai-privacy-filter\"]";"[\"presidio\", \"ner\"]"));
+  if(t.assert(str.len(one.error)==0 && one.present && one.routes.len==1;"a route is read")){pass=pass+1}el{fail=fail+1};
+  let r0:$entityroute=one.routes.get(0);
+  if(t.asserteq(r0.entitytype;"PERSON";"with its entity type")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r0.preferred;"openai-privacy-filter";"its preferred layers")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r0.fallback;"presidio,ner";"and its fallback layers, in order")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(one.warning;"";"a route for a type the regex layer does not report warns of nothing")){pass=pass+1}el{fail=fail+1};
+  let nofall=resolved("[[privacy.entity_routing]]\nentity_type = 'PERSON'\npreferred_layers = [\"ner\",]  # comment\n");
+  if(t.assert(str.len(nofall.error)==0 && nofall.routes.len==1 && str.eq(nofall.routes.get(0).fallback;"");"fallback_layers is optional; single quotes, a trailing comma and a comment are read")){pass=pass+1}el{fail=fail+1};
+  let two=resolved(str.concat(route("PERSON";"[\"presidio\"]";"[]");route("au_tfn";"[\"regex\"]";"[\"presidio\"]")));
+  if(t.assert(str.len(two.error)==0 && two.routes.len==2;"two routes are read")){pass=pass+1}el{fail=fail+1};
 
-  (* ── Routes that resolve ─────────────────────────────────────────────────────*)
-  if(t.assert(er.hasroute(cfg;"email");"email has a route")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(er.getroute(cfg;"email").preferredlayers;"regex";"and prefers the regex layer, which is the cheap deterministic one")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(er.getroute(cfg;"email").fallbacklayers;"presidio");"with Presidio among its fallbacks")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(er.getroute(cfg;"person").preferredlayers;"ner";"a person is routed to NER first, because no regex finds a name")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(er.getroute(cfg;"address").preferredlayers;"presidio";"and an address to Presidio")){pass=pass+1}el{fail=fail+1};
+  (* ── The regex guard, at config time ─────────────────────────────────────── *)
+  let card=resolved(route("CREDIT_CARD";"[\"presidio\"]";"[]"));
+  if(t.assert(str.len(card.error)==0 && card.routes.len==1;"a route for CREDIT_CARD to Presidio is applied to the other layers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(card.warning;"regex") && str.contains(card.warning;"CREDIT_CARD");"and warns that it does not reach the regex layer's credit_card (\(card.warning))")){pass=pass+1}el{fail=fail+1};
+  let rxfall=resolved(route("au_tfn";"[\"presidio\"]";"[\"regex\"]"));
+  if(t.assert(str.len(rxfall.warning)>0;"so does one that names the regex layer only as a fallback")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(resolved(route("email";"[\"regex\"]";"[]")).warning;"";"one that prefers the regex layer does not")){pass=pass+1}el{fail=fail+1};
 
-  (* Every route must name at least a preferred layer. A route with neither is the same as
-     no route, and worse because it looks configured. *)
-  if(t.assert((str.len(er.getroute(cfg;"phone").preferredlayers) as i64)>0;"every declared route names a preferred layer")){pass=pass+1}el{fail=fail+1};
-  if(t.assert((str.len(er.getroute(cfg;"creditcard").preferredlayers) as i64)>0;"including the card route")){pass=pass+1}el{fail=fail+1};
+  (* ── Malformed: refused, with the line named ─────────────────────────────── *)
+  if(refused("[privacy.entity_routing]\nentity_type = \"PERSON\"\n";"written as a table")){pass=pass+1}el{fail=fail+1};
+  if(refused("[privacy]\nentity_routing = []\n";"written inline under [privacy]")){pass=pass+1}el{fail=fail+1};
+  if(refused("privacy.entity_routing = []\n";"written inline as a dotted key")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = [\"ner\"]\nlayer = \"ner\"\n";"an unknown key")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\nentity_type = \"PERSON\"\nentity_type = \"EMAIL_ADDRESS\"\npreferred_layers = [\"ner\"]\n";"a key given twice")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\nentity_type =\npreferred_layers = [\"ner\"]\n";"a key with no value")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\nentity_type \"PERSON\"\npreferred_layers = [\"ner\"]\n";"a line that is not key = value")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\npreferred_layers = [\"ner\"]\n";"no entity_type")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\nentity_type = PERSON\npreferred_layers = [\"ner\"]\n";"an unquoted entity_type")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("private_person";"[\"ner\"]";"[]");"a type no layer reports")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.entity_routing]]\nentity_type = \"PERSON\"\n";"no preferred_layers")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[]";"[\"ner\"]");"an empty preferred_layers")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"\"ner\"";"[]");"preferred_layers not an array")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[ner]";"[]");"an unquoted layer id")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[\"spacy\"]";"[]");"a layer the registry does not hold")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[\"regex\"]";"[]");"a preferred layer that does not report the type")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[\"ner\"]";"[\"regex\"]");"a fallback layer that does not report the type")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[\"ner\", \"ner\"]";"[]");"a layer named twice in preferred_layers")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[\"ner\"]";"[\"ner\"]");"a layer both preferred and fallback")){pass=pass+1}el{fail=fail+1};
+  if(refused(route("PERSON";"[\"ner\"]";"\"presidio\"");"fallback_layers not an array")){pass=pass+1}el{fail=fail+1};
+  if(refused(str.concat(route("PERSON";"[\"ner\"]";"[]");route("person";"[\"presidio\"]";"[]"));"two routes for one type, in different case")){pass=pass+1}el{fail=fail+1};
+  if(refused(str.concat(route("PERSON";"[\"ner\"]";"[]");route("LOCATION";"[\"regex\"]";"[]"));"one good route and one bad: none is applied")){pass=pass+1}el{fail=fail+1};
+  let at=resolved("[privacy]\nconsensus_strategy = \"majority\"\n\n[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = [\"spacy\"]\n");
+  if(t.assert(str.contains(at.error;"config.toml line 4") && str.contains(at.error;"spacy");"the error names the entry's line and the fault (\(at.error))")){pass=pass+1}el{fail=fail+1};
+  let atkey=resolved("[[privacy.entity_routing]]\nentity_type = \"PERSON\"\nprefered_layers = [\"ner\"]\n");
+  if(t.assert(str.contains(atkey.error;"config.toml line 3") && str.contains(atkey.error;"prefered_layers");"a misspelt key is named with its own line (\(atkey.error))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(er.refusal(at);"privacy.entity_routing in config.toml cannot be applied: \(at.error)");"the refusal begins with the section's name")){pass=pass+1}el{fail=fail+1};
 
-  (* ── FINDING 1, recorded: the vocabulary matches no detector ─────────────────*)
-  if(t.assert(!er.hasroute(cfg;"credit_card");"there is NO route for credit_card, which is what core.privacy.regex actually emits")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(er.hasroute(cfg;"creditcard");"the route is spelled creditcard, which no layer emits")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!er.hasroute(cfg;"phone_au");"and there is no route for phone_au either")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!er.hasroute(cfg;"CREDIT_CARD");"nor for the Presidio spelling")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!er.hasroute(cfg;"api_key");"nor for api_key, ssn_us, au_tfn, ip_v4 or url — five detected types with no route at all")){pass=pass+1}el{fail=fail+1};
+  (* ── At run time ─────────────────────────────────────────────────────────── *)
+  let hits=@(hit("email";"a@b.co");hit("PERSON";"Jane");hit("PERSON";"Jane");hit("CREDIT_CARD";"4111");hit("credit_card";"4111"));
+  let layers=@("regex";"ner";"presidio";"presidio";"regex");
+  let all=@("regex";"ner";"presidio");
+  let orig="regex:email,ner:PERSON,presidio:PERSON,presidio:CREDIT_CARD,regex:credit_card";
 
-  (* ── FINDING 2, recorded: an unrouted type resolves to NO LAYERS ─────────────
-     Not to a default, not to an error — to a route with both layer lists empty. A caller
-     reading that as "which layers scan this" concludes: none. *)
-  let missing=er.getroute(cfg;"au_tfn");
-  if(t.asserteq(missing.entitytype;"au_tfn";"an unrouted type echoes its own name back")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(missing.preferredlayers;"";"but names NO preferred layer")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(missing.fallbacklayers;"";"and NO fallback either — so an unrouted entity would be scanned by nothing, which fails OPEN")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!er.hasroute(cfg;"");"an empty entity type has no route")){pass=pass+1}el{fail=fail+1};
+  let unrouted=er.apply(none;reg();all;hits;layers);
+  if(t.asserteq(kept(unrouted);orig;"with no route every detection is kept, in order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unrouted.notes.len==0;"and nothing is noted")){pass=pass+1}el{fail=fail+1};
+
+  let toner=er.apply(resolved(route("PERSON";"[\"presidio\"]";"[\"ner\"]"));reg();all;hits;layers);
+  if(t.asserteq(kept(toner);"regex:email,presidio:PERSON,presidio:CREDIT_CARD,regex:credit_card";"PERSON preferring an available Presidio drops NER's PERSON and nothing else")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(toner.notes.len==0;"and notes nothing")){pass=pass+1}el{fail=fail+1};
+  let lower=er.apply(resolved(route("person";"[\"ner\"]";"[]"));reg();all;hits;layers);
+  if(t.asserteq(kept(lower);"regex:email,ner:PERSON,presidio:CREDIT_CARD,regex:credit_card";"the type is matched without regard to case")){pass=pass+1}el{fail=fail+1};
+
+  let fb=er.apply(resolved(route("PERSON";"[\"openai-privacy-filter\"]";"[\"ner\"]"));reg();all;hits;layers);
+  if(t.asserteq(kept(fb);"regex:email,ner:PERSON,presidio:CREDIT_CARD,regex:credit_card";"a preferred layer that did not run gives way to the fallback")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fb.notes.len==1 && str.contains(fb.notes.get(0);"fallback");"which is noted")){pass=pass+1}el{fail=fail+1};
+  let fb2=er.apply(resolved(route("PERSON";"[\"ner\"]";"[\"presidio\"]"));reg();@("regex";"presidio");hits;layers);
+  if(t.asserteq(kept(fb2);"regex:email,presidio:PERSON,presidio:CREDIT_CARD,regex:credit_card";"so does a preferred layer that failed (not a voter)")){pass=pass+1}el{fail=fail+1};
+
+  let filtered=fr.setpolicy(reg();"presidio";true;3;fr.detectandmask();0.0;"LOCATION");
+  let ff=er.apply(resolved(route("PERSON";"[\"presidio\"]";"[\"ner\"]"));filtered;all;hits;layers);
+  if(t.asserteq(kept(ff);"regex:email,ner:PERSON,presidio:CREDIT_CARD,regex:credit_card";"and a preferred layer whose entity_filter excludes the type")){pass=pass+1}el{fail=fail+1};
+
+  let neither=er.apply(resolved(route("PERSON";"[\"openai-privacy-filter\"]";"[\"ner\"]"));reg();@("regex";"presidio");hits;layers);
+  if(t.asserteq(kept(neither);orig;"with neither a preferred nor a fallback layer available, every layer that ran is accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(neither.notes.len==1 && str.contains(neither.notes.get(0);"every layer that ran");"and that is noted (\(neither.notes.get(0)))")){pass=pass+1}el{fail=fail+1};
+
+  let guard=er.apply(resolved(route("CREDIT_CARD";"[\"presidio\"]";"[]"));reg();all;hits;layers);
+  if(t.asserteq(kept(guard);orig;"CREDIT_CARD routed to Presidio keeps the regex layer's credit_card")){pass=pass+1}el{fail=fail+1};
+  let guard2=er.apply(resolved(route("CREDIT_CARD";"[\"presidio\"]";"[]"));reg();all;@(hit("credit_card";"4111"));@("regex"));
+  if(t.asserteq(kept(guard2);"regex:credit_card";"even when Presidio found no card at all")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

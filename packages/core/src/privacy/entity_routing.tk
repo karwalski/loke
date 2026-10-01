@@ -2,43 +2,373 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=core.privacy.entityrouting;
-i=str:std.str;
 
+i=str:std.str;
+i=sh:shared.types;
+i=fr:core.privacy.filterregistry;
+i=vocab:core.privacy.entityvocab;
+i=lyc:core.privacy.layerconfig;
+
+(* F3b.5. `[[privacy.entity_routing]]` in config.toml: which layers' detections of an entity
+   type core.privacy.pipeline accepts.
+
+       [[privacy.entity_routing]]
+       entity_type = "PERSON"
+       preferred_layers = ["openai-privacy-filter"]
+       fallback_layers = ["presidio", "ner"]
+
+   entity_type is a type a layer reports, as core.privacy.entityvocab.layertypes declares it,
+   matched without regard to case (so "CREDIT_CARD" names the regex layer's credit_card as
+   well as Presidio's CREDIT_CARD). preferred_layers is required and not empty;
+   fallback_layers is optional. Every layer named must be one the registry holds and must
+   report the type: a route to a layer that cannot find the type would mask it nowhere.
+
+   EVERY LAYER STILL SCANS ALL OF THE TEXT. Routing decides whose detections of a routed
+   type are accepted, after the layers have run and before consensus. For a routed type the
+   accepted layers are its preferred layers that are available; if none is, its fallback
+   layers that are available. A layer is available for a type when it completed its scan of
+   this text, masks (it is not detect-only) and its entity_filter does not exclude the type.
+   A preferred layer that is switched off, not in the registry, down or failed is therefore
+   unavailable, and the fallbacks are used. Unrouted types are accepted from every layer, as
+   before.
+
+   NEITHER AVAILABLE: EVERY LAYER THAT RAN. When no preferred and no fallback layer is
+   available, the type is accepted from every layer that completed, which is what it would
+   be with no route, and the run carries a note the pipeline logs as a warning. Refusing
+   the request was the alternative; it was not chosen because it would take a local-first
+   product offline whenever an optional sidecar is down, and accepting from every layer
+   never masks less than the default. The value is never passed through unexamined: if no
+   layer at all completed, the pipeline refuses (NC1.9).
+
+   THE REGEX LAYER'S DETECTIONS ARE NEVER DROPPED BY ROUTING. A route for a type the regex
+   layer reports that does not prefer the regex layer is applied to the other layers and
+   logged as a warning; the regex layer's detections of that type are still accepted, as
+   core.privacy.layerconfig treats an attempt to turn the regex layer down.
+
+   A MALFORMED ROUTING CONFIG REFUSES REQUESTS, as a malformed [[privacy.layers]] does: an
+   unknown key, a duplicate key or route, a missing or empty preferred_layers, an unknown
+   type or layer, a layer that does not report the type or is named twice,
+   `[privacy.entity_routing]` as a table or `entity_routing = ...` inline. resolve returns
+   the error, naming the line, and no route; core.privacy.pipeline refuses every run while
+   it stands.
+
+   A veto layer's veto is decided on what it accepted before routing, so routing cannot
+   suppress a veto. With a consensus strategy other than most-restrictive, a detection
+   routing drops is not a vote for its group. *)
+
+(* One route. preferred and fallback are layer ids, comma separated; in a parsed but
+   unchecked entry they hold the arrays as written. line is where the entry starts. *)
 t=$entityroute{
   entitytype:str;
-  preferredlayers:str;
-  fallbacklayers:str
+  preferred:str;
+  fallback:str;
+  line:i64
 };
 
+(* What resolve returns. error refuses every run; warning is logged; present says whether
+   the text has any [[privacy.entity_routing]]. *)
 t=$routingconfig{
   routes:@$entityroute;
-  count:i64
+  error:str;
+  warning:str;
+  present:bool
 };
 
-f=defaultrouting():$routingconfig{
-  let routes=@(
-    $entityroute{entitytype:"email";preferredlayers:"regex";fallbacklayers:"ner,presidio"};
-    $entityroute{entitytype:"phone";preferredlayers:"regex";fallbacklayers:"presidio"};
-    $entityroute{entitytype:"person";preferredlayers:"ner";fallbacklayers:"presidio"};
-    $entityroute{entitytype:"creditcard";preferredlayers:"regex";fallbacklayers:"presidio"};
-    $entityroute{entitytype:"address";preferredlayers:"presidio";fallbacklayers:"ner"}
-  );
-  <$routingconfig{routes:routes;count:5}
+t=$routeparse{
+  entries:@$entityroute;
+  errors:@str;
+  present:bool
 };
 
-f=getroute(cfg:$routingconfig;entitytype:str):$entityroute{
-  let result=mut.$entityroute{entitytype:entitytype;preferredlayers:"";fallbacklayers:""};
-  lp(let i=0;i<cfg.count;i=i+1){
-    let r=cfg.routes.get(i);
-    if(str.eq(r.entitytype;entitytype)){result=r}el{}
+(* The detections the pipeline goes on with, and the layer each came from, in step; notes
+   are what the pipeline logs. *)
+t=$routedhits{
+  entities:@$piientity;
+  layers:@str;
+  notes:@str
+};
+
+f=header():str{ <"privacy.entity_routing" };
+
+f=norouting():$routingconfig{
+  <$routingconfig{routes:@();error:"";warning:"";present:false}
+};
+
+f=emptyentry(line:i64):$entityroute{
+  <$entityroute{entitytype:"";preferred:"";fallback:"";line:line}
+};
+
+f=knownkey(key:str):bool{
+  <str.eq(key;"entity_type") || str.eq(key;"preferred_layers") || str.eq(key;"fallback_layers")
+};
+
+f=valueof(e:$entityroute;key:str):str{
+  if(str.eq(key;"entity_type")){ <e.entitytype }el{};
+  if(str.eq(key;"preferred_layers")){ <e.preferred }el{};
+  <e.fallback
+};
+
+f=withkey(e:$entityroute;key:str;v:str):$entityroute{
+  if(str.eq(key;"entity_type")){ <$entityroute{entitytype:v;preferred:e.preferred;fallback:e.fallback;line:e.line} }el{};
+  if(str.eq(key;"preferred_layers")){ <$entityroute{entitytype:e.entitytype;preferred:v;fallback:e.fallback;line:e.line} }el{};
+  <$entityroute{entitytype:e.entitytype;preferred:e.preferred;fallback:v;line:e.line}
+};
+
+(* The [[privacy.entity_routing]] entries in a config.toml text, each key's value as
+   written, and every line that cannot be one. Read from the text for the reason
+   core.privacy.layerconfig gives: std.toml has no array-of-tables accessor. *)
+f=parse(text:str):$routeparse{
+  let lines=str.split(text;"\n");
+  let entries=mut.@();
+  let errors=mut.@();
+  let present=mut.false;
+  let inentry=mut.false;
+  let section=mut."";
+  let cur=mut.emptyentry(0);
+  lp(let i=0;i<lines.len;i=i+1){
+    let line=str.trim(lyc.stripcomment(lines.get(i)));
+    let n=i+1;
+    if(str.len(line)==0){}el{
+      if(str.startswith(line;"[")){
+        if(inentry){
+          entries=entries.push(cur);
+          inentry=false
+        }el{};
+        let name=lyc.headername(line);
+        section=name;
+        if(str.eq(name;header())){
+          present=true;
+          if(str.startswith(line;"[[")){
+            inentry=true;
+            cur=emptyentry(n)
+          }el{
+            errors=errors.push("\(lyc.at(n)): [privacy.entity_routing] is a table; each route is an entry of its own, written [[privacy.entity_routing]]")
+          }
+        }el{}
+      }el{
+        let eq=str.indexof(line;"=");
+        if(inentry){
+          if(eq<1){
+            errors=errors.push("\(lyc.at(n)): expected key = value in a [[privacy.entity_routing]] entry")
+          }el{
+            let key=str.trim(sh.strslice(line;0;eq));
+            let v=str.trim(sh.strslice(line;eq+1;str.len(line) as i64));
+            if(!knownkey(key)){
+              errors=errors.push("\(lyc.at(n)): unknown key \(key) in a [[privacy.entity_routing]] entry (entity_type, preferred_layers, fallback_layers)")
+            }el{
+              if(str.len(v)==0){
+                errors=errors.push("\(lyc.at(n)): \(key) has no value")
+              }el{
+                if(str.len(valueof(cur;key))>0){
+                  errors=errors.push("\(lyc.at(n)): \(key) is given twice in one [[privacy.entity_routing]] entry")
+                }el{
+                  cur=withkey(cur;key;v)
+                }
+              }
+            }
+          }
+        }el{
+          if(eq>0){
+            let key=str.trim(sh.strslice(line;0;eq));
+            if((str.eq(section;"privacy") && str.eq(key;"entity_routing")) || (str.eq(section;"") && str.eq(key;"privacy.entity_routing"))){
+              present=true;
+              errors=errors.push("\(lyc.at(n)): privacy.entity_routing written inline is not read; write each route as a [[privacy.entity_routing]] entry")
+            }el{}
+          }el{}
+        }
+      }
+    }
   };
-  <result
+  if(inentry){ entries=entries.push(cur) }el{};
+  <$routeparse{entries:entries;errors:errors;present:present}
 };
 
-f=hasroute(cfg:$routingconfig;entitytype:str):bool{
-  let found=mut.false;
-  lp(let i=0;i<cfg.count;i=i+1){
-    if(str.eq(cfg.routes.get(i).entitytype;entitytype)){found=true}el{}
+(* ── Checks ─────────────────────────────────────────────────────────────── *)
+
+f=sametype(a:str;b:str):bool{
+  <str.eq(sh.strlower(a);sh.strlower(b))
+};
+
+f=reports(layerid:str;entitytype:str):bool{
+  let types=vocab.layertypes(layerid);
+  let hit=mut.false;
+  lp(let i=0;i<types.len;i=i+1){
+    if(sametype(types.get(i);entitytype)){ hit=true }el{}
   };
-  <found
+  <hit
+};
+
+f=reportedbyany(entitytype:str):bool{
+  let ids=vocab.layerids();
+  let hit=mut.false;
+  lp(let i=0;i<ids.len;i=i+1){
+    if(reports(ids.get(i);entitytype)){ hit=true }el{}
+  };
+  <hit
+};
+
+(* The error in one layer list, or "". seen is the ids named so far in the entry. *)
+f=listerror(reg:$filterregistry;key:str;v:str;entitytype:str;seen:@str;required:bool):str{
+  if(!lyc.isarray(v)){ <"\(key) must be an array of layer ids on one line, e.g. [\"presidio\"]" }el{};
+  let names=lyc.filternames(v);
+  if(required && names.len==0){ <"\(key) is empty; a route needs at least one preferred layer" }el{};
+  let all=mut.seen;
+  lp(let i=0;i<names.len;i=i+1){
+    let id:str=names.get(i);
+    if(str.len(id)==0){ <"\(key) has an element that is not a quoted layer id" }el{};
+    if(!fr.has(reg;id)){ <"\(key) names \(id), which no layer has as its id (regex, ner, presidio, openai-privacy-filter)" }el{};
+    if(!reports(id;entitytype)){ <"\(key) names \(id), which does not report \(entitytype)" }el{};
+    if(vocab.contains(all;id)){ <"\(key) names \(id) twice in one route" }el{};
+    all=all.push(id)
+  };
+  <""
+};
+
+f=entryerror(reg:$filterregistry;e:$entityroute):str{
+  if(str.len(e.entitytype)==0){ <"a [[privacy.entity_routing]] entry has no entity_type" }el{};
+  if(!lyc.isquoted(e.entitytype)){ <"entity_type must be a quoted string" }el{};
+  let et=lyc.unquote(e.entitytype);
+  if(!reportedbyany(et)){ <"entity_type \(et) is not a type any layer reports" }el{};
+  if(str.len(e.preferred)==0){ <"the route for \(et) has no preferred_layers" }el{};
+  let pe=listerror(reg;"preferred_layers";e.preferred;et;@();true);
+  if(str.len(pe)>0){ <pe }el{};
+  if(str.len(e.fallback)>0){
+    let fe=listerror(reg;"fallback_layers";e.fallback;et;lyc.filternames(e.preferred);false);
+    if(str.len(fe)>0){ <fe }el{}
+  }el{};
+  <""
+};
+
+(* ── Resolution ─────────────────────────────────────────────────────────── *)
+
+f=failed(p:$routeparse;error:str):$routingconfig{
+  <$routingconfig{routes:@();error:error;warning:"";present:p.present}
+};
+
+(* The routes in text, checked against the registry. Any error returns no route and the
+   error; the pipeline refuses to run with it. *)
+f=resolve(reg:$filterregistry;text:str):$routingconfig{
+  let p=parse(text);
+  if(p.errors.len>0){ <failed(p;str.join("; ";p.errors)) }el{};
+  if(!p.present){ <norouting() }el{};
+  let routes=mut.@();
+  let warnings=mut.@();
+  lp(let i=0;i<p.entries.len;i=i+1){
+    let e:$entityroute=p.entries.get(i);
+    let err=entryerror(reg;e);
+    if(str.len(err)>0){ <failed(p;"\(lyc.at(e.line)): \(err)") }el{};
+    let et=lyc.unquote(e.entitytype);
+    lp(let j=0;j<routes.len;j=j+1){
+      let prior:$entityroute=routes.get(j);
+      if(sametype(prior.entitytype;et)){ <failed(p;"\(lyc.at(e.line)): \(et) has two [[privacy.entity_routing]] entries") }el{}
+    };
+    let preferred=lyc.filternames(e.preferred);
+    let fallback=mut.@();
+    if(str.len(e.fallback)>0){ fallback=lyc.filternames(e.fallback) }el{};
+    if(reports(fr.regexid();et) && !vocab.contains(preferred;fr.regexid())){
+      warnings=warnings.push("the route for \(et) is not applied to the regex layer's \(et) detections")
+    }el{};
+    routes=routes.push($entityroute{entitytype:et;preferred:str.join(",";preferred);fallback:str.join(",";fallback);line:e.line})
+  };
+  let warning=mut."";
+  if(warnings.len>0){
+    warning="\(lyc.listed(warnings)): the regex layer's detections are always masked"
+  }el{};
+  <$routingconfig{routes:routes;error:"";warning:warning;present:true}
+};
+
+(* Why a run made with c is refused, beginning with header() so the pipeline can tell it
+   from a [[privacy.layers]] error. *)
+f=refusal(c:$routingconfig):str{
+  <"\(header()) in config.toml cannot be applied: \(c.error)"
+};
+
+(* ── At run time ────────────────────────────────────────────────────────── *)
+
+f=ids(list:str):@str{
+  if(str.len(list)==0){ <@() }el{};
+  <str.split(list;",")
+};
+
+f=allows(filter:str;entitytype:str):bool{
+  if(str.len(filter)==0){ <true }el{};
+  let names=str.split(filter;",");
+  let hit=mut.false;
+  lp(let i=0;i<names.len;i=i+1){
+    if(sametype(names.get(i);entitytype)){ hit=true }el{}
+  };
+  <hit
+};
+
+(* The layers in list that are available for entitytype: in voters (completed and masking)
+   and not filtering the type out. Comma separated. *)
+f=available(reg:$filterregistry;voters:@str;list:str;entitytype:str):str{
+  let named=ids(list);
+  let out=mut.@();
+  lp(let i=0;i<named.len;i=i+1){
+    let id:str=named.get(i);
+    if(vocab.contains(voters;id) && allows(fr.get(reg;id).entityfilter;entitytype)){ out=out.push(id) }el{}
+  };
+  <str.join(",";out)
+};
+
+(* The layers a route accepts this run: its available preferred layers, else its available
+   fallback layers, else "" for every layer. *)
+f=accepting(reg:$filterregistry;voters:@str;r:$entityroute):str{
+  let pref=available(reg;voters;r.preferred;r.entitytype);
+  if(str.len(pref)>0){ <pref }el{};
+  <available(reg;voters;r.fallback;r.entitytype)
+};
+
+f=note(reg:$filterregistry;voters:@str;r:$entityroute):str{
+  if(str.len(available(reg;voters;r.preferred;r.entitytype))>0){ <"" }el{};
+  if(str.len(available(reg;voters;r.fallback;r.entitytype))>0){
+    <"no preferred layer for \(r.entitytype) (\(r.preferred)) is available; it is accepted from its fallback layers (\(r.fallback))"
+  }el{};
+  <"neither a preferred (\(r.preferred)) nor a fallback (\(r.fallback)) layer for \(r.entitytype) is available; it is accepted from every layer that ran"
+};
+
+f=routeindex(c:$routingconfig;entitytype:str):i64{
+  let at=mut.0-1;
+  lp(let i=0;i<c.routes.len;i=i+1){
+    if(at<0 && sametype(c.routes.get(i).entitytype;entitytype)){ at=i }el{}
+  };
+  <at
+};
+
+(* Whether a detection of entitytype by layerid is accepted, given each route's accepting
+   layers this run. *)
+f=keeps(c:$routingconfig;accepts:@str;layerid:str;entitytype:str):bool{
+  if(str.eq(layerid;fr.regexid())){ <true }el{};
+  let k=routeindex(c;entitytype);
+  if(k<0){ <true }el{};
+  let acc:str=accepts.get(k);
+  if(str.len(acc)==0){ <true }el{};
+  <vocab.contains(str.split(acc;",");layerid)
+};
+
+(* The detections routing accepts, with their layers, in the order given. voters are the
+   layers that completed a scan and mask. With no route, hits and layers come back as they
+   were given. *)
+f=apply(c:$routingconfig;reg:$filterregistry;voters:@str;hits:@$piientity;layers:@str):$routedhits{
+  let notes=mut.@();
+  if(c.routes.len==0){ <$routedhits{entities:hits;layers:layers;notes:@()} }el{};
+  let accepts=mut.@();
+  lp(let i=0;i<c.routes.len;i=i+1){
+    let r:$entityroute=c.routes.get(i);
+    accepts=accepts.push(accepting(reg;voters;r));
+    let nt=note(reg;voters;r);
+    if(str.len(nt)>0){ notes=notes.push(nt) }el{}
+  };
+  let kepthits=mut.@();
+  let keptlayers=mut.@();
+  lp(let i=0;i<hits.len;i=i+1){
+    let h:$piientity=hits.get(i);
+    let id:str=layers.get(i);
+    if(keeps(c;accepts;id;h.entitytype)){
+      kepthits=kepthits.push(h);
+      keptlayers=keptlayers.push(id)
+    }el{}
+  };
+  <$routedhits{entities:kepthits;layers:keptlayers;notes:notes}
 };

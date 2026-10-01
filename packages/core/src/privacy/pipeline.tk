@@ -17,6 +17,7 @@ i=lh:core.privacy.layerhealth;
 i=cfg:shared.config;
 i=cn:core.privacy.consensus;
 i=lyc:core.privacy.layerconfig;
+i=er:core.privacy.entityrouting;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
    detection layers exist, which are enabled, the order they run in and the URL and setting
@@ -37,7 +38,10 @@ t=$pipelineconfig{
   consensusthreshold:str;
   (* F3b.2. Why the [[privacy.layers]] in config.toml could not be applied, or "". Every run
      made with a config carrying one is refused (core.privacy.layerconfig). *)
-  layererror:str
+  layererror:str;
+  (* F3b.5. The [[privacy.entity_routing]] in config.toml (core.privacy.entityrouting). A
+     routing error refuses every run made with the config. *)
+  routing:$routingconfig
 };
 
 t=$stageresult{
@@ -80,11 +84,11 @@ t=$pipelinerun{
    registered and OFF, so a caller that says nothing about it gets the three layers it had
    (F3b.3). *)
 f=newconfig(purl:str;ourl:str):$pipelineconfig{
-  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false;consensus:cn.defaultstrategy();consensusthreshold:"";layererror:""}
+  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false;consensus:cn.defaultstrategy();consensusthreshold:"";layererror:"";routing:er.norouting()}
 };
 
 f=withlayers(c:$pipelineconfig;layers:$filterregistry):$pipelineconfig{
-  <$pipelineconfig{layers:layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror}
+  <$pipelineconfig{layers:layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror;routing:c.routing}
 };
 
 (* One registry entry switched on or off. An id the registry does not hold is left alone. *)
@@ -93,7 +97,7 @@ f=withlayer(c:$pipelineconfig;id:str;enabled:bool):$pipelineconfig{
 };
 
 f=withdryrun(c:$pipelineconfig;dryrun:bool):$pipelineconfig{
-  <$pipelineconfig{layers:c.layers;dryrun:dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror}
+  <$pipelineconfig{layers:c.layers;dryrun:dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror;routing:c.routing}
 };
 
 (* The privacy-filter layer switched on (or off) at a sidecar URL and operating point. The
@@ -105,7 +109,7 @@ f=withprivacyfilter(c:$pipelineconfig;enabled:bool;url:str;threshold:str):$pipel
 };
 
 f=withconsensus(c:$pipelineconfig;strategy:str;threshold:str):$pipelineconfig{
-  <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:strategy;consensusthreshold:threshold;layererror:c.layererror}
+  <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:strategy;consensusthreshold:threshold;layererror:c.layererror;routing:c.routing}
 };
 
 (* F3b.2. The [[privacy.layers]] entries in a config.toml text applied to the registry. One
@@ -116,13 +120,22 @@ f=withlayerconfig(c:$pipelineconfig;text:str):$pipelineconfig{
   if(str.len(ls.warning)>0){ log.warn("privacy.layers: \(ls.warning)";"pipeline";"") }el{};
   if(str.len(ls.error)>0){
     log.error("privacy.layers cannot be applied, so requests will be refused: \(ls.error)";"pipeline";"");
-    <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:ls.error}
+    <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:ls.error;routing:c.routing}
   }el{};
   <withlayers(c;ls.registry)
 };
 
+(* F3b.5. The [[privacy.entity_routing]] entries in a config.toml text. One that cannot be
+   applied leaves no route and refuses every run made with the config. *)
+f=withroutingconfig(c:$pipelineconfig;text:str):$pipelineconfig{
+  let rc:$routingconfig=er.resolve(c.layers;text);
+  if(str.len(rc.warning)>0){ log.warn("privacy.entity_routing: \(rc.warning)";"pipeline";"") }el{};
+  if(str.len(rc.error)>0){ log.error("privacy.entity_routing cannot be applied, so requests will be refused: \(rc.error)";"pipeline";"") }el{};
+  <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror;routing:rc}
+};
+
 f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
-  <withlayerconfig(withconsensus(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);lc.consensusstrategy;lc.consensusthreshold);lc.sourcetext)
+  <withroutingconfig(withlayerconfig(withconsensus(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);lc.consensusstrategy;lc.consensusthreshold);lc.sourcetext);lc.sourcetext)
 };
 
 (* newconfig plus the privacy-filter settings from the user's config.toml, read now. *)
@@ -603,9 +616,18 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     stages=stages.push(absent.get(ai))
   };
 
+  (* F3b.5. A routed entity type is accepted only from the layers its route names; with no
+     route this returns the detections as they are. *)
+  let routed:$routedhits=er.apply(config.routing;reg;voters;allentities;hitlayers);
+  lp(let ni=0;ni<routed.notes.len;ni=ni+1){
+    log.warn("privacy.entity_routing: \(routed.notes.get(ni))";"pipeline";requestid)
+  };
+  let cfgerror=mut.config.layererror;
+  if(str.len(cfgerror)==0 && str.len(config.routing.error)>0){ cfgerror=er.refusal(config.routing) }el{};
+
   (* F3b.4. Overlapping detections are resolved by the configured strategy before dedup;
      the default, most-restrictive, keeps every detection, as this list always was. *)
-  let agreed:$consensusresult=cn.apply(allentities;hitlayers;voters;config.consensus;config.consensusthreshold);
+  let agreed:$consensusresult=cn.apply(routed.entities;routed.layers;voters;config.consensus;config.consensusthreshold);
   let dedupedraw=dedupentities(agreed.entities);
   (* PL1.1 — placeholders are assigned HERE, after dedup and before anonymisation, and
      nowhere else.
@@ -691,7 +713,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     consensus:agreed.strategy;
     resolved:agreed.resolved;
     vetoedby:vetoedby;
-    layererror:config.layererror
+    layererror:cfgerror
   }
 };
 
@@ -733,6 +755,7 @@ f=issafetoforward(r:$pipelinerun):bool{
 
 (* Why issafetoforward refused r, for a caller's refusal message. Names no entity. *)
 f=refusalreason(r:$pipelinerun):str{
+  if(str.startswith(r.layererror;er.header())){ <r.layererror }el{};
   if(str.len(r.layererror)>0){ <"privacy.layers in config.toml cannot be applied: \(r.layererror)" }el{};
   if(str.len(r.vetoedby)>0){ <"the \(r.vetoedby) privacy layer is in veto mode and found PII above its threshold" }el{};
   if(r.unplaced>0 as u32){ <"a privacy detection layer reported an entity that could not be located in the text exactly" }el{};
