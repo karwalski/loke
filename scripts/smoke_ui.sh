@@ -105,5 +105,13 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/connections" "$ROOT/tests/ui/proxy_mk199.json"
   rc=$?
 fi
+# MK19.8: the nine connection modules are mounted on the Connections page; with the empty
+# allowlist above, every one of them shows the allowlist refusal and loads nothing. The one
+# success shown is a canned /api/proxy envelope injected into the page (the check says so),
+# because the proxy refuses every loopback stand-in by design.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/connections" "$ROOT/tests/ui/connections_mk198.json"
+  rc=$?
+fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
 exit $rc

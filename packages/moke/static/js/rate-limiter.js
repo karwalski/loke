@@ -86,6 +86,52 @@ window.MokeRateLimiter = (function () {
     if (!_stats[host])   _stats[host]   = { requests: 0, retries: 0, rateLimits: 0 };
   }
 
+  // ── The transport: moke's proxy, never the network directly (MK19.8) ──
+
+  /**
+   * A Response-like object read from a proxy envelope. The proxy carries the
+   * upstream's status, content type and text body; no other upstream header
+   * reaches the page, so a 429's Retry-After is not seen and the default
+   * backoff applies.
+   */
+  function responseFrom(env) {
+    var body = env.body == null ? '' : String(env.body);
+    var ct = env.contentType || '';
+    return {
+      ok: env.status >= 200 && env.status < 300,
+      status: env.status,
+      statusText: '',
+      envelope: env,
+      headers: {
+        get: function (n) { return String(n).toLowerCase() === 'content-type' && ct ? ct : null; },
+        forEach: function (fn) { if (ct) fn(ct, 'content-type'); }
+      },
+      text: function () { return Promise.resolve(body); },
+      json: function () { return Promise.resolve().then(function () { return JSON.parse(body); }); },
+      clone: function () { return responseFrom(env); }
+    };
+  }
+
+  /**
+   * One request through moke's /api/proxy (moke-proxy.js). This used to be a
+   * bare fetch of the target URL, which a page cannot make across origins and
+   * which would bypass the proxy's allowlist if it could. A refusal is an Error
+   * carrying the proxy's reason, marked `refused` so it is never retried: the
+   * allowlist will refuse it again.
+   */
+  async function viaProxy(url, options) {
+    if (!window.MokeProxy) throw new Error('moke-proxy.js is not loaded on this page');
+    var o = options || {};
+    var env = await window.MokeProxy.request({ url: url, method: o.method || 'GET', headers: o.headers, body: o.body });
+    if (!env.ok) {
+      var err = new Error(window.MokeProxy.describe(env));
+      err.envelope = env;
+      err.refused = true;
+      throw err;
+    }
+    return responseFrom(env);
+  }
+
   // ── Core request execution ────────────────────────────────────────────
 
   /**
@@ -114,8 +160,9 @@ window.MokeRateLimiter = (function () {
 
       var response;
       try {
-        response = await fetch(url, options);
+        response = await viaProxy(url, options);
       } catch (networkError) {
+        if (networkError.refused) throw networkError;
         // Network-level failure — retry with backoff if attempts remain.
         if (attempt < maxRetries) {
           _stats[host].retries++;
@@ -360,6 +407,7 @@ window.MokeRateLimiter = (function () {
 
     // Public methods
     fetch:            rateLimitedFetch,
+    responseFrom:     responseFrom,
     parseRetryAfter:  parseRetryAfter,
     calculateBackoff: calculateBackoff,
     getHost:          getHost,

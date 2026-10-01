@@ -279,6 +279,48 @@
    * indifferent to which.
    * ------------------------------------------------------------------ */
 
+  /* The one place the active dataset is written. */
+  function setActive(ds) {
+    sessionStorage.setItem('moke_dataset', JSON.stringify(ds));
+    return ds;
+  }
+
+  /* The origin and path of a URL, never its query: a connection may carry an
+   * API key in the query string, and the active dataset is read by every page. */
+  function sourceUrl(u) {
+    try { var x = new URL(String(u)); return x.origin + x.pathname; } catch (e) { return ''; }
+  }
+
+  /* A table a connection fetched through moke's proxy (MK19.8), shaped as the
+   * store's datasets are: headers in order, every row an array of strings in
+   * that order. It is the ACTIVE dataset, not a store entry: nothing is written
+   * to static/data, and the next Load replaces it. The modules hand rows over as
+   * arrays (CSV, GraphQL) or as objects keyed by header (JSON, URL import); both
+   * are accepted. An empty table is refused rather than loaded as "no results".
+   * Its columns are not classified here, so pii is empty and the sensitivity
+   * defaults to CONFIDENTIAL; loke's filter still judges every prompt. */
+  function fromConnection(src, sensitivity) {
+    var headers = (src.headers || []).map(function (h) { return String(h); });
+    if (!headers.length) throw new Error('the response has no columns to load');
+    var table = (src.rows || []).map(function (r) {
+      return headers.map(function (h, i) {
+        var v = Array.isArray(r) ? r[i] : (r ? r[h] : undefined);
+        if (v === null || v === undefined) return '';
+        return typeof v === 'object' ? JSON.stringify(v) : String(v);
+      });
+    });
+    if (!table.length) throw new Error('the response has no rows to load');
+    return {
+      id: 'connection_' + Date.now(),
+      name: src.name || 'API dataset',
+      sensitivity: sensitivity || 'CONFIDENTIAL',
+      category: 'connection',
+      headers: headers, pii: [], rows: table,
+      source: { kind: 'connection', connection: src.connection || '', url: sourceUrl(src.url) },
+      loadedAt: Date.now()
+    };
+  }
+
   global.MokeActive = {
     /* The active dataset with its rows, whichever store it came from. */
     get: function () {
@@ -313,21 +355,25 @@
      * shape the pages that read sessionStorage directly expect. Rejects when the
      * file and its manifest entry disagree on the row count, because the entry's
      * provenance no longer describes the file. `sensitivity` overrides the
-     * manifest's default when given. */
+     * manifest's default when given. Given a table instead of an id
+     * ({name, headers, rows, url, connection}), it makes the table a connection
+     * fetched the active dataset (fromConnection above), by the same write. */
     load: function (id, sensitivity) {
+      // A dataset a connection fetched (MK19.8) is passed as the table itself.
+      if (id && typeof id === 'object') {
+        return Promise.resolve().then(function () { return setActive(fromConnection(id, sensitivity)); });
+      }
       return meta(id).then(function (m) {
         return rows(id).then(function (parsed) {
           if (parsed.rowcountMismatch) {
             throw new Error(id + ' has ' + parsed.rowcountMismatch.actual +
                             ' rows; its manifest entry says ' + parsed.rowcountMismatch.manifest);
           }
-          var ds = {
+          return setActive({
             id: id, name: m.name, sensitivity: sensitivity || m.sensitivity,
             category: m.category, headers: parsed.headers, pii: m.pii || [],
             rows: parsed.rows, loadedAt: Date.now()
-          };
-          sessionStorage.setItem('moke_dataset', JSON.stringify(ds));
-          return ds;
+          });
         });
       });
     },

@@ -387,13 +387,15 @@
       var ttl     = self.getTTL(connectionName);
 
       var key = self.cacheKey(url, method, body, headers);
+      // The console line names the path only: a connection may carry an API key
+      // in its query string (MK19.8).
 
       // Check cache
       var cached = self.get(key);
       if (cached) {
         _hits++;
         self._hits = _hits;
-        console.log('[cache HIT] ' + method + ' ' + url);
+        console.log('[cache HIT] ' + method + ' ' + String(url).split('?')[0]);
         return Promise.resolve({
           ok:      cached.status >= 200 && cached.status < 300,
           status:  cached.status,
@@ -409,9 +411,12 @@
       // Cache miss — perform real fetch
       _misses++;
       self._misses = _misses;
-      console.log('[cache MISS] ' + method + ' ' + url);
+      console.log('[cache MISS] ' + method + ' ' + String(url).split('?')[0]);
 
-      return fetch(url, options).then(function (response) {
+      // MK19.8: through the rate limiter, whose transport is moke's proxy. This
+      // was a bare fetch of the target URL, which would bypass the allowlist.
+      if (!window.MokeRateLimiter) return Promise.reject(new Error('rate-limiter.js is not loaded on this page'));
+      return window.MokeRateLimiter.fetch(url, options).then(function (response) {
         var status = response.status;
         var respHeaders = {};
 

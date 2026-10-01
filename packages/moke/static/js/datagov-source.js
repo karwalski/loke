@@ -5,8 +5,9 @@
  * Search datasets, filter by format/organisation/tags, download CSV data,
  * and auto-configure API connections.
  *
- * All network requests go through the loke proxy to avoid CORS issues.
- * No external dependencies.
+ * All network requests go through moke's own /api/proxy (moke-proxy.js),
+ * which fetches only hosts on the operator's allowlist (MOKE_PROXY_ALLOW).
+ * Mounted on the Connections page (MK19.8). No external dependencies.
  */
 (function () {
   'use strict';
@@ -17,8 +18,8 @@
 
   // Verified 2026-09-19: the CKAN base is /data/api/3/action. The previous
   // value, /api/3/action, returns 404 with an HTML body — so every search
-  // through this module failed. It was never noticed because the module is not
-  // mounted by any page (MK19.8).
+  // through this module failed. It was never noticed because the module was not
+  // mounted by any page until MK19.8; test-moke-connections.js pins the base.
   var BASE_URL = 'https://data.gov.au/data/api/3/action';
 
   /**
@@ -893,7 +894,19 @@
         btn.textContent = 'Error';
         btn.style.borderColor = '#e57373';
         btn.style.color = '#e57373';
-        console.error('[MokeDataGov] CSV download error:', err);
+        // MK19.8: say why. A host nobody allowlisted is refused by moke's
+        // proxy, and "Error" alone would read as a fault in the data.
+        var holder = btn.parentNode;
+        var prior = holder && holder.querySelector('.datagov-csv-error');
+        if (prior) prior.remove();
+        if (holder) {
+          var note = document.createElement('div');
+          note.className = 'datagov-csv-error';
+          note.setAttribute('role', 'alert');
+          note.style.cssText = 'flex-basis:100%;color:#e57373;font-size:12px;margin-top:4px;';
+          note.textContent = 'Could not download: ' + err.message;
+          holder.appendChild(note);
+        }
 
         // Reset after delay
         setTimeout(function () {

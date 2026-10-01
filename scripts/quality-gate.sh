@@ -438,6 +438,13 @@ step_checks() {
            echo "  a call site bypasses moke-proxy.js or still targets loke's port" >&2; failed=1; }
   fi
 
+  if [[ -f packages/moke/static/js/tests/test-moke-connections.js ]] && command -v node >/dev/null; then
+    echo "  the connection modules are mounted, proxied, and load through MokeActive (MK19.8)"
+    node packages/moke/static/js/tests/test-moke-connections.js >/dev/null \
+      || { node packages/moke/static/js/tests/test-moke-connections.js >&2
+           echo "  a connection module is unmounted, bypasses the proxy, or loads outside MokeActive.load" >&2; failed=1; }
+  fi
+
   # Two checks for the defect class MK20.4 fixed: presentation mode rendered
   # Math.random() figures under a "computed locally" caption, because the NC1.5
   # rule lived in one template and it had no access to it.

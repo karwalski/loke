@@ -4,8 +4,14 @@
  * Manages saved API connections: list, test, fetch, schedule refresh,
  * health monitoring, and export/import of configs (excluding secrets).
  *
- * Connections are stored in localStorage. Requests are sent through the
- * loke proxy. No external dependencies.
+ * Connections are stored in localStorage, without their secrets. Every
+ * request goes MokeApiCache -> MokeRateLimiter -> moke's own /api/proxy
+ * (moke-proxy.js), so the operator's allowlist (MOKE_PROXY_ALLOW) decides what
+ * is fetched, and a refusal is reported with its reason (MK19.8).
+ *
+ * Live refresh (setSchedule) is a separate feature and never the demo path: it
+ * is off on every page load, is not persisted, and runs only while the page
+ * that started it is open. A connection's saved `schedule` is ignored.
  */
 (function () {
   'use strict';
@@ -100,6 +106,13 @@
     return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  /** Show (or clear) a failure reason under the card a button belongs to. */
+  function showMsg(btn, text) {
+    var card = btn.closest('.mcm-card');
+    var m = card && card.querySelector('.mcm-msg');
+    if (m) m.textContent = text || '';
+  }
+
   /** Create a DOM element with optional class and text content. */
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -112,26 +125,30 @@
   // Build request options from a connection record
   // ---------------------------------------------------------------------------
 
+  /**
+   * Key/value pairs as a plain object. The Connections page saves headers and
+   * params as [{key, value}]; imported configs may hold an object. Both are read.
+   */
+  function pairs(v) {
+    var out = {};
+    if (Array.isArray(v)) {
+      for (var i = 0; i < v.length; i++) {
+        var k = v[i] && (v[i].key || v[i].name);
+        if (k) out[k] = v[i].value == null ? '' : String(v[i].value);
+      }
+    } else if (v && typeof v === 'object') {
+      var keys = Object.keys(v);
+      for (var j = 0; j < keys.length; j++) out[keys[j]] = v[keys[j]];
+    }
+    return out;
+  }
+
+  /** Secrets for this page's session only, by connection name; never stored. */
+  var _sessionAuth = {};
+
   function buildFetchOptions(conn) {
     var opts = { method: (conn.method || 'GET').toUpperCase() };
-    var hdrs = {};
-
-    // Merge stored headers
-    if (conn.headers && typeof conn.headers === 'object') {
-      var keys = Object.keys(conn.headers);
-      for (var i = 0; i < keys.length; i++) {
-        hdrs[keys[i]] = conn.headers[keys[i]];
-      }
-    }
-
-    // Apply auth
-    if (conn.authType === 'bearer' && conn.authToken) {
-      hdrs['Authorization'] = 'Bearer ' + conn.authToken;
-    } else if (conn.authType === 'basic' && conn.authUser && conn.authPass) {
-      hdrs['Authorization'] = 'Basic ' + btoa(conn.authUser + ':' + conn.authPass);
-    } else if (conn.authType === 'api-key' && conn.authKey && conn.authKeyHeader) {
-      hdrs[conn.authKeyHeader] = conn.authKey;
-    }
+    var hdrs = pairs(conn.headers);
 
     if (Object.keys(hdrs).length > 0) opts.headers = hdrs;
 
@@ -148,19 +165,54 @@
   }
 
   /** Build the full URL including any query params. */
-  function buildUrl(conn) {
+  function buildUrl(conn, extraParams) {
     var url = conn.url || '';
-    if (conn.params && typeof conn.params === 'object') {
-      var keys = Object.keys(conn.params);
-      if (keys.length > 0) {
-        var parts = [];
-        for (var i = 0; i < keys.length; i++) {
-          parts.push(encodeURIComponent(keys[i]) + '=' + encodeURIComponent(conn.params[keys[i]]));
-        }
-        url += (url.indexOf('?') === -1 ? '?' : '&') + parts.join('&');
+    var params = Object.assign(pairs(conn.params), extraParams || {});
+    var keys = Object.keys(params);
+    if (keys.length > 0) {
+      var parts = [];
+      for (var i = 0; i < keys.length; i++) {
+        parts.push(encodeURIComponent(keys[i]) + '=' + encodeURIComponent(params[keys[i]]));
       }
+      url += (url.indexOf('?') === -1 ? '?' : '&') + parts.join('&');
     }
     return url;
+  }
+
+  /**
+   * The request for a connection: its URL, method, headers and body, with this
+   * session's credentials applied by MokeAuth (auth-methods.js) when it is
+   * loaded. An OAuth token is fetched, through moke's proxy, when it is needed.
+   */
+  async function buildRequest(conn) {
+    var opts = buildFetchOptions(conn);
+    var auth = _sessionAuth[conn.name];
+    var extra = {};
+    if (auth && auth.type && auth.type !== 'none' && window.MokeAuth) {
+      if (auth.type === 'oauth2') await window.MokeAuth.ensureValidToken(auth);
+      var rc = window.MokeAuth.applyAuth({ headers: Object.assign({}, opts.headers || {}), params: {} }, auth);
+      opts.headers = rc.headers;
+      extra = rc.params;
+    }
+    return { url: buildUrl(conn, extra), options: opts };
+  }
+
+  /**
+   * Send a connection's request: through the response cache unless `fresh`,
+   * and always through the rate limiter, whose transport is moke's proxy. There
+   * is no path here to a bare fetch of the target.
+   */
+  async function send(conn, fresh) {
+    var req = await buildRequest(conn);
+    if (!fresh && window.MokeApiCache) return window.MokeApiCache.cachedFetch(req.url, req.options, conn.name);
+    if (!window.MokeRateLimiter) throw new Error('rate-limiter.js is not loaded on this page');
+    return window.MokeRateLimiter.fetch(req.url, req.options);
+  }
+
+  function contentTypeOf(resp) {
+    var h = resp.headers;
+    if (h && typeof h.get === 'function') return h.get('content-type') || '';
+    return (h && h['content-type']) || '';
   }
 
   // ---------------------------------------------------------------------------
@@ -239,17 +291,16 @@
       if (idx === -1) return { ok: false, status: 0, responseTime: 0, error: 'Connection not found' };
 
       var conn = all[idx];
-      var url = buildUrl(conn);
-      var opts = buildFetchOptions(conn);
       var start = performance.now();
 
       try {
-        var resp = await fetch(url, opts);
+        var resp = await send(conn, true);
         var elapsed = Math.round(performance.now() - start);
         conn.lastTested = Date.now();
         conn.lastStatus = resp.status;
         persist(all);
-        return { ok: resp.ok, status: resp.status, responseTime: elapsed, error: null };
+        return { ok: resp.ok, status: resp.status, responseTime: elapsed,
+                 error: resp.ok ? null : 'the upstream answered ' + resp.status };
       } catch (err) {
         var elapsed2 = Math.round(performance.now() - start);
         conn.lastTested = Date.now();
@@ -260,22 +311,22 @@
     },
 
     /**
-     * Fetch data from a connection and return it in moke dataset format.
-     * Uses MokeJSONParser if available, otherwise does basic extraction.
+     * Fetch data from a connection and return it as a table:
+     * {name, headers, rows, url, connection, meta}. JSON goes through
+     * MokeJsonParser.toDataset (json-parser.js; this used to call a
+     * MokeJSONParser.parse that never existed), CSV through MokeData.parseCSV.
+     * The table is not stored here: the caller hands it to MokeActive.load.
      * @param {string} name
-     * @returns {Promise<{headers: string[], rows: Array[], meta: Object}>}
+     * @param {{fresh: boolean}} [opts] - fresh skips the response cache.
      */
-    fetch: async function (name) {
+    fetch: async function (name, opts) {
       var all = loadAll();
       var idx = findIndex(all, name);
       if (idx === -1) throw new Error('Connection not found: ' + name);
 
       var conn = all[idx];
-      var url = buildUrl(conn);
-      var opts = buildFetchOptions(conn);
-
-      var resp = await fetch(url, opts);
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + resp.statusText);
+      var resp = await send(conn, !!(opts && opts.fresh));
+      if (!resp.ok) throw new Error('the upstream answered ' + resp.status);
 
       var text = await resp.text();
 
@@ -285,14 +336,42 @@
       conn.lastStatus  = resp.status;
       persist(all);
 
-      // Parse into dataset — delegate to MokeJSONParser if present
-      if (window.MokeJSONParser && typeof window.MokeJSONParser.parse === 'function') {
-        return window.MokeJSONParser.parse(text);
-      }
+      return MokeConnectionManager.toTable(text, contentTypeOf(resp), conn);
+    },
 
-      // Fallback: basic JSON-to-table conversion
-      var json = JSON.parse(text);
-      return MokeConnectionManager._basicParse(json);
+    /**
+     * A response body as a table. JSON first (it parses), then CSV by content
+     * type; anything else is an error naming what arrived.
+     */
+    toTable: function (text, contentType, conn) {
+      var name = (conn && conn.name) || 'API dataset';
+      var json, isJson = false;
+      try { json = JSON.parse(text); isJson = true; } catch (e) { isJson = false; }
+      var table;
+      if (isJson) {
+        table = window.MokeJsonParser
+          ? window.MokeJsonParser.toDataset(json, { name: name, flatten: true })
+          : MokeConnectionManager._basicParse(json);
+      } else if (/csv|text\/plain|tab-separated/i.test(contentType || '') && window.MokeData) {
+        var parsed = window.MokeData.parseCSV(text);
+        table = { headers: parsed.headers, rows: parsed.rows, meta: { delimiter: parsed.delimiter } };
+      } else {
+        throw new Error('the response is neither JSON nor CSV (' + (contentType || 'no content type') + ')');
+      }
+      table.name = name;
+      table.url = (conn && conn.url) || '';
+      table.connection = (conn && conn.name) || '';
+      return table;
+    },
+
+    /**
+     * This page session's credentials for a connection. Kept in memory only:
+     * never written to localStorage and never exported.
+     */
+    setSessionAuth: function (name, authConfig) {
+      if (!name) return;
+      if (!authConfig || !authConfig.type || authConfig.type === 'none') delete _sessionAuth[name];
+      else _sessionAuth[name] = authConfig;
     },
 
     /**
@@ -377,8 +456,8 @@
       var idx = findIndex(all, name);
       if (idx === -1) return;
 
-      all[idx].schedule = intervalMinutes || 0;
-      persist(all);
+      // Not persisted: live refresh never starts by itself on a page load.
+      MokeConnectionManager._schedules[name] = intervalMinutes || 0;
 
       // Reset timer
       if (MokeConnectionManager._timers[name]) {
@@ -388,25 +467,24 @@
 
       if (intervalMinutes > 0) {
         MokeConnectionManager._timers[name] = setInterval(function () {
-          MokeConnectionManager.fetch(name).catch(function (err) {
-            console.warn('[MokeConnectionManager] Scheduled fetch failed for "' + name + '":', err);
-          });
+          MokeConnectionManager.refresh(name);
         }, intervalMinutes * 60 * 1000);
       }
     },
 
     /**
-     * Start scheduled refreshes for all connections that have a schedule.
-     * Call once on page load.
+     * One live refresh: a fresh fetch (no cache), announced as a
+     * 'moke:live-refresh' event with the table, or with the error. What to do
+     * with it is the page's decision; this module stores nothing.
      */
-    startScheduler: function () {
-      MokeConnectionManager.stopScheduler();
-      var all = loadAll();
-      for (var i = 0; i < all.length; i++) {
-        if (all[i].schedule && all[i].schedule > 0) {
-          MokeConnectionManager.setSchedule(all[i].name, all[i].schedule);
-        }
-      }
+    refresh: function (name) {
+      return MokeConnectionManager.fetch(name, { fresh: true }).then(function (table) {
+        document.dispatchEvent(new CustomEvent('moke:live-refresh', { detail: { name: name, table: table, at: Date.now() } }));
+        return table;
+      }, function (err) {
+        document.dispatchEvent(new CustomEvent('moke:live-refresh', { detail: { name: name, error: err.message || String(err), at: Date.now() } }));
+        return null;
+      });
     },
 
     /** Stop all scheduled timers. */
@@ -416,6 +494,7 @@
         clearInterval(MokeConnectionManager._timers[names[i]]);
       }
       MokeConnectionManager._timers = {};
+      MokeConnectionManager._schedules = {};
     },
 
     // -----------------------------------------------------------------------
@@ -435,12 +514,11 @@
           name:     c.name,
           url:      c.url,
           method:   c.method,
-          authType: c.authType || null,
-          headers:  stripSecrets(c.headers),
-          params:   c.params || {},
+          headers:  stripSecrets(pairs(c.headers)),
+          params:   stripSecrets(pairs(c.params)),
           body:     c.body || null,
-          schedule: c.schedule || 0
-          // authToken, authUser, authPass, authKey — intentionally excluded
+          auth:     c.auth || c.authType || 'none'
+          // credentials are never stored, so none can be exported
         });
       }
       return JSON.stringify(exported, null, 2);
@@ -582,7 +660,7 @@
         var opt = document.createElement('option');
         opt.value = SCHEDULE_OPTIONS[s].value;
         opt.textContent = SCHEDULE_OPTIONS[s].label;
-        if ((connection.schedule || 0) === SCHEDULE_OPTIONS[s].value) opt.selected = true;
+        if ((MokeConnectionManager._schedules[connection.name] || 0) === SCHEDULE_OPTIONS[s].value) opt.selected = true;
         schedSelect.appendChild(opt);
       }
       (function (connName) {
@@ -590,7 +668,11 @@
           MokeConnectionManager.setSchedule(connName, parseInt(this.value, 10));
         });
       })(connection.name);
-      card.appendChild(schedSelect);
+      var schedLabel = el('label', 'mcm-schedule-label', 'Live refresh ');
+      schedLabel.style.cssText = 'color:var(--muted);font-size:0.72rem;';
+      schedLabel.title = 'Off by default and on every page load; runs only while this page is open';
+      schedLabel.appendChild(schedSelect);
+      card.appendChild(schedLabel);
 
       // Action buttons
       var actions = el('span', 'mcm-actions');
@@ -612,6 +694,7 @@
           MokeConnectionManager.test(connName).then(function (result) {
             btn.textContent = result.ok ? result.status + ' OK' : 'Err ' + (result.status || '');
             btn.disabled = false;
+            showMsg(btn, result.ok ? '' : result.error);
             // Update dot colour
             var all = loadAll();
             var ix = findIndex(all, connName);
@@ -636,6 +719,7 @@
           MokeConnectionManager.fetch(connName).then(function (dataset) {
             btn.textContent = dataset.rows.length + ' rows';
             btn.disabled = false;
+            showMsg(btn, '');
             // Dispatch custom event so moke can pick up the dataset
             var evt = new CustomEvent('moke:dataset', { detail: { name: connName, dataset: dataset } });
             document.dispatchEvent(evt);
@@ -643,7 +727,7 @@
           }).catch(function (err) {
             btn.textContent = 'Error';
             btn.disabled = false;
-            console.error('[MokeConnectionManager] Fetch failed:', err);
+            showMsg(btn, err.message || String(err));
             setTimeout(function () { btn.textContent = 'Load'; }, 3000);
           });
         });
@@ -664,6 +748,12 @@
       actions.appendChild(delBtn);
 
       card.appendChild(actions);
+
+      // Why the last Test or Load failed: the proxy's reason, in full.
+      var msg = el('div', 'mcm-msg');
+      msg.setAttribute('role', 'status');
+      msg.style.cssText = 'flex-basis:100%;color:var(--red);font-size:0.75rem;';
+      card.appendChild(msg);
       return card;
     },
 
@@ -672,7 +762,10 @@
     // -----------------------------------------------------------------------
 
     /** Active setInterval timer IDs keyed by connection name. */
-    _timers: {}
+    _timers: {},
+
+    /** Live-refresh intervals (minutes) set in this page session. */
+    _schedules: {}
   };
 
   // ---------------------------------------------------------------------------
