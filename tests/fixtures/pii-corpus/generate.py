@@ -30,11 +30,13 @@ Known gaps in what loke detects, encoded deliberately
 ----------------------------------------------------
 `packages/core/src/privacy/patterns.tk` defines the regex layer's patterns. Some
 Australian identifiers that loke's own demo data and regulatory presets centre on
-have **no detector at all** — ACN, driver licence, passport. Those appear in the
-corpus marked `expected_detected: false` so that a recall figure computed from it
-reflects reality rather than only the cases loke already covers. Medicare, BSB and
-bank account numbers were in that list until RG1.7 gave them detectors; their
-cases are now scored, and RG1.7 added their formats and near misses at the end.
+have **no detector at all** — ACN. Those appear in the corpus marked
+`expected_detected: false` so that a recall figure computed from it reflects
+reality rather than only the cases loke already covers. Medicare, BSB and bank
+account numbers were in that list until RG1.7 gave them detectors; their cases are
+now scored, and RG1.7 added their formats and near misses at the end. RG1.7a did
+the same for Centrelink CRN, passport, driver licence and super member numbers,
+each detected only after the words that name it.
 
 Usage
 -----
@@ -408,6 +410,92 @@ def cases(rng: random.Random) -> list[dict]:
     add("negative",
         "The form had BSB {bsb} entered as a placeholder.",
         {"bsb": ("NOT_PII", "000-000", False, "the all-zero BSB placeholder")})
+
+    # --- RG1.7a: CRN, passport, driver licence, super member number -------
+    # Appended after RG1.7's cases for the same reason. None of these has a check
+    # loke can apply (the CRN check letter's algorithm is not published), so each
+    # detector is gated on its words; the positives carry the words and the
+    # negatives carry the same shapes without them, or the words without the shape.
+    def nine_and_letter() -> tuple[str, str]:
+        d = "".join(str(rng.randint(0, 9)) for _ in range(9))
+        return d, rng.choice("ABCDEFGHJKLMNPRSTVWXYZ")
+
+    crn_forms = [
+        ("Centrelink CRN {crn} is on the claim.", lambda d, c: f"{d[:3]} {d[3:6]} {d[6:]}{c}",
+         "after 'CRN', spaced 3-3-3 and the check letter"),
+        ("Customer Reference Number: {crn} (Centrelink).", lambda d, c: f"{d}{c}",
+         "after 'Customer Reference Number:', unspaced"),
+        ("crn no. {crn} for the family payment.", lambda d, c: f"{d[:3]}-{d[3:6]}-{d[6:]}{c.lower()}",
+         "lower case, hyphenated, lower-case letter"),
+    ]
+    for template, fmt, note in crn_forms:
+        d, c = nine_and_letter()
+        add("adversarial", template, {"crn": ("AU_CRN", fmt(d, c), True, note)})
+
+    pp_forms = [
+        ("Passport number: {pp}, expires 2031.", lambda: f"N{rng.randint(1000000, 9999999)}",
+         "Australian: one letter and seven digits"),
+        ("Her passport no. {pp} was sighted.", lambda: f"PA{rng.randint(1000000, 9999999)}",
+         "Australian: two letters and seven digits"),
+        ("UK PASSPORT {pp} on the booking.", lambda: str(rng.randint(100000000, 999999999)),
+         "UK: nine digits, upper-case context"),
+    ]
+    for template, gen, note in pp_forms:
+        add("adversarial", template, {"pp": ("PASSPORT", gen(), True, note)})
+
+    dl_forms = [
+        ("Driver's licence {dl} (NSW).", lambda: str(rng.randint(10000000, 99999999)),
+         "NSW: eight digits after \"driver's licence\""),
+        ("drivers license number: {dl} (VIC).", lambda: str(rng.randint(1000000000, 9999999999)),
+         "VIC: ten digits, US spelling, no apostrophe"),
+        ("Driver Licence No. {dl} (SA).", lambda: f"S{rng.randint(10000, 99999)}",
+         "SA: a letter and five digits"),
+        ("Driving licence {dl} (WA).", lambda: str(rng.randint(1000000, 9999999)),
+         "WA: seven digits after 'driving licence'"),
+    ]
+    for template, gen, note in dl_forms:
+        add("adversarial", template, {"dl": ("DRIVER_LICENCE", gen(), True, note)})
+
+    sm_forms = [
+        ("Superannuation fund member number {sm} for the rollover.",
+         "after 'superannuation fund member number'"),
+        ("Super member no. {sm} please.", "after 'super member no.'"),
+    ]
+    for template, note in sm_forms:
+        add("adversarial", template,
+            {"sm": ("AU_SUPER_MEMBER", str(rng.randint(100000000, 999999999)), True, note)})
+
+    for _ in range(2):
+        d, c = nine_and_letter()
+        add("negative",
+            "Part {part} ships on Tuesday.",
+            {"part": ("NOT_PII", f"{d}{c}", False,
+                      "nine digits and a letter with no CRN context: a part number")})
+
+    add("negative",
+        "BPAY biller 23796, CRN {ref} for the invoice.",
+        {"ref": ("NOT_PII", f"1{rng.randint(100000000, 999999999)}", False,
+                 "a BPAY customer reference number: digits only, no check letter")})
+
+    add("negative",
+        "Passport office ticket {t} was called.",
+        {"t": ("NOT_PII", str(rng.randint(10000000, 99999999)), False,
+               "the word passport, but not followed by a number")})
+
+    add("negative",
+        "Software licence number {n} was renewed.",
+        {"n": ("NOT_PII", str(rng.randint(10000000, 99999999)), False,
+               "a licence number that is not a driver licence")})
+
+    add("negative",
+        "Gym member number {n} checked in.",
+        {"n": ("NOT_PII", str(rng.randint(100000000, 999999999)), False,
+               "a member number with no superannuation context")})
+
+    add("negative",
+        "Driver's licence {y} renewal is due.",
+        {"y": ("NOT_PII", str(rng.randint(2020, 2030)), False,
+               "four digits after the words: a year, too short for a licence")})
 
     return out
 

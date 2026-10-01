@@ -309,7 +309,9 @@ checksum-valid numbers. The 2026-09-19 figures were measured against the uncorre
   decision.
 - ACN still has **no detector at all**. Medicare, BSB and bank account numbers gained regex
   detectors on 2026-10-01 (RG1.7: Medicare checksum-gated, BSB and account only after their
-  label). No figure here measures them yet; the counts in this section predate them.
+  label), and Centrelink CRN, passport, driver licence and superannuation member numbers the
+  same day (RG1.7a: each only after its label, none with a check that can be applied). No
+  figure here measures them yet; the counts in this section predate them.
 - `au_tfn` still fires inside `au_abn` — `"ABN 51 824 753 556"` reports both. The boundary check
   cannot see it, because the characters either side of the TFN match are spaces. Recorded as
   PL1.10's remaining tail.
@@ -534,6 +536,9 @@ restored and checked with `cmp`.
 - **The guardian row says it was sent, not that it works.** It is judged by the guardian's version
   marker at the start of the system prompt the stand-in received. Whether a model obeys it is
   unmeasured (AD1.5).
+- **Recorded before RG1.7a merged.** The harness now also carries cases for `au_crn`, `passport`,
+  `driver_licence` and `au_super_member` (RG1.7a): 5 × 19 = 95 matrix cells, run by the gate. The
+  counts above are the 75-cell run and have not been re-recorded for the 95.
 - **Not a recall figure.** Each type is exercised with one value the regex layer is known to
   detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
 - **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven

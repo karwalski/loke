@@ -49,10 +49,15 @@ CASES = [
     ("au_medicare", "2123 45670 1", "AU_MEDICARE"),
     ("au_bsb", "BSB 062-000", "AU_BSB"),
     ("bank_account", "account 12345678", "BANK_ACCOUNT"),
+    # RG1.7a: the same for CRN, passport, licence and super member number.
+    ("au_crn", "CRN 123 456 789A", "AU_CRN"),
+    ("passport", "passport number PA1234567", "PASSPORT"),
+    ("driver_licence", "driver's licence 12345678", "DRIVER_LICENCE"),
+    ("au_super_member", "super member number 987654321", "AU_SUPER_MEMBER"),
     ("PERSON (NER layer)", "Jane Citizen", "PERSON"),
     ("none (control)", "", ""),
 ]
-REGEX_TYPES = [c[0] for c in CASES[:13]]
+REGEX_TYPES = [c[0] for c in CASES[:17]]
 GUARDIAN = "LOKE_GUARDIAN_v"
 PLACEHOLDER = re.compile(r"\[[A-Z][A-Z0-9_]*_[0-9]+\]|\[[A-Z][A-Z0-9_]*_[0-9a-f]{4,}_[0-9]+\]")
 

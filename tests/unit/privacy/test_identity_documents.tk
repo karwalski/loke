@@ -1,0 +1,139 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.identitydocuments;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+i=pl:core.privacy.pipeline;
+
+(* RG1.7a — the au-privacy identifiers with no check loke can apply: Centrelink CRN,
+   passport, driver licence and superannuation member number. Each is detected only after
+   the words that name it, so for each detector: the forms that must be found (value and
+   span cover the identifier, not the words), the same shape WITHOUT the words (the context
+   guard), the words without the shape, and a run too long or too short. Every assertion
+   goes through the production detector, rx.detect.
+
+   None of the values is a tax file number: 123 456 789 fails the TFN checksum (323), so
+   no au_tfn detection overlaps the CRN cases. *)
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=valueoftype(entities:@$piientity;wanted:str):str{
+  let v=mut."";
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ v=e.value }el{}
+  };
+  <v
+};
+
+f=startoftype(entities:@$piientity;wanted:str):i64{
+  let at=mut.(0-1);
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ at=e.start as i64 }el{}
+  };
+  <at
+};
+
+f=found(text:str;wanted:str):i64{
+  let res:$piidetectionresult=rx.detect(text);
+  <countoftype(res.entities;wanted)
+};
+
+f=value(text:str;wanted:str):str{
+  let res:$piidetectionresult=rx.detect(text);
+  <valueoftype(res.entities;wanted)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── Centrelink CRN: nine digits and a letter, after CRN or customer reference number ── *)
+  let crntext="Centrelink CRN 123 456 789A on file";
+  let crn:$piidetectionresult=rx.detect(crntext);
+  if(t.assert(countoftype(crn.entities;"au_crn")==1;"a CRN after the word CRN is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(crn.entities;"au_crn");"123 456 789A";"as the number and its letter, not the word")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(crn.entities;"au_crn")==15;"its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(crn.sensitivity);"restricted";"a CRN is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(crn.anonymised;"789A")<0;"the anonymised text does not carry it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(crn.anonymised;"CRN")>=0;"while the word CRN is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Customer Reference Number: 123456789A (Centrelink)";"au_crn");"123456789A";"after 'Customer Reference Number:', unspaced")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("crn no. 123-456-789a for the payment";"au_crn");"123-456-789a";"lower case, hyphenated, after 'crn no.'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("CRN number 123456789Z please";"au_crn");"123456789Z";"after 'CRN number'")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Part 123456789A ships Tuesday";"au_crn")==0;"context guard: nine digits and a letter without the word are a part number")){pass=pass+1}el{fail=fail+1};
+  (* The corpus's one new false positive, and whose it is. 984593866 passes the TFN
+     checksum, and a letter after nine digits is not a digit, so au_tfn reports the part
+     number; au_crn does not. Recorded, not endorsed: RG1.7b. *)
+  let part:$piidetectionresult=rx.detect("Part 984593866N ships on Tuesday");
+  if(t.assert(countoftype(part.entities;"au_crn")==0;"the corpus part-number decoy is not a CRN")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(part.entities;"au_tfn")==1;"RECORDED (RG1.7b): au_tfn reports its checksum-valid nine digits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("BPAY biller 23796, CRN 1188833632 for the invoice";"au_crn")==0;"near miss: a BPAY CRN, digits only, has no letter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("CRN 12345678A on file";"au_crn")==0;"near miss: eight digits and a letter")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Passport: up to two letters and six to nine digits, after the word passport ── *)
+  let pptext="Passport number: N1234567 was sighted";
+  let pp:$piidetectionresult=rx.detect(pptext);
+  if(t.assert(countoftype(pp.entities;"passport")==1;"an Australian passport number after 'Passport number:' is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(pp.entities;"passport");"N1234567";"with its letter, and without the word")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(pp.entities;"passport")==17;"its span starts at the letter")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pp.sensitivity);"restricted";"a passport number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.indexof(pp.anonymised;"N1234567")<0;"the anonymised text does not carry it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Her passport no. PA1234567 was sighted";"passport");"PA1234567";"two letters, after 'passport no.'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("UK PASSPORT 123456789 on the booking";"passport");"123456789";"nine digits, upper case")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("passport no 1234567 today";"passport");"1234567";"digits only: the letters of 'no' are not taken as the number's")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Reference N1234567 was sighted";"passport")==0;"context guard: a letter and seven digits without the word are not a passport")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Passport office ticket 24903240 called";"passport")==0;"near miss: the word, but another word before the number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("passport 12345 today";"passport")==0;"near miss: five digits are too short")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("passport N1234567890 today";"passport")==0;"near miss: a tenth digit makes it a fragment")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Driver licence: each state's own format, after the words ─────────────────────── *)
+  let dltext="Driver's licence 12345678 (NSW)";
+  let dl:$piidetectionresult=rx.detect(dltext);
+  if(t.assert(countoftype(dl.entities;"driver_licence")==1;"a licence number after the words Driver's licence is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(dl.entities;"driver_licence");"12345678";"as the number alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(dl.entities;"driver_licence")==17;"its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(dl.sensitivity);"restricted";"a driver licence number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("drivers license number: 1234567890 (VIC)";"driver_licence");"1234567890";"ten digits, US spelling, no apostrophe")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Driver Licence No. S12345 (SA)";"driver_licence");"S12345";"a letter and five digits, after 'Driver Licence No.'")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Driving licence 1234567 (WA)";"driver_licence");"1234567";"after 'Driving licence'")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Software licence number 12345678 renewed";"driver_licence")==0;"context guard: a licence number that is not a driver's")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Order 12345678 shipped";"driver_licence")==0;"context guard: eight digits with no words")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Driver's licence 2024 renewal is due";"driver_licence")==0;"near miss: a year after the words is too short")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("Driver's licence 12345678901 here";"driver_licence")==0;"near miss: eleven digits are a fragment")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Superannuation member number: after super ... member number ─────────────────── *)
+  let smtext="Superannuation fund member number 87654321 for the rollover";
+  let sm:$piidetectionresult=rx.detect(smtext);
+  if(t.assert(countoftype(sm.entities;"au_super_member")==1;"a member number after 'Superannuation fund member number' is detected")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(valueoftype(sm.entities;"au_super_member");"87654321";"as the digits alone")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(startoftype(sm.entities;"au_super_member")==34;"its span starts at the number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(sm.sensitivity);"restricted";"a super member number is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(value("Super member no. 987654321 please";"au_super_member");"987654321";"after 'Super member no.'")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(found("Gym member number 87654321 checked in";"au_super_member")==0;"context guard: a member number with no super in front")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found("super member number 12345 here";"au_super_member")==0;"near miss: five digits are too short")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The pipeline rates them as the regex layer does ──────────────────────────────── *)
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(crn.entities));"restricted";"the pipeline rates a CRN RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(pp.entities));"restricted";"and a passport number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(dl.entities));"restricted";"and a licence number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(sm.entities));"restricted";"and a super member number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(crn.entities)==1 && pl.countrestricted(pp.entities)==1 && pl.countrestricted(dl.entities)==1 && pl.countrestricted(sm.entities)==1;"each counts as restricted")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
