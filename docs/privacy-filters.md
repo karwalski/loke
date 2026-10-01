@@ -290,22 +290,25 @@ The `$comparisonmatrix` type aggregates evaluation results across all layers, tr
 
 ## Metrics (F3b.10)
 
-The metrics module (`filter_metrics.tk`) tracks operational statistics per layer:
+For every request, `core.privacy.pipeline.run` records what each layer in the registry did
+(`core.privacy.filtermetrics`), as names, counts and confidences only:
 
-- **Detection count** — Total entities detected
-- **Processing time** — Cumulative milliseconds spent in detection
-- **Average confidence** — Mean confidence score of detections
-- **Entity counts** — Breakdown by entity type (JSON string)
+- **Per layer** — state (completed, disabled, unavailable, failed), mode, milliseconds around
+  the layer call (probe included; the clock has millisecond resolution, so a regex scan usually
+  reads 0), detections reported, accepted by the layer's threshold and entity filter, and kept
+  by entity routing
+- **Per layer and entity type** — the same counts, and the minimum, maximum and mean confidence
+- **Consensus** — the strategy applied, the voting layers, how many detections were resolved,
+  masked and passed, how many every voter found, the vetoing layer if any, and entity
+  routing's notes
 
-### Aggregate Metrics
-
-The `$metricsaggregate` type rolls up per-layer metrics into system-wide totals:
-
-- Total requests processed
-- Total detections across all layers
-- Average processing time per request
-
-Use `formatmetric` for human-readable per-layer summaries.
+`POST /api/pipeline` returns this as `privacy_layers`, `consensus`, `vetoed_by` and
+`entity_routing_notes`, including on a privacy refusal. The same figures are written to the
+`privacy_layer_metrics` table and bound into the audit hash chain (`audit_log.layer_digest`),
+so `loke audit verify` detects an edited, added or deleted metrics row. No row holds a
+detected value or a hash of one. `core.audit.layermetrics` aggregates the rows (detections
+by layer per day, by entity type, and the agreement rate between layers); no dashboard
+shows them yet.
 
 ## What a Disclosure Measure Cannot Capture (EM1.5)
 

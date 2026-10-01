@@ -4,36 +4,234 @@
 m=core.privacy.filtermetrics;
 
 i=str:std.str;
+i=jx:shared.jsonobj;
+(* For $piientity. Only a type is taken from it. *)
+i=t:shared.types;
+(* For $resolvedentity. Only a type is taken from it. *)
+i=cn:core.privacy.consensus;
+
+(* F3b.10. What each detection layer did with one text, as numbers and labels only.
+
+   core.privacy.pipeline.run builds one list per run (forlayer, for each layer in registry
+   order) and keeps it on $pipelinerun.layermetrics; page.api.pipeline writes it to the
+   privacy_layer_metrics table, which the audit chain binds (core.audit.layermetrics,
+   core.storage.audit), and puts summaryjson in the reply.
+
+   ONE ROW SHAPE, TWO KINDS. A layer row (entitytype "") carries the layer's state, mode,
+   measured time and its totals; a type row carries one entity type's count and confidences
+   for that layer. The rows are flat because that is the shape they are stored in.
+
+   NO VALUE, EVER. Nothing here reads $piientity.value, and nothing derived from it (no hash:
+   a phone number or a name is low-entropy, and its hash is reversible by trying them). The
+   detections are reduced to their type and confidence at the point they enter this module.
+
+   CONFIDENCES are kept as integer thousandths (0.95 is 950), minimum, maximum and sum over
+   the layer's detections of the type, so a mean is the sum over the count and any total over
+   many requests is exact. A layer's confidences are what the layer reported, before its
+   threshold; `accepted` is how many passed the threshold and entity filter (F3b.2).
+
+   TIME is milliseconds read from shared.types.nowms (std.time.now, millisecond resolution)
+   either side of core.privacy.layerhealth.consult, so it includes the availability probe as
+   well as the scan. A regex scan of a prompt usually completes inside one millisecond and is
+   recorded as 0: that is the clock's resolution, not a measurement of zero work. *)
 
 t=$layermetric{
   layerid:str;
-  detectioncount:i64;
-  totalprocessingms:i64;
-  avgconfidence:f64;
-  entitycounts:str
+  entitytype:str;
+  state:str;
+  mode:str;
+  durationms:i64;
+  detections:i64;
+  accepted:i64;
+  routed:i64;
+  confminmilli:i64;
+  confmaxmilli:i64;
+  confsummilli:i64
 };
 
-t=$metricsaggregate{
-  layers:@$layermetric;
-  totalrequests:i64;
-  totaldetections:i64;
-  avgprocessingms:i64
+f=milli(c:f64):i64{
+  if(c<0.0){ <0 }el{};
+  if(c>1.0){ <1000 }el{};
+  <(c*1000.0+0.5) as i64
 };
 
-f=newmetric(layerid:str):$layermetric{
-  <$layermetric{layerid:layerid;detectioncount:0;totalprocessingms:0;avgconfidence:0.0;entitycounts:"{}"}
+(* 950 -> "0.950". Formatted from the integer, so no float rendering decides the text. *)
+f=millitext(m:i64):str{
+  let frac=m%1000;
+  let pad=mut."";
+  if(frac<100){ pad="0" }el{};
+  if(frac<10){ pad="00" }el{};
+  <"\(m/1000).\(pad)\(frac)"
 };
 
-f=recorddetection(m:$layermetric;count:i64;processingms:i64;confidence:f64):$layermetric{
-  <$layermetric{
-    layerid:m.layerid;
-    detectioncount:m.detectioncount+count;
-    totalprocessingms:m.totalprocessingms+processingms;
-    avgconfidence:confidence;
-    entitycounts:m.entitycounts
-  }
+f=hastype(types:@str;ty:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<types.len;i=i+1){
+    if(str.eq(types.get(i);ty)){ found=true }el{}
+  };
+  <found
+};
+
+f=counttype(es:@$piientity;ty:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<es.len;i=i+1){
+    if(str.eq(es.get(i).entitytype;ty)){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* The type row for `ty`: its count, accepted count and confidences. *)
+f=typerow(layerid:str;state:str;mode:str;ty:str;hits:@$piientity;accepted:@$piientity):$layermetric{
+  let lo=mut.1000;
+  let hi=mut.0;
+  let sum=mut.0;
+  let n=mut.0;
+  lp(let i=0;i<hits.len;i=i+1){
+    let e:$piientity=hits.get(i);
+    if(str.eq(e.entitytype;ty)){
+      let c=milli(e.confidence);
+      n=n+1;
+      sum=sum+c;
+      if(c<lo){ lo=c }el{};
+      if(c>hi){ hi=c }el{}
+    }el{}
+  };
+  if(n==0){ lo=0 }el{};
+  <$layermetric{layerid:layerid;entitytype:ty;state:state;mode:mode;durationms:0-1;detections:n;accepted:counttype(accepted;ty);routed:0;confminmilli:lo;confmaxmilli:hi;confsummilli:sum}
+};
+
+(* `acc` with one layer's rows appended: the layer row, then a type row per entity type it
+   reported, in first-seen order. `hits` is everything the layer reported, `accepted` the part
+   its threshold and filter kept. durationms is -1 when the call was not timed. *)
+f=forlayer(acc:@$layermetric;layerid:str;state:str;mode:str;durationms:i64;hits:@$piientity;accepted:@$piientity):@$layermetric{
+  let lo=mut.1000;
+  let hi=mut.0;
+  let sum=mut.0;
+  lp(let i=0;i<hits.len;i=i+1){
+    let c=milli(hits.get(i).confidence);
+    sum=sum+c;
+    if(c<lo){ lo=c }el{};
+    if(c>hi){ hi=c }el{}
+  };
+  if(hits.len==0){ lo=0 }el{};
+  let out=mut.acc.push($layermetric{layerid:layerid;entitytype:"";state:state;mode:mode;durationms:durationms;detections:hits.len as i64;accepted:accepted.len as i64;routed:0;confminmilli:lo;confmaxmilli:hi;confsummilli:sum});
+  let seen=mut.@();
+  lp(let j=0;j<hits.len;j=j+1){
+    let ty:str=hits.get(j).entitytype;
+    if(hastype(seen;ty)){}el{
+      seen=seen.push(ty);
+      out=out.push(typerow(layerid;state;mode;ty;hits;accepted))
+    }
+  };
+  <out
+};
+
+f=islayerrow(m:$layermetric):bool{
+  <str.len(m.entitytype)==0
+};
+
+(* F3b.5 and F3b.10. `routed` is how many of a row's accepted detections entity routing then
+   kept (core.privacy.entityrouting.apply returns the kept detections with their layers): the
+   detections that went on to the consensus. A detect-only layer's are never kept, and with
+   no route it equals accepted for a masking layer. *)
+f=routedcount(m:$layermetric;layers:@str;entities:@$piientity):i64{
+  let n=mut.0;
+  lp(let i=0;i<layers.len && i<entities.len;i=i+1){
+    if(str.eq(layers.get(i);m.layerid) && (islayerrow(m) || str.eq(entities.get(i).entitytype;m.entitytype))){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=withrouted(ms:@$layermetric;layers:@str;entities:@$piientity):@$layermetric{
+  let out=mut.@();
+  lp(let i=0;i<ms.len;i=i+1){
+    let m:$layermetric=ms.get(i);
+    out=out.push($layermetric{layerid:m.layerid;entitytype:m.entitytype;state:m.state;mode:m.mode;durationms:m.durationms;detections:m.detections;accepted:m.accepted;routed:routedcount(m;layers;entities);confminmilli:m.confminmilli;confmaxmilli:m.confmaxmilli;confsummilli:m.confsummilli})
+  };
+  <out
+};
+
+(* ── The consensus outcome ────────────────────────────────────────────────────────
+   Over core.privacy.consensus's record of every masking-layer detection ($resolvedentity):
+   how many were masked and passed, and how many were found by EVERY voter (agreed). A
+   resolved entity's detectinglayers names each voter in its group, "regex=0.95,ner=0.80",
+   so the number of names is the number of voters that found it. Agreement is only defined
+   with two or more voters; with one, every detection is trivially agreed, and the dashboard
+   query leaves those runs out (core.audit.layermetrics.agreementsince). *)
+f=layersin(detectinglayers:str):i64{
+  if(str.len(detectinglayers)==0){ <0 }el{};
+  <str.split(detectinglayers;",").len as i64
+};
+
+f=countaction(resolved:@$resolvedentity;action:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<resolved.len;i=i+1){
+    if(str.eq(resolved.get(i).action;action)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=agreed(resolved:@$resolvedentity;voters:i64):i64{
+  let n=mut.0;
+  lp(let i=0;i<resolved.len;i=i+1){
+    if(voters>0 && layersin(resolved.get(i).detectinglayers)>=voters){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* ── The reply's summary ─────────────────────────────────────────────────────────── *)
+f=durationjson(ms:i64):str{
+  if(ms<0){ <"null" }el{};
+  <str.fromint(ms)
+};
+
+(* `acc` with `x` appended, comma-separated. *)
+f=listed(acc:str;x:str):str{
+  if(str.len(acc)==0){ <x }el{};
+  <"\(acc),\(x)"
+};
+
+f=typejson(m:$layermetric):str{
+  let mean=mut.0;
+  if(m.detections>0){ mean=(m.confsummilli+(m.detections/2))/m.detections }el{};
+  <"{\"type\":\(jx.escape(m.entitytype)),\"detections\":\(m.detections),\"accepted\":\(m.accepted),\"routed\":\(m.routed),\"confidence_min\":\(millitext(m.confminmilli)),\"confidence_max\":\(millitext(m.confmaxmilli)),\"confidence_mean\":\(millitext(mean))}"
+};
+
+f=layerjson(ms:@$layermetric;i:i64):str{
+  let m:$layermetric=ms.get(i);
+  let ts=mut."";
+  lp(let j=i+1;j<ms.len && !islayerrow(ms.get(j));j=j+1){
+    ts=listed(ts;typejson(ms.get(j)))
+  };
+  <"{\"layer\":\(jx.escape(m.layerid)),\"state\":\(jx.escape(m.state)),\"mode\":\(jx.escape(m.mode)),\"duration_ms\":\(durationjson(m.durationms)),\"detections\":\(m.detections),\"accepted\":\(m.accepted),\"routed\":\(m.routed),\"entity_types\":[\(ts)]}"
+};
+
+f=layersjson(ms:@$layermetric):str{
+  let out=mut."";
+  lp(let i=0;i<ms.len;i=i+1){
+    if(islayerrow(ms.get(i))){ out=listed(out;layerjson(ms;i)) }el{}
+  };
+  <"[\(out)]"
+};
+
+f=notesjson(notes:@str):str{
+  let out=mut."";
+  lp(let i=0;i<notes.len;i=i+1){ out=listed(out;jx.escape(notes.get(i))) };
+  <"[\(out)]"
+};
+
+(* `,"privacy_layers":[...],"consensus":{...},"vetoed_by":"...","entity_routing_notes":[...]`,
+   for a reply that already has fields. Names, counts and confidences; never a value. *)
+f=maskaction():str{ <"mask" };
+f=passaction():str{ <"pass" };
+f=comma():str{ <"," };
+
+f=summaryjson(ms:@$layermetric;strategy:str;vetoedby:str;resolved:@$resolvedentity;voters:@str;notes:@str):str{
+  let nv=voters.len as i64;
+  let nr=resolved.len as i64;
+  <",\"privacy_layers\":\(layersjson(ms)),\"consensus\":{\"strategy\":\(jx.escape(strategy)),\"voters\":\(nv),\"voter_ids\":\(jx.escape(str.join(comma();voters))),\"resolved\":\(nr),\"masked\":\(countaction(resolved;maskaction())),\"passed\":\(countaction(resolved;passaction())),\"agreed\":\(agreed(resolved;nv))},\"vetoed_by\":\(jx.escape(vetoedby)),\"entity_routing_notes\":\(notesjson(notes))"
 };
 
 f=formatmetric(m:$layermetric):str{
-  <str.concat(m.layerid;str.concat(": ";str.concat(str.fromint(m.detectioncount);str.concat(" detections, ";str.concat(str.fromint(m.totalprocessingms);"ms total")))))
+  <"\(m.layerid): \(m.detections) detections, \(durationjson(m.durationms))ms"
 };

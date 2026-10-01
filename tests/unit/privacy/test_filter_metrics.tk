@@ -5,82 +5,91 @@ m=test.privacy.filtermetrics;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=cn:core.privacy.consensus;
 i=fm:core.privacy.filtermetrics;
+i=audit:core.storage.audit;
 
-(* X7.2 — this file used to declare its own $layermetric and assert against it. It now
-   imports core.privacy.filtermetrics.
+(* F3b.10 — core.privacy.filtermetrics, the per-layer record core.privacy.pipeline.run keeps
+   for each layer and page.api.pipeline stores and replies with.
 
-   TWO FINDINGS, recorded rather than asserted as correct.
+   The module this file used to test overwrote its "average" confidence with the last one and
+   never wrote its per-type breakdown (both recorded here as findings until now). It had no
+   importer. It was rewritten for F3b.10: counts, accepted counts and confidences per entity
+   type, kept as integer thousandths, a measured time, and a JSON summary that names no value.
 
-   FINDING 1 — avgconfidence IS NOT AN AVERAGE. recorddetection's body is:
+   The values planted below are distinctive strings; every rendered output is searched for
+   them. *)
 
-       avgconfidence:confidence;
+f=hit(ty:str;value:str;conf:f64):$piientity{
+  <$piientity{entitytype:ty;value:value;start:0;end:0;confidence:conf;placeholder:""}
+};
 
-   It OVERWRITES the field with the confidence of the most recent call. So after
-   recording 0.99 and then 0.10, a field named avgconfidence reads 0.10 rather than 0.545.
-   Nothing in the module divides by anything, and there is no count of confidence samples
-   to divide by — the struct has detectioncount, but that is a count of ENTITIES, and one
-   recorddetection call can carry several. A metric named avg that reports last is worse
-   than no metric: it will be quoted as an average, and docs/metrics-baseline.md is the
-   only place this project publishes figures from.
-
-   FINDING 2 — entitycounts IS NEVER WRITTEN. newmetric sets it to the literal "{}" and
-   recorddetection copies it across unchanged. There is no code path anywhere that puts an
-   entity type into it, so the per-type breakdown this field exists for is permanently
-   empty.
-
-   NEITHER IS FIXED HERE: this module has no importer anywhere in the repository, so no
-   figure derived from it is being published today. The assertions below record the
-   behaviour as it is, following the precedent in tests/unit/storage/test_backup.tk, and
-   they turn RED when the average and the breakdown are implemented. *)
+f=resolved(layers:str;action:str):$resolvedentity{
+  <$resolvedentity{entitytype:"email";value:"w62.resolved@example.com";start:0;end:0;finalconfidence:0.9;detectinglayers:layers;action:action}
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  (* ── A fresh metric starts at zero ───────────────────────────────────────────
-     A counter that started anywhere else would over-report from the first request. *)
-  let m0=fm.newmetric("regex");
-  if(t.asserteq(m0.layerid;"regex";"a metric carries the id of the layer it measures")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m0.detectioncount==0;"and starts with no detections")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m0.totalprocessingms==0;"and no accumulated time")){pass=pass+1}el{fail=fail+1};
+  let mail="w62.planted@example.com";
+  let card="4111 1111 1111 1111";
+  let hits=@(hit("email";mail;0.95);hit("credit_card";card;0.60);hit("email";"second.w62@example.com";0.85));
+  let kept=@(hit("email";mail;0.95);hit("email";"second.w62@example.com";0.85));
+  let ms=fm.forlayer(@();"regex";"completed";"detect-and-mask";7;hits;kept);
 
-  (* ── Accumulation ────────────────────────────────────────────────────────────
-     Both counters must ADD rather than replace, and the returned metric must be used:
-     these are value types, so a caller that drops the return records nothing — the same
-     shape of defect as core.privacy.placeholder.addentry (LS1.1a) and
-     core.storage.ephemeral.put. *)
-  let m1=fm.recorddetection(m0;3;12;0.95);
-  if(t.assert(m1.detectioncount==3;"recording three detections counts three")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m1.totalprocessingms==12;"and twelve milliseconds")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m0.detectioncount==0;"while the metric passed in is unchanged, because a toke struct is a value")){pass=pass+1}el{fail=fail+1};
+  (* ── the rows ─────────────────────────────────────────────────────────────── *)
+  if(t.assert(ms.len==3;"one layer row and one row per entity type the layer reported")){pass=pass+1}el{fail=fail+1};
+  let lr:$layermetric=ms.get(0);
+  if(t.assert(fm.islayerrow(lr);"the first row is the layer's own")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lr.detections==3 && lr.accepted==2;"it counts every detection and the ones its threshold and filter accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lr.durationms==7;"and carries the measured time")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lr.confminmilli==600 && lr.confmaxmilli==950 && lr.confsummilli==2400;"its confidences are the minimum, maximum and sum, in thousandths")){pass=pass+1}el{fail=fail+1};
+  let er:$layermetric=ms.get(1);
+  if(t.asserteq(er.entitytype;"email";"type rows follow in first-seen order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(er.detections==2 && er.accepted==2;"the email row counts two, both accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(er.confminmilli==850 && er.confmaxmilli==950 && er.confsummilli==1800;"with its own confidences")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(er.durationms==(0-1);"a type row has no time of its own")){pass=pass+1}el{fail=fail+1};
+  let cr:$layermetric=ms.get(2);
+  if(t.assert(str.eq(cr.entitytype;"credit_card") && cr.detections==1 && cr.accepted==0;"the card row counts one, not accepted")){pass=pass+1}el{fail=fail+1};
 
-  let m2=fm.recorddetection(m1;2;8;0.80);
-  if(t.assert(m2.detectioncount==5;"a second recording ADDS to the count rather than replacing it")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m2.totalprocessingms==20;"and the elapsed time accumulates too")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(m2.layerid;"regex";"and the layer id survives accumulation")){pass=pass+1}el{fail=fail+1};
+  let none=fm.forlayer(@();"ner";"unavailable";"detect-and-mask";3;@();@());
+  if(t.assert(none.len==1;"a layer that found nothing has its layer row only")){pass=pass+1}el{fail=fail+1};
+  let nr:$layermetric=none.get(0);
+  if(t.assert(nr.detections==0 && nr.confminmilli==0 && nr.confmaxmilli==0;"with zero counts and confidences")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(nr.state;"unavailable";"and its state")){pass=pass+1}el{fail=fail+1};
 
-  (* Recording a scan that found nothing must still count the TIME. A layer that is slow
-     and finds nothing is exactly the layer an operator needs to see. *)
-  let m3=fm.recorddetection(m2;0;40;0.0);
-  if(t.assert(m3.detectioncount==5;"a scan that found nothing adds no detections")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m3.totalprocessingms==60;"but its time is still recorded, so a slow layer that finds nothing is visible")){pass=pass+1}el{fail=fail+1};
+  (* ── confidences from integers ────────────────────────────────────────────── *)
+  if(t.asserteq(fm.millitext(950);"0.950";"950 thousandths render as 0.950")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(fm.millitext(5);"0.005";"5 as 0.005")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(fm.millitext(1000);"1.000";"and 1000 as 1.000")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fm.milli(1.5)==1000 && fm.milli(0.0-0.2)==0;"a confidence outside 0..1 is clamped")){pass=pass+1}el{fail=fail+1};
 
-  (* ── FINDING 1, recorded: avgconfidence is the LAST value, not the mean ──────
-     0.95 then 0.80 then 0.0. A mean would be 0.583; the field reads 0.0. Asserted
-     through a comparison rather than equality on an f64. *)
-  if(t.assert(m3.avgconfidence<0.5;"avgconfidence after 0.95, 0.80 and 0.0 is BELOW 0.5 — it is the last value, not the mean of the three")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(m2.avgconfidence<0.9;"and after 0.95 then 0.80 it reads 0.80 rather than 0.875")){pass=pass+1}el{fail=fail+1};
+  (* ── the consensus outcome ────────────────────────────────────────────────── *)
+  let rs=@(resolved("regex=0.95,ner=0.80";"mask");resolved("regex=0.95";"mask");resolved("ner=0.70";"pass"));
+  if(t.assert(fm.agreed(rs;2)==1;"with two voters, one detection was found by both")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fm.countaction(rs;"mask")==2 && fm.countaction(rs;"pass")==1;"two masked and one passed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fm.agreed(rs;0)==0;"no voters, nothing agreed")){pass=pass+1}el{fail=fail+1};
 
-  (* ── FINDING 2, recorded: entitycounts is never written ──────────────────────*)
-  if(t.asserteq(m0.entitycounts;"{}";"a fresh metric's per-entity breakdown is an empty JSON object")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(m3.entitycounts;"{}";"and it is STILL empty after three recordings — nothing in the module ever writes an entity type into it")){pass=pass+1}el{fail=fail+1};
+  (* ── routing: how many accepted detections entity routing kept, per layer and type ── *)
+  let kept1=@(hit("email";mail;0.95));
+  let rms=fm.withrouted(ms;@("regex";"ner");@(hit("email";mail;0.95);hit("email";"x";0.5)));
+  let rl:$layermetric=rms.get(0);
+  let re:$layermetric=rms.get(1);
+  let rc:$layermetric=rms.get(2);
+  if(t.assert(rl.routed==1 && re.routed==1 && rc.routed==0;"routed counts the kept detections of this layer only, by type")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rl.accepted==2 && kept1.len==1;"and leaves the other counts as they were")){pass=pass+1}el{fail=fail+1};
 
-  (* ── The summary an operator reads ───────────────────────────────────────────*)
-  let line=fm.formatmetric(m3);
-  if(t.assert(str.contains(line;"regex");"the summary names the layer")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(line;"5 detections");"reports the accumulated count, not the last one")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.contains(line;"60ms");"and the accumulated time")){pass=pass+1}el{fail=fail+1};
+  (* ── the reply's summary ──────────────────────────────────────────────────── *)
+  let js=fm.summaryjson(ms;"most-restrictive";"";rs;@("regex";"ner");@("no preferred layer for email (ner) is available; it is accepted from its fallback layers (regex)"));
+  if(t.assert(str.contains(js;"\"privacy_layers\":[{\"layer\":\"regex\",\"state\":\"completed\",\"mode\":\"detect-and-mask\",\"duration_ms\":7,\"detections\":3,\"accepted\":2,\"routed\":0,\"entity_types\":[");"the summary names the layer, its state, mode, time and counts")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;"{\"type\":\"email\",\"detections\":2,\"accepted\":2,\"routed\":0,\"confidence_min\":0.850,\"confidence_max\":0.950,\"confidence_mean\":0.900}");"and each type's counts and confidences")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(js;"\"consensus\":{\"strategy\":\"most-restrictive\",\"voters\":2,\"voter_ids\":\"regex,ner\",\"resolved\":3,\"masked\":2,\"passed\":1,\"agreed\":1},\"vetoed_by\":\"\",\"entity_routing_notes\":[\"no preferred layer for email (ner) is available; it is accepted from its fallback layers (regex)\"]");"and the consensus outcome, veto and routing notes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(js;mail) && !str.contains(js;card) && !str.contains(js;"second.w62") && !str.contains(js;"w62.resolved");"and no detected value, from the hits or from the resolved record")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(js;audit.sha256hex(mail)) && !str.contains(js;audit.sha256hex(card));"nor a hash of one")){pass=pass+1}el{fail=fail+1};
+  let untimed=fm.summaryjson(fm.forlayer(@();"regex";"completed";"veto";0-1;@();@());"first-match";"regex";@();@();@());
+  if(t.assert(str.contains(untimed;"\"duration_ms\":null") && str.contains(untimed;"\"vetoed_by\":\"regex\"");"an untimed layer reports null, not 0, and a veto names its layer")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

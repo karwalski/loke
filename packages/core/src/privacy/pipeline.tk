@@ -18,6 +18,7 @@ i=cfg:shared.config;
 i=cn:core.privacy.consensus;
 i=lyc:core.privacy.layerconfig;
 i=er:core.privacy.entityrouting;
+i=fm:core.privacy.filtermetrics;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
    detection layers exist, which are enabled, the order they run in and the URL and setting
@@ -76,7 +77,14 @@ t=$pipelinerun{
   (* F3b.2. The layer, in veto mode, that found PII above its threshold, or "". And the
      config's layer error, if the run was made with one. issafetoforward refuses either. *)
   vetoedby:str;
-  layererror:str
+  layererror:str;
+  (* F3b.10. What each layer did, as counts, confidences and time and never a value
+     (core.privacy.filtermetrics), and the layers that voted in the consensus. *)
+  layermetrics:@$layermetric;
+  voters:@str;
+  (* F3b.10. core.privacy.entityrouting's notes for this run: a routed type taken from its
+     fallback layers, or from every layer. Type names and layer ids only. *)
+  routingnotes:@str
 };
 
 
@@ -533,11 +541,11 @@ f=stagefor(id:str):$pipelinestage{
 
 (* The stage a consulted layer leaves in the trace: a scan when it completed, and a skipped
    stage carrying the reason otherwise, disabled and degraded alike. *)
-f=layerstage(s:$layerstatus):$stageresult{
+f=layerstage(s:$layerstatus;ms:i64):$stageresult{
   if(lh.iscompleted(s)){
-    <$stageresult{stage:stagefor(s.id);entitiesfound:s.detectioncount as u32;durationms:0;skipped:false;skipreason:""}
+    <$stageresult{stage:stagefor(s.id);entitiesfound:s.detectioncount as u32;durationms:ms as u32;skipped:false;skipreason:""}
   }el{};
-  <$stageresult{stage:stagefor(s.id);entitiesfound:0;durationms:0;skipped:true;skipreason:s.reason}
+  <$stageresult{stage:stagefor(s.id);entitiesfound:0;durationms:ms as u32;skipped:true;skipreason:s.reason}
 };
 
 (* One skipped stage for each of the four real layers the registry has no entry for. *)
@@ -566,6 +574,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let degraded=mut.0;
   let unplaced=mut.0;
   let vetoedby=mut."";
+  let metrics=mut.@();
 
   (* F3b.1 / F3b.6. Every detection layer, in registry order, through the one path in
      core.privacy.layerhealth: a disabled entry is recorded as a skipped stage and sent
@@ -576,13 +585,18 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let reg=config.layers;
   lp(let li=0;li<reg.filters.len;li=li+1){
     let layer:$privacyfilter=reg.filters.get(li);
+    (* F3b.10. Timed with the millisecond clock around the whole call, probe included. *)
+    let began=t.nowms();
     let lr:$layerresult=lh.consult(layer;text);
+    let tookms=t.nowms()-began;
     let st:$layerstatus=lr.status;
+    (* F3b.2. Only the detections the layer's threshold and entity filter accept count; a
+       detect-only layer's are not masked and it does not vote; a veto layer's refuse. A
+       layer that did not complete reported nothing, so this is empty for it. *)
+    let hits=lyc.accepted(layer;lr.hits);
+    metrics=fm.forlayer(metrics;layer.id;st.state;layer.mode;tookms;lr.hits;hits);
     if(lh.iscompleted(st)){
       completed=completed+1;
-      (* F3b.2. Only the detections the layer's threshold and entity filter accept count; a
-         detect-only layer's are not masked and it does not vote; a veto layer's refuse. *)
-      let hits=lyc.accepted(layer;lr.hits);
       if(lyc.masks(layer)){
         voters=voters.push(layer.id);
         lp(let hi=0;hi<hits.len;hi=hi+1){
@@ -606,7 +620,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
       log.warn("privacy layer \(layer.id) \(st.state): \(st.reason) -- running degraded";"pipeline";requestid)
     }el{};
     if(lh.isknown(layer.id)){
-      stages=stages.push(layerstage(st))
+      stages=stages.push(layerstage(st;tookms))
     }el{}
   };
   (* A real layer the registry does not hold at all is still named in the trace, as a
@@ -713,7 +727,10 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     consensus:agreed.strategy;
     resolved:agreed.resolved;
     vetoedby:vetoedby;
-    layererror:cfgerror
+    layererror:cfgerror;
+    layermetrics:fm.withrouted(metrics;routed.layers;routed.entities);
+    voters:voters;
+    routingnotes:routed.notes
   }
 };
 

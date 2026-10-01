@@ -36,6 +36,8 @@ i=xport:core.providers.transport;
 i=nd:core.nocustody.dispatch;
 i=ns:core.nocustody.session;
 i=popt:core.optimiser.prompt;
+i=fm:core.privacy.filtermetrics;
+i=lmx:core.audit.layermetrics;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -69,6 +71,13 @@ f=settingspath():str{ <str.concat(std.homedir();"/.loke/settings.json") };
 (* F3b.1. core.privacy.pipeline.served: the same layers page.api.health reports on. *)
 f=pipelineconfig():$pipelineconfig{
   <pipe.served()
+};
+
+(* F3b.10. The privacy filter's refusal, with what each layer did (privacyfields). *)
+f=refusedrun(run:$pipelinerun):i64{
+  let reason=pipe.refusalreason(run);
+  log.error("pipeline endpoint refused a request: \(reason)";"api.pipeline";run.requestid);
+  <http.res(503;"{\"ok\":false,\"error\":\(jx.escape(reason)),\"refused\":true\(privacyfields(run))}")
 };
 
 f=refused(reason:str):i64{
@@ -114,9 +123,24 @@ f=lokehome():str{
   <str.concat(std.homedir();"/.loke")
 };
 
+(* F3b.10. Every reply that carries these fields also carries what each detection layer did
+   (core.privacy.filtermetrics.summaryjson): layer ids, states, modes, measured time, counts and
+   confidences by entity type, the consensus outcome and any vetoing layer. Never a value. *)
 f=privacyfields(run:$pipelinerun):str{
   let res:$piidetectionresult=run.result;
-  <",\"entities_found\":\(run.totalentities),\"sensitivity\":\(jx.escape(t.senslabel(res.sensitivity))),\"layers_completed\":\(run.layerscompleted),\"layers_degraded\":\(run.layersdegraded),\"request_id\":\(jx.escape(run.requestid))"
+  <",\"entities_found\":\(run.totalentities),\"sensitivity\":\(jx.escape(t.senslabel(res.sensitivity))),\"layers_completed\":\(run.layerscompleted),\"layers_degraded\":\(run.layersdegraded),\"request_id\":\(jx.escape(run.requestid))\(fm.summaryjson(run.layermetrics;run.consensus;run.vetoedby;run.resolved;run.voters;run.routingnotes))"
+};
+
+(* F3b.10. The run's per-layer metrics, written before any audit row on its request id, so
+   core.storage.audit binds them into every one (layer_digest). Not written is logged and not
+   refused: the metrics describe the filter, they are not part of it. *)
+f=recordlayers(store:i64;run:$pipelinerun):bool{
+  if(store==0){ <false }el{};
+  let ok=lmx.record(run.requestid;run.layermetrics;run.consensus;run.vetoedby;run.resolved;run.voters;run.routingnotes);
+  if(ok){}el{
+    log.warn("per-layer privacy metrics were not recorded for this request";"api.pipeline";run.requestid)
+  };
+  <ok
 };
 
 (* GA1.10 — restoration, policy and audit, recovered from 2b8942e.
@@ -392,6 +416,14 @@ f=killswitchtrace(store:i64):bool{
   let t0=tr.newtrace(rid;rid;"");
   let t1=tr.recordpolicy(t0;"not_evaluated";"unknown");
   <tr.persist(t1;$assessorfields{outcome:"kill_switch_refused";detectionlayers:"not_scanned";approvaloutcome:"not_applicable";killswitchstate:"engaged"})
+};
+
+(* F3b.10. A request the privacy filter refused is audited too, as `privacy_refused`, so the
+   audit chain binds the per-layer metrics of the refusal, including the vetoing layer. It
+   had a decision trace and no audit row. *)
+f=privacyrefusedaudit(store:i64;run:$pipelinerun;durationms:i64):bool{
+  if(store==0){ <false }el{};
+  <audit.insertevent(store;auditeventfor(run;"privacy_refused";"none";"none";0;0;durationms))
 };
 
 f=privacyrefusedtrace(store:i64;run:$pipelinerun;durationms:i64):bool{
@@ -1045,7 +1077,12 @@ f=hoprun(run:$pipelinerun;i:i64):$pipelinerun{
     layersdegraded:run.layersdegraded;
     unplaced:run.unplaced;
     consensus:run.consensus;
-    resolved:run.resolved
+    resolved:run.resolved;
+    vetoedby:run.vetoedby;
+    layererror:run.layererror;
+    layermetrics:run.layermetrics;
+    voters:run.voters;
+    routingnotes:run.routingnotes
   }
 };
 
@@ -1566,6 +1603,7 @@ f=post(req:i64):i64{
      an approval and to be anonymised again for the no-custody envelope. *)
   let sysprompt=jx.strvalue(pobj;"system_prompt";"");
   let run=sp.runforward(text;sysprompt;pipelineconfig());
+  recordlayers(store;run);
   if(pipe.issafetoforward(run)){
     (* GA1.8 — the governance gate, between detection and dispatch. policy.evaluate returns
        a PLAIN struct, so T-18 cannot touch it, which is why this one could be wired now
@@ -1605,8 +1643,12 @@ f=post(req:i64):i64{
     }el{};
     <forward(store;run;startms;decision;fbreason;fbby;sid)
   }el{
-    privacyrefusedtrace(store;run;t.nowms()-startms);
-    <refused(pipe.refusalreason(run))
+    let refusedms=t.nowms()-startms;
+    if(privacyrefusedaudit(store;run;refusedms)){}el{
+      log.warn("audit row was not written for this privacy refusal";"api.pipeline";run.requestid)
+    };
+    privacyrefusedtrace(store;run;refusedms);
+    <refusedrun(run)
   }
 };
 

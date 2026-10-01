@@ -144,9 +144,51 @@ f=digestfields(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provide
    written before migration 40) hashes exactly as before, so an existing chain still
    verifies. *)
 f=digestbound(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str;disclosure:str):str{
+  <digestlayered(prevhash;id;eventtype;usecase;modelid;provider;sensitivity;risktier;tokensin;tokensout;costusd;durationms;correlationid;created;disclosure;"")
+};
+
+(* F3b.10. A row whose request has privacy_layer_metrics rows hashes their digest (layerdigest
+   below) as one more field, after the disclosure digest, so the chain covers what each
+   detection layer found: editing, adding or deleting one of those rows breaks the row's hash
+   check in the verifier. A row with no layer digest (every row written before migration 43,
+   and every event with no metrics on its correlation id) hashes exactly as before. *)
+f=digestlayered(prevhash:str;id:str;eventtype:str;usecase:str;modelid:str;provider:str;sensitivity:str;risktier:str;tokensin:str;tokensout:str;costusd:str;durationms:str;correlationid:str;created:str;disclosure:str;layers:str):str{
   let base=fieldstring(prevhash;id;eventtype;usecase;modelid;provider;sensitivity;risktier;tokensin;tokensout;costusd;durationms;correlationid;created);
-  if(str.len(disclosure)==0){ <sha256hex(base) };
-  <sha256hex("\(base)|disclosure:\(disclosure)")
+  let bound=mut.base;
+  if(str.len(disclosure)>0){ bound="\(base)|disclosure:\(disclosure)" }el{};
+  if(str.len(layers)==0){ <sha256hex(bound) };
+  <sha256hex("\(bound)|layers:\(layers)")
+};
+
+(* ── F3b.10: the privacy_layer_metrics rows' canonical serialisation ─────────────────
+   The same construction as the disclosure record's below: SQLite's quote() of each column,
+   comma-separated, one line per row in seq order, under a prefix naming the version and the
+   column set. Nothing is read back through a toke numeric type. *)
+f=layermetricscols():@str{
+  <@("correlation_id";"seq";"kind";"layer_id";"entity_type";"state";"mode";"duration_ms";"detections";"accepted";"routed";"conf_min_milli";"conf_max_milli";"conf_sum_milli";"strategy";"vetoed_by";"voters";"resolved";"masked";"passed";"agreed";"routing_notes";"created_at")
+};
+
+f=layerserialsql():str{
+  <"SELECT 'layers-v1:'||\(quotedcols(layermetricscols())) AS s FROM privacy_layer_metrics WHERE correlation_id=? ORDER BY seq ASC"
+};
+
+f=joinserials(rows:@$row):str{
+  let out=mut."";
+  lp(let i=0;i<rows.len;i=i+1){
+    let line:str=s.rowstr(rows.get(i);"s");
+    if(i==0){ out=line }el{ out="\(out)\n\(line)" }
+  };
+  <out
+};
+
+(* The digest of the privacy_layer_metrics rows on `correlationid`, or "" when there are none. *)
+f=layerdigest(correlationid:str):str{
+  let serial=mt db.many(layerserialsql();@(correlationid)) {
+    $ok:rows joinserials(rows);
+    $err:e ""
+  };
+  if(str.len(serial)==0){ <"" };
+  <sha256hex(serial)
 };
 
 (* ── DA1.10: the disclosure record's canonical serialisation ───────────────────────────
@@ -228,7 +270,11 @@ f=eventdigest(prevhash:str;id:str;event:$auditevent;created:i64):str{
 };
 
 f=eventdigestbound(prevhash:str;id:str;event:$auditevent;created:i64;disclosure:str):str{
-  <digestbound(
+  <eventdigestlayered(prevhash;id;event;created;disclosure;"")
+};
+
+f=eventdigestlayered(prevhash:str;id:str;event:$auditevent;created:i64;disclosure:str;layers:str):str{
+  <digestlayered(
     prevhash;
     id;
     event.eventtype;
@@ -243,7 +289,8 @@ f=eventdigestbound(prevhash:str;id:str;event:$auditevent;created:i64;disclosure:
     str.fromint(event.durationms);
     event.correlationid;
     str.fromi64(created);
-    disclosure)
+    disclosure;
+    layers)
 };
 
 f=insertevent(store:i64;event:$auditevent):bool{
@@ -264,9 +311,12 @@ f=insertbound(store:i64;event:$auditevent;disclosure:str):bool{
     $err:v ""
   };
 
-  let hash=eventdigestbound(prevhashval;id;event;created;disclosure);
+  (* F3b.10. Every row on a correlation id that has privacy_layer_metrics rows binds them,
+     whichever writer calls this. *)
+  let layers=layerdigest(event.correlationid);
+  let hash=eventdigestlayered(prevhashval;id;event;created;disclosure;layers);
 
-  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at,disclosure_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''))";@(
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at,disclosure_digest,layer_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''))";@(
     id;
     event.eventtype;
     event.usecase;
@@ -282,7 +332,8 @@ f=insertbound(store:i64;event:$auditevent;disclosure:str):bool{
     prevhashval;
     hash;
     str.fromi64(created);
-    disclosure)) {
+    disclosure;
+    layers)) {
     $ok:v true;
     $err:e false
   }
@@ -338,7 +389,7 @@ f=digestfromrow(r:$row):str{
      integer of cents (GA5.15), or for a row written before migration 28 the legacy REAL
      read through the same rounding its digest was written with. See
      core.storage.db.auditcostcols. *)
-  <digestbound(
+  <digestlayered(
     s.rowstr(r;"prev_hash");
     s.rowstr(r;"id");
     s.rowstr(r;"event_type");
@@ -353,7 +404,8 @@ f=digestfromrow(r:$row):str{
     s.rowstr(r;"duration_ms");
     s.rowstr(r;"correlation_id");
     s.rowstr(r;"created_at");
-    s.rowstr(r;"disclosure_digest"))
+    s.rowstr(r;"disclosure_digest");
+    s.rowstr(r;"layer_digest"))
 };
 
 f=verifyrows(rows:@$row):$chainresult{
@@ -383,6 +435,14 @@ f=verifyrows(rows:@$row):$chainresult{
       }
     };
 
+    (* F3b.10: likewise the privacy_layer_metrics rows on its correlation id. *)
+    let layersbound=s.rowstr(r;"layer_digest");
+    if(str.len(layersbound)>0){
+      if(str.eq(layerdigest(s.rowstr(r;"correlation_id"));layersbound)){}el{
+        <chainbad(i;id;"the privacy_layer_metrics rows this audit row is bound to were altered, added to or deleted: their digest no longer matches")
+      }
+    };
+
     expectedprev=storedhash
   };
   <chainok(rows.len as i64)
@@ -391,7 +451,7 @@ f=verifyrows(rows:@$row):$chainresult{
 (* The first row's prev_hash is "" — logevent writes the empty string when the table is
    empty — so an empty trail verifies trivially and says so through rowschecked. *)
 f=verifychain(store:i64):$chainresult{
-  <mt db.many(str.join("";@("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,";s.auditcostcols();",duration_ms,correlation_id,prev_hash,hash,created_at,COALESCE(disclosure_digest,'') AS disclosure_digest FROM audit_log ORDER BY created_at ASC, rowid ASC"));@()) {
+  <mt db.many(str.join("";@("SELECT id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,";s.auditcostcols();",duration_ms,correlation_id,prev_hash,hash,created_at,COALESCE(disclosure_digest,'') AS disclosure_digest,COALESCE(layer_digest,'') AS layer_digest FROM audit_log ORDER BY created_at ASC, rowid ASC"));@()) {
     $ok:rows verifyrows(rows);
     $err:e chainbad(0;"";"the audit trail could not be read")
   }

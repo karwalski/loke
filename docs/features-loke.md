@@ -118,7 +118,7 @@ to original values.
 
 **Evaluation Mode** (`core/privacy/evaluation.tk`): Measures layer quality against labelled datasets — precision, recall, F1 score per layer. *(Unwired — see the F3b note above.)*
 
-**Metrics** (`core/privacy/filter_metrics.tk`): Tracks detection count, processing time, average confidence, and entity counts per layer. *(Unwired — see the F3b note above.)*
+**Metrics** (`core/privacy/filter_metrics.tk`): Records, for each request, every layer's detection and accepted counts, counts and confidences by entity type, and measured time, with the consensus outcome; returned by `/api/pipeline` and bound into the audit hash chain (F3b.10). No dashboard or MCP surface shows them yet.
 
 ---
 

@@ -1,0 +1,213 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.audit.layermetrics;
+
+i=str:std.str;
+i=db:std.db;
+i=s:core.storage.db;
+(* For $layermetric and the per-mille text. *)
+i=fm:core.privacy.filtermetrics;
+(* For $resolvedentity. Only a type is taken from it. *)
+i=cn:core.privacy.consensus;
+
+(* F3b.10. The per-layer privacy metrics of one request, written to privacy_layer_metrics
+   (migration 41) and read back as aggregates.
+
+   WHERE IT SITS IN THE AUDIT TRAIL. record() is called with the run's request id before the
+   request's first audit_log row is written, and core.storage.audit.insertbound binds the
+   digest of these rows into every audit row on that correlation id (layer_digest, migration
+   43). So the chain covers them: `loke audit verify` recomputes the digest from the rows and
+   fails at the audit row if one was edited, added or deleted. A request whose metrics could
+   not be written binds nothing and is not refused: the metrics describe the privacy filter,
+   they are not part of it.
+
+   ONCE PER CORRELATION ID. A second record() for an id that already has rows writes nothing
+   and returns false, because rows added after an audit row bound the first set would read as
+   tampering, and they would be.
+
+   WHAT A ROW HOLDS: layer ids, entity type labels, states, modes, counts, confidences as
+   integer thousandths, milliseconds, the consensus strategy, counts of its outcome and the id
+   of a vetoing layer. Never a detected value, and never a hash of one.
+
+   AGGREGATES are computed from the rows by SQL, never estimated: detections by layer per UTC
+   day, by entity type, and the agreement rate between layers. *)
+
+t=$layerday{
+  day:str;
+  layerid:str;
+  requests:i64;
+  detections:i64;
+  accepted:i64
+};
+
+t=$typecount{
+  layerid:str;
+  entitytype:str;
+  detections:i64;
+  accepted:i64
+};
+
+(* Over the consensus rows of runs with two or more voters: how many detections were
+   resolved and how many every voter found. ratetext is the per-cent with one decimal place,
+   or "n/a" when nothing was resolved, so no rate is stated for no data. *)
+t=$agreement{
+  runs:i64;
+  resolved:i64;
+  agreed:i64;
+  ratetext:str
+};
+
+f=exec(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=hasrows(cid:str):bool{
+  <s.scalari64("SELECT COUNT() AS n FROM privacy_layer_metrics WHERE correlation_id=?";@(cid);"n";0)>0
+};
+
+f=insertsql():str{
+  <"INSERT INTO privacy_layer_metrics (correlation_id,seq,kind,layer_id,entity_type,state,mode,duration_ms,detections,accepted,routed,conf_min_milli,conf_max_milli,conf_sum_milli,strategy,vetoed_by,voters,resolved,masked,passed,agreed,routing_notes,created_at) VALUES (?,?,?,?,?,?,?,NULLIF(?,'-1'),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+};
+
+f=kindof(m:$layermetric):str{
+  if(fm.islayerrow(m)){ <"layer" }el{};
+  <"type"
+};
+
+f=metricrow(cid:str;seq:i64;m:$layermetric;created:str):bool{
+  <exec(insertsql();@(
+    cid;
+    str.fromint(seq);
+    kindof(m);
+    m.layerid;
+    m.entitytype;
+    m.state;
+    m.mode;
+    str.fromint(m.durationms);
+    str.fromint(m.detections);
+    str.fromint(m.accepted);
+    str.fromint(m.routed);
+    str.fromint(m.confminmilli);
+    str.fromint(m.confmaxmilli);
+    str.fromint(m.confsummilli);
+    "";
+    "";
+    "0";
+    "0";
+    "0";
+    "0";
+    "0";
+    "";
+    created))
+};
+
+f=consensusrow(cid:str;seq:i64;strategy:str;vetoedby:str;resolved:@$resolvedentity;voters:@str;notes:@str;created:str):bool{
+  let nv=voters.len as i64;
+  <exec(insertsql();@(
+    cid;
+    str.fromint(seq);
+    "consensus";
+    "";
+    "";
+    "";
+    "";
+    "-1";
+    "0";
+    "0";
+    "0";
+    "0";
+    "0";
+    "0";
+    strategy;
+    vetoedby;
+    str.fromint(nv);
+    str.fromint(resolved.len as i64);
+    str.fromint(fm.countaction(resolved;"mask"));
+    str.fromint(fm.countaction(resolved;"pass"));
+    str.fromint(fm.agreed(resolved;nv));
+    str.join("\n";notes);
+    created))
+};
+
+(* Writes the request's rows in one savepoint: all of them or none. *)
+f=record(cid:str;metrics:@$layermetric;strategy:str;vetoedby:str;resolved:@$resolvedentity;voters:@str;notes:@str):bool{
+  if(str.len(cid)==0){ <false };
+  if(hasrows(cid)){ <false };
+  if(exec("SAVEPOINT layermetrics";@())==false){ <false };
+  let created=str.fromi64(db.nowms());
+  let ok=mut.true;
+  lp(let i=0;i<metrics.len;i=i+1){
+    if(ok){ ok=metricrow(cid;i as i64;metrics.get(i);created) }el{}
+  };
+  if(ok){ ok=consensusrow(cid;metrics.len as i64;strategy;vetoedby;resolved;voters;notes;created) }el{};
+  if(ok){
+    if(exec("RELEASE layermetrics";@())){ <true }el{}
+  }el{};
+  exec("ROLLBACK TO layermetrics";@());
+  exec("RELEASE layermetrics";@());
+  <false
+};
+
+(* ── Aggregates, from the rows ──────────────────────────────────────────────────── *)
+f=daysfromrows(rows:@$row):@$layerday{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let r:$row=rows.get(i);
+    out=out.push($layerday{day:s.rowstr(r;"day");layerid:s.rowstr(r;"layer_id");requests:s.rowi64(r;"requests");detections:s.rowi64(r;"detections");accepted:s.rowi64(r;"accepted")})
+  };
+  <out
+};
+
+(* Detections by layer per UTC day, since `sincems` (epoch milliseconds). `requests` counts
+   the requests the layer was in the registry for, whether or not it completed. *)
+f=bylayerday(sincems:i64):@$layerday{
+  <mt db.many("SELECT strftime('%Y-%m-%d', created_at/1000, 'unixepoch') AS day, layer_id, COUNT() AS requests, SUM(detections) AS detections, SUM(accepted) AS accepted FROM privacy_layer_metrics WHERE kind='layer' AND created_at>=? GROUP BY day, layer_id ORDER BY day ASC, layer_id ASC";@(str.fromi64(sincems))) {
+    $ok:rows daysfromrows(rows);
+    $err:e @()
+  }
+};
+
+f=typesfromrows(rows:@$row):@$typecount{
+  let out=mut.@();
+  lp(let i=0;i<rows.len;i=i+1){
+    let r:$row=rows.get(i);
+    out=out.push($typecount{layerid:s.rowstr(r;"layer_id");entitytype:s.rowstr(r;"entity_type");detections:s.rowi64(r;"detections");accepted:s.rowi64(r;"accepted")})
+  };
+  <out
+};
+
+(* Detections per layer and entity type since `sincems`. *)
+f=bytype(sincems:i64):@$typecount{
+  <mt db.many("SELECT layer_id, entity_type, SUM(detections) AS detections, SUM(accepted) AS accepted FROM privacy_layer_metrics WHERE kind='type' AND created_at>=? GROUP BY layer_id, entity_type ORDER BY layer_id ASC, entity_type ASC";@(str.fromi64(sincems))) {
+    $ok:rows typesfromrows(rows);
+    $err:e @()
+  }
+};
+
+(* agreed / resolved as a per-cent to one decimal place, rounded half up, from integers. *)
+f=ratetext(agreed:i64;resolved:i64):str{
+  if(resolved<=0){ <"n/a" }el{};
+  let permille=(agreed*1000+(resolved/2))/resolved;
+  <"\(permille/10).\(permille%10)%"
+};
+
+f=agreementfromrows(rows:@$row):$agreement{
+  if(rows.len==0){ <$agreement{runs:0;resolved:0;agreed:0;ratetext:"n/a"} }el{};
+  let r:$row=rows.get(0);
+  let resolved=s.rowi64(r;"resolved");
+  let agreed=s.rowi64(r;"agreed");
+  <$agreement{runs:s.rowi64(r;"runs");resolved:resolved;agreed:agreed;ratetext:ratetext(agreed;resolved)}
+};
+
+(* The agreement rate between layers since `sincems`: over runs where two or more layers
+   voted, the share of resolved detections that every voting layer found. *)
+f=agreementsince(sincems:i64):$agreement{
+  <mt db.many("SELECT COUNT() AS runs, COALESCE(SUM(resolved),0) AS resolved, COALESCE(SUM(agreed),0) AS agreed FROM privacy_layer_metrics WHERE kind='consensus' AND voters>=2 AND created_at>=?";@(str.fromi64(sincems))) {
+    $ok:rows agreementfromrows(rows);
+    $err:e $agreement{runs:0;resolved:0;agreed:0;ratetext:"n/a"}
+  }
+};

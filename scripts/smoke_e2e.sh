@@ -359,6 +359,17 @@ judge() {  # $1 label, $2 expected status, $3 substring the body must contain
   if [ "$CODE" = "$2" ] && [[ "$BODY" == *"$3"* ]]; then echo "  ok   $1 [$CODE]"
   else echo "  FAIL $1: got [$CODE] $(printf '%s' "$BODY" | head -c 300), expected [$2] containing $3" >&2; fail=1; fi
 }
+# F3b.10: BODY's per-layer summary (privacy_layers, consensus, vetoed_by) is present and holds
+# neither the value $1 nor its sha256. The rest of a successful body holds the value on
+# purpose: the answer is restored for the user.
+layers_clean() {
+  if printf '%s' "$BODY" | python3 -c 'import hashlib,json,sys
+v=sys.argv[1]; d=json.load(sys.stdin)
+part=json.dumps({k:d.get(k) for k in ("privacy_layers","consensus","vetoed_by")})
+ok=bool(d.get("privacy_layers")) and v not in part and hashlib.sha256(v.encode()).hexdigest() not in part
+sys.exit(0 if ok else 1)' "$1" 2>/dev/null; then echo "  ok   and that summary holds neither the value nor its sha256"
+  else echo "  FAIL the per-layer summary is missing, or holds the value or its hash: $(printf '%s' "$BODY" | head -c 300)" >&2; fail=1; fi
+}
 pipe_post "$CARDTEXT" ""
 judge "a restricted request is held for approval, not forwarded" 409 '"approval_required":true'
 AID=$(printf '%s' "$BODY" | python3 -c 'import json,sys
@@ -707,6 +718,15 @@ else
   : > "$SEEN"
   pipe_post "please write to $VETOMAIL about the invoice" ""
   judge "with the regex layer in veto mode, a request carrying an email is refused" 503 '"error":"the regex privacy layer is in veto mode and found PII above its threshold","refused":true'
+  # F3b.10: the refusal says what each layer did, names the vetoing layer, and its per-layer
+  # metrics are in the audit trail, bound to a privacy_refused row.
+  judge "F3b.10: the refusal carries the per-layer summary, with the regex layer in veto mode" 503 '"privacy_layers":[{"layer":"regex","state":"completed","mode":"veto",'
+  judge "and names the vetoing layer" 503 '"vetoed_by":"regex"'
+  layers_clean "$VETOMAIL"
+  vrid=$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("request_id",""))' 2>/dev/null)
+  vrow=$(dl "SELECT vetoed_by||' '||(SELECT length(layer_digest) FROM audit_log WHERE correlation_id='$vrid' AND event_type='privacy_refused') FROM privacy_layer_metrics WHERE correlation_id='$vrid' AND kind='consensus'")
+  if [ -n "$vrid" ] && [ "$vrow" = "regex 64" ]; then echo "  ok   its metrics record the veto, bound into a privacy_refused audit row"
+  else echo "  FAIL the veto's metrics or audit row are '$vrow' for '$vrid'" >&2; fail=1; fi
   case "$BODY" in
     *"$VETOMAIL"*) echo "  FAIL the refusal echoed the email it vetoed" >&2; fail=1 ;;
     *) echo "  ok   and the refusal does not repeat the email" ;;
@@ -765,6 +785,8 @@ pipe_post "$LONGTEXT" ""
 judge "GA1.5: with an LLMLingua sidecar configured, a long prompt is answered" 200 '"ok":true'
 judge "and the answer reports the compression it measured" 200 '"optimisation":{"method":"llmlingua","applied":true,"reason":"","bytes_before":'
 judge "and restores the address the model was given as a placeholder" 200 "$EMAIL"
+judge "F3b.10: and the answer carries the per-layer summary" 200 '"privacy_layers":[{"layer":"regex","state":"completed","mode":"detect-and-mask",'
+layers_clean "$EMAIL"
 mb=$(model_body)
 if grep -q 'POST /compress .*invoice' "$LLLOG" && ! grep -q "$EMAIL" "$LLLOG"; then
   echo "  ok   the sidecar was sent the anonymised prompt, never the address"
@@ -826,7 +848,33 @@ if [ -x "$CLI_BIN" ]; then
       echo "  ok   and the row deleted, the reconciliation reports it by correlation id" ;;
     *) echo "  FAIL a deleted disclosure row was not reported (exit $avrc): $(printf '%s' "$AV" | head -c 600)" >&2; fail=1 ;;
   esac
+  # F3b.10: every audit row on a request with per-layer metrics binds them (layer_digest), and
+  # on another copy, a metrics row edited by one breaks the chain at that request's first row.
+  unbound=$(dl "SELECT COUNT() FROM audit_log a WHERE EXISTS (SELECT 1 FROM privacy_layer_metrics p WHERE p.correlation_id=a.correlation_id) AND length(COALESCE(a.layer_digest,''))<>64")
+  lbound=$(dl "SELECT COUNT() FROM audit_log WHERE length(layer_digest)=64")
+  if [ "$unbound" = "0" ] && [ -n "$lbound" ] && [ "$lbound" -gt 0 ]; then echo "  ok   F3b.10: $lbound audit rows bind their request's per-layer metrics, and none on such a request does not"
+  else echo "  FAIL $unbound audit row(s) on a request with per-layer metrics do not bind them ($lbound bound)" >&2; fail=1; fi
+  mkdir -p "$WORK/tamper2/home/.loke"
+  TDB2="$WORK/tamper2/home/.loke/loke.db"
+  sqlite3 "$DB" ".backup '$TDB2'"
+  lcid=$(sqlite3 "$TDB2" "SELECT a.correlation_id FROM audit_log a WHERE length(a.layer_digest)=64 ORDER BY a.created_at, a.rowid LIMIT 1")
+  lid=$(sqlite3 "$TDB2" "SELECT id FROM audit_log WHERE correlation_id='$lcid' ORDER BY created_at, rowid LIMIT 1")
+  sqlite3 "$TDB2" "UPDATE privacy_layer_metrics SET detections=detections+1 WHERE correlation_id='$lcid' AND kind='layer' AND layer_id='regex'"
+  AV=$(HOME="$WORK/tamper2/home" "$CLI_BIN" audit verify 2>&1); avrc=$?
+  case "$avrc:$AV" in
+    "1:"*"AUDIT CHAIN BROKEN"*"at id $lid: the privacy_layer_metrics rows"*) echo "  ok   a per-layer metrics row edited by one: the chain breaks at its request's audit row" ;;
+    *) echo "  FAIL an edited per-layer metrics row was not detected at '$lid' (exit $avrc): $(printf '%s' "$AV" | head -c 600)" >&2; fail=1 ;;
+  esac
 fi
+# F3b.10: the planted values are in no row of the database, nor their sha256: the email
+# every dispatch above was asked about, and the one the veto refused.
+dump=$(sqlite3 "$DB" .dump 2>/dev/null)
+for planted in "$EMAIL" "$VETOMAIL"; do
+  ph=$(printf '%s' "$planted" | shasum -a 256 | cut -d' ' -f1)
+  if [ -z "$dump" ]; then echo "  FAIL the database could not be dumped to search it" >&2; fail=1
+  elif [[ "$dump" == *"$planted"* ]] || [[ "$dump" == *"$ph"* ]]; then echo "  FAIL the database holds '$planted' or its sha256" >&2; fail=1
+  else echo "  ok   F3b.10: the database holds neither '$planted' nor its sha256"; fi
+done
 # MK6.13: no body loke sent to the model in this whole run was one Ollama's decoder refuses.
 if [ -s "$SEEN.badjson" ]; then echo "  FAIL the model was sent a body that is not strict JSON: $(head -c 300 "$SEEN.badjson")" >&2; fail=1
 else echo "  ok   every body sent to the model in this run was strict JSON"; fi

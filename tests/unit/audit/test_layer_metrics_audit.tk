@@ -1,0 +1,209 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.audit.testlayermetricsaudit;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=lmx:core.audit.layermetrics;
+i=pipe:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=sp:core.privacy.systemprompt;
+i=cn:core.privacy.consensus;
+i=h:page.api.pipeline;
+
+(* F3b.10, against the production pipeline, the production /api/pipeline handler functions,
+   the real migrations and the real audit chain.
+
+   A regex-only pipeline (NER and Presidio switched off in the registry, so nothing leaves the
+   process) runs over a text with a planted email address and card number. The handler writes
+   the run's per-layer metrics (h.recordlayers) and an audit row on the request id; asserted:
+   the rows exist and say what the layer did; the audit row binds them (layer_digest) and the
+   chain verifies; no row, no reply and no audit column holds a planted value or its sha256;
+   editing, deleting or adding a metrics row breaks the chain at that audit row; rewriting the
+   bound digest to match an edit breaks the row's own hash; a second record for the same id is
+   refused. A veto through a run WITH a system prompt is refused and audited as
+   privacy_refused, naming the layer. The dashboard aggregates are computed from the rows.
+
+   audit_log is append-only by trigger (GA5.9), so the test drops a trigger to play the
+   attacker who can, as tests/unit/audit/test_disclosure_chain.tk does. *)
+
+f=storedir():str{
+  <str.concat(std.homedir();"/.loke/test-layer-metrics-audit")
+};
+
+f=openfresh():i64{
+  let dir=storedir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=exec(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=firstcol(rs:@$row;c:str):str{
+  if(rs.len==0){ <"<no row>" }el{ <db.rowstr(rs.get(0);c) }
+};
+
+f=textof(sql:str;params:@str):str{
+  <mt db.many(sql;params) {
+    $ok:rs firstcol(rs;"v");
+    $err:e "<error>"
+  }
+};
+
+(* Regex only: the other layers are off in the registry, so none is probed or sent anything. *)
+f=regexonly():$pipelineconfig{
+  let c=pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999");
+  <pipe.withlayer(pipe.withlayer(c;fr.nerid();false);fr.presidioid();false)
+};
+
+f=everymetricscolumn():str{
+  <textof("SELECT COALESCE(group_concat(correlation_id||'|'||seq||'|'||kind||'|'||layer_id||'|'||entity_type||'|'||state||'|'||mode||'|'||COALESCE(duration_ms,'')||'|'||detections||'|'||accepted||'|'||routed||'|'||conf_min_milli||'|'||conf_max_milli||'|'||conf_sum_milli||'|'||strategy||'|'||vetoed_by||'|'||voters||'|'||resolved||'|'||masked||'|'||passed||'|'||agreed||'|'||routing_notes||'|'||created_at, char(10)),'') AS v FROM privacy_layer_metrics";@())
+};
+
+f=everyauditcolumn():str{
+  <textof("SELECT COALESCE(group_concat(id||'|'||event_type||'|'||use_case||'|'||model_id||'|'||provider||'|'||sensitivity||'|'||risk_tier||'|'||tokens_in||'|'||tokens_out||'|'||duration_ms||'|'||correlation_id||'|'||prev_hash||'|'||hash||'|'||created_at||'|'||COALESCE(disclosure_digest,'')||'|'||COALESCE(layer_digest,''), char(10)),'') AS v FROM audit_log";@())
+};
+
+f=holdsnone(hay:str;values:@str):bool{
+  let clean=mut.true;
+  lp(let i=0;i<values.len;i=i+1){
+    let v:str=values.get(i);
+    if(str.contains(hay;v) || str.contains(hay;audit.sha256hex(v))){ clean=false }el{}
+  };
+  <clean
+};
+
+f=resolvedof(layers:str;action:str):$resolvedentity{
+  <$resolvedentity{entitytype:"email";value:"synthetic.w62@example.com";start:0;end:0;finalconfidence:0.9;detectinglayers:layers;action:action}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=openfresh();
+  if(t.assert(store!=0;"a fresh store opens and migrates")){pass=pass+1}el{fail=fail+1};
+
+  let mail="w62.planted@example.com";
+  let card="4111 1111 1111 1111";
+  let planted=@(mail;card);
+  let run=sp.runforward("please bill \(card) and write to \(mail) today";"";regexonly());
+  let cid=run.requestid;
+  if(t.assert(pipe.issafetoforward(run) && run.totalentities>=(2 as u32);"the regex layer finds both planted values and the run may be forwarded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the run's record ─────────────────────────────────────────────────────── *)
+  if(t.assert(run.layermetrics.len>=3;"the run records the regex layer row, a type row per type, and the disabled layers")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.recordlayers(store;run);"the handler writes the run's per-layer metrics")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT state||' '||mode||' '||detections||' '||accepted||' '||routed||' '||(duration_ms IS NOT NULL) AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='layer' AND layer_id='regex'";@(cid));"completed detect-and-mask 2 2 2 1";"the regex layer row: completed, masking, two found, accepted and kept by routing, and timed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT group_concat(entity_type||'='||detections, ',') AS v FROM (SELECT entity_type, detections FROM privacy_layer_metrics WHERE correlation_id=? AND kind='type' ORDER BY entity_type)";@(cid));"credit_card=1,email=1";"a type row for each planted type")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT COUNT() AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='type' AND conf_max_milli BETWEEN 1 AND 1000 AND conf_min_milli<=conf_max_milli";@(cid));"2";"with confidences in thousandths")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT group_concat(layer_id||':'||state, ',') AS v FROM (SELECT layer_id, state FROM privacy_layer_metrics WHERE correlation_id=? AND kind='layer' AND layer_id<>'regex' ORDER BY layer_id)";@(cid));"ner:disabled,openai-privacy-filter:disabled,presidio:disabled";"the layers that did not run are recorded with their state")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT strategy||' '||vetoed_by||'|'||voters||' '||resolved||' '||masked||' '||passed||' '||agreed AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='consensus'";@(cid));"most-restrictive |1 2 2 0 2";"and the consensus row: strategy, no veto, one voter, two resolved and masked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.recordlayers(store;run)==false;"a second record for the same request is refused")){pass=pass+1}el{fail=fail+1};
+
+  (* ── bound into the chain ─────────────────────────────────────────────────── *)
+  if(t.assert(audit.insertevent(store;h.auditeventfor(run;"llm_request";"ollama";"qwen2.5:7b";10;5;12));"the request's audit row is written")){pass=pass+1}el{fail=fail+1};
+  let bound=textof("SELECT COALESCE(layer_digest,'') AS v FROM audit_log WHERE correlation_id=? AND event_type='llm_request'";@(cid));
+  if(t.assert(str.len(bound)==64;"it carries a sha256 of the request's metrics rows")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(bound;audit.layerdigest(cid);"the digest of exactly those rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.insertevent(store;$auditevent{eventtype:"settings_changed";usecase:"settings";modelid:"";provider:"";sensitivity:"";risktier:"";tokensin:0;tokensout:0;costusd:0.0;durationms:0 as u32;correlationid:"cfg-w62"});"an event with no metrics is written")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT COALESCE(layer_digest,'NULL') AS v FROM audit_log WHERE correlation_id='cfg-w62'";@());"NULL";"and binds nothing")){pass=pass+1}el{fail=fail+1};
+  let v0=audit.verifychain(store);
+  if(t.assert(v0.ok;"the chain verifies: \(audit.formatchainresult(v0))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── no value, anywhere ───────────────────────────────────────────────────── *)
+  if(t.assert(holdsnone(everymetricscolumn();planted);"no metrics row holds a planted value or its sha256")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(holdsnone(everyauditcolumn();planted);"no audit_log column holds one")){pass=pass+1}el{fail=fail+1};
+  let fields=h.privacyfields(run);
+  if(t.assert(str.contains(fields;"\"privacy_layers\":[{\"layer\":\"regex\",\"state\":\"completed\"");"the reply's fields carry the per-layer summary")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(fields;"\"consensus\":{\"strategy\":\"most-restrictive\",\"voters\":1,") && str.contains(fields;"\"vetoed_by\":\"\",\"entity_routing_notes\":[]");"with the consensus, veto and (no) routing notes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(holdsnone(fields;planted);"and no planted value or its sha256")){pass=pass+1}el{fail=fail+1};
+
+  (* ── tampering ────────────────────────────────────────────────────────────── *)
+  let aid=textof("SELECT id AS v FROM audit_log WHERE correlation_id=? AND event_type='llm_request'";@(cid));
+  if(t.assert(exec("UPDATE privacy_layer_metrics SET detections=detections+1 WHERE correlation_id=? AND kind='layer' AND layer_id='regex'";@(cid));"a metrics row is edited")){pass=pass+1}el{fail=fail+1};
+  let v1=audit.verifychain(store);
+  if(t.assert(v1.ok==false && str.eq(v1.firstbadid;aid) && str.contains(v1.reason;"privacy_layer_metrics");"the chain breaks at the request's audit row: \(audit.formatchainresult(v1))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE privacy_layer_metrics SET detections=detections-1 WHERE correlation_id=? AND kind='layer' AND layer_id='regex'";@(cid));"and put back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"and the chain verifies again")){pass=pass+1}el{fail=fail+1};
+
+  (* The attacker who also rewrites the bound digest to match the edit. *)
+  if(t.assert(exec("DROP TRIGGER IF EXISTS audit_log_append_only_update";@());"the append-only trigger is dropped, as the attacker the chain exists for can")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE privacy_layer_metrics SET entity_type='phone_au' WHERE correlation_id=? AND kind='type' AND entity_type='email'";@(cid));"a type row is relabelled")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE audit_log SET layer_digest=? WHERE id=?";@(audit.layerdigest(cid);aid));"and the bound digest rewritten to match it")){pass=pass+1}el{fail=fail+1};
+  let v2=audit.verifychain(store);
+  if(t.assert(v2.ok==false && str.eq(v2.firstbadid;aid) && str.contains(v2.reason;"a field was altered");"the row's own hash no longer matches, because the digest is hashed into it: \(audit.formatchainresult(v2))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("UPDATE privacy_layer_metrics SET entity_type='email' WHERE correlation_id=? AND kind='type' AND entity_type='phone_au'";@(cid)) && exec("UPDATE audit_log SET layer_digest=? WHERE id=?";@(bound;aid));"both are put back")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"and the chain verifies again")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(exec("INSERT INTO privacy_layer_metrics (correlation_id,seq,kind,layer_id,entity_type,state,mode,duration_ms,detections,accepted,routed,conf_min_milli,conf_max_milli,conf_sum_milli,strategy,vetoed_by,voters,resolved,masked,passed,agreed,routing_notes,created_at) VALUES (?,99,'type','regex','email','completed','detect-and-mask',NULL,1,1,1,900,900,900,'','',0,0,0,0,0,'',0)";@(cid));"a metrics row is added")){pass=pass+1}el{fail=fail+1};
+  let v3=audit.verifychain(store);
+  if(t.assert(v3.ok==false && str.eq(v3.firstbadid;aid);"the chain breaks there")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(exec("DELETE FROM privacy_layer_metrics WHERE correlation_id=? AND seq=99";@(cid));"and removed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"and the chain verifies again")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a veto, through a run with a system prompt ───────────────────────────── *)
+  let vetocfg=pipe.withlayerconfig(regexonly();"[[privacy.layers]]\nid = \"regex\"\nmode = \"veto\"\n");
+  let vrun=sp.runforward("please write to \(mail)";"You are a careful assistant.";vetocfg);
+  if(t.assert(pipe.issafetoforward(vrun)==false;"a veto is not lost when the request carries a system prompt: the run is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(vrun.vetoedby;"regex";"and names the vetoing layer")){pass=pass+1}el{fail=fail+1};
+  let vfields=h.privacyfields(vrun);
+  if(t.assert(str.contains(vfields;"\"vetoed_by\":\"regex\"") && str.contains(vfields;"\"mode\":\"veto\"");"the refusal's fields name the veto and the layer's mode")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(holdsnone(vfields;planted);"and hold no planted value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.recordlayers(store;vrun) && h.privacyrefusedaudit(store;vrun;3);"the refusal's metrics and its privacy_refused audit row are written")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT vetoed_by AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='consensus'";@(vrun.requestid));"regex";"the consensus row records the veto")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT length(layer_digest) AS v FROM audit_log WHERE correlation_id=? AND event_type='privacy_refused'";@(vrun.requestid));"64";"and the privacy_refused row binds it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"the chain still verifies")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(holdsnone(everymetricscolumn();planted) && holdsnone(everyauditcolumn();planted);"and still no row holds a planted value")){pass=pass+1}el{fail=fail+1};
+
+  (* ── entity routing's notes reach the reply and the audited rows (F3b.5) ────── *)
+  let rcfg=pipe.withroutingconfig(regexonly();"[[privacy.entity_routing]]\nentity_type = \"PERSON\"\npreferred_layers = [\"ner\"]\nfallback_layers = [\"presidio\"]\n");
+  let rrun=sp.runforward("please write to \(mail)";"";rcfg);
+  if(t.assert(pipe.issafetoforward(rrun) && rrun.routingnotes.len==1;"a route whose layers are all off leaves one note on the run")){pass=pass+1}el{fail=fail+1};
+  let rfields=h.privacyfields(rrun);
+  if(t.assert(str.contains(rfields;"\"entity_routing_notes\":[\"neither a preferred (ner) nor a fallback (presidio) layer for PERSON is available");"the reply carries it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.recordlayers(store;rrun);"the routed run's metrics are written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(textof("SELECT routing_notes AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='consensus'";@(rrun.requestid));"layer for PERSON is available");"and its consensus row records the note")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(holdsnone(rfields;planted) && holdsnone(everymetricscolumn();planted);"with no planted value in either")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the dashboard aggregates, from the rows ──────────────────────────────── *)
+  let rs=@(resolvedof("regex=0.95,ner=0.80";"mask");resolvedof("regex=0.95,ner=0.70";"mask");resolvedof("regex=0.90";"mask"));
+  if(t.assert(lmx.record("agree-w62";@();"majority";"";rs;@("regex";"ner");@());"a two-voter run's consensus is recorded")){pass=pass+1}el{fail=fail+1};
+  let ag=lmx.agreementsince(0);
+  if(t.assert(ag.runs==1 && ag.resolved==3 && ag.agreed==2;"agreement counts only runs with two or more voters: 2 of 3")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ag.ratetext;"66.7%";"and states the rate from those integers")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lmx.agreementsince(9999999999999).ratetext;"n/a";"with no rows in the window, no rate is stated")){pass=pass+1}el{fail=fail+1};
+  let days=lmx.bylayerday(0);
+  let regexdet=mut.0-1;
+  let regexreq=mut.0-1;
+  lp(let di=0;di<days.len;di=di+1){
+    let d:$layerday=days.get(di);
+    if(str.eq(d.layerid;"regex")){ regexdet=d.detections; regexreq=d.requests }el{}
+  };
+  if(t.assert(regexreq==3 && regexdet==4;"by layer per day: regex was in three requests and found four values")){pass=pass+1}el{fail=fail+1};
+  let types=lmx.bytype(0);
+  let emails=mut.0;
+  lp(let ti=0;ti<types.len;ti=ti+1){
+    let tc:$typecount=types.get(ti);
+    if(str.eq(tc.layerid;"regex") && str.eq(tc.entitytype;"email")){ emails=tc.detections }el{}
+  };
+  if(t.assert(emails==3;"by type: three emails from the regex layer")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
