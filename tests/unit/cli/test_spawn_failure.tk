@@ -1,0 +1,83 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.cli.spawnfailure;
+
+i=t:std.test;
+i=io:std.io;
+i=str:std.str;
+i=args:std.args;
+i=upd:cli.updater;
+i=port:cli.portable;
+i=reach:shared.reachability;
+i=mon:core.monitoring.sysmon;
+i=oc:core.installer.ollamacli;
+
+(* F10.44 — is a spawn that FAILS seen as a failure by the production code?
+
+   The repository's check was `mt process.spawn(argv) { $ok:h h; $err:e @() }` followed by
+   `if(h == @())`. An array `==` is a pointer compare against a fresh allocation, so it was
+   never true: the code went on to read and wait on the empty array's address as if it were
+   a process handle, which can block in waitpid for good (MK19.9). The fix makes the error
+   arm the NULL handle (0) and tests h==0.
+
+   The calls run in children of this binary, under a perl alarm that survives the exec, so a
+   call that blocks is killed within the bound and this test fails, never the gate.
+     --abs     cli.updater.runcmd on an absolute path that does not exist.
+     --nopath  PATH set to a directory that does not exist, so no tool can be found:
+               cli.portable.chmod755, shared.reachability.connects (nc) and
+               core.monitoring.sysmon's ram and cpu figures (sysctl, vm_stat, top). *)
+
+f=abschild():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let r=upd.runcmd(@("/nonexistent/f10-44/no-such-tool";"--version"));
+  if(t.assert(r.exitcode==127;"updater.runcmd: a command that cannot start reports 127")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.stderr;"could not spawn command";"updater.runcmd: and says it could not be spawned")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.stdout;"";"updater.runcmd: with no output")){pass=pass+1}el{fail=fail+1};
+  let ok=upd.runcmd(@("/bin/echo";"f10-44"));
+  if(t.assert(ok.exitcode==0 && str.contains(ok.stdout;"f10-44");"updater.runcmd: a command that starts still runs and is read")){pass=pass+1}el{fail=fail+1};
+  io.println("test_spawn_failure (abs child): \(pass) passed, \(fail) failed");
+  <fail
+};
+
+f=nopathchild():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let ran=oc.run(@("true");false);
+  if(!t.assert(!ran.ran;"the child's PATH finds no tool at all")){
+    io.println("refusing to go on: PATH still finds `true`");
+    <1
+  }el{ pass=pass+1 };
+  if(t.assert(!port.chmod755("/nonexistent/f10-44/file");"portable.chmod755: no chmod is a failure, not a success")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reach.connects(59435);"reachability.connects: no nc reads as not reachable")){pass=pass+1}el{fail=fail+1};
+  let ram=mon.getramstats();
+  if(t.assert(ram.total==0 && ram.used==0;"sysmon.getramstats: no sysctl or vm_stat measures nothing")){pass=pass+1}el{fail=fail+1};
+  let cpu=mon.getcpustats();
+  if(t.assert(cpu.count==0;"sysmon.getcpustats: no sysctl counts no CPUs")){pass=pass+1}el{fail=fail+1};
+  io.println("test_spawn_failure (nopath child): \(pass) passed, \(fail) failed");
+  <fail
+};
+
+f=main():i64{
+  let mode=mt args.get(1 as u64) { $ok:v v; $err:e "" };
+  if(mode=="--abs"){ <abschild() }el{};
+  if(mode=="--nopath"){ <nopathchild() }el{};
+  let self=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+
+  let pass=mut.0;
+  let fail=mut.0;
+  let alarm="alarm shift; exec @ARGV or die";
+  let ra=oc.run(@("perl";"-e";alarm;"20";self;"--abs");false);
+  io.println(ra.out);
+  io.println(ra.err);
+  if(t.assert(ra.ran && ra.code==0;"a failed spawn by absolute path is reported as one, within 20s")){pass=pass+1}el{fail=fail+1};
+
+  let rn=oc.run(@("perl";"-e";alarm;"30";"env";"PATH=/nonexistent/f10-44";self;"--nopath");false);
+  io.println(rn.out);
+  io.println(rn.err);
+  if(t.assert(rn.ran && rn.code==0;"a tool missing from PATH is a failure at every call site, within 30s")){pass=pass+1}el{fail=fail+1};
+
+  io.println("test_spawn_failure: \(pass) passed, \(fail) failed");
+  <fail
+};

@@ -294,6 +294,12 @@ step_checks() {
       || { python3 ./scripts/find_wait_before_read.py packages >&2; failed=1; }
   fi
 
+  if [[ -f ./scripts/find_empty_array_sentinel.py ]]; then
+    echo "  no spawn failure hidden behind \`h == @()\` or a non-NULL error handle (F10.44)"
+    python3 ./scripts/find_empty_array_sentinel.py --check packages tests scripts >/dev/null \
+      || { python3 ./scripts/find_empty_array_sentinel.py packages tests scripts >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/find_interp_abi_str.py ]]; then
     echo "  no std.str result interpolated as an address"
     python3 ./scripts/find_interp_abi_str.py --check packages tests >/dev/null \

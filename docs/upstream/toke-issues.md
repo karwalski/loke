@@ -2209,3 +2209,37 @@ bare `true`, so no line reads as a limit that is not enforced, and states the in
 scope of each in a comment. `env_write` is not granted. Keeping network traffic on the
 machine rests on `core.providers.transport` refusing every non-loopback send, a check in
 loke's code, not on this manifest.
+
+---
+
+## T-60 — `==` on an array compares addresses, so `x == @()` is never true
+
+**Severity: correctness, silent. It hid every failed `process.spawn` in this repository.**
+
+Measured 2026-10-01 at toke v3.1.0 (`86c432da`), with a probe built by the pinned compiler
+and read in its LLVM IR (loke F10.44).
+
+1. **`==` on two typed arrays is a pointer compare.** `let a:@str=@(); a==@()` lowers to
+   `icmp eq i8* %a, %t` against a fresh `malloc(24)` block, so it is `false`. `@()` allocates
+   on every evaluation, so a comparison with the literal can never be true, whatever `a`
+   holds, including an empty array produced the line before.
+2. **Two UNTYPED empty arrays compare as strings.** `let x=@(); let y=@(); x==y` lowers to
+   `tk_str_cmp` and answers `true`, while `x==@()` is still an address compare and answers
+   `false`. The same operator means three different things depending on inference.
+3. **The idiom it broke.** `let h=mt process.spawn(argv) { $ok:h h; $err:e @() }; if(h == @())`
+   — spawning `/nonexistent/no-such-tool` takes the `$err` arm and then `h == @()` is
+   `false`, so the program goes on to `process.stdout(h)` / `process.wait(h)` with the empty
+   array's address as the handle. `process_glue.c` casts it to `ProcessHandle*` and reads a
+   pid and an fd out of the array header; a pid of 0 or -1 makes `waitpid` wait for any child,
+   and one probe blocked in `wait4` for good. Any other non-NULL error value (`""`, a struct)
+   does the same.
+
+What does work, measured: `$err:e 0`. The runtime's own bad handle is NULL
+(`tk_process_badhandle_w`), and on it `process.stdout` takes its `$err` arm, `process.wait`
+answers -1 and `process.kill` false, and `h==0` is true. loke now uses that everywhere and
+`scripts/find_empty_array_sentinel.py` keeps it so.
+
+**The ask.** Either make `==` on arrays an element-wise comparison (as the untyped case
+already half does) or reject it with a diagnostic pointing at `.len`; and give
+`process.spawn` a failure value that cannot be mistaken for a handle, or have
+`process.wait` refuse an address that is not one it handed out.
