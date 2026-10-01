@@ -46,7 +46,23 @@ i=g:moke.proxy.guard;
 
    A fetch that cannot be done safely is refused, not degraded: no curl, no resolver
    answer, an unreadable address, a body over the cap or not UTF-8 text, a timeout, a
-   certificate that does not verify. *)
+   certificate that does not verify.
+
+   THE INDEPENDENT REVIEW (2026-10-01) found six things, fixed here and each tested in
+   test_proxy_fetch.tk:
+   - a failed spawn was not seen (F10.44): the handle is now used only inside the match's
+     $ok arm, and the $err arm refuses (runout, fetchwith);
+   - curl's status line shared stdout with the body, and toke strings end at the first NUL,
+     so a body holding a NUL and a forged status line was read as that status. The status,
+     size and content type now go to stderr (-w %{stderr}), and a body whose length is not
+     curl's %{size_download} is refused;
+   - the envelope was served as text/html (pages/api/proxy.tk now answers application/json);
+   - Host and Origin accepted any port; they must now name moke's own port, and a
+     Sec-Fetch-Site other than same-origin is refused;
+   - curl inherited moke's environment, so CURL_CA_BUNDLE or SSL_CERT_FILE changed what it
+     trusted and SSLKEYLOGFILE wrote its TLS secrets to disk. Every child now starts from an
+     empty environment (childenv);
+   - the resolver had no clock. It is now bounded (bounded). *)
 
 t=$proxyrequest{
   url:str;
@@ -89,12 +105,12 @@ f=failed(code:i64;reason:str):$proxyresult{
   <$proxyresult{ ok:false; code:code; reason:reason; status:0; ctype:""; body:"" }
 };
 
-(* A system tool by absolute path, or "" when it is not installed. Only a tool that exists
-   is ever spawned, for two reasons. No PATH lookup decides which program runs. And a spawn
-   that FAILS cannot be told apart reliably at this pin: measured while writing this
-   module, `mt process.spawn(...) { $ok:h h; $err:e @() }` followed by `h == @()` did not
-   see the failure of spawning a missing `getent` on macOS, and the process.wait after it
-   blocked for good, waiting on the test's other children. *)
+(* A system tool by absolute path, or "" when it is not installed, so no PATH lookup
+   decides which program runs. A spawn can still fail (fork or pipe refused under load), and
+   `mt process.spawn(...) { $ok:h h; $err:e @() }` followed by `h == @()` does not see that
+   (F10.44: measured while writing this module, the process.wait after a failed spawn of a
+   missing `getent` blocked for good). So every spawn here uses its handle only inside the
+   match's $ok arm, and the $err arm is the refusal. *)
 f=tool(name:str):str{
   let dirs=@("/usr/bin";"/bin";"/usr/sbin";"/sbin");
   lp(let k=0;k<dirs.len;k=k+1){
@@ -104,14 +120,63 @@ f=tool(name:str):str{
   <""
 };
 
-(* stdout of a command run without a shell, or "" when its tool is not installed. stdout is
-   read before wait: a full pipe would otherwise deadlock (F10.37). *)
-f=runout(argv:@str):str{
-  let h=mt process.spawn(argv) { $ok:h h; $err:e @() };
-  if(h == @()){ <"" }el{};
-  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
-  process.wait(h);
+(* The environment a child starts with: none of moke's. execv hands a child the parent's
+   whole environment, and curl reads its trust from it (CURL_CA_BUNDLE, SSL_CERT_FILE,
+   SSL_CERT_DIR: measured, either makes the system curl trust another CA) and writes TLS
+   secrets where SSLKEYLOGFILE says. The resolvers read RES_OPTIONS, LOCALDOMAIN and
+   HOSTALIASES. So every child is run by `env -i` with a fixed PATH and nothing else. *)
+f=childenv(argv:@str):@str{
+  let out=mut.@("/usr/bin/env";"-i";"PATH=/usr/bin:/bin");
+  lp(let k=0;k<argv.len;k=k+1){ out=out.push(argv.get(k)) };
   <out
+};
+
+(* Seconds a resolver may take before it is killed and its name refused. *)
+f=resolvesecs():str{
+  <"5"
+};
+
+(* `argv` with a clock on it, in an empty environment, or @() when there is no clock to use.
+   std.process has no timeout, so the clock is a tool: coreutils/busybox `timeout` where it
+   exists (Linux), else perl's alarm, which survives the exec and kills the resolver with
+   SIGALRM. macOS has no `timeout` and always has /usr/bin/perl; a system with neither gets
+   @(), and the name is refused rather than resolved without a clock. A killed resolver
+   exits non-zero, and runout reads a non-zero exit as no answer. *)
+f=bounded(argv:@str):@str{
+  let tm=tool("timeout");
+  if(slen(tm)>0){
+    let out=mut.@(tm;resolvesecs());
+    lp(let k=0;k<argv.len;k=k+1){ out=out.push(argv.get(k)) };
+    <childenv(out)
+  }el{};
+  let perl=tool("perl");
+  if(slen(perl)==0){ <@() }el{};
+  let script="alarm shift @ARGV; exec {$ARGV[0]} @ARGV or exit 127";
+  let out=mut.@(perl;"-e";script;resolvesecs());
+  lp(let k=0;k<argv.len;k=k+1){ out=out.push(argv.get(k)) };
+  <childenv(out)
+};
+
+(* stdout of a command that exited 0, read before wait: a full pipe would otherwise
+   deadlock (F10.37). Anything else is "". *)
+f=drain(h:i64):str{
+  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
+  let code=process.wait(h) as i64;
+  if(code!=0){ <"" }el{};
+  <out
+};
+
+(* stdout of a command run without a shell, bounded by bounded(), or "" when it could not
+   be run, failed, or ran out of time. A spawn that fails is "" from the $err arm: the
+   handle is never touched (F10.44). *)
+f=runout(argv:@str):str{
+  let bv=bounded(argv);
+  if(bv.len==0){ <"" }el{};
+  <runspawn(bv)
+};
+
+f=runspawn(argv:@str):str{
+  <mt process.spawn(argv) { $ok:h drain(h); $err:e "" }
 };
 
 (* getent ahosts: "<address> STREAM <name>", one line per address and socket type. *)
@@ -165,6 +230,9 @@ f=pin(t:$proxytarget;p:$proxypolicy):$proxypin{
   <pinfrom(resolve(t.host);t.port;p)
 };
 
+(* curl's -w line, written to STDERR (%{stderr}) so that nothing the upstream sends can
+   reach it: the body is stdout and nothing else. status@@size@@content-type, in that order,
+   so the one field the upstream chooses comes last and cannot shift the other two. *)
 f=marker():str{
   <"\n@@moke-proxy@@"
 };
@@ -176,7 +244,7 @@ f=curlargv(t:$proxytarget;addr:str;p:$proxypolicy;req:$proxyrequest):@str{
   if(str.contains(addr;":")){ target="[\(addr)]" }el{};
   let connect=mut.5;
   if(p.timeouts<5){ connect=p.timeouts }el{};
-  let wfmt="\(marker())%{http_code}@@%{content_type}";
+  let wfmt="%{stderr}\(marker())%{http_code}@@%{size_download}@@%{content_type}";
   let argv=mut.@(tool("curl");"-q";"-sS";"-g";"--proto";"=https";"--proto-redir";"=https";"--max-redirs";"0";"--noproxy";"*";"--max-time";"\(p.timeouts)";"--connect-timeout";"\(connect)";"--max-filesize";"\(p.maxbytes)";"--resolve";"\(t.host):\(t.port):\(target)");
   if(slen(p.cafile)>0){
     argv=argv.push("--cacert");
@@ -216,24 +284,39 @@ f=curlreason(code:i64;p:$proxypolicy):str{
 f=fetchpinned(t:$proxytarget;addr:str;p:$proxypolicy;req:$proxyrequest):$proxyresult{
   let argv=curlargv(t;addr;p;req);
   if(slen(argv.get(0))==0){ <failed(502;"curl is not installed, so nothing was fetched") }el{};
-  let h=mt process.spawn(argv) { $ok:h h; $err:e @() };
-  if(h == @()){ <failed(502;"curl could not be started, so nothing was fetched") }el{};
-  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
+  <fetchwith(childenv(argv);p)
+};
+
+(* Run a curl argv and judge what it gave. A spawn that fails is refused from the $err
+   arm, and the handle is never touched (F10.44). *)
+f=fetchwith(argv:@str;p:$proxypolicy):$proxyresult{
+  <mt process.spawn(argv) { $ok:h curlresult(h;p); $err:e failed(502;"curl could not be started, so nothing was fetched") }
+};
+
+(* The body is curl's stdout and the -w line its stderr. stdout is read first: curl writes
+   at most a short error and the -w line to stderr, far below a pipe's buffer, so it never
+   blocks there while stdout is unread. The body's length must be the length curl
+   downloaded: a toke string ends at its first NUL, so a body that holds one would
+   otherwise arrive cut short and still read as text. *)
+f=curlresult(h:i64;p:$proxypolicy):$proxyresult{
+  let body=mt process.stdout(h) { $ok:s s; $err:e "" };
+  let errout=mt process.stderr(h) { $ok:s s; $err:e "" };
   let code=process.wait(h) as i64;
   if(code!=0){ <failed(502;curlreason(code;p)) }el{};
-  let at=str.lastindex(out;marker());
+  let at=str.lastindex(errout;marker());
   if(at<0){ <failed(502;"the upstream gave no readable response") }el{};
-  let body=sub(out;0;at);
-  let meta=sub(out;at+slen(marker());slen(out));
-  let sep=str.indexof(meta;"@@");
-  if(sep<0){ <failed(502;"the upstream gave no readable response") }el{};
-  let status=mt str.toint(sub(meta;0;sep)) { $ok:n n; $err:e 0 };
-  let ctype=sub(meta;sep+2;slen(meta));
+  let meta=sub(errout;at+slen(marker());slen(errout));
+  let parts=str.split(meta;"@@");
+  if(parts.len<3){ <failed(502;"the upstream gave no readable response") }el{};
+  let status=mt str.toint(parts.get(0)) { $ok:n n; $err:e 0 };
+  let size=mt str.toint(parts.get(1)) { $ok:n n; $err:e 0-1 };
+  let ctype=sub(meta;slen(parts.get(0))+slen(parts.get(1))+4;slen(meta));
   if(status>=300 && status<400){
     <$proxyresult{ ok:false; code:502; reason:"the upstream answered \(status), a redirect; redirects are not followed"; status:status; ctype:""; body:"" }
   }el{};
   if(status<100){ <failed(502;"the upstream gave no status") }el{};
-  if(slen(body)>p.maxbytes){ <failed(502;"the upstream body is larger than the \(p.maxbytes)-byte cap") }el{};
+  if(size>p.maxbytes || slen(body)>p.maxbytes){ <failed(502;"the upstream body is larger than the \(p.maxbytes)-byte cap") }el{};
+  if(size!=slen(body)){ <failed(502;"the upstream body holds a NUL byte or was cut short; binary bodies are not proxied") }el{};
   let text=mt str.frombytes(str.bytes(body)) { $ok:s true; $err:e false };
   if(!text){ <failed(502;"the upstream body is not UTF-8 text; binary bodies are not proxied") }el{};
   <$proxyresult{ ok:true; code:200; reason:""; status:status; ctype:ctype; body:body }
@@ -257,26 +340,35 @@ f=proxy(req:$proxyrequest;p:$proxypolicy):$proxyresult{
 
 (* ── The endpoint's request and reply ───────────────────────────────────────── *)
 
-(* Host must name this machine. A page on another site that rebinds its own name to
-   127.0.0.1 can reach moke as same-origin, but its requests still carry its own name
-   in Host. *)
-f=loopbackauthority(a:str):bool{
+(* Host must name this machine AND moke's own port. A page on another site that rebinds
+   its own name to 127.0.0.1 can reach moke as same-origin, but its requests still carry
+   its own name in Host. The port is compared exactly with the one moke serves on
+   (`port`, from its ooke.toml): another local service's page, on another loopback port,
+   is a different origin and is refused. The name alone is accepted only when moke serves
+   on 80, the one port a browser leaves out. *)
+f=loopbackauthority(a:str;port:i64):bool{
   let names=@("127.0.0.1";"localhost";"[::1]");
   lp(let k=0;k<names.len;k=k+1){
     let n=names.get(k);
-    if(str.eq(a;n)){ <true }el{};
-    if(str.startswith(a;"\(n):")){
-      let port=sub(a;slen(n)+1;slen(a));
-      if(slen(port)>0 && slen(port)<=5 && str.isdigit(port)){ <true }el{}
-    }el{}
+    if(str.eq(a;n) && port==80){ <true }el{};
+    if(str.eq(a;"\(n):\(port)")){ <true }el{}
   };
   <false
 };
 
-f=originok(origin:str):bool{
+(* A present Origin must be moke's own: http, this machine, moke's port. *)
+f=originok(origin:str;port:i64):bool{
   if(slen(origin)==0){ <true }el{};
   if(!str.startswith(origin;"http://")){ <false }el{};
-  <loopbackauthority(sub(origin;7;slen(origin)))
+  <loopbackauthority(sub(origin;7;slen(origin));port)
+};
+
+(* Sec-Fetch-Site, which a browser sets and a page cannot: when present it must be
+   same-origin. Absent (curl, an older browser), the Host, Origin and Content-Type checks
+   still apply. *)
+f=fetchsiteok(site:str):bool{
+  if(slen(site)==0){ <true }el{};
+  <str.eq(str.lower(site);"same-origin")
 };
 
 f=headernameok(n:str):bool{
@@ -322,10 +414,11 @@ f=resultreply(r:$proxyresult):$proxyreply{
 
 (* The endpoint, minus the HTTP plumbing, so a test can call exactly what the route runs.
    The request body is {"url":..., "method":"GET"|"POST", "headers":[{"name":..,
-   "value":..}], "body":...}. *)
-f=handle(host:str;origin:str;ctype:str;body:str;p:$proxypolicy):$proxyreply{
-  if(!loopbackauthority(host)){ <errorreply(403;"refused: the request must be addressed to this machine (Host)") }el{};
-  if(!originok(origin)){ <errorreply(403;"refused: cross-origin requests are not proxied") }el{};
+   "value":..}], "body":...}. `port` is the port moke serves on. *)
+f=handle(port:i64;host:str;origin:str;site:str;ctype:str;body:str;p:$proxypolicy):$proxyreply{
+  if(!loopbackauthority(host;port)){ <errorreply(403;"refused: the request must be addressed to this machine (Host)") }el{};
+  if(!originok(origin;port)){ <errorreply(403;"refused: cross-origin requests are not proxied") }el{};
+  if(!fetchsiteok(site)){ <errorreply(403;"refused: cross-origin requests are not proxied (Sec-Fetch-Site)") }el{};
   if(!str.startswith(str.lower(ctype);"application/json")){ <errorreply(415;"the request must be application/json") }el{};
   if(slen(body)>131072){ <errorreply(400;"the request is too large") }el{};
   let obj=mt json.dec(body) { $ok:o o; $jsonerr:e jx.emptyobj() };

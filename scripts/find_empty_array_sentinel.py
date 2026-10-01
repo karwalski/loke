@@ -49,10 +49,9 @@ from find_sql_literal_now import comment_mask  # noqa: E402
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 # path -> (hits allowed, owner). Owned by another worker's story at the time of F10.44.
-KNOWN = {
-    "packages/moke/src/proxy/fetch.tk": (
-        4, "moke's /api/proxy runout and fetchpinned; fixed with MK19.9's review finding 1 (W54), not F10.44"),
-}
+# None today: moke's /api/proxy (packages/moke/src/proxy/fetch.tk) was the last, fixed by
+# MK19.9's review finding 1, which uses the handle only inside the match's $ok arm.
+KNOWN: dict[str, tuple[int, str]] = {}
 
 EMPTYCMP = re.compile(r"(?:[=!]=\s*@\(\s*\))|(?:@\(\s*\)\s*[=!]=)")
 SPAWNBIND = re.compile(r"let\s+(\w+)\s*=\s*process\.spawn\(")

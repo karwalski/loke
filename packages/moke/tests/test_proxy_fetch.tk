@@ -8,6 +8,7 @@ i=io:std.io;
 i=str:std.str;
 i=file:std.file;
 i=process:std.process;
+i=args:std.args;
 i=ty:shared.types;
 i=g:moke.proxy.guard;
 i=fetch:moke.proxy.fetch;
@@ -92,8 +93,83 @@ f=pair(a:@str;x:str;y:str):bool{
   <false
 };
 
-f=main():i64{
+f=envchildrun(h:i64):str{
+  let out=mt process.stdout(h) { $ok:s s; $err:e "" };
+  let err=mt process.stderr(h) { $ok:s s; $err:e "" };
+  process.wait(h);
+  <"\(err)\(out)"
+};
+
+(* Review finding 5, run as a child whose environment holds CURL_CA_BUNDLE, SSL_CERT_FILE
+   (both the run's CA) and SSLKEYLOGFILE. Its argv is: self envchild <port> <base>. *)
+f=envchild(portstr:str;base:str):i64{
   let fail=mut.0;
+  let port=mt str.toint(portstr) { $ok:n n; $err:e 0 };
+  let root="https://localhost:\(port)";
+  let llog="\(base).localhost.log";
+  let r5=fetch.proxy(get("\(root)/proxy-test/envtrust");policy(port;"";100000;3));
+  fail=fail+chk(!r5.ok && str.contains(r5.reason;"TLS failed");"(5) production trust refuses the run's CA although moke's environment names it in CURL_CA_BUNDLE and SSL_CERT_FILE");
+  fail=fail+chk(!str.contains(readfile(llog);"/proxy-test/envtrust");"(5) and no request arrived");
+  let keylog="\(base).keylog";
+  let r5b=fetch.proxy(get("\(root)/proxy-test/keylog");policy(port;"\(base).certs/ca.pem";100000;3));
+  fail=fail+chk(r5b.ok && str.contains(readfile(llog);"/proxy-test/keylog");"(5) a fetch with SSLKEYLOGFILE in moke's environment completes");
+  fail=fail+chk(!file.exists(keylog);"(5) and curl wrote no key log: SSLKEYLOGFILE never reached it");
+  io.println("envchild: \(fail) failed");
+  <fail
+};
+
+(* Review finding 1, run as a child (argv: self spawnchild) with a sleeping child of its
+   own, so that a handle misread as pid 0 or -1 would wait on it. *)
+f=spawnchild():i64{
+  <mt process.spawn(@("/bin/sleep";"30")) { $ok:h spawnchecks(h); $err:e 1 }
+};
+
+f=spawnchecks(holder:i64):i64{
+  let fail=mut.0;
+  let nopolicy=$proxypolicy{ allow:@(); maxbytes:1000; timeouts:2; loopbackport:0; cafile:"" };
+  fail=fail+chk(str.len(fetch.runspawn(@("/nonexistent/no-such-resolver";"x")))==0;"(1) a resolver that cannot be spawned answers nothing");
+  let r1=fetch.fetchwith(@("/nonexistent/no-such-curl";"-q");nopolicy);
+  fail=fail+chk(!r1.ok && r1.code==502 && str.contains(r1.reason;"could not be started");"(1) a curl that cannot be spawned is refused as not started, 502");
+  process.kill(holder);
+  process.wait(holder);
+  io.println("spawnchild: \(fail) failed");
+  <fail
+};
+
+f=main():i64{
+  let mode=mt args.get(1 as u64) { $ok:v v; $err:e "" };
+  if(str.eq(mode;"spawnchild")){ <spawnchild() }el{};
+  if(str.eq(mode;"envchild")){
+    let cport=mt args.get(2 as u64) { $ok:v v; $err:e "" };
+    let cbase=mt args.get(3 as u64) { $ok:v v; $err:e "" };
+    <envchild(cport;cbase)
+  }el{};
+  let fail=mut.0;
+
+  (* ── Review finding 1: a spawn that fails is refused, and its handle never used ── *)
+  (* In a child of its own (spawnchild, below) under a 20-second alarm: the old idiom used
+     the failed spawn's placeholder as a process handle, and a pid read from it can make
+     waitpid wait for ANY child, so a regression here would hang rather than fail. *)
+  let me=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+  let alarm="alarm shift @ARGV; exec {$ARGV[0]} @ARGV or exit 127";
+  let t1=ty.nowms();
+  let spawnout=mt process.spawn(@("/usr/bin/perl";"-e";alarm;"20";me;"spawnchild")) { $ok:h envchildrun(h); $err:e "spawn failed" };
+  io.println(spawnout);
+  fail=fail+chk(str.contains(spawnout;"spawnchild: 0 failed") && ty.nowms()-t1<20000;"(1) a spawn that fails is refused from its $err arm, with another child running, and nothing waits on the placeholder");
+  (* The review's 'plausible' item: a child killed by a signal must never read as exit 0.
+     process.c maps WIFSIGNALED to -WTERMSIG. *)
+  let killed="kill -9 $$";
+  let r1k=fetch.fetchwith(@("/bin/sh";"-c";killed);$proxypolicy{ allow:@(); maxbytes:1000; timeouts:2; loopbackport:0; cafile:"" });
+  fail=fail+chk(!r1k.ok && str.contains(r1k.reason;"curl exit -9");"(1) a curl killed by SIGKILL is refused, its exit read as -9, never 0");
+
+  (* ── Review finding 6: the resolver step has a clock ──────────────────────── *)
+  let t6=ty.nowms();
+  let slow=fetch.runout(@("/bin/sleep";"30"));
+  let took6=ty.nowms()-t6;
+  fail=fail+chk(str.len(slow)==0 && took6<12000;"(6) a resolver that hangs is killed within its 5-second bound and answers nothing");
+  let bv=fetch.bounded(@("/usr/bin/getent";"ahosts";"x"));
+  fail=fail+chk(bv.len>0 && str.eq(bv.get(0);"/usr/bin/env") && str.eq(bv.get(1);"-i");"(5) a resolver starts from an empty environment");
+
   let base=scratch();
   let certs="\(base).certs";
   let gen=mt process.spawn(@("sh";"scripts/lib/tls_fixture.sh";certs)) { $ok:h h; $err:e 0 };
@@ -144,6 +220,15 @@ f=main():i64{
   fail=fail+chk(rc.status==302;"(c) and its status is reported");
   fail=fail+chk(str.contains(readfile(llog);"GET /proxy-test/redirect ");"(c) the recorder saw the request that redirected");
   fail=fail+chk(!str.contains(readfile(llog);"/proxy-test/redirected");"(c) and never the request the redirect pointed at");
+
+  (* ── Review finding 2: the status line cannot be forged from the body ──────── *)
+  let r2=fetch.proxy(get("\(root)/proxy-test/nulredirect");tp);
+  fail=fail+chk(!r2.ok && r2.status==302 && str.contains(r2.reason;"redirect");"(2) a 302 whose body holds a NUL and a forged 200 status line is refused as the 302 it is");
+  fail=fail+chk(!str.contains(r2.ctype;"forged") && str.len(r2.body)==0;"(2) and nothing of the forgery is passed on");
+  fail=fail+chk(str.contains(readfile(llog);"GET /proxy-test/nulredirect");"(2) the recorder served it (positive control)");
+  let r2n=fetch.proxy(get("\(root)/proxy-test/nul");tp);
+  fail=fail+chk(!r2n.ok && str.contains(r2n.reason;"NUL");"(2) a 200 text body with a NUL in it is refused, not passed on cut short");
+  fail=fail+chk(!str.contains(r2n.body;"visible");"(2) and none of it is passed on");
 
   (* ── (d) the body cap stops a body with no Content-Length as it arrives ───── *)
   let rd=fetch.proxy(get("\(root)/proxy-test/big");tp);
@@ -196,25 +281,65 @@ f=main():i64{
 
   (* ── The endpoint: what /api/proxy runs ──────────────────────────────────── *)
   let okbody="{\"url\":\"\(root)/proxy-test/json\",\"method\":\"GET\"}";
-  let h1=fetch.handle("evil.example";"";"application/json";okbody;tp);
+  let h1=fetch.handle(11432;"evil.example";"";"";"application/json";okbody;tp);
   fail=fail+chk(h1.code==403 && str.contains(h1.body;"addressed to this machine");"a request whose Host is not this machine is refused (DNS rebinding against moke)");
-  let h2=fetch.handle("127.0.0.1:11432";"https://evil.example";"application/json";okbody;tp);
+  let h2=fetch.handle(11432;"127.0.0.1:11432";"https://evil.example";"";"application/json";okbody;tp);
   fail=fail+chk(h2.code==403 && str.contains(h2.body;"cross-origin");"a request with a foreign Origin is refused");
-  let h3=fetch.handle("127.0.0.1:11432";"http://localhost:11432";"text/plain";okbody;tp);
+  let h3=fetch.handle(11432;"127.0.0.1:11432";"http://localhost:11432";"";"text/plain";okbody;tp);
   fail=fail+chk(h3.code==415;"a request that is not application/json is refused: a form post cannot reach the proxy without a preflight");
-  let h4=fetch.handle("localhost:11432";"";"application/json";"not json";tp);
+  let h4=fetch.handle(11432;"localhost:11432";"";"";"application/json";"not json";tp);
   fail=fail+chk(h4.code==400 && str.contains(h4.body;"missing field: url");"a body that is not JSON is a 400");
-  let h5=fetch.handle("localhost:11432";"";"application/json";"{\"url\":\"\(root)/x\",\"method\":\"DELETE\"}";tp);
+  let h5=fetch.handle(11432;"localhost:11432";"";"";"application/json";"{\"url\":\"\(root)/x\",\"method\":\"DELETE\"}";tp);
   fail=fail+chk(h5.code==400 && str.contains(h5.body;"GET or POST");"DELETE is refused");
-  let h6=fetch.handle("localhost:11432";"";"application/json";"{\"url\":\"\(root)/x\",\"headers\":[{\"name\":\"Host\",\"value\":\"evil.example\"}]}";tp);
+  let h6=fetch.handle(11432;"localhost:11432";"";"";"application/json";"{\"url\":\"\(root)/x\",\"headers\":[{\"name\":\"Host\",\"value\":\"evil.example\"}]}";tp);
   fail=fail+chk(h6.code==400 && str.contains(h6.body;"header refused");"a Host header from the caller is refused");
-  let h7=fetch.handle("localhost:11432";"";"application/json";"{\"url\":\"\(root)/x\",\"headers\":[{\"name\":\"X-A\",\"value\":\"a\\r\\nX-Injected: 1\"}]}";tp);
+  let h7=fetch.handle(11432;"localhost:11432";"";"";"application/json";"{\"url\":\"\(root)/x\",\"headers\":[{\"name\":\"X-A\",\"value\":\"a\\r\\nX-Injected: 1\"}]}";tp);
   fail=fail+chk(h7.code==400 && str.contains(h7.body;"control character");"a header value carrying CR LF is refused");
-  let h8=fetch.handle("[::1]:11432";"";"application/json";"{\"url\":\"https://169.254.169.254/latest/meta-data/\"}";tp);
+  let h8=fetch.handle(11432;"[::1]:11432";"";"";"application/json";"{\"url\":\"https://169.254.169.254/latest/meta-data/\"}";tp);
   fail=fail+chk(h8.code==403 && str.contains(h8.body;"cloud metadata");"the metadata address is refused through the endpoint, and the reason says so");
-  let h9=fetch.handle("127.0.0.1:11432";"http://127.0.0.1:11432";"application/json; charset=utf-8";okbody;tp);
+  let h9=fetch.handle(11432;"127.0.0.1:11432";"http://127.0.0.1:11432";"";"application/json; charset=utf-8";okbody;tp);
   fail=fail+chk(h9.code==200 && str.contains(h9.body;"\"ok\":true") && str.contains(h9.body;"\"status\":200");"an allowed request through the endpoint answers the ok envelope");
   fail=fail+chk(str.contains(h9.body;"answered-by-recorder");"with the upstream body inside it");
+
+  (* ── Review finding 4: Host and Origin name moke's own port ─────────────── *)
+  let h10=fetch.handle(11432;"127.0.0.1:11433";"";"";"application/json";okbody;tp);
+  fail=fail+chk(h10.code==403 && str.contains(h10.body;"addressed to this machine");"(4) a Host on another loopback port is refused");
+  let h11=fetch.handle(11432;"127.0.0.1:99999";"";"";"application/json";okbody;tp);
+  fail=fail+chk(h11.code==403;"(4) a Host port out of range is refused");
+  let h12=fetch.handle(11432;"localhost";"";"";"application/json";okbody;tp);
+  fail=fail+chk(h12.code==403;"(4) a Host with no port is refused when moke is not on 80");
+  let h13=fetch.handle(11432;"127.0.0.1:11432";"http://127.0.0.1:8080";"";"application/json";okbody;tp);
+  fail=fail+chk(h13.code==403 && str.contains(h13.body;"cross-origin");"(4) an Origin on another loopback port (another local service's page) is refused");
+  let h14=fetch.handle(11432;"127.0.0.1:11432";"";"cross-site";"application/json";okbody;tp);
+  fail=fail+chk(h14.code==403 && str.contains(h14.body;"Sec-Fetch-Site");"(4) Sec-Fetch-Site: cross-site is refused");
+  let h15=fetch.handle(11432;"localhost:11432";"http://localhost:11432";"same-origin";"application/json";okbody;tp);
+  fail=fail+chk(h15.code==200 && str.contains(h15.body;"\"ok\":true");"(4) and a same-origin request on moke's port is served (positive control)");
+  let h16=fetch.handle(8099;"localhost:8099";"http://localhost:8099";"";"application/json";okbody;tp);
+  fail=fail+chk(h16.code==200;"(4) the port is the one moke is given, not a constant");
+
+  (* ── Review finding 5: curl does not inherit moke's environment ────────────── *)
+  (* env.set needs a capability no loke binary is granted (tkc.toml), so the environment
+     is set the way an operator's would be: this test runs ITSELF again under
+     `env CURL_CA_BUNDLE=<the run's CA> SSL_CERT_FILE=<same> SSLKEYLOGFILE=<a path>`, and
+     the child (envchild, below) fetches through the production module. The control
+     first: the system curl given that same environment DOES trust the run's CA, so a
+     refusal in the child is the empty child environment's doing. *)
+  let keylog="\(base).keylog";
+  let envvars=@("/usr/bin/env";"CURL_CA_BUNDLE=\(ca)";"SSL_CERT_FILE=\(ca)";"SSLKEYLOGFILE=\(keylog)");
+  let ctlkeylog="\(base).keylog-control";
+  let ctlargv=mut.@("/usr/bin/env";"CURL_CA_BUNDLE=\(ca)";"SSLKEYLOGFILE=\(ctlkeylog)");
+  let ctltail=@("/usr/bin/curl";"-q";"-sS";"-o";"/dev/null";"\(root)/proxy-test/envcontrol");
+  lp(let k=0;k<ctltail.len;k=k+1){ ctlargv=ctlargv.push(ctltail.get(k)) };
+  let ctl=mt process.spawn(ctlargv) { $ok:h process.wait(h) as i64; $err:e 0-1 };
+  fail=fail+chk(ctl==0 && str.contains(readfile(llog);"/proxy-test/envcontrol");"(5) control: curl run with CURL_CA_BUNDLE naming the run's CA trusts it");
+  fail=fail+chk(file.exists(ctlkeylog);"(5) control: and creates the file SSLKEYLOGFILE names");
+  let self=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+  let childargv=mut.envvars;
+  let childtail=@(self;"envchild";"\(lport)";base);
+  lp(let k=0;k<childtail.len;k=k+1){ childargv=childargv.push(childtail.get(k)) };
+  let child=mt process.spawn(childargv) { $ok:h envchildrun(h); $err:e "spawn failed" };
+  io.println(child);
+  fail=fail+chk(str.contains(child;"envchild: 0 failed");"(5) with CURL_CA_BUNDLE, SSL_CERT_FILE and SSLKEYLOGFILE in moke's environment, every envchild check passed");
 
   if(lrec!=0){ process.kill(lrec); process.wait(lrec); }el{};
   if(orec!=0){ process.kill(orec); process.wait(orec); }el{};

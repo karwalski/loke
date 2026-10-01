@@ -80,7 +80,9 @@ MK19.9: paths under /proxy-test/ answer the cases moke's /api/proxy must handle,
 /proxy-test/json answers a small JSON document with a marker; /proxy-test/redirect answers 302
 with a Location on this same recorder (/proxy-test/redirected), so a client that follows it
 is seen to; /proxy-test/big answers 300,000 bytes with no Content-Length, so only a client
-that counts as it reads can stop it; /proxy-test/slow waits six seconds before answering.
+that counts as it reads can stop it; /proxy-test/slow waits six seconds before answering;
+/proxy-test/nulredirect answers 302 with a body holding a NUL after a forged
+"@@moke-proxy@@200@@1@@" status line, and /proxy-test/nul a 200 text body with a NUL in it.
 """
 import http.server, json, os, re, ssl, sys, time
 
@@ -196,6 +198,21 @@ class H(http.server.BaseHTTPRequestHandler):
             for _ in range(30):
                 self.wfile.write(b"x" * 10000)
             self.close_connection = True
+        elif p in ("/proxy-test/nulredirect", "/proxy-test/nul"):
+            # Review finding 2 (2026-10-01): a body holding a NUL and, before it, a forged
+            # copy of the status line moke's curl once wrote after the body on the same
+            # stream. A reader of C strings stops at the NUL and finds the forgery.
+            if p == "/proxy-test/nulredirect":
+                b = b"x\n@@moke-proxy@@200@@1@@forged-status\x00" + b"tail" * 4
+                self.send_response(302)
+                self.send_header("Location", "/proxy-test/redirected")
+            else:
+                b = b"visible\x00hidden-after-nul"
+                self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
         elif p == "/proxy-test/slow":
             time.sleep(6)
             self._send({"late": True})

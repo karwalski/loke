@@ -224,6 +224,19 @@ proxyhdr() {  # extra-curl-args... -- expected-code must-contain label
 proxyhdr -H 'Content-Type: application/json' -H 'Host: rebound.example:'"$PORT" -- 403 'addressed to this machine' "a request naming another host (DNS rebinding) is refused"
 proxyhdr -H 'Content-Type: application/json' -H 'Origin: https://evil.example' -- 403 'cross-origin' "a cross-origin request is refused"
 proxyhdr -H 'Content-Type: text/plain' -- 415 'application/json' "a simple (no-preflight) form post is refused"
+# MK19.9 review (2026-10-01), finding 4: Host and Origin must name the port this moke serves
+# on ($PORT, from the ooke.toml written above), not any loopback port. The checks above pass
+# only if the route read that port correctly.
+proxyhdr -H 'Content-Type: application/json' -H "Host: 127.0.0.1:$((PORT + 1))" -- 403 'addressed to this machine' "a Host naming another loopback port is refused"
+proxyhdr -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:8080' -- 403 'cross-origin' "an Origin on another loopback port is refused"
+proxyhdr -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: cross-site' -- 403 'Sec-Fetch-Site' "Sec-Fetch-Site: cross-site is refused"
+proxyhdr -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$PORT" -H 'Sec-Fetch-Site: same-origin' -- 403 'not on the proxy allowlist' "a same-origin request on moke's own port reaches the allowlist"
+# Finding 3: the envelope is JSON and is served as JSON, never text/html.
+pct=$(curl -s -m 20 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"url":"https://data.gov.au/"}' -w '%{content_type}' "http://127.0.0.1:$PORT/api/proxy")
+case "$pct" in
+  application/json*) echo "  ok   POST /api/proxy is served as $pct" ;;
+  *) echo "  FAIL POST /api/proxy is served as '$pct', not application/json" >&2; fail=1 ;;
+esac
 
 # MK6.5: the seven handlers that compiled with no route. Each check judges what the handler
 # computed, so a route that answers 404, or a handler that answers but ignores its input, fails.
