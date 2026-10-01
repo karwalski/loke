@@ -146,7 +146,9 @@ property of the host.
 > implemented — the strategy argument is accepted and ignored — and no entity-type routing
 > configuration is read. Tracked as AD1.7.
 
-- **Regex detector** — 10 patterns (email, phone, credit card, TFN, SSN, IP, API key)
+- **Regex detector** — 17 patterns (email, AU and US phone, credit card, TFN, ABN, SSN, IPv4, URL,
+  API key, Medicare, BSB, bank account, CRN, passport, driver licence, super member number; the last
+  six only after the word that names them)
 - **Local NER** — SLM-based entity recognition via Ollama
 - **Presidio** — 180+ entity types via optional Python sidecar
 - **Privacy Filter sidecar** — OpenAI Privacy Filter model (1.5B params)
