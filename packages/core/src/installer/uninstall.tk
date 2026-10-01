@@ -10,6 +10,7 @@ i=file:std.file;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=reach:shared.reachability;
+i=cli:core.installer.ollamacli;
 
 t=$removablemodel{
   name:str;
@@ -51,44 +52,38 @@ f=parseremovablefrombody(body:str;inmodels:@$removablemodel):@$removablemodel{
   <models
 };
 
+(* F10.40: `ollama list` aligns its columns with runs of spaces, and SIZE is a number and a
+   unit ("4.7 GB"). Splitting on one space read the empty strings between the columns as
+   the digest and the size, so the rows are split on whitespace runs (ollamacli.listrows). *)
 f=parseremovablefromcli(out:str;inmodels:@$removablemodel):@$removablemodel{
-  let lines=str.split(out;"
-");
+  let rows=cli.listrows(out);
   let models=mut.inmodels;
-  let j=mut.1;
-  lp(let ii52=0;ii52<lines.len;ii52=ii52+1){
-    let line=lines.get(ii52);
-    if(j > 0){
-      if(str.len(str.trim(line)) > 0){
-        let parts=str.split(line;" ");
-        if(parts.len > 3){
-          let modifiedval=mut."";
-          if(parts.len > 4){modifiedval=parts.get(3)}el{};
-          models=models.push($removablemodel{
-            name:parts.get(0);
-            size:parts.get(2);
-            digest:parts.get(1);
-            modified:modifiedval
-          })
-        }el{};
-      }el{};
-    }el{};
-    j=j+1
-
+  lp(let k=0;k<rows.len;k=k+1){
+    let parts:@str=rows.get(k);
+    if(parts.len > 3){
+      let modified=mut."";
+      lp(let j=4;j<parts.len;j=j+1){ modified=str.trim("\(modified) \(parts.get(j))") };
+      models=models.push($removablemodel{
+        name:parts.get(0);
+        size:"\(parts.get(2)) \(parts.get(3))";
+        digest:parts.get(1);
+        modified:modified
+      })
+    }el{}
   };
   <models
 };
 
-(* F10.39: this called `proc.exec(@(...))`. process.exec takes ONE command string and
-   runs it through the runtime's command-string spawn; handed an argv array it read the
-   array's address as text, so the command it ran was a few bytes of pointer, never
-   ollama. toke 3.1.0 rejects the call (E4031). The command therefore never ran, and
-   rather than start running it as a side effect of a toolchain move, this takes the path
-   the caller already had for "it did not run". Running it for real, as an argv spawn
-   with a test, is F10.40. *)
+(* F10.40: `ollama list` as an argv spawn (core.installer.ollamacli); handed to
+   process.exec as an array, it never ran (F10.39). A command that did not start or exited
+   non-zero adds nothing, and says so. *)
 f=parseremovablefallback(e:str;models:@$removablemodel):@$removablemodel{
-  log.warn("ollama list is not run from source yet (F10.40)";"installer.uninstall";"system");
-  <models
+  let r=cli.run(@("ollama";"list");false);
+  if(!r.ok){
+    log.warn("ollama list failed (exit \(str.fromint(r.code))): \(str.trim(r.err))";"installer.uninstall";"system");
+    <models
+  }el{};
+  <parseremovablefromcli(r.out;models)
 };
 
 (* The GET goes through shared.reachability.localget, which probes the port first (T-15) and
@@ -122,11 +117,11 @@ f=formatsize(bytes:i64):str{
   <str.concat(str.fromint(bytes / 1024);" KB")
 };
 
-f=verifymodelremoval(modelid:str;modelsize:str):$uninstallresult{
-  let after=listremovable();
+f=verifymodelremovalat(baseurl:str;modelid:str;modelsize:str):$uninstallresult{
+  let after=listremovableat(baseurl);
   let stillexists=mut.false;
   lp(let ii112=0;ii112<after.len;ii112=ii112+1){
-    if(str.eq(after.get(ii112).name;modelid)){
+    if(cli.samemodel(after.get(ii112).name;modelid)){
       stillexists=true
     }el{}
 
@@ -172,13 +167,27 @@ f=handlermfailed(e:str):$uninstallresult{
   }
 };
 
-f=uninstallmodel(modelid:str):$uninstallresult{
-  let models=listremovable();
+(* F10.40, the decision before `ollama rm` runs from an action. It runs only (1) for an id
+   that ollamacli.validmodelid accepts, so it cannot be read as an option; (2) for a model
+   the list just answered by that name (or name:latest, ollamacli.samemodel), so it
+   removes only something that is installed; and (3) from `loke uninstall-model <name>`, which asks [y/N] first
+   (cli.modelmgmt). No page calls it. It runs as an argv spawn; a non-zero exit is a
+   failed removal with ollama's own message, and a zero exit is still checked by listing
+   again (verifymodelremovalat). *)
+f=uninstallmodelat(baseurl:str;modelid:str):$uninstallresult{
+  if(!cli.validmodelid(modelid)){
+    <$uninstallresult{
+      success:false;
+      message:"not a model name: refusing to pass it to ollama rm";
+      freedspace:""
+    }
+  }el{};
+  let models=listremovableat(baseurl);
   let modelsize=mut."";
   let found=mut.false;
   lp(let ii163=0;ii163<models.len;ii163=ii163+1){
     let m=models.get(ii163);
-    if(str.eq(m.name;modelid)){
+    if(cli.samemodel(m.name;modelid)){
       modelsize=m.size;
       found=true
     }el{}
@@ -196,14 +205,15 @@ f=uninstallmodel(modelid:str):$uninstallresult{
     "installer.uninstall";
     "system"
   );
-  (* F10.39: this called `proc.exec(@(...))`. process.exec takes ONE command string and
-     runs it through the runtime's command-string spawn; handed an argv array it read the
-     array's address as text, so the command it ran was a few bytes of pointer, never
-     ollama. toke 3.1.0 rejects the call (E4031). The command therefore never ran, and
-     rather than start running it as a side effect of a toolchain move, this takes the path
-     the caller already had for "it did not run". Running it for real, as an argv spawn
-     with a test, is F10.40. *)
-  <handlermfailed("ollama rm is not run from source yet (F10.40)")
+  let r=cli.run(@("ollama";"rm";modelid);false);
+  if(!r.ok){
+    <handlermfailed("exit \(str.fromint(r.code)): \(str.trim(r.err))")
+  }el{};
+  <verifymodelremovalat(baseurl;modelid;modelsize)
+};
+
+f=uninstallmodel(modelid:str):$uninstallresult{
+  <uninstallmodelat("http://localhost:11434";modelid)
 };
 
 f=handleollamaremoved(home:str):$uninstallresult{

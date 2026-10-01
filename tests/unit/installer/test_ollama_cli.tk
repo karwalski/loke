@@ -1,0 +1,213 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.installer.ollamacli;
+
+i=t:std.test;
+i=io:std.io;
+i=str:std.str;
+i=file:std.file;
+i=args:std.args;
+i=process:std.process;
+i=cli:core.installer.ollamacli;
+i=pull:core.installer.pull;
+i=un:core.installer.uninstall;
+i=upd:core.installer.updater;
+i=auto:core.installer.autostart;
+
+(* F10.40 — do the installer's `ollama list/rm/pull` and `test -x` run, with exactly the
+   argv they mean, and is a failing exit read as a failure?
+
+   They went through process.exec handed an array and never ran (F10.39). Now they run
+   through core.installer.ollamacli as argv spawns. This drives the production functions
+   against tests/fixtures/fake-ollama/ollama, a stand-in that records every argv it is
+   given and answers from files in a scratch directory. The real ollama is never run and
+   ~/.ollama is never touched: the production code finds `ollama` on PATH, and the runtime
+   reads PATH once, at start-up (AMB-03), so the work is done in a child — this binary
+   again, started through env(1) with PATH set to the stand-in's directory, /usr/bin and
+   /bin, and nothing else. Before it calls anything that could remove or pull, the child
+   checks that `ollama` answers as the stand-in, and stops if it does not.
+
+   The listing GET goes to 127.0.0.1:11090, where nothing listens, so uninstall takes its
+   `ollama list` fallback. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_ollamacli_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=touch(p:str):bool{
+  <mt file.write(p;"") { $ok:v v; $err:e false }
+};
+
+f=runwait(argv:@str):i64{
+  let r=cli.run(argv;false);
+  <r.code
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:11090"
+};
+
+(* The calls the stand-in has seen since the log was last cleared. *)
+f=calls(base:str):str{
+  <readfile("\(base)/argv.log")
+};
+
+f=clearcalls(base:str):bool{
+  <touch("\(base)/argv.log")
+};
+
+f=child(base:str):i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── Safety first: `ollama` must be the stand-in ─────────────────────────── *)
+  let who=cli.run(@("ollama";"--whoami");false);
+  if(!t.assert(who.ran && str.contains(who.out;"FAKE-OLLAMA");"the ollama on this child's PATH is the stand-in")){
+    io.println("refusing to go on: `ollama` is not the stand-in");
+    <1
+  }el{ pass=pass+1 };
+
+  (* ── ollamacli.run: argv as given, never a shell; exit status read right ─── *)
+  clearcalls(base);
+  let odd="a b;touch \(base)/pwned $HOME";
+  let rs=cli.run(@("ollama";"show";odd);false);
+  if(t.assert(rs.ok && rs.code==0;"run: a clean exit is ok, code 0")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"<show><\(odd)>
+";"run: the argument with spaces, a ; and a $ arrives as ONE argv element, unexpanded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!file.exists("\(base)/pwned");"run: and no shell ran the text after the ;")){pass=pass+1}el{fail=fail+1};
+  touch("\(base)/fail.show");
+  let rf=cli.run(@("ollama";"show";"x");false);
+  if(t.assert(rf.ran && !rf.ok && rf.code==3;"run: exit 3 is not ok, and the code is 3")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rf.err;"boom show");"run: with the command's stderr")){pass=pass+1}el{fail=fail+1};
+  let rn=cli.run(@("no-such-binary-f10-40");false);
+  if(t.assert(!rn.ran && !rn.ok;"run: a command that cannot start did not run and is not ok")){pass=pass+1}el{fail=fail+1};
+
+  (* ── model ids ───────────────────────────────────────────────────────────── *)
+  if(t.assert(cli.validmodelid("qwen2.5:7b") && cli.validmodelid("library/llama3:8b-instruct-q4_0");"ids: ollama names are accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cli.validmodelid("--help") && !cli.validmodelid("a b") && !cli.validmodelid("") && !cli.validmodelid("x;y");"ids: an option, whitespace, empty or a ; are not")){pass=pass+1}el{fail=fail+1};
+
+  (* ── pull.listinstalledmodels: `ollama list` ─────────────────────────────── *)
+  clearcalls(base);
+  let ms=pull.listinstalledmodels();
+  if(t.asserteq(calls(base);"<list>
+";"list: ran exactly `ollama list`")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ms.len==2;"list: two models listed")){pass=pass+1}el{fail=fail+1};
+  if(ms.len==2){
+    if(t.assert(ms.get(0)=="fake:latest" && ms.get(1)=="other:7b";"list: by name")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  touch("\(base)/fail.list");
+  let mf=pull.listinstalledmodels();
+  if(t.assert(mf.len==0;"list: a failing `ollama list` lists nothing")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/fail.list");
+
+  (* ── uninstall: the `ollama list` fallback, parsed on whitespace runs ──────── *)
+  let rm=un.listremovableat(deadurl());
+  if(t.assert(rm.len==2;"uninstall list: the fallback lists both models")){pass=pass+1}el{fail=fail+1};
+  if(rm.len==2){
+    let m0:$removablemodel=rm.get(0);
+    if(t.asserteq(m0.name;"fake:latest";"uninstall list: name")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(m0.digest;"0123abcd4567";"uninstall list: id")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(m0.size;"4.7 GB";"uninstall list: size with its unit")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(m0.modified;"2 days ago";"uninstall list: modified")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+4 };
+
+  (* ── updater.getinstalleddigest ──────────────────────────────────────────── *)
+  if(t.asserteq(upd.getinstalleddigest("fake");"0123abcd4567";"digest: an untagged id finds name:latest")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(upd.getinstalleddigest("other:7b");"89abcdef0123";"digest: a tagged id finds its row")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(upd.getinstalleddigest("other");"";"digest: other is not other:7b")){pass=pass+1}el{fail=fail+1};
+  touch("\(base)/fail.list");
+  if(t.asserteq(upd.getinstalleddigest("fake");"";"digest: a failing `ollama list` answers none")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/fail.list");
+
+  (* ── uninstall.uninstallmodelat: `ollama rm` ─────────────────────────────── *)
+  clearcalls(base);
+  let ur=un.uninstallmodelat(deadurl();"--help");
+  if(t.assert(!ur.success;"rm: an id that is an option is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"";"rm: and nothing ran")){pass=pass+1}el{fail=fail+1};
+  let ua=un.uninstallmodelat(deadurl();"absent:1b");
+  if(t.assert(!ua.success && str.contains(ua.message;"not found");"rm: a model that is not installed is not removed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(calls(base);"<rm>");"rm: and `ollama rm` did not run")){pass=pass+1}el{fail=fail+1};
+  touch("\(base)/fail.rm");
+  clearcalls(base);
+  let ue=un.uninstallmodelat(deadurl();"fake:latest");
+  if(t.assert(!ue.success && str.contains(ue.message;"exit 3") && str.contains(ue.message;"boom rm");"rm: a failing `ollama rm` is a failed removal, with its exit and message")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"<list>
+<rm><fake:latest>
+";"rm: it listed, then ran exactly `ollama rm fake:latest`")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/fail.rm");
+  touch("\(base)/rmnoop");
+  let un0=un.uninstallmodelat(deadurl();"fake:latest");
+  if(t.assert(!un0.success && str.contains(un0.message;"still present");"rm: exit 0 with the model still listed is not a removal")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/rmnoop");
+  clearcalls(base);
+  let uo=un.uninstallmodelat(deadurl();"fake:latest");
+  if(t.assert(uo.success;"rm: a clean `ollama rm` that removed the model succeeds")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(uo.freedspace;"4.7 GB";"rm: and reports the size freed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"<list>
+<rm><fake:latest>
+<list>
+";"rm: list, rm, list again to check")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/removed");
+
+  (* ── updater.updatemodel: `ollama pull` ──────────────────────────────────── *)
+  clearcalls(base);
+  if(t.assert(!upd.updatemodel("-v");"pull: an id that is an option is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"";"pull: and nothing ran")){pass=pass+1}el{fail=fail+1};
+  touch("\(base)/fail.pull");
+  clearcalls(base);
+  if(t.assert(!upd.updatemodel("fake:latest");"pull: a failing `ollama pull` is a failed update")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(calls(base);"<list>
+<pull><fake:latest>
+";"pull: it ran exactly `ollama pull fake:latest`")){pass=pass+1}el{fail=fail+1};
+  file.delete("\(base)/fail.pull");
+  clearcalls(base);
+  if(t.assert(upd.updatemodel("fake:latest");"pull: a clean `ollama pull` is an update")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(upd.getinstalleddigest("fake:latest");"fedcba987654";"pull: and the listed id is the new one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── autostart.isconfigured: `test -x ~/.loke/bin/ollama` ────────────────── *)
+  let home=process.homedir();
+  if(t.assert(!str.contains(home;"/.ollama");"configured: HOME is a scratch directory")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!auto.isconfigured();"configured: no ~/.loke/bin/ollama is not configured")){pass=pass+1}el{fail=fail+1};
+  runwait(@("mkdir";"-p";"\(home)/.loke/bin"));
+  touch("\(home)/.loke/bin/ollama");
+  if(t.assert(!auto.isconfigured();"configured: a file that is not executable is not configured")){pass=pass+1}el{fail=fail+1};
+  runwait(@("chmod";"+x";"\(home)/.loke/bin/ollama"));
+  if(t.assert(auto.isconfigured();"configured: an executable one is")){pass=pass+1}el{fail=fail+1};
+
+  io.println("test_ollama_cli (child): \(pass) passed, \(fail) failed");
+  <fail
+};
+
+f=main():i64{
+  let mode=mt args.get(1 as u64) { $ok:v v; $err:e "" };
+  if(mode=="--child"){
+    <child(mt args.get(2 as u64) { $ok:v v; $err:e "" })
+  }el{};
+  let self=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  runwait(@("mkdir";"-p";"\(base)/bin"));
+  runwait(@("cp";"tests/fixtures/fake-ollama/ollama";"\(base)/bin/ollama"));
+  runwait(@("chmod";"+x";"\(base)/bin/ollama"));
+  touch("\(base)/argv.log");
+  if(t.assert(file.exists("\(base)/bin/ollama");"the stand-in is in place")){pass=pass+1}el{fail=fail+1};
+
+  let pathenv="PATH=\(base)/bin:/usr/bin:/bin";
+  let direnv="FAKE_OLLAMA_DIR=\(base)";
+  let r=cli.run(@("env";pathenv;direnv;self;"--child";base);false);
+  io.println(r.out);
+  io.println(r.err);
+  if(t.assert(r.ran && r.code==0;"the child's checks all passed")){pass=pass+1}el{fail=fail+1};
+
+  runwait(@("rm";"-rf";base));
+  io.println("test_ollama_cli: \(pass) passed, \(fail) failed");
+  <fail
+};

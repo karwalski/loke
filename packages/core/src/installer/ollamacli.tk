@@ -1,0 +1,136 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.installer.ollamacli;
+
+i=str:std.str;
+i=log:shared.log;
+i=process:std.process;
+
+(* F10.40. The installer's `ollama list`, `ollama rm`, `ollama pull` and `test -x` went
+   through process.exec handed an argv array. process.exec takes ONE command string, so it
+   read the array's address as text and ollama never ran (F10.39). They now run through
+   here: process.spawn with a fixed argv vector, so no shell ever sees the command and no
+   argument is ever spliced into a command line (tkc.toml, process_spawn). The runtime
+   resolves argv[0] against the PATH captured at start-up (AMB-03), not a live one.
+
+   Both pipes are drained before the child is waited for (F10.37): a child that fills a
+   64 KiB pipe while loke waits for it to exit never exits. Which pipe is read first
+   matters for the same reason. `ollama pull` writes its progress to stderr, and a lot of
+   it, so it reads stderr first; the others write their answer to stdout and read that
+   first.
+
+   The exit status is process.wait's plain i32, read as a number. 0 is success, anything
+   else is failure, and so is a pipe that could not be read: `ok` is true only when the
+   command started, both pipes were read and it exited 0. (`mt` on that i32 tested it
+   against 0 and inverted the answer, T-50; toke 3.1.0 rejects the match.) *)
+
+t=$cliresult{
+  ran:bool;
+  ok:bool;
+  code:i64;
+  out:str;
+  err:str
+};
+
+t=$piperead{
+  ok:bool;
+  text:str
+};
+
+f=readstdout(h:i64):$piperead{
+  <mt process.stdout(h) {
+    $ok:s $piperead{ok:true;text:s};
+    $err:e $piperead{ok:false;text:""}
+  }
+};
+
+f=readstderr(h:i64):$piperead{
+  <mt process.stderr(h) {
+    $ok:s $piperead{ok:true;text:s};
+    $err:e $piperead{ok:false;text:""}
+  }
+};
+
+f=finish(h:i64;o:$piperead;e:$piperead):$cliresult{
+  let code=process.wait(h) as i64;
+  <$cliresult{ran:true;ok:code==0 && o.ok && e.ok;code:code;out:o.text;err:e.text}
+};
+
+(* Each pipe is read in its own call, so the order is the order of the calls in collect. *)
+f=thenstdout(h:i64;e:$piperead):$cliresult{
+  <finish(h;readstdout(h);e)
+};
+
+f=thenstderr(h:i64;o:$piperead):$cliresult{
+  <finish(h;o;readstderr(h))
+};
+
+f=collect(h:i64;errfirst:bool):$cliresult{
+  if(errfirst){ <thenstdout(h;readstderr(h)) }el{};
+  <thenstderr(h;readstdout(h))
+};
+
+f=notstarted(name:str):$cliresult{
+  log.warn("could not start \(name)";"installer.ollamacli";"system");
+  <$cliresult{ran:false;ok:false;code:0-1;out:"";err:"could not start \(name)"}
+};
+
+(* Runs argv[0] with the rest as its arguments, exactly as given. errfirst drains stderr
+   before stdout (see above). *)
+f=run(argv:@str;errfirst:bool):$cliresult{
+  <mt process.spawn(argv) {
+    $ok:h collect(h;errfirst);
+    $err:e notstarted(argv.get(0))
+  }
+};
+
+(* Whether argv ran and exited 0, with stdout read first. *)
+f=succeeds(argv:@str):bool{
+  <okof(run(argv;false))
+};
+
+f=okof(r:$cliresult):bool{
+  <r.ok
+};
+
+(* What a model id may be before it is handed to `ollama rm` or `ollama pull`. The argv
+   spawn already keeps it away from a shell; this keeps it from being read as an option
+   (a leading '-') and from carrying whitespace or control bytes into ollama's own parsing.
+   Ollama's names are [namespace/]name[:tag], with letters, digits and . _ - in each part. *)
+(* A digit, a letter, or one of . _ - : / *)
+f=namebyte(c:i64):bool{
+  <(c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c==46 || c==95 || c==45 || c==58 || c==47
+};
+
+f=validmodelid(id:str):bool{
+  let n=str.len(id) as i64;
+  if(n==0 || n > 200){ <false }el{};
+  if(str.startswith(id;"-")){ <false }el{};
+  let good=mut.true;
+  lp(let k=0;k<n;k=k+1){
+    if(!namebyte(str.charcode(id;k))){ good=false }el{}
+  };
+  <good
+};
+
+(* The `ollama list` columns, split on runs of whitespace: NAME, ID, SIZE (a number and a
+   unit), then MODIFIED. The first line is the header. *)
+f=listrows(out:str):@@str{
+  let lines=str.split(out;"
+");
+  let rows=mut.@();
+  lp(let k=1;k<lines.len;k=k+1){
+    let parts=str.fields(lines.get(k));
+    if(parts.len > 1){ rows=rows.push(parts) }el{}
+  };
+  <rows
+};
+
+(* Whether a listed NAME is the model asked for. `ollama list` shows an untagged pull as
+   name:latest, so "llama3" is "llama3:latest"; a longer name that merely starts with the
+   id ("qwen2.5:7b-instruct" for "qwen2.5:7b") is a different model. *)
+f=samemodel(listed:str;modelid:str):bool{
+  if(listed==modelid){ <true }el{};
+  <!str.contains(modelid;":") && listed=="\(modelid):latest"
+};

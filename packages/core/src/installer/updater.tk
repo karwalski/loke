@@ -6,6 +6,7 @@ m=core.installer.updater;
 i=json:std.json;
 i=jx:shared.jsonobj;
 i=reach:shared.reachability;
+i=cli:core.installer.ollamacli;
 i=str:std.str;
 i=log:shared.log;
 i=db:core.storage.db;
@@ -84,37 +85,30 @@ f=checkdue(config:$updateconfig):bool{
   <(now - config.lastchecked) > (config.checkintervaldays * 86400000)
 };
 
+(* F10.40: the ID column of `ollama list` for the row whose NAME is the model (name, or
+   name:latest). This split each line on single spaces, so with the columns aligned by runs
+   of spaces it read the empty string between NAME and ID; and it took any line that merely
+   contained the id, so "qwen2.5:7b" also matched "qwen2.5:7b-instruct". *)
 f=parsedigestfromlist(out:str;modelid:str):str{
-  let lines=str.split(out;"
-");
+  let rows=cli.listrows(out);
   let found=mut."";
-  lp(let i=0;i<str.arraylen(lines);i=i+1){ let line=lines.get(i);
-    if(str.contains(line;modelid)){
-      let parts=str.split(line;" ");
-      if(parts.len > 2){
-        found=parts.get(1)
-      }el{}
-    }el{}
+  lp(let k=0;k<rows.len;k=k+1){
+    let parts:@str=rows.get(k);
+    if(cli.samemodel(parts.get(0);modelid)){ found=parts.get(1) }el{}
   };
   <found
 };
 
-(* e stays i64: std.process's ProcessErr sum is not nameable from loke source, and
-   it carries no payload, so there is nothing to read off it anyway. *)
-f=digestlisterr(e:i64):str{
-  log.warn("failed to get installed digest: ollama list did not run";"installer.updater";"system");
-  <""
-};
-
-(* F10.39: this called `proc.exec(@(...))`. process.exec takes ONE command string and
-   runs it through the runtime's command-string spawn; handed an argv array it read the
-   array's address as text, so the command it ran was a few bytes of pointer, never
-   ollama. toke 3.1.0 rejects the call (E4031). The command therefore never ran, and
-   rather than start running it as a side effect of a toolchain move, this takes the path
-   the caller already had for "it did not run". Running it for real, as an argv spawn
-   with a test, is F10.40. *)
+(* F10.40: `ollama list` as an argv spawn (core.installer.ollamacli); handed to
+   process.exec as an array, it never ran (F10.39). A command that did not start or exited
+   non-zero answers no digest, which every caller reads as "not installed / unknown". *)
 f=getinstalleddigest(modelid:str):str{
-  <digestlisterr(0)
+  let r=cli.run(@("ollama";"list");false);
+  if(!r.ok){
+    log.warn("failed to get installed digest: ollama list failed (exit \(str.fromint(r.code)))";"installer.updater";"system");
+    <""
+  }el{};
+  <parsedigestfromlist(r.out;modelid)
 };
 
 (* Read through the typed decoder and shared.jsonobj; json.decode and json.str on the
@@ -205,26 +199,32 @@ f=verifyupdate(modelid:str;olddigest:str):bool{
   <true
 };
 
-f=handleupdatefailed(e:i64):bool{
-  log.warn("model update failed: ollama pull did not run";"installer.updater";"system");
+f=handleupdatefailed(why:str):bool{
+  log.warn("model update failed: \(why)";"installer.updater";"system");
   <false
 };
 
+(* F10.40, the decision before `ollama pull` runs from an action. It runs only for an id
+   that ollamacli.validmodelid accepts, so it cannot be read as an option, and only from
+   `loke update [model]` (cli.modelmgmt), which the user types to ask for exactly this; no
+   page calls it. It runs as an argv spawn, draining stderr first because that is where
+   pull writes its progress; a non-zero exit is a failed update, and a zero exit is still
+   checked by listing again (verifyupdate). *)
 f=updatemodel(modelid:str):bool{
+  if(!cli.validmodelid(modelid)){
+    <handleupdatefailed("not a model name: refusing to pass it to ollama pull")
+  }el{};
   log.info(
     str.concat("pulling update for ";modelid);
     "installer.updater";
     "system"
   );
   let olddigest=getinstalleddigest(modelid);
-  (* F10.39: this called `proc.exec(@(...))`. process.exec takes ONE command string and
-     runs it through the runtime's command-string spawn; handed an argv array it read the
-     array's address as text, so the command it ran was a few bytes of pointer, never
-     ollama. toke 3.1.0 rejects the call (E4031). The command therefore never ran, and
-     rather than start running it as a side effect of a toolchain move, this takes the path
-     the caller already had for "it did not run". Running it for real, as an argv spawn
-     with a test, is F10.40. *)
-  <handleupdatefailed(0)
+  let r=cli.run(@("ollama";"pull";modelid);true);
+  if(!r.ok){
+    <handleupdatefailed("ollama pull exited \(str.fromint(r.code))")
+  }el{};
+  <verifyupdate(modelid;olddigest)
 };
 
 f=periodiccheck(store:i64;modelid:str):$updatecheck{
