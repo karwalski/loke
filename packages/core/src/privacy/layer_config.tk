@@ -4,44 +4,404 @@
 m=core.privacy.layerconfig;
 
 i=str:std.str;
+i=sh:shared.types;
+i=fr:core.privacy.filterregistry;
+i=vocab:core.privacy.entityvocab;
+
+(* F3b.2. `[[privacy.layers]]` in config.toml, applied to the filter registry
+   core.privacy.pipeline runs.
+
+       [[privacy.layers]]
+       id = "presidio"
+       enabled = true
+       priority = 0
+       mode = "veto"
+       confidence_threshold = 0.9
+       entity_filter = ["PERSON", "CREDIT_CARD"]
+
+   Every key but id is optional; a key left out keeps the registry's value. id names a layer
+   the registry holds (regex, ner, presidio, openai-privacy-filter). priority orders the
+   layers, lower first: the pipeline runs them in that order and consensus takes it as
+   first-match's priority. Unlisted layers keep their default priority, 1 to 4 in registry
+   order, and equal priorities keep registry order. mode is detect-and-mask (the default),
+   detect-only (the layer's detections are reported in its stage and not masked) or veto (its
+   detections are masked, and any one refuses the request). confidence_threshold (0 to 1,
+   default 0) and entity_filter (types the layer declares in core.privacy.entityvocab, empty
+   for all) narrow what the layer's detections count for.
+
+   WHY THIS READS THE TEXT. std.toml at this toolchain has no accessor for an array of
+   tables (it has str, i64, bool and section), so `[[privacy.layers]]` cannot be read through
+   it. The entries are read here, line by line, from the file text shared.config keeps. What
+   is read is deliberately narrow: one `key = value` per line, strings in double or single
+   quotes without escapes, and an entity_filter array on one line. Anything else inside an
+   entry is an error, not a guess.
+
+   A MALFORMED LAYERS CONFIG REFUSES REQUESTS. An unknown key or id, a duplicate, a value of
+   the wrong kind, a threshold outside 0..1, an unknown mode or entity type, `[privacy.layers]`
+   written as a table or `layers = ...` written inline: resolve returns the error and the
+   registry it was given, unchanged, and core.privacy.pipeline refuses every run while the
+   error stands (issafetoforward). Falling back to the defaults was the alternative; it was
+   not chosen because a config the user believes is in force, and is not, is a silent
+   change of what is masked.
+
+   THE REGEX LAYER CANNOT BE TURNED DOWN FROM HERE. It is the in-process, deterministic
+   detector, and the one layer that cannot be unavailable. enabled = false, mode =
+   "detect-only", a confidence_threshold above 0 and an entity_filter are each logged as a
+   warning and not applied to it; its priority and veto mode are applied, since neither
+   masks less. Whether a user may switch it off is a decision for the project, recorded in
+   the F3b.2 row.
+
+   Organisation-managed settings that override these (F3b.8) are not read: no org policy
+   reaches the pipeline. *)
 
 t=$layerentry{
   id:str;
-  enabled:bool;
-  priority:i32;
+  enabled:str;
+  priority:str;
   mode:str;
-  confidencethreshold:f64;
-  entityfilter:str
+  threshold:str;
+  entityfilter:str;
+  line:i64
 };
 
-t=$layerconfig{
-  layers:@$layerentry;
-  consensusstrategy:str
+t=$layerparse{
+  entries:@$layerentry;
+  errors:@str;
+  present:bool
 };
 
-f=defaultconfig():$layerconfig{
-  let layers=@(
-    $layerentry{id:"regex";enabled:true;priority:1 as i32;mode:"detect-and-mask";confidencethreshold:0.8;entityfilter:""};
-    $layerentry{id:"ner";enabled:true;priority:2 as i32;mode:"detect-and-mask";confidencethreshold:0.75;entityfilter:""};
-    $layerentry{id:"presidio";enabled:false;priority:3 as i32;mode:"detect-only";confidencethreshold:0.7;entityfilter:""}
-  );
-  <$layerconfig{layers:layers;consensusstrategy:"most-restrictive"}
+(* What resolve returns: the registry to run, and why it was not changed, if it was not.
+   warning is what was asked and not applied (the regex layer). present says whether the
+   text has any [[privacy.layers]] entry. *)
+t=$layersettings{
+  registry:$filterregistry;
+  error:str;
+  warning:str;
+  present:bool
 };
 
-f=getlayer(cfg:$layerconfig;id:str):$layerentry{
-  let result=mut.cfg.layers.get(0);
-  lp(let i=0;i<cfg.layers.len;i=i+1){
-    let l=cfg.layers.get(i);
-    if(str.eq(l.id;id)){result=l}el{}
+f=header():str{ <"privacy.layers" };
+
+f=emptyentry(line:i64):$layerentry{
+  <$layerentry{id:"";enabled:"";priority:"";mode:"";threshold:"";entityfilter:"";line:line}
+};
+
+f=knownkey(key:str):bool{
+  <str.eq(key;"id") || str.eq(key;"enabled") || str.eq(key;"priority") || str.eq(key;"mode") || str.eq(key;"confidence_threshold") || str.eq(key;"entity_filter")
+};
+
+f=valueof(e:$layerentry;key:str):str{
+  if(str.eq(key;"id")){ <e.id }el{};
+  if(str.eq(key;"enabled")){ <e.enabled }el{};
+  if(str.eq(key;"priority")){ <e.priority }el{};
+  if(str.eq(key;"mode")){ <e.mode }el{};
+  if(str.eq(key;"confidence_threshold")){ <e.threshold }el{};
+  <e.entityfilter
+};
+
+f=withkey(e:$layerentry;key:str;v:str):$layerentry{
+  if(str.eq(key;"id")){ <$layerentry{id:v;enabled:e.enabled;priority:e.priority;mode:e.mode;threshold:e.threshold;entityfilter:e.entityfilter;line:e.line} }el{};
+  if(str.eq(key;"enabled")){ <$layerentry{id:e.id;enabled:v;priority:e.priority;mode:e.mode;threshold:e.threshold;entityfilter:e.entityfilter;line:e.line} }el{};
+  if(str.eq(key;"priority")){ <$layerentry{id:e.id;enabled:e.enabled;priority:v;mode:e.mode;threshold:e.threshold;entityfilter:e.entityfilter;line:e.line} }el{};
+  if(str.eq(key;"mode")){ <$layerentry{id:e.id;enabled:e.enabled;priority:e.priority;mode:v;threshold:e.threshold;entityfilter:e.entityfilter;line:e.line} }el{};
+  if(str.eq(key;"confidence_threshold")){ <$layerentry{id:e.id;enabled:e.enabled;priority:e.priority;mode:e.mode;threshold:v;entityfilter:e.entityfilter;line:e.line} }el{};
+  <$layerentry{id:e.id;enabled:e.enabled;priority:e.priority;mode:e.mode;threshold:e.threshold;entityfilter:v;line:e.line}
+};
+
+(* The line with any comment removed: a # outside quotes starts one. *)
+f=stripcomment(s:str):str{
+  let n=str.len(s) as i64;
+  let q=mut.0;
+  let cut=mut.0-1;
+  lp(let i=0;i<n && cut<0;i=i+1){
+    let c=str.charat(s;i);
+    if(q==0){
+      if(c==35){ cut=i }el{
+        if(c==34 || c==39){ q=c }el{}
+      }
+    }el{
+      if(c==q){ q=0 }el{}
+    }
   };
-  <result
+  if(cut<0){ <s }el{};
+  <sh.strslice(s;0;cut)
 };
 
-f=enabledlayers(cfg:$layerconfig):@$layerentry{
-  let result=mut.@();
-  lp(let i=0;i<cfg.layers.len;i=i+1){
-    let l=cfg.layers.get(i);
-    if(l.enabled){result=result.push(l)}el{}
+(* "[[ privacy.layers ]]" and "[privacy]" as privacy.layers and privacy. *)
+f=headername(line:str):str{
+  let inner=mut.str.replace(line;" ";"");
+  lp(let k=0;str.startswith(inner;"[");k=k+1){ inner=sh.strslice(inner;1;str.len(inner) as i64) };
+  lp(let k=0;str.endswith(inner;"]");k=k+1){ inner=sh.strslice(inner;0;(str.len(inner) as i64)-1) };
+  <inner
+};
+
+f=at(line:i64):str{
+  <"config.toml line \(str.fromint(line))"
+};
+
+(* The [[privacy.layers]] entries in a config.toml text, each key's value as written, and
+   every line that cannot be one. *)
+f=parse(text:str):$layerparse{
+  let lines=str.split(text;"\n");
+  let entries=mut.@();
+  let errors=mut.@();
+  let present=mut.false;
+  let inentry=mut.false;
+  let section=mut."";
+  let cur=mut.emptyentry(0);
+  lp(let i=0;i<lines.len;i=i+1){
+    let line=str.trim(stripcomment(lines.get(i)));
+    let n=i+1;
+    if(str.len(line)==0){}el{
+      if(str.startswith(line;"[")){
+        if(inentry){
+          entries=entries.push(cur);
+          inentry=false
+        }el{};
+        let name=headername(line);
+        section=name;
+        if(str.eq(name;header())){
+          present=true;
+          if(str.startswith(line;"[[")){
+            inentry=true;
+            cur=emptyentry(n)
+          }el{
+            errors=errors.push("\(at(n)): [privacy.layers] is a table; each layer is an entry of its own, written [[privacy.layers]]")
+          }
+        }el{}
+      }el{
+        let eq=str.indexof(line;"=");
+        if(inentry){
+          if(eq<1){
+            errors=errors.push("\(at(n)): expected key = value in a [[privacy.layers]] entry")
+          }el{
+            let key=str.trim(sh.strslice(line;0;eq));
+            let v=str.trim(sh.strslice(line;eq+1;str.len(line) as i64));
+            if(!knownkey(key)){
+              errors=errors.push("\(at(n)): unknown key \(key) in a [[privacy.layers]] entry (id, enabled, priority, mode, confidence_threshold, entity_filter)")
+            }el{
+              if(str.len(v)==0){
+                errors=errors.push("\(at(n)): \(key) has no value")
+              }el{
+                if(str.len(valueof(cur;key))>0){
+                  errors=errors.push("\(at(n)): \(key) is given twice in one [[privacy.layers]] entry")
+                }el{
+                  cur=withkey(cur;key;v)
+                }
+              }
+            }
+          }
+        }el{
+          if(eq>0){
+            let key=str.trim(sh.strslice(line;0;eq));
+            if((str.eq(section;"privacy") && str.eq(key;"layers")) || (str.eq(section;"") && str.eq(key;"privacy.layers"))){
+              present=true;
+              errors=errors.push("\(at(n)): privacy.layers written inline is not read; write each layer as a [[privacy.layers]] entry")
+            }el{}
+          }el{}
+        }
+      }
+    }
   };
-  <result
+  if(inentry){ entries=entries.push(cur) }el{};
+  <$layerparse{entries:entries;errors:errors;present:present}
+};
+
+(* ── Values ─────────────────────────────────────────────────────────────── *)
+
+(* A string in double or single quotes, with no quote or backslash inside. *)
+f=isquoted(v:str):bool{
+  let n=str.len(v) as i64;
+  if(n<2){ <false }el{};
+  let first=str.charat(v;0);
+  if(first==34 || first==39){}el{ <false };
+  if(str.charat(v;n-1)==first){}el{ <false };
+  let inner=sh.strslice(v;1;n-1);
+  <!str.contains(inner;"\"") && !str.contains(inner;"'") && !str.contains(inner;"\\")
+};
+
+f=unquote(v:str):str{
+  <sh.strslice(v;1;(str.len(v) as i64)-1)
+};
+
+f=isinteger(v:str):bool{
+  if(str.startswith(v;"-") || str.startswith(v;"+")){ <str.isdigit(sh.strslice(v;1;str.len(v) as i64)) }el{};
+  <str.isdigit(v)
+};
+
+f=integer(v:str):i64{
+  let digits=mut.v;
+  if(str.startswith(v;"+")){ digits=sh.strslice(v;1;str.len(v) as i64) }el{};
+  <mt str.toint(digits) { $ok:x x; $err:e 0 }
+};
+
+(* A threshold is written as a number, 0.9, or as text, "0.9", the form the other privacy
+   thresholds in config.toml take (std.toml has no float accessor). Digits, with at most one
+   point between digits. *)
+f=numbertext(v:str):str{
+  if(isquoted(v)){ <unquote(v) }el{};
+  <v
+};
+
+f=isdecimal(v:str):bool{
+  let s=numbertext(v);
+  let dot=str.indexof(s;".");
+  if(dot<0){ <str.isdigit(s) }el{};
+  <str.isdigit(sh.strslice(s;0;dot)) && str.isdigit(sh.strslice(s;dot+1;str.len(s) as i64))
+};
+
+f=decimal(v:str):f64{
+  <mt str.tofloat(numbertext(v)) { $ok:x x; $err:e 0.0-1.0 }
+};
+
+f=ismode(m:str):bool{
+  <str.eq(m;fr.detectandmask()) || str.eq(m;fr.detectonly()) || str.eq(m;fr.veto())
+};
+
+(* An entity_filter array's names, as written: ["PERSON", "EMAIL_ADDRESS"]. A trailing comma
+   is allowed. An element that is not a quoted string is returned as "", which filtererror
+   reports. *)
+f=filternames(v:str):@str{
+  let inner=str.trim(sh.strslice(v;1;(str.len(v) as i64)-1));
+  let out=mut.@();
+  if(str.len(inner)==0){ <out }el{};
+  let parts=str.split(inner;",");
+  lp(let i=0;i<parts.len;i=i+1){
+    let item=str.trim(parts.get(i));
+    if(str.len(item)==0 && i==parts.len-1 && i>0){}el{
+      if(isquoted(item)){ out=out.push(unquote(item)) }el{ out=out.push("") }
+    }
+  };
+  <out
+};
+
+f=isarray(v:str):bool{
+  <str.startswith(v;"[") && str.endswith(v;"]")
+};
+
+f=listed(items:@str):str{ <str.join(", ";items) };
+
+f=filtererror(id:str;v:str):str{
+  if(!isarray(v)){ <"entity_filter must be an array of type names on one line, e.g. [\"PERSON\"]" }el{};
+  let names=filternames(v);
+  let known=vocab.layertypes(id);
+  lp(let i=0;i<names.len;i=i+1){
+    let name:str=names.get(i);
+    if(str.len(name)==0){ <"entity_filter has an element that is not a quoted type name" }el{};
+    if(!vocab.contains(known;name)){ <"entity_filter names \(name), which the \(id) layer does not report (it reports \(listed(known)))" }el{}
+  };
+  <""
+};
+
+(* The error in one entry, or "". *)
+f=entryerror(reg:$filterregistry;e:$layerentry):str{
+  if(str.len(e.id)==0){ <"a [[privacy.layers]] entry has no id" }el{};
+  if(!isquoted(e.id)){ <"id must be a quoted string" }el{};
+  let id=unquote(e.id);
+  if(!fr.has(reg;id)){ <"no layer has the id \(id) (regex, ner, presidio, openai-privacy-filter)" }el{};
+  if(str.len(e.enabled)>0 && !str.eq(e.enabled;"true") && !str.eq(e.enabled;"false")){ <"enabled must be true or false" }el{};
+  if(str.len(e.priority)>0 && !isinteger(e.priority)){ <"priority must be a whole number" }el{};
+  if(str.len(e.mode)>0){
+    if(!isquoted(e.mode)){ <"mode must be a quoted string" }el{};
+    if(!ismode(unquote(e.mode))){ <"mode must be detect-and-mask, detect-only or veto" }el{}
+  }el{};
+  if(str.len(e.threshold)>0){
+    if(!isdecimal(e.threshold)){ <"confidence_threshold must be a number from 0 to 1" }el{};
+    let th=decimal(e.threshold);
+    if(th<0.0 || th>1.0){ <"confidence_threshold must be a number from 0 to 1" }el{}
+  }el{};
+  if(str.len(e.entityfilter)>0){
+    let fe=filtererror(id;e.entityfilter);
+    if(str.len(fe)>0){ <fe }el{}
+  }el{};
+  <""
+};
+
+(* ── Resolution ─────────────────────────────────────────────────────────── *)
+
+f=nochange(reg:$filterregistry;p:$layerparse;error:str):$layersettings{
+  <$layersettings{registry:reg;error:error;warning:"";present:p.present}
+};
+
+(* The registry with the [[privacy.layers]] entries in text applied and sorted by priority.
+   A text with no entry returns reg as it is. Any error returns reg unchanged with the error;
+   the caller refuses to run with it. *)
+f=resolve(reg:$filterregistry;text:str):$layersettings{
+  let p=parse(text);
+  if(p.errors.len>0){ <nochange(reg;p;str.join("; ";p.errors)) }el{};
+  if(!p.present){ <nochange(reg;p;"") }el{};
+  let out=mut.reg;
+  let seen=mut.@();
+  let warnings=mut.@();
+  lp(let i=0;i<p.entries.len;i=i+1){
+    let e:$layerentry=p.entries.get(i);
+    let err=entryerror(reg;e);
+    if(str.len(err)>0){ <nochange(reg;p;"\(at(e.line)): \(err)") }el{};
+    let id=unquote(e.id);
+    if(vocab.contains(seen;id)){ <nochange(reg;p;"\(at(e.line)): the layer \(id) has two [[privacy.layers]] entries") }el{};
+    seen=seen.push(id);
+    let f=fr.get(out;id);
+    let enabled=mut.f.enabled;
+    if(str.len(e.enabled)>0){ enabled=str.eq(e.enabled;"true") }el{};
+    let priority=mut.f.priority;
+    if(str.len(e.priority)>0){ priority=integer(e.priority) }el{};
+    let mode=mut.f.mode;
+    if(str.len(e.mode)>0){ mode=unquote(e.mode) }el{};
+    let threshold=mut.f.threshold;
+    if(str.len(e.threshold)>0){ threshold=decimal(e.threshold) }el{};
+    let filter=mut.f.entityfilter;
+    if(str.len(e.entityfilter)>0){ filter=str.join(",";filternames(e.entityfilter)) }el{};
+    if(str.eq(id;fr.regexid())){
+      if(!enabled){
+        warnings=warnings.push("enabled = false is not applied to the regex layer");
+        enabled=true
+      }el{};
+      if(str.eq(mode;fr.detectonly())){
+        warnings=warnings.push("mode = detect-only is not applied to the regex layer");
+        mode=fr.detectandmask()
+      }el{};
+      if(threshold>0.0){
+        warnings=warnings.push("confidence_threshold is not applied to the regex layer");
+        threshold=0.0
+      }el{};
+      if(str.len(filter)>0){
+        warnings=warnings.push("entity_filter is not applied to the regex layer");
+        filter=""
+      }el{}
+    }el{};
+    out=fr.setpolicy(out;id;enabled;priority;mode;threshold;filter)
+  };
+  let warning=mut."";
+  if(warnings.len>0){
+    warning="\(listed(warnings)): the regex layer always runs and masks everything it finds"
+  }el{};
+  <$layersettings{registry:fr.sortbypriority(out);error:"";warning:warning;present:true}
+};
+
+(* ── At run time ────────────────────────────────────────────────────────── *)
+
+f=infilter(filter:str;entitytype:str):bool{
+  if(str.len(filter)==0){ <true }el{};
+  <vocab.contains(str.split(filter;",");entitytype)
+};
+
+(* The detections a layer's settings accept: at or above its threshold, and of a type its
+   entity filter names. Everything, for a layer nobody configured. *)
+f=accepted(f:$privacyfilter;hits:@$piientity):@$piientity{
+  let out=mut.@();
+  lp(let i=0;i<hits.len;i=i+1){
+    let h:$piientity=hits.get(i);
+    if(h.confidence>=f.threshold && infilter(f.entityfilter;h.entitytype)){ out=out.push(h) }el{}
+  };
+  <out
+};
+
+(* Whether a layer's accepted detections are masked. Only detect-only's are not. *)
+f=masks(f:$privacyfilter):bool{
+  <!str.eq(f.mode;fr.detectonly())
+};
+
+(* Whether a layer refuses the request: in veto mode, with any accepted detection. *)
+f=vetoes(f:$privacyfilter;acceptedhits:@$piientity):bool{
+  <str.eq(f.mode;fr.veto()) && acceptedhits.len>0
 };

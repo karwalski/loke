@@ -24,7 +24,17 @@ t=$privacyfilter{
   confidence:f64;
   enabled:bool;
   url:str;
-  param:str
+  param:str;
+  (* F3b.2. What [[privacy.layers]] in config.toml says about the layer
+     (core.privacy.layerconfig). priority orders the registry, lower first; mode is
+     detect-and-mask, detect-only or veto; a detection is accepted only at or above
+     threshold and, when entityfilter is not empty, only for a type it names (comma
+     separated). The defaults below accept everything a layer reports and mask it, which is
+     what the pipeline did before the layers were configurable. *)
+  priority:i64;
+  mode:str;
+  threshold:f64;
+  entityfilter:str
 };
 
 t=$filterregistry{
@@ -47,6 +57,11 @@ f=defaultnermodel():str{ <"qwen2.5:7b" };
    scripts/check_default_ports.py fails if two services share a default again. *)
 f=defaultpfurl():str{ <"http://127.0.0.1:11435" };
 
+(* F3b.2. The three modes a layer can run in. *)
+f=detectandmask():str{ <"detect-and-mask" };
+f=detectonly():str{ <"detect-only" };
+f=veto():str{ <"veto" };
+
 f=newregistry():$filterregistry{
   <$filterregistry{filters:@();count:0}
 };
@@ -55,7 +70,7 @@ f=newregistry():$filterregistry{
    caller that does not check has still got nothing to run. `get` used to return
    filters.get(0) for a missing id, which was the regex layer. *)
 f=missing():$privacyfilter{
-  <$privacyfilter{id:"";name:"";kind:"";entitytypes:"";confidence:0.0;enabled:false;url:"";param:""}
+  <$privacyfilter{id:"";name:"";kind:"";entitytypes:"";confidence:0.0;enabled:false;url:"";param:"";priority:0;mode:detectandmask();threshold:0.0;entityfilter:""}
 };
 
 f=has(reg:$filterregistry;id:str):bool{
@@ -125,19 +140,50 @@ f=listenabled(reg:$filterregistry):@$privacyfilter{
 f=setenabled(reg:$filterregistry;id:str;enabled:bool):$filterregistry{
   if(!has(reg;id)){ <reg }el{};
   let f=get(reg;id);
-  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:enabled;url:f.url;param:f.param})
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:enabled;url:f.url;param:f.param;priority:f.priority;mode:f.mode;threshold:f.threshold;entityfilter:f.entityfilter})
 };
 
 f=seturl(reg:$filterregistry;id:str;url:str):$filterregistry{
   if(!has(reg;id)){ <reg }el{};
   let f=get(reg;id);
-  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:f.enabled;url:url;param:f.param})
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:f.enabled;url:url;param:f.param;priority:f.priority;mode:f.mode;threshold:f.threshold;entityfilter:f.entityfilter})
 };
 
 f=setparam(reg:$filterregistry;id:str;param:str):$filterregistry{
   if(!has(reg;id)){ <reg }el{};
   let f=get(reg;id);
-  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:f.enabled;url:f.url;param:param})
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:f.enabled;url:f.url;param:param;priority:f.priority;mode:f.mode;threshold:f.threshold;entityfilter:f.entityfilter})
+};
+
+(* F3b.2. One entry's layer settings, as core.privacy.layerconfig resolved them. *)
+f=setpolicy(reg:$filterregistry;id:str;enabled:bool;priority:i64;mode:str;threshold:f64;entityfilter:str):$filterregistry{
+  if(!has(reg;id)){ <reg }el{};
+  let f=get(reg;id);
+  <replace(reg;$privacyfilter{id:f.id;name:f.name;kind:f.kind;entitytypes:f.entitytypes;confidence:f.confidence;enabled:enabled;url:f.url;param:f.param;priority:priority;mode:mode;threshold:threshold;entityfilter:entityfilter})
+};
+
+(* F3b.2. The registry in priority order, lower first. Stable: entries of equal priority keep
+   the order they were in, so a registry nobody configured is returned as it was. The
+   pipeline runs the layers in this order, and core.privacy.consensus takes the same order
+   as first-match's priority. *)
+f=sortbypriority(reg:$filterregistry):$filterregistry{
+  let out=mut.@();
+  lp(let i=0;i<reg.filters.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
+    let placed=mut.false;
+    let next=mut.@();
+    lp(let j=0;j<out.len;j=j+1){
+      let o:$privacyfilter=out.get(j);
+      if(!placed && f.priority<o.priority){
+        next=next.push(f);
+        placed=true
+      }el{};
+      next=next.push(o)
+    };
+    if(!placed){ next=next.push(f) }el{};
+    out=next
+  };
+  <$filterregistry{filters:out;count:out.len as i64}
 };
 
 (* The four real layers, in the order the pipeline runs them: regex, NER, Presidio, then the
@@ -154,22 +200,26 @@ f=layers(presidiourl:str;ollamaurl:str):$filterregistry{
   let reg=register(reg;$privacyfilter{
     id:regexid();name:"Regex Pattern Detector";kind:"regex";
     entitytypes:vocab.layertypetext(regexid());
-    confidence:0.95;enabled:true;url:"";param:""
+    confidence:0.95;enabled:true;url:"";param:"";
+    priority:1;mode:detectandmask();threshold:0.0;entityfilter:""
   });
   let reg=register(reg;$privacyfilter{
     id:nerid();name:"NLP NER Detector";kind:"ner";
     entitytypes:vocab.layertypetext(nerid());
-    confidence:0.85;enabled:true;url:ollamaurl;param:defaultnermodel()
+    confidence:0.85;enabled:true;url:ollamaurl;param:defaultnermodel();
+    priority:2;mode:detectandmask();threshold:0.0;entityfilter:""
   });
   let reg=register(reg;$privacyfilter{
     id:presidioid();name:"Presidio Analyser";kind:"external";
     entitytypes:vocab.layertypetext(presidioid());
-    confidence:0.80;enabled:true;url:presidiourl;param:""
+    confidence:0.80;enabled:true;url:presidiourl;param:"";
+    priority:3;mode:detectandmask();threshold:0.0;entityfilter:""
   });
   let reg=register(reg;$privacyfilter{
     id:privacyfilterid();name:"OpenAI Privacy Filter (sidecar)";kind:"external";
     entitytypes:vocab.layertypetext(privacyfilterid());
-    confidence:0.0;enabled:false;url:defaultpfurl();param:""
+    confidence:0.0;enabled:false;url:defaultpfurl();param:"";
+    priority:4;mode:detectandmask();threshold:0.0;entityfilter:""
   });
   <reg
 };

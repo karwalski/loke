@@ -696,6 +696,30 @@ print("ok" if sys.argv[1] in (r.get("response") or "") else "response differs: %
   rm -f "$WORK/lk/home/.loke/config.toml"
   kill "$PR_PID" 2>/dev/null; wait "$PR_PID" 2>/dev/null
 fi
+# F3b.2: [[privacy.layers]] in config.toml, which the /api/pipeline handler reads per request.
+# The regex layer in veto mode finds the email, so the request is refused and nothing reaches
+# the model; then a malformed entry refuses a request with no PII in it at all.
+mkdir -p "$WORK/lk/home/.loke"
+if [ -e "$WORK/lk/home/.loke/config.toml" ]; then echo "  FAIL a config.toml already exists in the throwaway HOME; the layers check would not own it" >&2; fail=1
+else
+  printf '[[privacy.layers]]\nid = "regex"\nmode = "veto"\n' > "$WORK/lk/home/.loke/config.toml"
+  VETOMAIL="veto.check@example.com"
+  : > "$SEEN"
+  pipe_post "please write to $VETOMAIL about the invoice" ""
+  judge "with the regex layer in veto mode, a request carrying an email is refused" 503 '"error":"the regex privacy layer is in veto mode and found PII above its threshold","refused":true'
+  case "$BODY" in
+    *"$VETOMAIL"*) echo "  FAIL the refusal echoed the email it vetoed" >&2; fail=1 ;;
+    *) echo "  ok   and the refusal does not repeat the email" ;;
+  esac
+  if [ -s "$SEEN" ]; then echo "  FAIL the model received a request the veto refused: $(head -c 200 "$SEEN")" >&2; fail=1
+  else echo "  ok   and the model received nothing"; fi
+  printf '[[privacy.layers]]\nid = "ner"\nmode = "block"\n' > "$WORK/lk/home/.loke/config.toml"
+  pipe_post "what is the capital of France" ""
+  judge "a malformed [[privacy.layers]] refuses even a request with no PII, saying why" 503 '"error":"privacy.layers in config.toml cannot be applied: config.toml line 1: mode must be detect-and-mask, detect-only or veto","refused":true'
+  if [ -s "$SEEN" ]; then echo "  FAIL the model received a request the malformed config refused" >&2; fail=1
+  else echo "  ok   and the model received nothing"; fi
+  rm -f "$WORK/lk/home/.loke/config.toml"
+fi
 # GA1.5: the token optimiser, between the privacy filter and dispatch. scripts/lib/http_recorder.py
 # stands in for the LLMLingua sidecar: in `echo` mode it keeps every placeholder and every other
 # word; in `answer` mode it answers "short", dropping the placeholder. It is configured the way a

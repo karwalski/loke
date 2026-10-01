@@ -5,85 +5,147 @@ m=test.privacy.layerconfig;
 
 i=t:std.test;
 i=str:std.str;
+i=sh:shared.types;
+i=fr:core.privacy.filterregistry;
 i=lc:core.privacy.layerconfig;
 
-(* X7.2 — this file used to declare its own $layerentry and $layerconfig and assert
-   against them. It now imports core.privacy.layerconfig.
+(* F3b.2 — core.privacy.layerconfig reads [[privacy.layers]] from a config.toml text and
+   applies it to the filter registry core.privacy.pipeline runs. This file judges the module
+   on its own: what each entry changes, the order it leaves, what it refuses, and what it
+   will not do to the regex layer. tests/unit/privacy/test_layer_config_pipeline.tk judges
+   the same settings by what the production pipeline masks.
 
-   FINDING, recorded rather than asserted as correct: getlayer RETURNS THE FIRST LAYER
-   FOR AN UNKNOWN ID.
+   It replaces the X7.2 test of the old module, whose $layerconfig nothing read: that
+   module's default switched Presidio off, made it detect-only and set thresholds that would
+   have dropped detections, so it could not be wired as it was without masking less. *)
 
-       f=getlayer(cfg:$layerconfig;id:str):$layerentry{
-         let result=mut.cfg.layers.get(0);
-         ...
+f=order(reg:$filterregistry):str{
+  let ids=mut.@();
+  lp(let i=0;i<reg.filters.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
+    ids=ids.push(f.id)
+  };
+  <str.join(",";ids)
+};
 
-   The accumulator is seeded with layers.get(0) — the regex layer — and only overwritten
-   on a match. So getlayer(cfg;"presidio-v2") returns the REGEX layer's entry, complete
-   with enabled:true and a 0.8 confidence threshold, under a name that does not exist. A
-   caller checking whether a layer it was asked about is enabled gets "yes" for every
-   layer it has never heard of. The honest answers are either an `enabled:false` sentinel
-   or a `has` predicate alongside it, as core.privacy.entityrouting at least manages —
-   that one returns empty layer lists rather than another layer's.
+f=defaultorder():str{ <"regex,ner,presidio,openai-privacy-filter" };
 
-   It is worse than fail-open on a lookup: it attributes one layer's configuration to
-   another, so a diagnostic printed from it would be confidently wrong about which layer
-   is doing what.
+f=entry(id:str;body:str):str{
+  <"[[privacy.layers]]\nid = \"\(id)\"\n\(body)\n"
+};
 
-   NOT FIXED HERE: this module has no importer anywhere in the repository, so the defect
-   is latent. The assertion below records it, following the precedent in
-   tests/unit/storage/test_backup.tk, and turns RED when a sentinel or a predicate is
-   added. *)
+f=resolved(text:str):$layersettings{
+  <lc.resolve(fr.defaultregistry();text)
+};
+
+(* A text that must be refused: an error, and the registry handed back as it was. *)
+f=refused(text:str;why:str):bool{
+  let s=resolved(text);
+  let ok=str.len(s.error)>0 && str.eq(order(s.registry);defaultorder()) && fr.get(s.registry;"ner").enabled && str.eq(fr.get(s.registry;"presidio").mode;fr.detectandmask());
+  <t.assert(ok;"refused, registry unchanged: \(why) (\(s.error))")
+};
+
+f=hit(etype:str;value:str;confidence:f64):$piientity{
+  <$piientity{entitytype:etype;value:value;start:0 as u32;end:0 as u32;confidence:confidence;placeholder:""}
+};
 
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
-  let cfg=lc.defaultconfig();
+  (* ── No [[privacy.layers]]: the registry as it was ───────────────────────── *)
+  let none=resolved("");
+  if(t.assert(str.len(none.error)==0 && !none.present;"an empty text is not an error and has no layers entry")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(order(none.registry);defaultorder();"and leaves the registry in its default order")){pass=pass+1}el{fail=fail+1};
+  let other=resolved("[privacy]\nconsensus_strategy = \"majority\"\nprivacy_filter = false\n\n[providers]\nollama_url = \"http://127.0.0.1:11434\"\n");
+  if(t.assert(str.len(other.error)==0 && !other.present && str.eq(order(other.registry);defaultorder());"a config.toml with other settings and no layers changes nothing")){pass=pass+1}el{fail=fail+1};
+  let allmask=mut.true;
+  lp(let i=0;i<none.registry.filters.len;i=i+1){
+    let f:$privacyfilter=none.registry.filters.get(i);
+    if(!str.eq(f.mode;fr.detectandmask()) || f.threshold>0.0 || str.len(f.entityfilter)>0){ allmask=false }el{}
+  };
+  if(t.assert(allmask;"every default layer is detect-and-mask, threshold 0, no entity filter: it accepts and masks everything it reports")){pass=pass+1}el{fail=fail+1};
+  let ra=lc.accepted(fr.get(none.registry;"ner");@(hit("PERSON";"a";0.0);hit("LOCATION";"b";0.65)));
+  if(t.assert(ra.len==2;"so a default layer accepts every detection, even one at confidence 0")){pass=pass+1}el{fail=fail+1};
 
-  (* ── The default layer set ───────────────────────────────────────────────────
-     Three layers, and WHICH of them ship enabled is the whole security posture of a
-     fresh install: regex is in-process and cannot be unavailable, NER needs Ollama,
-     Presidio needs a sidecar. *)
-  if(t.assert(cfg.layers.len==3;"three detection layers are configured by default")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.getlayer(cfg;"regex").enabled;"the regex layer ships ENABLED — it is in-process and is the one layer that cannot be unavailable")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.getlayer(cfg;"ner").enabled;"NER ships enabled")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(!lc.getlayer(cfg;"presidio").enabled;"and Presidio ships DISABLED, because it needs a sidecar that is not part of the install")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.enabledlayers(cfg).len==2;"so two layers are active on a fresh install")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.enabledlayers(cfg).len>0;"and never zero, which would mean nothing scans the text")){pass=pass+1}el{fail=fail+1};
+  (* ── Priority ───────────────────────────────────────────────────────────── *)
+  let first=resolved(entry("presidio";"priority = 0"));
+  if(t.asserteq(order(first.registry);"presidio,regex,ner,openai-privacy-filter";"presidio at priority 0 runs first")){pass=pass+1}el{fail=fail+1};
+  let last=resolved(entry("ner";"priority = 9"));
+  if(t.asserteq(order(last.registry);"regex,presidio,openai-privacy-filter,ner";"ner at priority 9 runs last")){pass=pass+1}el{fail=fail+1};
+  let tie=resolved(entry("openai-privacy-filter";"priority = 2"));
+  if(t.asserteq(order(tie.registry);"regex,ner,openai-privacy-filter,presidio";"an equal priority keeps registry order: the privacy filter at 2 runs after ner (2) and before presidio (3)")){pass=pass+1}el{fail=fail+1};
+  let neg=resolved(str.concat(entry("ner";"priority = -1");entry("presidio";"priority = -5")));
+  if(t.asserteq(order(neg.registry);"presidio,ner,regex,openai-privacy-filter";"negative priorities and two entries")){pass=pass+1}el{fail=fail+1};
 
-  (* Priority orders the layers. Regex first is deliberate: it is deterministic and free,
-     so it runs before anything that costs a model call. *)
-  if(t.assert(lc.getlayer(cfg;"regex").priority<lc.getlayer(cfg;"ner").priority;"regex runs before NER, being deterministic and free")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.getlayer(cfg;"ner").priority<lc.getlayer(cfg;"presidio").priority;"and NER before Presidio")){pass=pass+1}el{fail=fail+1};
+  (* ── Each setting reaches its entry ──────────────────────────────────────── *)
+  let full=resolved(entry("presidio";"enabled = true\nmode = \"veto\"\nconfidence_threshold = 0.9   # a comment\nentity_filter = [\"PERSON\", \"CREDIT_CARD\",]"));
+  let pf:$privacyfilter=fr.get(full.registry;"presidio");
+  if(t.assert(str.len(full.error)==0 && full.present;"a full entry, with a comment and a trailing comma, is accepted (\(full.error))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.mode;"veto";"mode is applied")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pf.threshold>0.89 && pf.threshold<0.91;"confidence_threshold is applied")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pf.entityfilter;"PERSON,CREDIT_CARD";"entity_filter is applied")){pass=pass+1}el{fail=fail+1};
+  let quoted=resolved(entry("ner";"confidence_threshold = \"0.5\"\nenabled = false"));
+  let qn:$privacyfilter=fr.get(quoted.registry;"ner");
+  if(t.assert(qn.threshold>0.49 && qn.threshold<0.51;"a threshold written as text, as the other privacy thresholds are, is applied")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!qn.enabled;"enabled = false switches a model layer off")){pass=pass+1}el{fail=fail+1};
+  let pfon=resolved(entry("openai-privacy-filter";"enabled = true"));
+  if(t.assert(fr.get(pfon.registry;"openai-privacy-filter").enabled;"and enabled = true switches one on")){pass=pass+1}el{fail=fail+1};
+  let single=resolved("[[ privacy.layers ]]\nid = 'ner'\nmode = 'detect-only'\n");
+  if(t.asserteq(fr.get(single.registry;"ner").mode;"detect-only";"single quotes and spaces inside the header are read")){pass=pass+1}el{fail=fail+1};
 
-  (* Mode. detect-and-mask actually redacts; detect-only reports and does not. A layer
-     silently switched to detect-only would detect everything and mask nothing, which
-     looks like a working pipeline and forwards the text in the clear. *)
-  if(t.asserteq(lc.getlayer(cfg;"regex").mode;"detect-and-mask";"the regex layer MASKS what it detects, rather than only reporting it")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(lc.getlayer(cfg;"ner").mode;"detect-and-mask";"and so does NER")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(lc.getlayer(cfg;"presidio").mode;"detect-only";"Presidio is detect-only by default")){pass=pass+1}el{fail=fail+1};
+  (* ── At run time ────────────────────────────────────────────────────────── *)
+  let hits=@(hit("PERSON";"Jane";0.78);hit("PERSON";"Bob";0.95);hit("CREDIT_CARD";"4111";0.99);hit("LOCATION";"Perth";0.95));
+  let thr=resolved(entry("ner";"confidence_threshold = 0.8"));
+  let ta=lc.accepted(fr.get(thr.registry;"ner");hits);
+  if(t.assert(ta.len==3;"a threshold of 0.8 drops the 0.78 detection and keeps the three above it")){pass=pass+1}el{fail=fail+1};
+  let at08=resolved(entry("ner";"confidence_threshold = 0.78"));
+  if(t.assert(lc.accepted(fr.get(at08.registry;"ner");hits).len==4;"a detection AT the threshold is kept")){pass=pass+1}el{fail=fail+1};
+  let fa=lc.accepted(pf;hits);
+  if(t.assert(fa.len==2;"presidio, filtered to PERSON and CREDIT_CARD at 0.9, accepts Bob and the card only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.vetoes(pf;fa);"a veto layer with an accepted detection vetoes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!lc.vetoes(pf;lc.accepted(pf;@(hit("PERSON";"Jane";0.85))));"and one whose detections are all below its threshold does not")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!lc.vetoes(fr.get(none.registry;"presidio");hits);"a detect-and-mask layer never vetoes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lc.masks(pf) && lc.masks(fr.get(none.registry;"ner"));"veto and detect-and-mask layers mask")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!lc.masks(fr.get(single.registry;"ner"));"a detect-only layer does not")){pass=pass+1}el{fail=fail+1};
 
-  (* Confidence thresholds. A threshold of 0 would accept every candidate a layer
-     produced; a threshold of 1 would accept none. Both ends are asserted rather than the
-     exact values, so the numbers can be tuned but not zeroed. *)
-  if(t.assert(lc.getlayer(cfg;"regex").confidencethreshold>0.0;"every layer has a confidence threshold above zero — zero would accept every candidate")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.getlayer(cfg;"regex").confidencethreshold<1.0;"and below one, which would accept none")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.getlayer(cfg;"ner").confidencethreshold>0.0;"the same for NER")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(lc.getlayer(cfg;"presidio").confidencethreshold>0.0;"and for Presidio")){pass=pass+1}el{fail=fail+1};
+  (* ── The regex layer is never turned down ────────────────────────────────── *)
+  let rx=resolved(entry("regex";"enabled = false\nmode = \"detect-only\"\nconfidence_threshold = 1.0\nentity_filter = [\"email\"]\npriority = 7"));
+  let rf:$privacyfilter=fr.get(rx.registry;"regex");
+  if(t.assert(str.len(rx.error)==0;"turning the regex layer down is not an error (\(rx.error))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rf.enabled;"enabled = false is not applied to regex")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(rf.mode;fr.detectandmask();"nor is detect-only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rf.threshold==0.0 && str.len(rf.entityfilter)==0;"nor a threshold or an entity filter")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(rx.warning;"regex") && str.contains(rx.warning;"enabled = false") && str.contains(rx.warning;"entity_filter");"and each is named in the warning (\(rx.warning))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(order(rx.registry);"ner,presidio,openai-privacy-filter,regex";"its priority IS applied: running it later masks no less")){pass=pass+1}el{fail=fail+1};
+  let rv=resolved(entry("regex";"mode = \"veto\""));
+  if(t.assert(str.eq(fr.get(rv.registry;"regex").mode;"veto") && str.len(rv.warning)==0;"and so is veto, which can only refuse more")){pass=pass+1}el{fail=fail+1};
 
-  (* The entity filter is empty by default, which means every entity type. A non-empty
-     default would silently narrow detection on a fresh install. *)
-  if(t.asserteq(lc.getlayer(cfg;"regex").entityfilter;"";"the entity filter is empty by default, so no entity type is excluded on a fresh install")){pass=pass+1}el{fail=fail+1};
-
-  (* The consensus strategy decides what happens when two layers disagree.
-     most-restrictive is the fail-safe direction for redaction. *)
-  if(t.asserteq(cfg.consensusstrategy;"most-restrictive";"disagreement between layers resolves the MOST restrictive way, which is the fail-safe direction for redaction")){pass=pass+1}el{fail=fail+1};
-
-  (* ── FINDING, recorded: an unknown layer id returns the FIRST layer ──────────*)
-  let unknown=lc.getlayer(cfg;"no-such-layer");
-  if(t.asserteq(unknown.id;"regex";"an UNKNOWN layer id returns the first layer's entry — the regex layer — rather than a sentinel")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(unknown.enabled;"so a caller asking whether a layer it has never heard of is enabled is told YES")){pass=pass+1}el{fail=fail+1};
-  if(t.asserteq(lc.getlayer(cfg;"").id;"regex";"and an empty id does the same")){pass=pass+1}el{fail=fail+1};
+  (* ── Malformed: refused, never partly applied ────────────────────────────── *)
+  if(refused("[[privacy.layers]]\nid = \"nosuch\"\n";"an unknown id")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.layers]]\nenabled = false\n";"an entry with no id")){pass=pass+1}el{fail=fail+1};
+  if(refused("[[privacy.layers]]\nid = ner\n";"an unquoted id")){pass=pass+1}el{fail=fail+1};
+  if(refused(str.concat(entry("ner";"enabled = false");entry("ner";"priority = 1"));"two entries for one layer, the first of which would switch NER off")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"enabled = false\nthreshold = 0.5");"an unknown key, after a valid enabled = false")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"enabled = false\nenabled = true");"a key given twice")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"enabled = \"no\"");"enabled as text")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"priority = 1.5");"a fractional priority")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("presidio";"mode = \"block\"");"an unknown mode")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("presidio";"mode = veto");"an unquoted mode")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("presidio";"confidence_threshold = 1.5");"a threshold above 1")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("presidio";"confidence_threshold = -0.1");"a negative threshold")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("presidio";"confidence_threshold = \"high\"");"a threshold that is not a number")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("presidio";"confidence_threshold = 0.9x");"a threshold with trailing text")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"entity_filter = [\"EMAIL_ADDRESS\"]");"an entity type the layer does not report")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"entity_filter = [PERSON]");"an unquoted entity type")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"entity_filter = [\n  \"PERSON\",\n]");"an entity_filter over several lines")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"entity_filter = \"PERSON\"");"an entity_filter that is not an array")){pass=pass+1}el{fail=fail+1};
+  if(refused(entry("ner";"enabled");"a line with no value")){pass=pass+1}el{fail=fail+1};
+  if(refused("[privacy.layers]\nid = \"ner\"\nenabled = false\n";"[privacy.layers] written as a table")){pass=pass+1}el{fail=fail+1};
+  if(refused("[privacy]\nlayers = [{ id = \"ner\", enabled = false }]\n";"layers written inline")){pass=pass+1}el{fail=fail+1};
+  let bad=resolved(str.concat(entry("presidio";"priority = 0");"[[privacy.layers]]\nid = \"ner\"\nmode = \"block\"\n"));
+  if(t.assert(str.contains(bad.error;"line 4") && str.contains(bad.error;"mode");"the error names the entry's line and the key (\(bad.error))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(order(bad.registry);defaultorder();"and the valid entry before it is not applied either")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

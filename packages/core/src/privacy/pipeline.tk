@@ -16,6 +16,7 @@ i=fr:core.privacy.filterregistry;
 i=lh:core.privacy.layerhealth;
 i=cfg:shared.config;
 i=cn:core.privacy.consensus;
+i=lyc:core.privacy.layerconfig;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
    detection layers exist, which are enabled, the order they run in and the URL and setting
@@ -33,7 +34,10 @@ t=$pipelineconfig{
   (* F3b.4. privacy.consensus_strategy and privacy.consensus_threshold, as configured;
      core.privacy.consensus applies most-restrictive to any name it does not know. *)
   consensus:str;
-  consensusthreshold:str
+  consensusthreshold:str;
+  (* F3b.2. Why the [[privacy.layers]] in config.toml could not be applied, or "". Every run
+     made with a config carrying one is refused (core.privacy.layerconfig). *)
+  layererror:str
 };
 
 t=$stageresult{
@@ -64,7 +68,11 @@ t=$pipelinerun{
   (* F3b.4. The consensus strategy applied, and every layer detection with the layers and
      confidences of its group and whether it was masked. *)
   consensus:str;
-  resolved:@$resolvedentity
+  resolved:@$resolvedentity;
+  (* F3b.2. The layer, in veto mode, that found PII above its threshold, or "". And the
+     config's layer error, if the run was made with one. issafetoforward refuses either. *)
+  vetoedby:str;
+  layererror:str
 };
 
 
@@ -72,11 +80,11 @@ t=$pipelinerun{
    registered and OFF, so a caller that says nothing about it gets the three layers it had
    (F3b.3). *)
 f=newconfig(purl:str;ourl:str):$pipelineconfig{
-  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false;consensus:cn.defaultstrategy();consensusthreshold:""}
+  <$pipelineconfig{layers:fr.layers(purl;ourl);dryrun:false;consensus:cn.defaultstrategy();consensusthreshold:"";layererror:""}
 };
 
 f=withlayers(c:$pipelineconfig;layers:$filterregistry):$pipelineconfig{
-  <$pipelineconfig{layers:layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold}
+  <$pipelineconfig{layers:layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror}
 };
 
 (* One registry entry switched on or off. An id the registry does not hold is left alone. *)
@@ -85,7 +93,7 @@ f=withlayer(c:$pipelineconfig;id:str;enabled:bool):$pipelineconfig{
 };
 
 f=withdryrun(c:$pipelineconfig;dryrun:bool):$pipelineconfig{
-  <$pipelineconfig{layers:c.layers;dryrun:dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold}
+  <$pipelineconfig{layers:c.layers;dryrun:dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror}
 };
 
 (* The privacy-filter layer switched on (or off) at a sidecar URL and operating point. The
@@ -97,11 +105,24 @@ f=withprivacyfilter(c:$pipelineconfig;enabled:bool;url:str;threshold:str):$pipel
 };
 
 f=withconsensus(c:$pipelineconfig;strategy:str;threshold:str):$pipelineconfig{
-  <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:strategy;consensusthreshold:threshold}
+  <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:strategy;consensusthreshold:threshold;layererror:c.layererror}
+};
+
+(* F3b.2. The [[privacy.layers]] entries in a config.toml text applied to the registry. One
+   that cannot be applied leaves the registry as it was and sets layererror, which refuses
+   every run made with the config. *)
+f=withlayerconfig(c:$pipelineconfig;text:str):$pipelineconfig{
+  let ls:$layersettings=lyc.resolve(c.layers;text);
+  if(str.len(ls.warning)>0){ log.warn("privacy.layers: \(ls.warning)";"pipeline";"") }el{};
+  if(str.len(ls.error)>0){
+    log.error("privacy.layers cannot be applied, so requests will be refused: \(ls.error)";"pipeline";"");
+    <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:ls.error}
+  }el{};
+  <withlayers(c;ls.registry)
 };
 
 f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
-  <withconsensus(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);lc.consensusstrategy;lc.consensusthreshold)
+  <withlayerconfig(withconsensus(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);lc.consensusstrategy;lc.consensusthreshold);lc.sourcetext)
 };
 
 (* newconfig plus the privacy-filter settings from the user's config.toml, read now. *)
@@ -531,6 +552,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let completed=mut.0;
   let degraded=mut.0;
   let unplaced=mut.0;
+  let vetoedby=mut."";
 
   (* F3b.1 / F3b.6. Every detection layer, in registry order, through the one path in
      core.privacy.layerhealth: a disabled entry is recorded as a skipped stage and sent
@@ -545,11 +567,20 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     let st:$layerstatus=lr.status;
     if(lh.iscompleted(st)){
       completed=completed+1;
-      voters=voters.push(layer.id);
-      lp(let hi=0;hi<lr.hits.len;hi=hi+1){
-        allentities=allentities.push(lr.hits.get(hi));
-        hitlayers=hitlayers.push(layer.id)
-      };
+      (* F3b.2. Only the detections the layer's threshold and entity filter accept count; a
+         detect-only layer's are not masked and it does not vote; a veto layer's refuse. *)
+      let hits=lyc.accepted(layer;lr.hits);
+      if(lyc.masks(layer)){
+        voters=voters.push(layer.id);
+        lp(let hi=0;hi<hits.len;hi=hi+1){
+          allentities=allentities.push(hits.get(hi));
+          hitlayers=hitlayers.push(layer.id)
+        }
+      }el{};
+      if(lyc.vetoes(layer;hits) && str.len(vetoedby)==0){
+        vetoedby=layer.id;
+        log.warn("privacy layer \(layer.id) is in veto mode and found PII -- the run will be refused";"pipeline";requestid)
+      }el{};
       (* MK6.16. Logged and then forwarded until now: an entity a layer found and nothing
          masked. Counted, and issafetoforward refuses the run. *)
       if(lr.unplaced>0){
@@ -658,7 +689,9 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     layersdegraded:degraded as u32;
     unplaced:unplaced as u32;
     consensus:agreed.strategy;
-    resolved:agreed.resolved
+    resolved:agreed.resolved;
+    vetoedby:vetoedby;
+    layererror:config.layererror
   }
 };
 
@@ -695,11 +728,13 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
                                 loke could not place in the text exactly, so nothing masked
                                 it. Refuse, rather than forward what it found. *)
 f=issafetoforward(r:$pipelinerun):bool{
-  <(r.layerscompleted>(0 as u32)) && (r.unplaced==(0 as u32))
+  <(r.layerscompleted>(0 as u32)) && (r.unplaced==(0 as u32)) && (str.len(r.vetoedby)==0) && (str.len(r.layererror)==0)
 };
 
 (* Why issafetoforward refused r, for a caller's refusal message. Names no entity. *)
 f=refusalreason(r:$pipelinerun):str{
+  if(str.len(r.layererror)>0){ <"privacy.layers in config.toml cannot be applied: \(r.layererror)" }el{};
+  if(str.len(r.vetoedby)>0){ <"the \(r.vetoedby) privacy layer is in veto mode and found PII above its threshold" }el{};
   if(r.unplaced>0 as u32){ <"a privacy detection layer reported an entity that could not be located in the text exactly" }el{};
   <"no privacy detection layer is available"
 };
@@ -713,10 +748,14 @@ f=runforward(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
       log.warn("privacy pipeline degraded: \(r.layersdegraded) enabled layer(s) unavailable, \(r.layerscompleted) completed";"pipeline";r.requestid)
     }el{}
   }el{
-    if(r.unplaced>0 as u32){
-      log.error("privacy pipeline failed closed: \(r.unplaced) detected span(s) could not be placed in the text exactly, so this text must not be forwarded";"pipeline";r.requestid)
+    if(str.len(r.layererror)>0 || str.len(r.vetoedby)>0){
+      log.error("privacy pipeline failed closed: \(refusalreason(r))";"pipeline";r.requestid)
     }el{
-      log.error("privacy pipeline failed closed: no detection layer completed a scan, so this text must not be forwarded";"pipeline";r.requestid)
+      if(r.unplaced>0 as u32){
+        log.error("privacy pipeline failed closed: \(r.unplaced) detected span(s) could not be placed in the text exactly, so this text must not be forwarded";"pipeline";r.requestid)
+      }el{
+        log.error("privacy pipeline failed closed: no detection layer completed a scan, so this text must not be forwarded";"pipeline";r.requestid)
+      }
     }
   };
   <r

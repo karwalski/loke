@@ -17,14 +17,12 @@ Two scoping notes, so the rest of the document is read correctly:
 
 ## Architecture Overview
 
-> **What runs today (AD1.7, F3b.3).** The design below is not wired. `pipeline.run` calls the regex
-> layer, Ollama NER, Presidio and — when `privacy.privacy_filter = true` in `config.toml`, off by
-> default — the privacy-filter sidecar (through `core.privacy.sidecarclient`, loopback only) by name in
-> a fixed order, and de-duplicates overlaps itself. The consensus, layer-config, layer-health,
-> entity-routing, filter-registry, org-policy, per-layer-metrics and evaluation modules exist with unit
-> tests and have no importer in the product (the registry lists `openai-privacy-filter`, but the
-> pipeline does not read the registry); the four consensus strategies are not implemented. See
-> [claims.md](claims.md) §B.
+> **What runs today (AD1.7, F3b.1–F3b.4).** `pipeline.run` walks the filter registry (regex, Ollama
+> NER, Presidio and, when `privacy.privacy_filter = true`, the privacy-filter sidecar) through
+> `core.privacy.layerhealth`, in the order and with the settings `[[privacy.layers]]` gives (F3b.2),
+> and resolves overlaps by `privacy.consensus_strategy` (F3b.4). The entity-routing, org-policy,
+> per-layer-metrics and evaluation modules exist with unit tests and have no importer in the product.
+> See [claims.md](claims.md) §B.
 
 The privacy filter is a composable pipeline of detection layers. Each layer independently scans text for sensitive entities (PII, PHI, financial data, etc.) and produces detection results. A consensus strategy then merges all layer outputs into a final set of resolved entities, which are masked before the text leaves the device.
 
@@ -103,8 +101,46 @@ nothing filters on yet. A disabled entry is sent nothing and is recorded in the 
 ```
 
 NER and Presidio are enabled so that a missing service shows up as a DEGRADED layer rather than
-silently absent. Only the privacy filter can be switched and re-addressed from `config.toml` today.
-`layer_config.tk` (priority, mode, per-layer threshold) describes the same layers but nothing reads it.
+silently absent.
+
+### `[[privacy.layers]]` in config.toml (F3b.2)
+
+Each layer can be configured with an entry in `~/.loke/config.toml`. Every key but `id` is optional;
+a key left out keeps the default above.
+
+```toml
+[[privacy.layers]]
+id = "presidio"                           # regex, ner, presidio or openai-privacy-filter
+enabled = true
+priority = 0                              # lower runs first; unlisted layers keep 1, 2, 3, 4
+mode = "veto"                             # detect-and-mask (default), detect-only or veto
+confidence_threshold = 0.9                # 0 to 1, default 0; a number or "0.9"
+entity_filter = ["PERSON", "CREDIT_CARD"] # types the layer reports; empty means all
+```
+
+- **priority** sets the order `pipeline.run` consults the layers in, which is also first-match's order
+  of precedence. Equal priorities keep the order above.
+- **confidence_threshold** and **entity_filter** narrow what a layer's detections count for. A
+  detection below the threshold, or of a type the filter does not name, is not masked by that layer
+  and does not vote. These settings can only mask less. With no `[[privacy.layers]]`, every layer
+  accepts everything it reports, as before.
+- **detect-only**: the layer's detections are counted in its stage and not masked.
+- **veto**: the layer's detections are masked, and if it accepts any, the request is refused
+  (`issafetoforward` is false; `/api/pipeline` answers 503 with a reason that names the layer and no
+  PII).
+- **The regex layer cannot be turned down from config.toml.** `enabled = false`, `detect-only`, a
+  threshold and an entity filter are logged as a warning and not applied to it. Its priority and `veto`
+  are applied.
+- **A malformed entry refuses every request** until it is fixed. That covers an unknown id or key, a
+  duplicate, a value of the wrong kind, a threshold outside 0 to 1, an unknown mode or entity type, an
+  `entity_filter` over several lines, and `[privacy.layers]` written as a table or `layers = [...]`
+  inline. None of the layers config is applied, and the refusal says what is wrong. It does not fall
+  back to the defaults, because a config the user believes is in force, and is not, silently changes
+  what is masked.
+
+Not yet: organisation-managed settings that override these (F3b.8), and editing them in the settings
+UI. `std.toml` has no array-of-tables accessor at this toolchain, so `core.privacy.layerconfig` reads
+the entries from the file text itself: one `key = value` per line, and strings without escapes.
 
 ### Enabling Presidio
 

@@ -1,0 +1,233 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.layerconfigpipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=pt:core.privacy.pipelinetypes;
+i=fr:core.privacy.filterregistry;
+i=cn:core.privacy.consensus;
+i=cfg:shared.config;
+i=sh:shared.types;
+
+(* F3b.2 — [[privacy.layers]] in config.toml, judged by what the production pipeline
+   (core.privacy.pipeline.runforward) masks, the order it runs the layers in, and whether it
+   lets the run be forwarded.
+
+   scripts/lib/http_recorder.py stands in for NER (Ollama /api/chat) and Presidio (/analyze):
+   both report "Jane Citizen" at the start of the text. NER rates it 0.78 (its PERSON rating
+   in core.privacy.ner) and Presidio 0.92 (as core.privacy.presidio rates the recorder's
+   answer). The regex layer finds the email.
+
+   THE DEFAULT MUST MASK WHAT IT MASKED BEFORE. A config.toml with no [[privacy.layers]] is
+   checked against the pipeline built without reading one at all, value for value. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_layercfg_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=three(url:str):$pipelineconfig{
+  <pl.newconfig(url;url)
+};
+
+f=layers(url:str;text:str):$pipelineconfig{
+  <pl.withlayerconfig(three(url);text)
+};
+
+f=entry(id:str;body:str):str{
+  <"[[privacy.layers]]\nid = \"\(id)\"\n\(body)\n"
+};
+
+f=masked(r:$pipelinerun):str{
+  let out=mut.@();
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    out=out.push(e.value)
+  };
+  <str.join("|";out)
+};
+
+(* The same values, in any order: the order a run lists its entities in follows the order
+   the layers ran in. *)
+f=samevalues(a:$pipelinerun;b:$pipelinerun):bool{
+  if(a.result.entities.len==b.result.entities.len){}el{ <false };
+  let bm=masked(b);
+  let all=mut.true;
+  lp(let i=0;i<a.result.entities.len;i=i+1){
+    let e:$piientity=a.result.entities.get(i);
+    if(!str.contains(bm;e.value)){ all=false }el{}
+  };
+  <all
+};
+
+f=stagename(st:$pipelinestage):str{
+  <mt st {
+    $regexscan:v "regex";
+    $nerscan:v "ner";
+    $presidioscan:v "presidio";
+    $dedup:v "dedup";
+    $anonymise:v "anonymise";
+    $guardianinject:v "guardian";
+    $privacyfilterscan:v "privacy_filter"
+  }
+};
+
+(* The detection stages in the order the run recorded them, "name:scanned" or "name:skipped". *)
+f=detectionorder(run:$pipelinerun):str{
+  let out=mut.@();
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    let n=stagename(sr.stage);
+    if(str.eq(n;"dedup") || str.eq(n;"anonymise") || str.eq(n;"guardian")){}el{
+      if(sr.skipped){ out=out.push("\(n):skipped") }el{ out=out.push("\(n):scanned") }
+    }
+  };
+  <str.join(",";out)
+};
+
+f=found(run:$pipelinerun;name:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    if(str.eq(stagename(sr.stage);name)){ n=sr.entitiesfound as i64 }el{}
+  };
+  <n
+};
+
+f=resolvedfor(r:$pipelinerun;value:str):str{
+  let out=mut."";
+  lp(let i=0;i<r.resolved.len;i=i+1){
+    let re:$resolvedentity=r.resolved.get(i);
+    if(str.eq(re.value;value)){ out="\(re.action) \(re.detectinglayers)" }el{}
+  };
+  <out
+};
+
+f=writeconfig(body:str):bool{
+  let made=mt file.mkdir(sh.lokedir()) {$ok:v v;$err:e false};
+  <mt file.write(sh.configpath();body) {$ok:v v;$err:e false}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  let text="Jane Citizen called Tuesday, mail jane@example.com";
+  let name="Jane Citizen";
+  let email="jane@example.com";
+
+  (* ── The default is unchanged ───────────────────────────────────────────── *)
+  let before=pl.runforward(text;"";three(url));
+  let dm=masked(before);
+  if(t.assert(pl.issafetoforward(before) && str.contains(dm;name) && str.contains(dm;email);"without layer config the run masks the name and the email (\(dm))")){pass=pass+1}el{fail=fail+1};
+  let empty=pl.runforward(text;"";layers(url;""));
+  if(t.asserteq(masked(empty);dm;"an empty config.toml masks exactly the same values")){pass=pass+1}el{fail=fail+1};
+  let othertext="[privacy]\nconsensus_strategy = \"most-restrictive\"\n[providers]\ndefault = \"ollama\"\n";
+  let other=pl.runforward(text;"";pl.withlokeconfig(three(url);cfg.fromtext(othertext)));
+  if(t.asserteq(masked(other);dm;"so does a config.toml with settings but no [[privacy.layers]]")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(detectionorder(other);detectionorder(before);"and runs the layers in the same order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(other) && other.totalentities==before.totalentities;"with the same count, and forwardable")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Priority: the order the layers run in ───────────────────────────────── *)
+  let po=pl.runforward(text;"";layers(url;entry("presidio";"priority = 0")));
+  if(t.asserteq(detectionorder(po);"presidio:scanned,regex:scanned,ner:scanned,privacy_filter:skipped";"presidio at priority 0 is consulted first")){pass=pass+1}el{fail=fail+1};
+  let pn=pl.runforward(text;"";layers(url;entry("ner";"priority = 9")));
+  if(t.asserteq(detectionorder(pn);"regex:scanned,presidio:scanned,privacy_filter:skipped,ner:scanned";"ner at priority 9 is consulted last")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(samevalues(po;before);"and reordering under most-restrictive masks the same values")){pass=pass+1}el{fail=fail+1};
+
+  (* ── confidence_threshold ───────────────────────────────────────────────── *)
+  let pth=pl.runforward(text;"";layers(url;entry("presidio";"confidence_threshold = 0.95")));
+  let jr=resolvedfor(pth;name);
+  if(t.assert(str.contains(jr;"ner=") && !str.contains(jr;"presidio=");"Presidio's 0.92 detection does not count at a 0.95 threshold; NER's still does (\(jr))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(pth.result.anonymised;name);"so the name is still masked, by NER")){pass=pass+1}el{fail=fail+1};
+  let both=str.concat(entry("presidio";"confidence_threshold = 0.95");entry("ner";"confidence_threshold = 0.8"));
+  let bth=pl.runforward(text;"";layers(url;both));
+  if(t.assert(str.contains(bth.result.anonymised;name) && !str.contains(bth.result.anonymised;email);"with NER at 0.8 too, nothing accepts the name and it is not masked; the email still is")){pass=pass+1}el{fail=fail+1};
+  let low=pl.runforward(text;"";layers(url;str.concat(entry("presidio";"confidence_threshold = 0.92");entry("ner";"confidence_threshold = 0.78"))));
+  if(t.asserteq(masked(low);dm;"thresholds at the layers' own confidences mask everything the default does")){pass=pass+1}el{fail=fail+1};
+
+  (* ── entity_filter ──────────────────────────────────────────────────────── *)
+  let ef=pl.runforward(text;"";layers(url;str.concat(entry("ner";"entity_filter = [\"LOCATION\"]");entry("presidio";"entity_filter = [\"CREDIT_CARD\"]"))));
+  if(t.assert(str.contains(ef.result.anonymised;name) && !str.contains(ef.result.anonymised;email);"NER filtered to LOCATION and Presidio to CREDIT_CARD do not mask a PERSON")){pass=pass+1}el{fail=fail+1};
+  let ep=pl.runforward(text;"";layers(url;entry("presidio";"entity_filter = [\"PERSON\"]")));
+  if(t.asserteq(masked(ep);dm;"a filter naming the type the layer found masks as before")){pass=pass+1}el{fail=fail+1};
+
+  (* ── mode ───────────────────────────────────────────────────────────────── *)
+  let dto=pl.runforward(text;"";layers(url;str.concat(entry("ner";"mode = \"detect-only\"");entry("presidio";"mode = \"detect-only\""))));
+  if(t.assert(str.contains(dto.result.anonymised;name) && !str.contains(dto.result.anonymised;email);"detect-only NER and Presidio do not mask the name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(found(dto;"ner")>=1 && found(dto;"presidio")>=1;"but their stages report what they found")){pass=pass+1}el{fail=fail+1};
+
+  let vt=pl.runforward(text;"";layers(url;entry("presidio";"mode = \"veto\"")));
+  if(t.asserteq(vt.vetoedby;"presidio";"a veto layer that finds PII is recorded on the run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(vt);"and the run is refused")){pass=pass+1}el{fail=fail+1};
+  let vr=pl.refusalreason(vt);
+  if(t.assert(str.contains(vr;"presidio") && str.contains(vr;"veto") && !str.contains(vr;"Jane");"with a reason naming the layer and no PII (\(vr))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(vt.result.anonymised;name);"its detections are masked as well")){pass=pass+1}el{fail=fail+1};
+  let vh=pl.runforward(text;"";layers(url;entry("presidio";"mode = \"veto\"\nconfidence_threshold = 0.95")));
+  if(t.assert(str.len(vh.vetoedby)==0 && pl.issafetoforward(vh);"a veto layer whose detections are below its threshold does not refuse")){pass=pass+1}el{fail=fail+1};
+  let vf=pl.runforward(text;"";layers(url;entry("ner";"mode = \"veto\"\nentity_filter = [\"MEDICAL\"]")));
+  if(t.assert(str.len(vf.vetoedby)==0 && pl.issafetoforward(vf);"nor one whose filter excludes what it found")){pass=pass+1}el{fail=fail+1};
+  let vx=pl.runforward(text;"";layers(url;entry("regex";"mode = \"veto\"")));
+  if(t.asserteq(vx.vetoedby;"regex";"the regex layer can veto")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The regex layer cannot be turned down ──────────────────────────────── *)
+  let rx=pl.runforward(text;"";layers(url;entry("regex";"enabled = false\nmode = \"detect-only\"\nconfidence_threshold = 1.0\nentity_filter = [\"credit_card\"]")));
+  if(t.assert(!str.contains(rx.result.anonymised;email) && pl.issafetoforward(rx);"regex disabled, detect-only, at 1.0 and filtered to cards in config.toml still masks the email")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rx.layerscompleted==3 as u32;"and still runs")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Malformed: every run refused ───────────────────────────────────────── *)
+  let bad=layers(url;entry("ner";"enabled = false\nmode = \"block\""));
+  let brun=pl.runforward(text;"";bad);
+  if(t.assert(!pl.issafetoforward(brun) && str.len(brun.layererror)>0;"a malformed [[privacy.layers]] refuses the run")){pass=pass+1}el{fail=fail+1};
+  let brr=pl.refusalreason(brun);
+  if(t.assert(str.contains(brr;"privacy.layers") && str.contains(brr;"mode");"saying what is wrong (\(brr))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(brun.layerscompleted==3 as u32;"and none of it was applied: NER was not switched off")){pass=pass+1}el{fail=fail+1};
+  let clean=pl.runforward("nothing personal here";"";bad);
+  if(t.assert(!pl.issafetoforward(clean);"even text with no PII is refused while the config is malformed")){pass=pass+1}el{fail=fail+1};
+  let unk=pl.runforward(text;"";layers(url;"[[privacy.layers]]\nid = \"presidio-v2\"\nenabled = true\n"));
+  if(t.assert(!pl.issafetoforward(unk);"so is a layer id the registry does not hold")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Through config.toml on disk (the test's own HOME) ──────────────────── *)
+  if(t.assert(writeconfig("[privacy]\nconsensus_strategy = \"most-restrictive\"\n\n[[privacy.layers]]\nid = \"presidio\"\npriority = 0\nmode = \"veto\"\n");"wrote config.toml")){pass=pass+1}el{fail=fail+1};
+  let disk=pl.runforward(text;"";pl.configured(url;url));
+  if(t.assert(str.eq(disk.vetoedby;"presidio") && str.contains(detectionorder(disk);"presidio:scanned,regex:scanned");"pl.configured reads [[privacy.layers]] from config.toml: presidio runs first and vetoes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writeconfig("[[privacy.layers]]\nid = \"presidio\"\nmode = \"veto\"\n\n[providers\ndefault = \"ollama\"\n");"wrote a config.toml std.toml cannot parse")){pass=pass+1}el{fail=fail+1};
+  let broken=pl.runforward(text;"";pl.configured(url;url));
+  if(t.assert(!pl.issafetoforward(broken) && str.eq(broken.vetoedby;"presidio");"a file std.toml rejects is still read for its layers, not dropped: presidio still vetoes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writeconfig("[privacy]\nprivacy_filter = false\n");"wrote a config.toml with no layers")){pass=pass+1}el{fail=fail+1};
+  let plain=pl.runforward(text;"";pl.configured(url;url));
+  if(t.asserteq(masked(plain);dm;"and one with no [[privacy.layers]] masks what the default does")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  <fail
+};
