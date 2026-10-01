@@ -128,7 +128,7 @@ defaults are kept outside that range.
 | mcp-toke | 11460 | was 11435, the sidecar's port, until F3b.12 |
 | Presidio | 5000 | external |
 | LLMLingua | 5001 | external |
-| RouteLLM sidecar | 11431 | **shares the CLI proxy's port** — F3b.14 |
+| RouteLLM sidecar | 11461 | was 11431, the CLI proxy's port, until F3b.14; nothing calls it yet |
 
 ---
 

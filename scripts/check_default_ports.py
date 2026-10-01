@@ -67,15 +67,14 @@ SERVICES: dict[str, tuple[int, list[tuple[str, str]]]] = {
     "LLMLingua": (5001, [
         ("packages/shared/src/config.tk", r'llmlinguaurl:"http://localhost:(\d+)"'),
     ]),
-    "RouteLLM sidecar": (11431, [
-        ("packages/core/src/router/routellm.tk", r'queryat\("http://localhost:(\d+)"'),
-        ("packages/core/src/router/routellm.tk", r'localserviceup\("http://localhost:(\d+)"'),
+    "RouteLLM sidecar": (11461, [
+        ("packages/core/src/router/routellm.tk", r'defaulturl\(\):str\{ <"http://127\.0\.0\.1:(\d+)"'),
     ]),
 }
 
 # Pairs that share a default today, each owned by a backlog row. A pair not listed here fails.
+# Empty since F3b.14 moved the RouteLLM sidecar off the CLI proxy's 11431.
 KNOWN_SHARED: dict[frozenset[str], str] = {
-    frozenset({"loke CLI proxy", "RouteLLM sidecar"}): "F3b.14",
 }
 
 DOC = "docs/architecture.md"
