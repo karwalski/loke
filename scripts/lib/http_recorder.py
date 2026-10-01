@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A local HTTP server that records EVERY request it receives, whatever the method. (VM1.6e)
 
-Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo|mcpecho] [<cert.pem> <key.pem>]
+Usage: http_recorder.py <log-file> <port-file> [answer|garbage|silent|echo|mcpecho|analyzepast] [<cert.pem> <key.pem>]
 
 It binds a port the OS hands out on 127.0.0.1 and writes the number to <port-file> once it
 is listening, so a test needs no fixed port and two runs cannot collide. Each request is
@@ -40,7 +40,10 @@ by Python's json.dumps with its default ensure_ascii, so a non-ASCII character c
 a \\uXXXX escape. An upstream tool that repeats what it was given is how a test sees whether
 the broker restores a placeholder exactly, whatever escapes the upstream's encoder chose.
 In that mode /analyze reports a PERSON wherever `Jane` and `Citizen` stand together across
-whitespace, at the offsets Python gives (code points), instead of the fixed span above.
+whitespace, at the offsets Python gives (code points), instead of the fixed span above; since
+MK6.16 also each name in PERSONS, which hold non-ASCII characters of every UTF-8 length.
+`analyzepast` (MK6.16) answers as `answer` does except /analyze, which reports a PERSON span
+ending past the end of the text it was sent: a span loke cannot place, which must refuse.
 
 F5.11: every request's headers are also appended to `<log-file>.headers`, as a
 `METHOD path` line, one `name: value` line per header in the order they arrived (a
@@ -73,6 +76,11 @@ SEPS = (",", ":")
 # reply, which Ollama wraps as message.content.
 PRESIDIO = [{"entity_type": "PERSON", "start": 0, "end": 12, "score": 0.85}]
 NER = '[{"type":"PERSON","value":"Jane Citizen"}]'
+
+# MK6.16: the names `mcpecho`'s /analyze reports, besides "Jane Citizen" across whitespace:
+# one with a non-ASCII character inside it for each UTF-8 length (é and ë 2 bytes, the em
+# dash and CJK 3, an emoji 4). Python's match offsets count code points, as Presidio's do.
+PERSONS = "Jane\\s+Citizen|Zoë\\s+Brönte|Jane—Citizen|Jane\U0001F642Citizen|王小明"
 
 # The privacy-filter sidecar's classifier output (AD1.4): one confident span and one weak
 # one, so a threshold between them visibly suppresses one. The recorder applies the
@@ -229,8 +237,13 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == "/analyze" and MODE == "mcpecho":
             # MK6.14: a PERSON wherever "Jane" and "Citizen" stand together, across any
             # whitespace, at Python's offsets (code points), as Presidio reports them.
+            # MK6.16: and the names in PERSONS, which hold 2-, 3- and 4-byte characters.
             self._send([{"entity_type": "PERSON", "start": m.start(), "end": m.end(), "score": 0.85}
-                        for m in re.finditer(r"Jane\s+Citizen", _field(body, "text"))])
+                        for m in re.finditer(PERSONS, _field(body, "text"))])
+        elif p == "/analyze" and MODE == "analyzepast":
+            # MK6.16: a span that cannot be placed: it ends three code points past the text.
+            n = len(_field(body, "text"))
+            self._send([{"entity_type": "PERSON", "start": 0, "end": n + 3, "score": 0.85}])
         elif p == "/analyze":
             self._send(PRESIDIO)
         elif p in ("/detect", "/anonymise"):

@@ -51,7 +51,11 @@ t=$pipelinerun{
      totalentities:0 with a $pipelinerun that looked like a clean result.
      layersdegraded counts layers the operator enabled that were unavailable. *)
   layerscompleted:u32;
-  layersdegraded:u32
+  layersdegraded:u32;
+  (* MK6.16. Spans a completed layer reported that could not be placed in the text exactly
+     (core.privacy.layerhealth.$layerresult). Each is an entity a layer found and nothing
+     masked, so a run with any is not safe to forward. *)
+  unplaced:u32
 };
 
 
@@ -94,9 +98,19 @@ f=configured(purl:str;ourl:str):$pipelineconfig{
 
 (* The layers the loke server runs a request through: the default Presidio and Ollama
    addresses, with the user's privacy-filter settings. page.api.pipeline filters with it and
-   page.api.health reports the health of the same layers. *)
+   page.api.health reports the health of the same layers.
+
+   MK6.16. Presidio is reached at the user's privacy.presidio_url, as the CLI already reached
+   it (cli.ask, cli.proxy); the server took the built-in default whatever config.toml said.
+   The default is the same loopback port, and presidio.scan refuses a host that is not
+   loopback, so the setting can only move the layer to another local port. A config that
+   does not set it keeps the registry's 127.0.0.1 address, as before. *)
 f=served():$pipelineconfig{
-  <configured(fr.defaultpresidiourl();fr.defaultollamaurl())
+  let lc=cfg.loaded();
+  let defaults=cfg.defaultconfig();
+  let purl=mut.lc.presidiourl;
+  if(str.eq(purl;defaults.presidiourl)){ purl=fr.defaultpresidiourl() }el{};
+  <withlokeconfig(newconfig(purl;fr.defaultollamaurl());lc)
 };
 
 f=usener(c:$pipelineconfig):bool{ <fr.get(c.layers;fr.nerid()).enabled };
@@ -501,6 +515,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   (* NC1.9: a layer counts as completed only when it actually scanned the text. *)
   let completed=mut.0;
   let degraded=mut.0;
+  let unplaced=mut.0;
 
   (* F3b.1 / F3b.6. Every detection layer, in registry order, through the one path in
      core.privacy.layerhealth: a disabled entry is recorded as a skipped stage and sent
@@ -518,8 +533,11 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
       lp(let hi=0;hi<lr.hits.len;hi=hi+1){
         allentities=allentities.push(lr.hits.get(hi))
       };
+      (* MK6.16. Logged and then forwarded until now: an entity a layer found and nothing
+         masked. Counted, and issafetoforward refuses the run. *)
       if(lr.unplaced>0){
-        log.warn("privacy layer \(layer.id) reported \(lr.unplaced) span(s) that could not be located in the text";"pipeline";requestid)
+        unplaced=unplaced+lr.unplaced;
+        log.warn("privacy layer \(layer.id) reported \(lr.unplaced) span(s) that could not be located in the text exactly -- the run will be refused";"pipeline";requestid)
       }el{}
     }el{};
     if(lh.isdegraded(st)){
@@ -617,7 +635,8 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     finalsystemprompt:finalsystemprompt;
     requestid:requestid;
     layerscompleted:completed as u32;
-    layersdegraded:degraded as u32
+    layersdegraded:degraded as u32;
+    unplaced:unplaced as u32
   }
 };
 
@@ -648,9 +667,19 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
      layerscompleted >= 1   ->  true, with layersdegraded saying what was missing.
 
    A degraded run is allowed on purpose: a Presidio sidecar being down must not take a
-   local-first product offline. *)
+   local-first product offline.
+
+     unplaced > 0           ->  false (MK6.16). A layer that completed reported an entity
+                                loke could not place in the text exactly, so nothing masked
+                                it. Refuse, rather than forward what it found. *)
 f=issafetoforward(r:$pipelinerun):bool{
-  <r.layerscompleted>0 as u32
+  <(r.layerscompleted>(0 as u32)) && (r.unplaced==(0 as u32))
+};
+
+(* Why issafetoforward refused r, for a caller's refusal message. Names no entity. *)
+f=refusalreason(r:$pipelinerun):str{
+  if(r.unplaced>0 as u32){ <"a privacy detection layer reported an entity that could not be located in the text exactly" }el{};
+  <"no privacy detection layer is available"
 };
 
 (* Runs the pipeline and says in one place whether the result may leave the machine.
@@ -662,7 +691,11 @@ f=runforward(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
       log.warn("privacy pipeline degraded: \(r.layersdegraded) enabled layer(s) unavailable, \(r.layerscompleted) completed";"pipeline";r.requestid)
     }el{}
   }el{
-    log.error("privacy pipeline failed closed: no detection layer completed a scan, so this text must not be forwarded";"pipeline";r.requestid)
+    if(r.unplaced>0 as u32){
+      log.error("privacy pipeline failed closed: \(r.unplaced) detected span(s) could not be placed in the text exactly, so this text must not be forwarded";"pipeline";r.requestid)
+    }el{
+      log.error("privacy pipeline failed closed: no detection layer completed a scan, so this text must not be forwarded";"pipeline";r.requestid)
+    }
   };
   <r
 };

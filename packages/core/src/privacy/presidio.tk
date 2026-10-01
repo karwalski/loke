@@ -38,6 +38,14 @@ t=$presidioscan{
   presidiohits:@$presidioentity
 };
 
+(* MK6.16. What the pipeline takes from one Presidio scan (place, below): the entities
+   placed in loke's text, and how many of Presidio's spans could not be placed there
+   exactly. *)
+t=$presidioplaced{
+  hits:@$piientity;
+  unplaced:i64
+};
+
 f=new(baseurl:str):$presidioclient{
   <$presidioclient{baseurl:baseurl}
 };
@@ -213,6 +221,94 @@ f=mapconfidence(entitytype:str):f64{
 };
 
 
+(* MK6.16. The length of the UTF-8 sequence that byte c leads, or 0 when c cannot lead one:
+   a continuation byte, an overlong lead (0xC0, 0xC1) or one past U+10FFFF (0xF5 up). *)
+f=seqlen(c:i64):i64{
+  if(c<128){ <1 }el{};
+  if(c>=194 && c<=223){ <2 }el{};
+  if(c>=224 && c<=239){ <3 }el{};
+  if(c>=240 && c<=244){ <4 }el{};
+  <0
+};
+
+f=continuation(text:str;at:i64;n:i64;lo:i64;hi:i64):bool{
+  if(at>=n){ <false }el{};
+  let c=str.charat(text;at);
+  <c>=lo && c<=hi
+};
+
+(* MK6.16. Whether text is well-formed UTF-8 as Python's strict decoder requires: no
+   overlong form, no surrogate, nothing past U+10FFFF, no truncated sequence. Presidio counts
+   the code points of the text Python decoded, and for anything else that count is not
+   defined, so no span of such a text is placed. *)
+f=utf8valid(text:str):bool{
+  let n=str.len(text) as i64;
+  let ok=mut.true;
+  let b=mut.0;
+  lp(let k=0;b<n && ok;k=k+1){
+    let c=str.charat(text;b);
+    let l=seqlen(c);
+    if(l==0){
+      ok=false
+    }el{
+      let lo=mut.128;
+      let hi=mut.191;
+      if(c==224){ lo=160 }el{};
+      if(c==237){ hi=159 }el{};
+      if(c==240){ lo=144 }el{};
+      if(c==244){ hi=143 }el{};
+      if(l>=2 && !continuation(text;b+1;n;lo;hi)){ ok=false }el{};
+      if(l>=3 && !continuation(text;b+2;n;128;191)){ ok=false }el{};
+      if(l==4 && !continuation(text;b+3;n;128;191)){ ok=false }el{};
+      b=b+l
+    }
+  };
+  <ok
+};
+
+(* How many code points text holds: every byte that is not a continuation byte. *)
+f=cpcount(text:str):i64{
+  let n=str.len(text) as i64;
+  let count=mut.0;
+  lp(let b=0;b<n;b=b+1){
+    let c=str.charat(text;b);
+    if(c>=128 && c<192){}el{ count=count+1 }
+  };
+  <count
+};
+
+(* The byte offset at which code point number charoff begins, and the byte length for the
+   offset one past the last code point. The same walk as core.privacy.sidecarclient.cpbyte
+   and core.privacy.evaluation.bytestart, neither of which this module imports. *)
+f=cpbyte(text:str;charoff:i64):i64{
+  let n=str.len(text) as i64;
+  let seen=mut.0;
+  let at=mut.n;
+  let done=mut.false;
+  lp(let b=0;b<n && !done;b=b+1){
+    let c=str.charat(text;b);
+    if(c>=128 && c<192){}el{
+      if(seen==charoff){
+        at=b;
+        done=true
+      }el{
+        seen=seen+1
+      }
+    }
+  };
+  <at
+};
+
+f=placedentity(pe:$presidioentity;value:str;bs:i64;be:i64):$piientity{
+  <$piientity{
+    entitytype:pe.entitytype;
+    value:value;
+    start:bs as u32;
+    end:be as u32;
+    confidence:mapconfidence(pe.entitytype);
+    placeholder:""
+  }
+};
 
 (* Detection only — .placeholder is left empty on purpose.
 
@@ -222,30 +318,43 @@ f=mapconfidence(entitytype:str):f64{
    both lists. It also never called ph.addentry, so nothing it generated was recorded
    and nothing it generated could be restored — the placeholder went into the prompt and
    the original was dropped on the floor. placeholder.assignplaceholders numbers the
-   deduped list in one place, and placeholder.mapfromentities records all of it. *)
-f=topiientities(presidioresults:@$presidioentity;text:str):@$piientity{
-  let entities=mut.@();
-  let count=presidioresults.len;
-  let i=mut.0;
-  lp(let lv=0;true;lv=lv){
-    if(i>=count){
-      br
+   deduped list in one place, and placeholder.mapfromentities records all of it.
+
+   MK6.16. Presidio's start and end are offsets into the Python str it analysed, and a
+   Python str is indexed by Unicode code point: presidio-analyzer's RecognizerResult takes
+   them from `re` match spans and spaCy's character offsets, both code-point indices. loke's
+   strings are UTF-8 bytes, and this took the value as `str.slice(text;start;end)`, a BYTE
+   slice. After any non-ASCII character the slice moved left by one byte per extra byte:
+   with the recorder modelling Presidio, "café Jane Citizen called" gave the value
+   " Jane Citize", placeholder.applytotext replaced that, and "café[PERSON_..._1]n called"
+   went to the model with the name's last letter in the clear. The offsets are now converted
+   to bytes by walking the UTF-8 lead bytes, and the start and end recorded are those bytes,
+   the unit the regex layer and dedup use.
+
+   Presidio's /analyze answer carries no text for a span, so there is no reported value to
+   check the slice against. A span is placed only when it can be placed exactly: the text is
+   well-formed UTF-8 (so the code-point count is the one Python saw), start < end <= the
+   number of code points, and the slice holds more than whitespace. Anything else is counted
+   unplaced, and an unplaced span refuses the run (core.privacy.pipeline.issafetoforward):
+   Presidio said there is an entity and loke cannot tell which characters it is, so it
+   cannot mask it. *)
+f=place(presidioresults:@$presidioentity;text:str):$presidioplaced{
+  let hits=mut.@($piientity);
+  let unplaced=mut.0;
+  let valid=utf8valid(text);
+  let ncp=cpcount(text);
+  lp(let i=0;i<presidioresults.len;i=i+1){
+    let pe:$presidioentity=presidioresults.get(i);
+    let cs=pe.start as i64;
+    let ce=pe.end as i64;
+    if(valid && ce>cs && ce<=ncp){
+      let bs=cpbyte(text;cs);
+      let be=cpbyte(text;ce);
+      let value=t.strslice(text;bs;be);
+      if(str.len(str.trim(value))>0){ hits=hits.push(placedentity(pe;value;bs;be)) }el{ unplaced=unplaced+1 }
     }el{
-      let pe=presidioresults.get(i);
-      let value=str.slice(text;pe.start;pe.end);
-      let sensitivity=mapsensitivity(pe.entitytype);
-      let confidence=mapconfidence(pe.entitytype);
-      let entity=$piientity{
-        entitytype:pe.entitytype;
-        value:value;
-        start:pe.start;
-        end:pe.end;
-        confidence:confidence;
-        placeholder:""
-      };
-      entities=entities.push(entity);
-      i=i+1;
+      unplaced=unplaced+1
     }
   };
-  <entities
+  <$presidioplaced{hits:hits;unplaced:unplaced}
 };

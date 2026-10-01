@@ -653,6 +653,49 @@ else
   esac
   rm -f "$WORK/lk/home/.loke/config.toml"
 fi
+# MK6.16: Presidio's offsets count code points and loke's strings are bytes. http_recorder.py
+# in `mcpecho` mode stands in for Presidio (configured by privacy.presidio_url, which the
+# server now reads), reporting a PERSON for "Zoë Brönte" at Python's offsets. Regex finds no
+# name and the fake NER model answers [], so the name is masked only if the span is placed
+# exactly. Before MK6.16 the cut moved one byte left per extra byte before it, and part of the
+# name reached the model ("café[PERSON_..._1]n called" was measured).
+PR_LOG="$WORK/presidio.log"
+python3 "$ROOT/scripts/lib/http_recorder.py" "$PR_LOG" "$WORK/presidio.port" mcpecho >/dev/null 2>&1 & PR_PID=$!; PIDS="$PIDS $PR_PID"
+for _ in $(seq 1 40); do [ -s "$WORK/presidio.port" ] && break; sleep 0.25; done
+PR_PORT=$(cat "$WORK/presidio.port" 2>/dev/null)
+mkdir -p "$WORK/lk/home/.loke"
+if [ -z "$PR_PORT" ]; then echo "  FAIL the Presidio stand-in did not start" >&2; fail=1
+elif [ -e "$WORK/lk/home/.loke/config.toml" ]; then echo "  FAIL a config.toml already exists in the throwaway HOME; the Presidio check would not own it" >&2; fail=1
+else
+  printf '[privacy]\npresidio_url = "http://127.0.0.1:%s"\n' "$PR_PORT" > "$WORK/lk/home/.loke/config.toml"
+  PRNAME="Zoë Brönte"
+  : > "$SEEN"; : > "$SEEN.bodies"
+  pipe_post "summarise what café — 🙂 $PRNAME asked about 東京" ""
+  judge "with Presidio configured, a prompt with 2-, 3- and 4-byte characters is answered" 200 '"ok":true'
+  if grep -q "^POST /analyze .*Br" "$PR_LOG"; then echo "  ok   the pipeline asked Presidio (the stand-in at privacy.presidio_url)"
+  else echo "  FAIL Presidio was not asked: $(head -c 300 "$PR_LOG" 2>/dev/null)" >&2; fail=1; fi
+  prsent=$(python3 -c 'import json,re,sys
+try: rows=[json.loads(l) for l in open(sys.argv[1],encoding="utf-8")]
+except OSError: rows=[]
+gen=[r[2] for r in rows if r[1]=="/api/generate"]
+if not gen: print("no /api/generate request reached the model"); sys.exit()
+try: p=json.loads(gen[-1])["prompt"]
+except ValueError as e: print("not strict JSON: %s"%e); sys.exit()
+bad=[f for f in ("Zo","Br","nte","ë","ö") if f in p]
+if bad: print("a fragment of the name reached the model (%s): %r"%(",".join(bad),p))
+elif re.search(r"summarise what café — \U0001F642 \[PERSON_[0-9a-f]{4}_1\] asked about 東京",p): print("ok")
+else: print("prompt differs: %r"%p)' "$SEEN.bodies" 2>&1)
+  if [ "$prsent" = "ok" ]; then echo "  ok   the model received the whole name as one placeholder, every other character intact (MK6.16)"
+  else echo "  FAIL with a non-ASCII prompt: $prsent" >&2; fail=1; fi
+  prback=$(printf '%s' "$BODY" | python3 -c 'import json,sys
+try: r=json.loads(sys.stdin.read())
+except ValueError as e: print("not strict JSON: %s"%e); sys.exit()
+print("ok" if sys.argv[1] in (r.get("response") or "") else "response differs: %r"%(r.get("response"),))' "$PRNAME" 2>&1)
+  if [ "$prback" = "ok" ]; then echo "  ok   and the user got the name back, restored exactly"
+  else echo "  FAIL the name was not restored: $prback" >&2; fail=1; fi
+  rm -f "$WORK/lk/home/.loke/config.toml"
+  kill "$PR_PID" 2>/dev/null; wait "$PR_PID" 2>/dev/null
+fi
 # GA1.5: the token optimiser, between the privacy filter and dispatch. scripts/lib/http_recorder.py
 # stands in for the LLMLingua sidecar: in `echo` mode it keeps every placeholder and every other
 # word; in `answer` mode it answers "short", dropping the placeholder. It is configured the way a

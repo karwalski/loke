@@ -1,0 +1,212 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.presidiooffsets;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=pr:core.privacy.presidio;
+i=pl:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=ph:core.privacy.placeholder;
+i=sh:shared.types;
+
+(* MK6.16 — Presidio's spans are code-point offsets, and loke's strings are UTF-8 bytes.
+
+   core.privacy.presidio took each entity's value as a BYTE slice at Presidio's offsets, so
+   after any non-ASCII character the slice moved left: measured with the recorder modelling
+   Presidio, "café Jane Citizen called" went to the model as "café[PERSON_..._1]n called",
+   the last letter of the name in the clear.
+
+   Every case here runs through the production pipeline (core.privacy.pipeline.runforward,
+   the call loke's /api/pipeline route makes) with scripts/lib/http_recorder.py in `mcpecho`
+   mode standing in for Presidio: it reports a PERSON for each name it knows at the offsets
+   Python's `re` gives, which count code points, as Presidio's do. The NER layer is off, and
+   the regex layer finds no name, so the name can only be masked if the Presidio span is
+   placed exactly. For each case the text the model would receive must be EXACTLY the prefix,
+   the placeholder and the suffix (so no fragment of the name, and nothing else, changed),
+   the entity's byte span must be where the name is, and restoring must give back the text
+   byte for byte. The non-ASCII characters are 2-byte (é, ë, ö), 3-byte (the em dash, CJK)
+   and 4-byte (an emoji), before, inside and after the name.
+
+   Then the fail-closed side: a span the pipeline cannot place exactly refuses the run. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_presoff_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e @() };
+  if(!(h == @())){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+(* Regex and Presidio at url; NER off, so it neither finds the name nor degrades the run. *)
+f=presidioonly(url:str):$pipelineconfig{
+  <pl.withlayer(pl.newconfig(url;"http://127.0.0.1:59993");fr.nerid();false)
+};
+
+f=entityfor(run:$pipelinerun;name:str):i64{
+  let at=mut.(0-1);
+  lp(let i=0;i<run.result.entities.len;i=i+1){
+    let e:$piientity=run.result.entities.get(i);
+    if(str.eq(e.value;name)){ at=i }el{}
+  };
+  <at
+};
+
+(* "ok", or what was wrong. The text the model receives is run.result.anonymised. *)
+f=placed(cfg:$pipelineconfig;prefix:str;name:str;suffix:str):str{
+  let text="\(prefix)\(name)\(suffix)";
+  let run=pl.runforward(text;"";cfg);
+  if(!pl.issafetoforward(run)){ <"the run was refused" }el{};
+  let n:str=str.fromint(run.result.entities.len as i64);
+  if(!(run.result.entities.len==1)){ <"\(n) entities, not 1; forwarded '\(run.result.anonymised)'" }el{};
+  let idx=entityfor(run;name);
+  if(idx<0){ <"no entity's value is the name; forwarded '\(run.result.anonymised)'" }el{};
+  let e:$piientity=run.result.entities.get(idx);
+  if(!str.startswith(e.placeholder;"[PERSON_")){ <"placeholder '\(e.placeholder)'" }el{};
+  let want="\(prefix)\(e.placeholder)\(suffix)";
+  if(!str.eq(run.result.anonymised;want)){ <"forwarded '\(run.result.anonymised)'" }el{};
+  let at=str.indexof(text;name);
+  let nlen=str.len(name) as i64;
+  if(!((e.start as i64)==at) || !((e.end as i64)==at+nlen)){ <"the entity's span is not the name's bytes" }el{};
+  let back=ph.restore(run.result.anonymised;ph.mapfromentities(run.result.entities));
+  if(!str.eq(back;text)){ <"restored '\(back)'" }el{};
+  <"ok"
+};
+
+(* Two names in one text, non-ASCII between and around them. *)
+f=placedtwo(cfg:$pipelineconfig;a:str;first:str;b:str;second:str;c:str):str{
+  let text="\(a)\(first)\(b)\(second)\(c)";
+  let run=pl.runforward(text;"";cfg);
+  if(!pl.issafetoforward(run)){ <"the run was refused" }el{};
+  let i1=entityfor(run;first);
+  let i2=entityfor(run;second);
+  if(i1<0 || i2<0){ <"a name was not an entity's value; forwarded '\(run.result.anonymised)'" }el{};
+  let e1:$piientity=run.result.entities.get(i1);
+  let e2:$piientity=run.result.entities.get(i2);
+  let want="\(a)\(e1.placeholder)\(b)\(e2.placeholder)\(c)";
+  if(!str.eq(run.result.anonymised;want)){ <"forwarded '\(run.result.anonymised)'" }el{};
+  let back=ph.restore(run.result.anonymised;ph.mapfromentities(run.result.entities));
+  if(!str.eq(back;text)){ <"restored '\(back)'" }el{};
+  <"ok"
+};
+
+f=entity(start:i64;end:i64):$presidioentity{
+  <$presidioentity{entitytype:"PERSON";start:start as u32;end:end as u32;score:0.85}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let pastlog="\(base)-past.log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port";"mcpecho")) { $ok:h h; $err:e @() };
+  let past=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";pastlog;"\(base)-past.port";"analyzepast")) { $ok:h h; $err:e @() };
+  let port=waitport("\(base).port");
+  let pport=waitport("\(base)-past.port");
+  if(t.assert(str.len(port)>0 && str.len(pport)>0;"the two recorders standing in for Presidio came up")){pass=pass+1}el{fail=fail+1};
+  let cfg=presidioonly("http://127.0.0.1:\(port)");
+
+  (* ── The measured case, and the name with nothing non-ASCII ─────────────── *)
+  if(t.asserteq(placed(cfg;"café ";"Jane Citizen";" called");"ok";"MK6.16's measured case: after é (2 bytes) the whole name is masked, nothing else")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /analyze");"and the scan did go to the recorder as Presidio")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"";"Jane Citizen";" called");"ok";"an all-ASCII text, as before")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Non-ASCII BEFORE the name ──────────────────────────────────────────── *)
+  if(t.asserteq(placed(cfg;"pay — ";"Jane Citizen";" now");"ok";"after an em dash (3 bytes)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"🙂 ";"Jane Citizen";" ok");"ok";"after an emoji (4 bytes)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"東京の ";"Jane Citizen";" です");"ok";"after CJK (3 bytes each), with CJK after too")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"é—🙂王 ";"Jane Citizen";"");"ok";"after one character of each length, the name at the very end")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Non-ASCII INSIDE the name ──────────────────────────────────────────── *)
+  if(t.asserteq(placed(cfg;"met ";"Zoë Brönte";" today");"ok";"a name holding 2-byte letters")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"ask ";"Jane—Citizen";".");"ok";"a name holding an em dash")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"hi ";"Jane🙂Citizen";"!");"ok";"a name holding an emoji")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"致 ";"王小明";" 说");"ok";"a name that is all CJK")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(placed(cfg;"🙂é ";"Zoë Brönte";" —🙂");"ok";"non-ASCII before, inside and after")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Non-ASCII AFTER the name only ──────────────────────────────────────── *)
+  if(t.asserteq(placed(cfg;"";"Jane Citizen";" café — 🙂 王");"ok";"with every length after the name")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Two names: the second sits after the first and after more non-ASCII ── *)
+  if(t.asserteq(placedtwo(cfg;"café ";"Jane Citizen";" and 🙂 ";"Zoë Brönte";" — 王");"ok";"two names, each masked whole, both restored")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Fail closed: a span that cannot be placed refuses the run ──────────── *)
+  (* The `analyzepast` recorder reports a span ending three code points past the text. *)
+  let pcfg=presidioonly("http://127.0.0.1:\(pport)");
+  let refused=pl.runforward("café Jane Citizen called";"";pcfg);
+  let ru:str=str.fromint(refused.unplaced as i64);
+  if(t.assert(refused.layerscompleted==2 as u32;"with a span past the end, regex and Presidio still completed their scans")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refused.unplaced==1 as u32;"and the span is counted unplaced (unplaced=\(ru))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(refused);"so the run is REFUSED, not forwarded with the name unmasked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pl.refusalreason(refused);"could not be located in the text exactly");"and the refusal says why")){pass=pass+1}el{fail=fail+1};
+  let nothing=$pipelinerun{
+    result:refused.result;
+    stages:@();
+    totalentities:0 as u32;
+    finalsystemprompt:"";
+    requestid:"none";
+    layerscompleted:0 as u32;
+    layersdegraded:1 as u32;
+    unplaced:0 as u32
+  };
+  if(t.asserteq(pl.refusalreason(nothing);"no privacy detection layer is available";"a run nothing scanned keeps its own reason")){pass=pass+1}el{fail=fail+1};
+
+  (* core.privacy.presidio.place, the conversion itself, on spans the recorder cannot send. *)
+  let ok1=pr.place(@(entity(5;17));"café Jane Citizen called");
+  if(t.assert(ok1.hits.len==1 && ok1.unplaced==0;"code points 5..17 of \"café Jane Citizen called\" are placed")){pass=pass+1}el{fail=fail+1};
+  if(ok1.hits.len==1){
+    let h:$piientity=ok1.hits.get(0);
+    if(t.assert(str.eq(h.value;"Jane Citizen") && h.start==6 as u32 && h.end==18 as u32;"as bytes 6..18, the name exactly")){pass=pass+1}el{fail=fail+1}
+  }el{ fail=fail+1 };
+  let atend=pr.place(@(entity(5;9));"café Jane");
+  if(t.assert(atend.hits.len==1 && atend.unplaced==0;"a span ending at the last code point is placed")){pass=pass+1}el{fail=fail+1};
+  let pastend=pr.place(@(entity(5;10));"café Jane");
+  if(t.assert(pastend.hits.len==0 && pastend.unplaced==1;"one code point past the end is unplaced, not clipped")){pass=pass+1}el{fail=fail+1};
+  let empty=pr.place(@(entity(5;5));"café Jane");
+  if(t.assert(empty.hits.len==0 && empty.unplaced==1;"an empty span is unplaced")){pass=pass+1}el{fail=fail+1};
+  let backwards=pr.place(@(entity(9;5));"café Jane");
+  if(t.assert(backwards.hits.len==0 && backwards.unplaced==1;"a span that ends before it starts is unplaced")){pass=pass+1}el{fail=fail+1};
+  let blank=pr.place(@(entity(4;5));"café Jane");
+  if(t.assert(blank.hits.len==0 && blank.unplaced==1;"a span holding only whitespace is unplaced")){pass=pass+1}el{fail=fail+1};
+  (* A byte slice through é leaves a lone lead byte: not UTF-8, so there is no code-point
+     count Python could have agreed with, and nothing in that text is placed. *)
+  let broken="\(sh.strslice("café";0;4)) Jane Citizen";
+  let bad=pr.place(@(entity(5;17));broken);
+  if(t.assert(!pr.utf8valid(broken) && bad.hits.len==0 && bad.unplaced==1;"a text that is not well-formed UTF-8 places no span")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pr.utf8valid(sh.strslice("é";1;2));"a lone continuation byte is not UTF-8")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pr.utf8valid("aé—🙂王");"one character of each length is")){pass=pass+1}el{fail=fail+1};
+  let several=pr.place(@(entity(5;17);entity(0;99));"café Jane Citizen called");
+  if(t.assert(several.hits.len==1 && several.unplaced==1;"one bad span among good ones is counted, the good one still placed")){pass=pass+1}el{fail=fail+1};
+
+  if(!(rec == @())){ process.kill(rec); process.wait(rec); }el{};
+  if(!(past == @())){ process.kill(past); process.wait(past); }el{};
+  file.delete(logp);
+  file.delete("\(logp).bodies");
+  file.delete("\(logp).headers");
+  file.delete(pastlog);
+  file.delete("\(pastlog).bodies");
+  file.delete("\(pastlog).headers");
+  file.delete("\(base).port");
+  file.delete("\(base)-past.port");
+  <fail
+};
