@@ -1,0 +1,80 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.policy.watcherkey;
+
+i=t:std.test;
+i=str:std.str;
+i=std:std;
+i=file:std.file;
+i=u8:shared.utf8;
+i=w:core.policy.watcher;
+
+(* F10.49 — the policy watcher's change key never holds a split character, and sees a
+   change anywhere in the file.
+
+   `hashfile` was the file's length, a colon and its first 64 BYTES, cut with a plain
+   `str.slice`. Two things followed. A policy file with a multi-byte character across byte
+   64 (a team name in Japanese, a comment with an emoji) gave a key ending in part of a
+   character, which is invalid UTF-8. And an edit after byte 64 that kept the length
+   (`false` to `False`, one digit for another) left the key unchanged, so the watcher
+   never reloaded the policy.
+
+   Cutting at a character boundary (shared.utf8) would fix the first and make the second
+   worse: the bytes of the straddling character would leave the comparison too. The key is
+   never shown, stored or logged; it is only compared. So it is now a SHA-256 of the whole
+   file, which has no cut at all. *)
+
+f=testdir():str{
+  <"\(std.homedir())/watcher-key"
+};
+
+f=writefile(path:str;content:str):bool{
+  file.mkdir(testdir());
+  <mt file.write(path;content) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=repeat(s:str;n:i64):str{
+  let out=mut."";
+  lp(let i=0;i<n;i=i+1){ out="\(out)\(s)" };
+  <out
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let jp="日";
+  let emoji="😀";
+  let e2="é";
+  let tail="rest of the policy";
+  let a="a";
+  let x="x";
+  let allowf="allow: false";
+  let allowcap="allow: False";
+  let p=testdir();
+
+  (* 3-, 4- and 2-byte characters crossing byte 64. *)
+  let three="\(repeat(a;62))\(jp)\(tail)";
+  let four="\(repeat(a;61))\(emoji)\(tail)";
+  let two="\(repeat(a;63))\(e2)\(tail)";
+  let p3="\(p)/three.yaml";
+  let p4="\(p)/four.yaml";
+  let p2="\(p)/two.yaml";
+  if(t.assert(writefile(p3;three) && writefile(p4;four) && writefile(p2;two);"fixture: the three policy files were written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(w.hashfile(p3));"the key of a file with a 3-byte character across byte 64 is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(w.hashfile(p4));"and so is the key of one with a 4-byte character across it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(w.hashfile(p2));"and one with a 2-byte character across it")){pass=pass+1}el{fail=fail+1};
+
+  (* A same-length edit after byte 64. *)
+  let pa="\(p)/a.yaml";
+  let pb="\(p)/b.yaml";
+  let wrote=writefile(pa;"\(repeat(x;80))\(allowf)") && writefile(pb;"\(repeat(x;80))\(allowcap)");
+  if(t.assert(wrote;"fixture: two policy files of the same length were written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.eq(w.hashfile(pa);w.hashfile(pb));"two files of the same length differing only after byte 64 have different keys, so the edit is seen")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(w.hashfile(pa);w.hashfile(pa);"and the same file gives the same key, so an unchanged policy is not reloaded")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
