@@ -416,7 +416,7 @@ has no append-only triggers and is not covered by the hash chain.
   which also shows an unreadable switch blocks) — by a check on each path, not by a structural gate. The
   per-agent switch guards no live traffic, because agent runs are stubbed (E10 in [claims.md](claims.md)).
 - **OS keychain for secrets.** API keys and OAuth tokens are stored in the OS keychain (F1.5 / P5.2). They are never written to disk, never appear in logs, and are fetched per-request with expiry validation.
-- **HTTP server: NOT localhost-only today.** The intent is that the server (port 11430) binds to `127.0.0.1`. Measured 2026-09-24, it listens on every interface: the `host` setting in `ooke.toml` is ignored, and toke offers no way to choose a bind address (T-43, GA2.5). What is enforced is per request. State-changing requests from a foreign browser Origin are refused (GA2.6), and so is any request whose Host is not loopback (GA2.7). A non-browser client on the local network can still reach the API. CORS is restricted to localhost origins.
+- **HTTP server: localhost-only.** The server (port 11430) binds to `127.0.0.1` by default: `packages/browser/ooke.toml` sets `host = "127.0.0.1"`, which ooke rc.2 passes to toke 3.1.0's bind (T-43 fixed; GA2.5), and `scripts/smoke_serve.sh` asserts every listening socket is on loopback (K7 in [claims.md](claims.md)). Per-request checks remain as defence in depth: state-changing requests from a foreign browser Origin are refused (GA2.6), and so is any request whose Host is not loopback (GA2.7). CORS is restricted to localhost origins.
 
 ---
 
