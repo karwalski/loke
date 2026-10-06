@@ -368,30 +368,30 @@ One row per AI call is specified, exportable as CSV or JSON.
 **Specified per interaction:** event type, use case, model, provider, sensitivity, risk tier, token
 counts in and out, cost, duration, correlation ID.
 
-**Not captured:** the policy decision, detected-entity detail, which detection layer fired, the approval
-or override outcome, and kill-switch state. Those five fields exist only on the `$decisiontrace`
-structure in `core/governance/trace.tk`, which has no table and no insert — `complete()` writes a single
-log line and discards the structure. Persisting it is story **GA5.5**.
+**Recorded beside it (GA5.5):** the policy decision, detected-entity types and counts, which detection
+layers scanned and which were skipped, the approval outcome and kill-switch state, as one `decision_trace`
+row per outcome on the browser route (`core/governance/trace.tk` `persist`). That table holds no content,
+has no append-only triggers and is not covered by the hash chain.
 
 > **What this record evidences and what it does not.** The trail deliberately excludes prompt content
 > and placeholder values. That is a defensible privacy choice and it is kept — but it has a consequence
-> worth stating rather than leaving implicit: **the trail cannot evidence that the privacy control
-> operated**, because it records nothing about what was detected, which layer detected it, or what the
-> policy engine decided.
+> worth stating rather than leaving implicit: **the records cannot evidence that the privacy control
+> worked.** The decision trace says what was detected and decided on a request; nothing records whether
+> the masking that followed was complete.
 >
-> Two further limits apply today. Timestamps are not written correctly — `created_at` receives the
-> string literal `'now()'`, so every row carries the same seven characters and there is no orderable
-> time basis (**GA5.1**). The trail is a hash chain: sha256 over the previous row's hash and every field
+> Two further limits apply today. Each row's `created_at` is the host clock at insert, in epoch
+> milliseconds (`insertbound`, GA5.1, asserted by `test_audit_trail_e2e.tk`); nothing attests the clock.
+> The trail is a hash chain: sha256 over the previous row's hash and every field
 > (**GA5.2**), checked by `loke audit verify` (**GA5.3**); it is unkeyed and unanchored, so someone who
 > can write the file can rewrite a row and recompute every hash after it undetected.
 >
 > What the record therefore is: a **per-interaction usage and cost ledger**. An assessor distinguishes
 > *design effectiveness* — the control is present and correctly specified at a point in time, which is
 > established by inspecting the code and this document — from *operating effectiveness* — the control ran
-> as specified throughout a period. This ledger is **not** evidence of operating effectiveness, and
-> without a time basis there is no period for it to be evidence over. It must not be described as an
-> audit trail that demonstrates the privacy control worked. GA5.1, GA5.2, GA5.3 and GA5.5 are what would
-> change that.
+> as specified throughout a period. This ledger is **not** evidence of operating effectiveness: only the
+> browser route writes it, and its times come from a clock nothing attests. It must not be described as an
+> audit trail that demonstrates the privacy control worked. GA5.1, GA5.2, GA5.3 and GA5.5 have landed; the
+> gaps that remain include a writer on every path (E4) and an anchored chain (E5).
 
 ---
 
@@ -411,10 +411,10 @@ log line and discards the structure. Persisting it is story **GA5.5**.
   matches. "No PII in logs" is the goal; what is enforced is pattern-based redaction.
 - **Local-first.** Core functionality requires no network. Ollama, Presidio, and LLMLingua are optional; loke degrades gracefully when they are unavailable.
 - **Kill switch (G1.6).** When active, outbound AI requests are blocked immediately and the user is
-  shown an explanation. "Checked before every AI call" holds for calls routed through the governance
-  gateway (`core/governance/gateway.tk`) and for moke's own check; it is not structurally enforced on
-  every provider dispatch — the browser route does not check it at all (E4/A13 in
-  [claims.md](claims.md)). Same class of gap as the first bullet: AD1.6.
+  shown an explanation. "Checked before every AI call" holds for the four paths that make one — the browser
+  route, `loke ask`, the CLI proxy and no-custody dispatch (`tests/integration/test_kill_switch_paths.tk`,
+  which also shows an unreadable switch blocks) — by a check on each path, not by a structural gate. The
+  per-agent switch guards no live traffic, because agent runs are stubbed (E10 in [claims.md](claims.md)).
 - **OS keychain for secrets.** API keys and OAuth tokens are stored in the OS keychain (F1.5 / P5.2). They are never written to disk, never appear in logs, and are fetched per-request with expiry validation.
 - **HTTP server: NOT localhost-only today.** The intent is that the server (port 11430) binds to `127.0.0.1`. Measured 2026-09-24, it listens on every interface: the `host` setting in `ooke.toml` is ignored, and toke offers no way to choose a bind address (T-43, GA2.5). What is enforced is per request. State-changing requests from a foreign browser Origin are refused (GA2.6), and so is any request whose Host is not loopback (GA2.7). A non-browser client on the local network can still reach the API. CORS is restricted to localhost origins.
 

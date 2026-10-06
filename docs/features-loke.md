@@ -175,8 +175,8 @@ parameterised queries (no string concatenation).
 **OS Keychain Integration** (`core/storage/keychain.tk`, `core/config/keychain.tk`): API keys and secrets stored in the OS keychain via Security framework bindings (GA2.1). Keys are fetched per-request with expiry validation, never written to disk, and never appear in log output.
 
 **Audit Trail** (`core/storage/audit.tk`): One row per AI call is specified. Records: event type, use
-case, model, provider, sensitivity, risk tier, token counts in and out, cost, duration, correlation ID.
-Never stores prompt/response content or placeholder values.
+case, model, provider, sensitivity, risk tier, token counts in and out, cost, duration, correlation ID,
+and the time of the insert in epoch milliseconds. Never stores prompt/response content or placeholder values.
 
 > **Requests are recorded on the browser route only (GA1.4).** `/api/pipeline` calls `audit.insertevent`
 > for a dispatch and its outcome, a privacy refusal, an approval hold and a kill-switch refusal
@@ -185,15 +185,15 @@ Never stores prompt/response content or placeholder values.
 > any caller, `loke killswitch` included. Triggers reject `UPDATE` and `DELETE` on `audit_log` (GA5.9).
 > Tracked as **GA5** and **DA1**; recorded as E4 in [claims.md](claims.md).
 
-> **Where it is written, this is a per-interaction usage and cost ledger, not evidence that the privacy control operated.**
-> Five fields an assessor would look for are **not** recorded: the policy decision, detected-entity
-> detail, which detection layer fired, the approval or override outcome, and kill-switch state. They
-> exist only on the `$decisiontrace` structure in `core/governance/trace.tk`, which has no table and no
-> insert — `complete()` writes one log line and discards it (GA5.5).
+> **Where it is written, this is a per-interaction usage and cost ledger; the decision is kept beside it.**
+> The five fields an assessor looks for — the policy decision, detected-entity types and counts, which
+> detection layers scanned, the approval outcome and kill-switch state — are not in `audit_log`. Since
+> GA5.5 the browser route persists them per outcome in a `decision_trace` table (`core/governance/trace.tk`,
+> `tests/integration/test_decision_trace.tk`); that table is not append-only and not in the hash chain.
 >
 > Excluding prompt content and placeholder values is a deliberate privacy choice and it is kept. The
-> consequence, stated rather than left implicit: with neither the content nor the decision recorded, the
-> trail cannot show that anything was detected or masked on a given request.
+> consequence, stated rather than left implicit: the records show what was detected and decided on a
+> request, not that the masking that followed was complete.
 >
 > It is a hash chain for tamper detection, within a stated limit. Each row's digest is sha256 over the
 > previous row's hash and every field (GA5.2); `loke audit verify` names the first row whose fields, hash
@@ -203,8 +203,8 @@ Never stores prompt/response content or placeholder values.
 >
 > So: *design* effectiveness — the control is present and specified — is established by reading the code
 > and [architecture.md](architecture.md) §7. *Operating* effectiveness — the control ran as specified
-> throughout a period — is what this ledger does **not** evidence, and without a time basis there is no
-> period for it to evidence. Do not present it as the latter.
+> throughout a period — is what this ledger does **not** evidence: rows carry the host clock's time, but
+> only one route writes them and nothing attests the clock. Do not present it as the latter.
 
 **Log Redaction** (`core/privacy/logsanitiser.tk`): All log output passes through an auto-redaction filter (GA2.4). Emails, phone numbers, API keys, authorization tokens, passwords, and other sensitive values are replaced with `[REDACTED]` before reaching any log destination. Debug mode is subject to the same redaction rules as production.
 
@@ -224,23 +224,23 @@ Never stores prompt/response content or placeholder values.
 
 **Use Case Registry** (`core/governance/types.tk`): Built-in categories: chat-completion, code-generation, code-review, summarisation, data-analysis, translation, classification, agent-task, mcp-tool-call. Schema: ID, name, risk level, purpose, approved models, owner.
 
-**Decision Trace** (`core/governance/trace.tk`): A seventeen-field structure describing the full pipeline
-path — original input, PII detected, anonymisation applied, compression, risk classification, policy
-decisions, model selected (with reason), prompt sent, response received, de-anonymisation. **It is not
-persisted:** there is no table, no insert and no caller; `complete()` writes a single log line and discards
-the structure. Persisting it, and adding its fields to the audit record, is story **GA5.5**.
+**Decision Trace** (`core/governance/trace.tk`): A structure describing the pipeline path — original
+input, PII detected, anonymisation, compression, risk classification, policy decision, model, provider,
+prompt sent, response received, de-anonymisation. **What is persisted is the decision, not the path**
+(GA5.5): the browser route writes one `decision_trace` row per outcome with the policy decision, risk tier, entity types and counts, layers scanned
+and skipped, approval outcome and kill-switch state. Input, prompt, response and output are excluded by design; the compression and de-anonymisation flags are never set.
 
-**Monitoring** (`core/governance/monitoring.tk`): Incident types: PII leakage suspected, policy violation, quality degradation, provider outage, cost overrun, agent misbehaviour, security concern. Severity levels, post-incident review templates, trend tracking.
+**Monitoring** (`core/governance/monitoring.tk`, `core/governance/incidents.tk`): an incident register with P0–P3 severity levels, open/investigating/resolved status and a post-incident review template, and a per-model thumbs-up trend over a window of days. No incident types are defined (an incident carries a free title), and no request path, command or page calls either module.
 
-**Scorecard** (`core/governance/scorecard.tk`): Privacy %, compliance violations, risk tier breakdown, ownership coverage, open incidents. Trend charts (7d/30d/90d), drill-down.
+**Scorecard** (`core/governance/scorecard.tk`, `core/governance/dashboard.tk`): a per-provider scorecard (requests, latency, error rate, cost) and a governance scorecard over a period (privacy coverage, local routing ratio, cost, open incidents, audit chain integrity), both derived from the audit trail. Compliance violations, a risk tier breakdown, ownership coverage, trend charts and drill-down are not built.
 
-> **Its figures are only what the trail holds.** Its inputs are the audit trail, which records the browser
-> route's requests only (above), and the metrics tables. Those are no longer stubbed. `metrics_raw` has been
-> created since DA1.2, and `/api/pipeline` writes a row per dispatch since DA1.3. Since DA1.6,
-> `core/audit/metrics.tk` aggregates the table, but nothing on this page reads it yet (DA1.5). The compliance checks it surfaces are hardcoded: `core/governance/compliance.tk:42-56`
-> and `:82-90` assert `PASS` on the privacy and audit controls without querying the store — including
-> asserting that the audit trail is complete. Tracked as **DA1.2**, **DA1.3**, **DA1.6**, **GA5.7**;
-> recorded as E9, E12, F1 and F2 in [claims.md](claims.md).
+> **Its figures are only what the trail holds, and nothing shows them yet.** Its inputs are the audit trail,
+> which records the browser route's requests only (above); no command or page imports either scorecard.
+> `metrics_raw` has been created since DA1.2, and `/api/pipeline` writes a row per dispatch since DA1.3. Since DA1.6,
+> `core/audit/metrics.tk` aggregates the table, but nothing on this page reads it yet (DA1.5). The compliance checks in `core/governance/compliance.tk`
+> read the store: an empty trail fails, the chain is verified and the append-only triggers are read back;
+> the two privacy rows say `ASSERTED`, not `PASS`. No command or page runs them either. Tracked as **DA1.5**,
+> **GA5.7**; recorded as E9, E12, F1 and F2 in [claims.md](claims.md).
 
 ---
 

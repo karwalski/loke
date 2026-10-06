@@ -53,11 +53,11 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 >   measured and are gone; token and cost savings read "not measured". No figure from it is publishable
 >   (**VM1.7**).
 > - **Governance dashboard** — the risk breakdown, request log and privacy score are computed over events
->   held in the page, not over a persisted ledger; they reset on reload. Compliance report generation uses
->   moke's own `packages/moke/src/governance.tk:135`, which works over those in-session events. loke's core
->   report engine does **not** work: `core/governance/report-engine.tk:86,104,122,140,158` all query
->   `timestamp` and `detail` columns that `audit_log` does not have, and the table is never written in any
->   case (**GA5.6**, **GA5.7**, **DA1**).
+>   held in the page, not over a persisted ledger; they reset on reload. Compliance report generation is the
+>   page's own script (`packages/moke/templates/governance.tkt`, `downloadAuditReport`) over those in-session
+>   events. loke's core report engine selects the audit trail's real columns since GA5.6 and GA5.11, but no
+>   command or page calls it, and its templates count each forwarded request twice (**GA5.30**,
+>   **GA5.31**).
 > - **Memory palace** — navigation, AAAK compression and persistence are real. The search is keyword
 >   matching over an index table (`core/memory/search.tk:104-130`), not semantic retrieval.
 
@@ -347,16 +347,16 @@ enforced, because **presets are not enforced on the request path** (RG1.1), and 
 Saving a selection writes `governance.policy` to loke's settings, which nothing in loke reads.
 
 **Compliance Reporting:**
-Generate reports as inline, CSV, or JSON. Templates for: EU GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA.
+Generate reports as inline, CSV, or JSON from four templates (general audit, privacy compliance, cost analysis, model usage), each labelled with the selected regulatory preset (EU GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA).
 
-> **These reports cover the current session, and they are not compliance evidence.** Generation uses
-> moke's own `packages/moke/src/governance.tk:135` over events held in the page, so a report describes one
+> **These reports cover the current session, and they are not compliance evidence.** Generation is the
+> page's own script (`packages/moke/templates/governance.tkt`, `downloadAuditReport`) over events held in the page, so a report describes one
 > browser session and nothing before it. The risk breakdown, request log and privacy score above have the
-> same scope and reset on reload. loke's core report engine — which would report over a persisted ledger —
-> does not work: `core/governance/report-engine.tk:86,104,122,140,158` query `timestamp` and `detail`
-> columns that `audit_log` does not have, and nothing writes to `audit_log` in any case. The framework
-> templates name regulations loke ships presets for; they do not make a deployment compliant with any of
-> them. Tracked as **GA5.6**, **GA5.7**, **DA1**, **RG1.4**; recorded as E8, E9, F4 in
+> same scope and reset on reload. loke's core report engine, which reports over the persisted ledger,
+> selects the audit trail's real columns since GA5.6 and GA5.11 (`tests/unit/governance/test_report_window.tk`),
+> but no command or page calls it (**GA5.31**) and its templates count a forwarded request twice (**GA5.30**).
+> The preset names label the report; they do not make a deployment compliant with any of
+> them. Tracked as **GA5.30**, **GA5.31**, **DA1**, **RG1.4**; recorded as E8, E9, F4 in
 > [claims.md](claims.md).
 
 **External Integration Connectors (10 presets):**

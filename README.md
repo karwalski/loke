@@ -202,10 +202,10 @@ Act, CCPA), and report generation.
 > **The interaction ledger records requests on the browser route only** (GA1.4): `/api/pipeline` records
 > each dispatch and its outcome, a privacy refusal, an approval hold and a kill-switch refusal, and the
 > database rejects `UPDATE` and `DELETE` on the table (GA5.9). The CLI proxy, the broker and the MCP
-> server record no request, so it is not a ledger of every path. Of what reads it, the report engine
-> fails: its queries select two columns the table does not have. The compliance checks return
-> a hardcoded `PASS` on the privacy and audit controls without querying anything, including asserting
-> that the audit trail is complete. Tracked as GA5 and DA1; see [docs/claims.md](docs/claims.md) E4–E9.
+> server record no request, so it is not a ledger of every path. Nothing a user can run reads it yet: the
+> report engine selects the table's real columns (GA5.6) but no command calls it, and the compliance checks
+> query the store (an empty trail fails, the chain is verified) but no command or page runs them. Each
+> outcome's decision is kept beside it in a `decision_trace` table. See [docs/claims.md](docs/claims.md) E4–E9.
 
 > **It is a hash chain for tamper detection, within a limit.** Each row's digest is sha256 over the
 > previous row's hash and every field (GA5.2), and `loke audit verify` names the first row whose fields,
