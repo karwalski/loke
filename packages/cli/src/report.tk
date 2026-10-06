@@ -2,89 +2,88 @@
    SPDX-License-Identifier: Apache-2.0 *)
 
 m=cli.report;
+i=cfg:shared.config;
 i=re:core.governance.reportengine;
 i=ex:core.governance.reportexport;
+i=sdb:core.storage.db;
+i=cmd:cli.commands;
+i=out:cli.output;
 i=str:std.str;
-i=log:shared.log;
-i=tr:core.i18n.translator;
 
-f=run(conn:i64;args:@str):i64{
-  if(args.len<1){
-    printusage();
-    <0
-  }el{
-    let sub=args.get(0);
-    if(str.eq(sub;"generate")){
-      <rungenerate(conn;args)
-    }el{
-      if(str.eq(sub;"templates")){
-        <runtemplates()
-      }el{
-        printusage();
-        <1
-      };
-    };
-  };
+(* GA5.31. `loke report generate` and `loke report templates`, dispatched from cli.main.
+   This module was imported by nothing, so `loke report` did not exist although G4.4 named
+   it. It printed through log.info, which writes ~/.loke/loke.log, so even reached it would
+   have shown nothing; and its usage lines were translator keys that no locale defines. It
+   now prints to stdout through cli.output, in plain text like every other command.
+
+   The flags are parsed and checked by cli.commands.parsereport; this module checks the
+   template against the engine, opens the store and prints the export. A report reads
+   audit_log only, through core.governance.reportengine, and audit_log is designed to hold
+   no raw value: what a report can print is event type, use case, model, provider,
+   sensitivity, risk tier, cost and time. *)
+
+f=handle(kind:str;args:@str;config:$lokeconfig):i64{
+  if(str.eq(kind;"reporttemplates")){ <runtemplates() }el{};
+  <rungenerate(args;config)
 };
 
-f=printusage():i64{
-  log.info(tr.t("loke.cli.report.usage");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.usage_generate");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.usage_templates");"cli.report";"system");
-  <0
-};
-
-f=rungenerate(conn:i64;args:@str):i64{
-  let template=mut."compliance_summary";
-  let start=mut."2026-01-01";
-  let end=mut."2026-12-31";
-  let format=mut."text";
-  let i=mut.1;
-  lp(let lv=0;i<args.len;lv=lv){
-    let flag=args.get(i);
-    if(str.eq(flag;"--template")){
-      if(i+1<args.len){template=args.get(i+1);i=i+2}el{i=i+1}
-    }el{
-      if(str.eq(flag;"--start")){
-        if(i+1<args.len){start=args.get(i+1);i=i+2}el{i=i+1}
-      }el{
-        if(str.eq(flag;"--end")){
-          if(i+1<args.len){end=args.get(i+1);i=i+2}el{i=i+1}
-        }el{
-          if(str.eq(flag;"--format")){
-            if(i+1<args.len){format=args.get(i+1);i=i+2}el{i=i+1}
-          }el{i=i+1}
-        }
-      }
-    }
-  };
-  let filter=$reportfilter{startdate:start;enddate:end;reporttype:template;format:format};
-  (* One match, not two. The legacy shape matched re.generate twice and the second
-     match's `$err` arm read `r` — the first arm's binding, out of scope there — so
-     this module had never compiled. T-18 note as in cli.policy: generate's error type
-     is user-declared, so the `$err` arm is unreachable. *)
-  <mt re.generate(conn;filter) {
-    $ok:r emitreport(r);
-    $err:e generatefailed()
-  }
-};
-
-f=generatefailed():i64{
-  log.error(tr.t("loke.cli.report.generate_failed");"cli.report";"system");
-  <1
-};
-
-f=emitreport(report:$report):i64{
-  log.info(ex.export(report);"cli.report";"system");
-  <0
+f=notbuilt():str{
+  <"Not built: the regulatory templates G4.4 names (EU AI Act, Australian Privacy Act, HIPAA, GDPR, enterprise audit), PDF output, scheduling and the review workflow."
 };
 
 f=runtemplates():i64{
-  log.info(tr.t("loke.cli.report.available");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.compliance_summary");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.pii_detection_log");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.routing_decisions");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.policy_changes");"cli.report";"system");
-  log.info(tr.t("loke.cli.report.cost_savings");"cli.report";"system");
+  let names=re.templatelist();
+  out.printline("Report templates: \(names)");
+  out.printline(notbuilt());
   <0
+};
+
+(* The engine carries a report it could not produce inside a $report, by title or by
+   summary, so a refusal is not mistaken for an empty period. *)
+f=generated(r:$report):bool{
+  <!str.eq(r.title;"Report not generated") && !str.contains(r.summary;"could not be queried")
+};
+
+f=notgenerated():$report{
+  <$report{
+    title:"Report not generated";
+    reporttype:"";
+    generatedat:"";
+    periodstart:"";
+    periodend:"";
+    rows:@();
+    summary:"";
+    format:""
+  }
+};
+
+f=rungenerate(args:@str;config:$lokeconfig):i64{
+  let template=cmd.reporttemplate(args);
+  if(re.knowntemplate(template)){}el{
+    let names=re.templatelist();
+    out.printerror("unknown report template: \(template). Available: \(names)");
+    out.printerror(notbuilt());
+    <1
+  };
+  let opened=mt sdb.openstore(config.datadir) {
+    $ok:st st;
+    $err:e $store{conn:$dbconn{handle:0};datadir:""}
+  };
+  if(sdb.connectionlive()){}el{
+    out.printerror("report not generated: the database at \(config.datadir) could not be opened");
+    <1
+  };
+  let filter=$reportfilter{
+    startdate:cmd.reportstart(args);
+    enddate:cmd.reportend(args);
+    reporttype:template;
+    format:cmd.reportformat(args)
+  };
+  let report=mt re.generate(1;filter) {
+    $ok:r r;
+    $err:e notgenerated()
+  };
+  out.printline(ex.export(report));
+  if(generated(report)){ <0 }el{};
+  <1
 };

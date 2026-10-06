@@ -134,7 +134,190 @@ f=parse(args:@str):$command{
   if(str.eq(sub;"privacy")){
     <parseprivacy(args)
   };
+  if(str.eq(sub;"report")){
+    <parsereport(args)
+  };
   <$command{kind:"unknown";arg:str.concat("unknown command: ";sub)}
+};
+
+(* GA5.31. `loke report generate (--period <period> | --start <date> --end <date>)
+   [--template <name>] [--format text|csv|json]` and `loke report templates`. The flags
+   come in any order, each at most once. A period is a year (2026), a month (2026-03) or a
+   quarter (Q1-2026, the form G4.4 names), and resolves here to the ISO dates the report
+   engine takes. There is no default period: a report over a window nobody chose is a
+   report somebody misreads. The template name is checked against the engine by
+   cli.report, which owns the list; PDF is refused here because it is not built. *)
+f=reportusage():str{
+  <"usage: loke report generate (--period <2026|2026-03|Q1-2026> | --start <YYYY-MM-DD> --end <YYYY-MM-DD>) [--template <name>] [--format text|csv|json] | loke report templates"
+};
+
+f=reportflagknown(flag:str):bool{
+  <str.eq(flag;"--period") || str.eq(flag;"--start") || str.eq(flag;"--end") || str.eq(flag;"--template") || str.eq(flag;"--format")
+};
+
+(* How many times a flag is given in flag position. *)
+f=reportflagcount(args:@str;flag:str):i64{
+  let n=mut.0;
+  lp(let k=3;k<args.len;k=k+2){
+    if(str.eq(args.get(k);flag)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=isdigits(v:str):bool{
+  <str.len(v)>0 && str.eq(str.fromint(str.toint(v));v)
+};
+
+f=twodigits(n:i64):str{
+  if(n<10){ <"0\(n)" }el{};
+  <"\(n)"
+};
+
+f=yearof(y:str):i64{
+  if(str.len(y)!=4 || !isdigits(y)){ <0 }el{};
+  let n=str.toint(y);
+  if(n<1970){ <0 }el{};
+  <n
+};
+
+(* A two-digit month, 01 to 12, or 0. *)
+f=monthof(mm:str):i64{
+  if(str.len(mm)!=2){ <0 }el{};
+  let n=str.toint(mm);
+  if(n<1 || n>12 || !str.eq(twodigits(n);mm)){ <0 }el{};
+  <n
+};
+
+f=lastdayof(year:i64;month:i64):i64{
+  if(month==2){
+    if((year%4==0 && year%100!=0) || year%400==0){ <29 }el{};
+    <28
+  }el{};
+  if(month==4 || month==6 || month==9 || month==11){ <30 }el{};
+  <31
+};
+
+f=isodate(year:i64;month:i64;day:i64):str{
+  let mm=twodigits(month);
+  let dd=twodigits(day);
+  <"\(year)-\(mm)-\(dd)"
+};
+
+(* A period's first month, last month and year; a year of 0 if it is not a period. *)
+f=periodmonths(p:str):@i64{
+  let none:@i64=@(0;0;0);
+  let n=str.len(p);
+  if(n==4){
+    let y=yearof(p);
+    if(y==0){ <none }el{};
+    <@(1;12;y)
+  }el{};
+  if(n!=7){ <none }el{};
+  if(str.eq(str.slice(p;0;1);"Q")){
+    if(!str.eq(str.slice(p;2;3);"-")){ <none }el{};
+    let qs=str.slice(p;1;2);
+    let y=yearof(str.slice(p;3;7));
+    if(!isdigits(qs) || y==0){ <none }el{};
+    let q=str.toint(qs);
+    if(q<1 || q>4){ <none }el{};
+    <@((q-1)*3+1;q*3;y)
+  }el{};
+  if(!str.eq(str.slice(p;4;5);"-")){ <none }el{};
+  let y=yearof(str.slice(p;0;4));
+  let m=monthof(str.slice(p;5;7));
+  if(y==0 || m==0){ <none }el{};
+  <@(m;m;y)
+};
+
+(* The first day of a period, ISO, or "" if it is not a period. *)
+f=periodstart(p:str):str{
+  let pm=periodmonths(p);
+  if(pm.get(2)==0){ <"" }el{};
+  <isodate(pm.get(2);pm.get(0);1)
+};
+
+(* The last day of a period, ISO and inclusive, or "" if it is not a period. *)
+f=periodend(p:str):str{
+  let pm=periodmonths(p);
+  if(pm.get(2)==0){ <"" }el{};
+  <isodate(pm.get(2);pm.get(1);lastdayof(pm.get(2);pm.get(1)))
+};
+
+(* YYYY-MM-DD with a real month and a day that month has. *)
+f=isisodate(v:str):bool{
+  if(str.len(v)!=10 || !str.eq(str.slice(v;4;5);"-") || !str.eq(str.slice(v;7;8);"-")){ <false }el{};
+  let y=yearof(str.slice(v;0;4));
+  let m=monthof(str.slice(v;5;7));
+  if(y==0 || m==0){ <false }el{};
+  let dd=str.slice(v;8;10);
+  let day=str.toint(dd);
+  <day>=1 && day<=lastdayof(y;m) && str.eq(twodigits(day);dd)
+};
+
+f=parsereport(args:@str):$command{
+  let argc=args.len;
+  let bad=$command{kind:"unknown";arg:reportusage()};
+  if(argc<3){ <bad }el{};
+  let action=args.get(2);
+  if(str.eq(action;"templates")){
+    if(argc!=3){ <bad }el{};
+    <$command{kind:"reporttemplates";arg:""}
+  }el{};
+  if(!str.eq(action;"generate") || (argc-3)%2!=0){ <bad }el{};
+  lp(let k=3;k<argc;k=k+2){
+    let flag=args.get(k);
+    if(!reportflagknown(flag) || reportflagcount(args;flag)!=1 || str.len(args.get(k+1))==0){ <bad }el{}
+  };
+  let period=reportflagcount(args;"--period")==1;
+  let starts=reportflagcount(args;"--start")==1;
+  let ends=reportflagcount(args;"--end")==1;
+  if(period && (starts || ends)){ <bad }el{};
+  if(!period && !(starts && ends)){ <bad }el{};
+  if(period && str.len(periodstart(reportflag(args;"--period")))==0){
+    <$command{kind:"unknown";arg:"--period must be a year (2026), a month (2026-03) or a quarter (Q1-2026)"}
+  }el{};
+  if(starts && (!isisodate(reportflag(args;"--start")) || !isisodate(reportflag(args;"--end")))){
+    <$command{kind:"unknown";arg:"--start and --end must be dates, YYYY-MM-DD"}
+  }el{};
+  let format=reportformat(args);
+  if(!str.eq(format;"text") && !str.eq(format;"csv") && !str.eq(format;"json")){
+    <$command{kind:"unknown";arg:"--format must be text, csv or json; PDF output is not built"}
+  }el{};
+  <$command{kind:"reportgenerate";arg:""}
+};
+
+(* The value after a report flag, or "". parsereport has refused every malformed form. *)
+f=reportflag(args:@str;flag:str):str{
+  let found=mut."";
+  lp(let k=3;k+1<args.len;k=k+2){
+    if(str.eq(args.get(k);flag)){ found=args.get(k+1) }el{}
+  };
+  <found
+};
+
+f=reporttemplate(args:@str):str{
+  let v=reportflag(args;"--template");
+  if(str.len(v)==0){ <"compliance_summary" }el{};
+  <v
+};
+
+f=reportformat(args:@str):str{
+  let v=reportflag(args;"--format");
+  if(str.len(v)==0){ <"text" }el{};
+  <v
+};
+
+(* The window's first and last day, ISO, inclusive, from --period or from --start/--end. *)
+f=reportstart(args:@str):str{
+  let p=reportflag(args;"--period");
+  if(str.len(p)>0){ <periodstart(p) }el{};
+  <reportflag(args;"--start")
+};
+
+f=reportend(args:@str):str{
+  let p=reportflag(args;"--period");
+  if(str.len(p)>0){ <periodend(p) }el{};
+  <reportflag(args;"--end")
 };
 
 (* G1.6. `loke kill-switch <on|off> [--use-case <id> | --agent <id> | --provider <name>]`
@@ -300,6 +483,10 @@ f=usage():str{
   u=str.concat(u;"  loke erase --everything        say what erasing all loke data would remove\n");
   u=str.concat(u;"                 [--yes]         and do it: every table, the log, the cache, exports\n");
   u=str.concat(u;"  loke audit verify              verify the audit chain and reconcile the disclosure record\n");
+  u=str.concat(u;"  loke report generate           a report from the audit trail\n");
+  u=str.concat(u;"      (--period <2026|2026-03|Q1-2026> | --start <date> --end <date>)\n");
+  u=str.concat(u;"      [--template <name>] [--format text|csv|json]\n");
+  u=str.concat(u;"  loke report templates          list the report templates\n");
   u=str.concat(u;"  loke --version                 print version\n");
   u=str.concat(u;"  loke help                      show this help\n");
   <u

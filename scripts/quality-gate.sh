@@ -703,6 +703,12 @@ step_test() {
   if [[ -x ./scripts/smoke_privacy_evaluate.sh ]]; then
     ./scripts/smoke_privacy_evaluate.sh || return 1
   fi
+  # GA5.31: the built `loke report` over a throwaway HOME whose loke.db is seeded with audit
+  # rows, judged on the report body (one row per request, the right event types, no raw
+  # value from memory_drawers). No port, no lock.
+  if [[ -x ./scripts/smoke_report.sh ]]; then
+    ./scripts/smoke_report.sh || return 1
+  fi
   # The whole path: moke -> loke -> a recording fake model -> back. Asserts the model never
   # saw the PII and the user got it back. First ran end to end on 2026-09-25.
   if [[ -x ./scripts/smoke_e2e.sh ]]; then

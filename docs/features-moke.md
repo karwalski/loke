@@ -55,9 +55,9 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 > - **Governance dashboard** — the risk breakdown, request log and privacy score are computed over events
 >   held in the page, not over a persisted ledger; they reset on reload. Compliance report generation is the
 >   page's own script (`packages/moke/templates/governance.tkt`, `downloadAuditReport`) over those in-session
->   events. loke's core report engine selects the audit trail's real columns since GA5.6 and GA5.11, but no
->   command or page calls it, and its templates count each forwarded request twice (**GA5.30**,
->   **GA5.31**).
+>   events. loke's core report engine reports over the persisted audit trail through `loke report generate`
+>   (**GA5.31**), counting each request once (**GA5.30**); this page does not call it, and its five
+>   templates are not the regulatory presets.
 > - **Memory palace** — navigation, AAAK compression and persistence are real. The search is keyword
 >   matching over an index table (`core/memory/search.tk:104-130`), not semantic retrieval.
 
@@ -354,7 +354,7 @@ Generate reports as inline, CSV, or JSON from four templates (general audit, pri
 > browser session and nothing before it. The risk breakdown, request log and privacy score above have the
 > same scope and reset on reload. loke's core report engine, which reports over the persisted ledger,
 > selects the audit trail's real columns since GA5.6 and GA5.11 (`tests/unit/governance/test_report_window.tk`),
-> but no command or page calls it (**GA5.31**) and its templates count a forwarded request twice (**GA5.30**).
+> counts each request once (**GA5.30**) and is run by `loke report generate` (**GA5.31**); this page does not call it.
 > The preset names label the report; they do not make a deployment compliant with any of
 > them. Tracked as **GA5.30**, **GA5.31**, **DA1**, **RG1.4**; recorded as E8, E9, F4 in
 > [claims.md](claims.md).
