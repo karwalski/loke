@@ -1,0 +1,216 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.dedupsensitivity;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+i=pl:core.privacy.pipeline;
+i=ph:core.privacy.placeholder;
+i=fr:core.privacy.filterregistry;
+i=cn:core.privacy.consensus;
+
+(* RG1.7c — when detections of one value, or of overlapping spans, disagree on type, the
+   most sensitive classification survives, and a run is never rated lower than the highest
+   of the detections its layers reported, whatever the order of the patterns or the layers.
+
+   THE INVARIANT, on the production pipeline (pl.runforward, regex layer only, so the raw
+   detections are exactly rx.detect's): sensrank(run.result.sensitivity) is at least
+   sensrank(pl.maxsensitivity(rx.detect(text).entities)). The texts are the colliding pairs
+   found by running the regex layer over the corpus, the harness values and every unit
+   test's detect() literal (2026-10-01): an NHS number printed 3-3-4 and phone_us; a Medicare
+   number with its IRN and au_abn; nine digits that are a valid TFN and a bank account,
+   passport, super member or licence number; ten that are Medicare and an account number; a
+   card number or TFN inside a URL or an e-mail address.
+
+   ORDER IS NOT WHAT PASSES IT. au_abn comes BEFORE au_medicare in getpatterns, and the
+   regex layer reports the ABN first (both asserted), so on the Medicare text keep-first
+   kept the ABN and rated the prompt INTERNAL. The dedup is also run on the NHS detections
+   reversed, phone_us first, and through consensus first-match with the less sensitive
+   layer first.
+
+   Every run's anonymised text is restored with the run's own map and compared with the
+   original byte for byte. *)
+
+f=countoftype(entities:@$piientity;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<entities.len;i=i+1){
+    let e:$piientity=entities.get(i);
+    if(str.eq(e.entitytype;wanted)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=reversed(entities:@$piientity):@$piientity{
+  let out=mut.@();
+  let n=entities.len as i64;
+  lp(let k=0;k<n;k=k+1){ out=out.push(entities.get(n-1-k)) };
+  <out
+};
+
+f=indexofpattern(name:str):i64{
+  let pats=rx.getpatterns();
+  let at=mut.(0-1);
+  lp(let i=0;i<pats.len;i=i+1){
+    let p:$patterndef=pats.get(i);
+    if(at<0 && str.eq(p.name;name)){ at=i }el{}
+  };
+  <at
+};
+
+f=firsttype(entities:@$piientity):str{
+  if(entities.len==0){ <"" }el{};
+  let e:$piientity=entities.get(0);
+  <e.entitytype
+};
+
+(* The regex layer alone: the other layers are switched off, not left to time out. *)
+f=regexonly():$pipelineconfig{
+  let c=mut.pl.newconfig("http://127.0.0.1:9";"http://127.0.0.1:9");
+  c=pl.withlayer(c;fr.nerid();false);
+  c=pl.withlayer(c;fr.presidioid();false);
+  c=pl.withlayer(c;fr.privacyfilterid();false);
+  <c
+};
+
+f=rank(s:$sensitivitylevel):i64{ <sh.sensrank(s) };
+
+(* The regex layer's raw detections of text, and the production run's result on it. *)
+f=rawof(text:str):@$piientity{
+  let r:$piidetectionresult=rx.detect(text);
+  <r.entities
+};
+
+f=resultof(text:str):$piidetectionresult{
+  let run:$pipelinerun=pl.runforward(text;"";regexonly());
+  <run.result
+};
+
+(* The invariant for one text. *)
+f=holds(text:str):bool{
+  let raw=rawof(text);
+  let res=resultof(text);
+  <raw.len>0 && rank(res.sensitivity)>=rank(pl.maxsensitivity(raw))
+};
+
+f=rawlabel(text:str):str{ <sh.senslabel(pl.maxsensitivity(rawof(text))) };
+f=runlabel(text:str):str{
+  let res=resultof(text);
+  <sh.senslabel(res.sensitivity)
+};
+
+(* Restored with the run's own map, byte for byte, and every kept value absent from what
+   would be sent. *)
+f=roundtrips(text:str):bool{
+  let res=resultof(text);
+  let anon=res.anonymised;
+  let back=ph.restore(anon;ph.mapfromentities(res.entities));
+  let ok=mut.(str.eq(back;text) && str.len(back)==str.len(text) && !str.eq(anon;text));
+  lp(let i=0;i<res.entities.len;i=i+1){
+    let e:$piientity=res.entities.get(i);
+    if(str.contains(anon;e.value)){ ok=false }el{}
+  };
+  <ok
+};
+
+f=ent(kind:str;value:str;start:u32;end:u32;conf:f64):$piientity{
+  <$piientity{entitytype:kind;value:value;start:start;end:end;confidence:conf;placeholder:""}
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── The colliding pairs, on the production pipeline ──────────────────────── *)
+  let texts=@(
+    "Medicare no. 62174051064 was quoted on the referral.";
+    "Medicare no. 41707124673 was quoted on the referral.";
+    "NHS number 943 476 5919 is on the referral";
+    "Patient nhs no. 798-233-9786 was re-registered.";
+    "account 123456782";
+    "passport number 123456782";
+    "super member number 123456782";
+    "driver's licence 123456782";
+    "TFN 123456782 and account 123456782";
+    "account 2123456701";
+    "https://example.com/u/4111111111111111";
+    "https://example.com/?tfn=123456782";
+    "mail jane.4111111111111111@example.com";
+    "mail 123456782@example.com";
+    "NHS 943 476 5919 account 9434765919"
+  );
+  lp(let i=0;i<texts.len;i=i+1){
+    let tx:str=texts.get(i);
+    let rl=rawlabel(tx);
+    let gl=runlabel(tx);
+    if(t.assert(holds(tx);"invariant: the run is rated no lower than its raw detections (raw \(rl), run \(gl)) for: \(tx)")){pass=pass+1}el{fail=fail+1};
+    if(t.assert(roundtrips(tx);"and its anonymised text restores byte for byte, with no kept value left in it, for: \(tx)")){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* ── Less sensitive FIRST in getpatterns: au_abn before au_medicare ───────── *)
+  let med="Medicare no. 62174051064 was quoted on the referral.";
+  let medraw=rawof(med);
+  if(t.assert(indexofpattern("au_abn")>=0 && indexofpattern("au_abn")<indexofpattern("au_medicare");"au_abn precedes au_medicare in getpatterns")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(firsttype(medraw);"au_abn";"so the regex layer reports the ABN reading of the Medicare number first")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(medraw;"au_abn")==1 && countoftype(medraw;"au_medicare")==1;"and both readings of the same eleven digits are reported")){pass=pass+1}el{fail=fail+1};
+  let medrun=resultof(med);
+  if(t.asserteq(sh.senslabel(medrun.sensitivity);"restricted";"the run on it is RESTRICTED, not the ABN's INTERNAL")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(medrun.entities;"au_medicare")==1 && countoftype(medrun.entities;"au_abn")==0;"and the one entity kept for the value is the Medicare number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(medrun.anonymised;"[AU_MEDICARE_") && !str.contains(medrun.anonymised;"[AU_ABN_");"so its placeholder says AU_MEDICARE")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.countrestricted(medrun.entities)==1 as u32;"and it is counted RESTRICTED")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Arrival order does not decide: the NHS pair both ways ─────────────────── *)
+  let nhs="NHS number 943 476 5919 is on the referral";
+  let nhsraw=rawof(nhs);
+  let nhsrev=reversed(nhsraw);
+  if(t.asserteq(firsttype(nhsrev);"phone_us";"reversed, the phone_us reading comes first")){pass=pass+1}el{fail=fail+1};
+  let keptfwd=pl.dedupentities(nhsraw);
+  let keptrev=pl.dedupentities(nhsrev);
+  if(t.assert(countoftype(keptfwd;"uk_nhs_number")==1 && countoftype(keptfwd;"phone_us")==0;"in getpatterns order the NHS number is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countoftype(keptrev;"uk_nhs_number")==1 && countoftype(keptrev;"phone_us")==0;"and with phone_us first it is still the NHS number that is kept")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(keptrev));"restricted";"so the rating is RESTRICTED either way")){pass=pass+1}el{fail=fail+1};
+  let medrev=pl.dedupentities(reversed(medraw));
+  if(t.assert(countoftype(medrev;"au_medicare")==1 && countoftype(medrev;"au_abn")==0;"and the Medicare number is kept whichever reading arrives first")){pass=pass+1}el{fail=fail+1};
+
+  (* Equal sensitivity: the first is still kept, so nothing else moves. *)
+  let tfnacct=pl.dedupentities(rawof("account 123456782"));
+  if(t.assert(tfnacct.len==1 && str.eq(firsttype(tfnacct);"au_tfn");"two RESTRICTED readings of one value keep the first, as before")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Shadowing: a less sensitive span does not absorb a more sensitive one ─── *)
+  let card="4111111111111111";
+  let urltext="see https://example.com/u/4111111111111111 now";
+  let url="https://example.com/u/4111111111111111";
+  let shadow=@(ent("url";url;4 as u32;42 as u32;0.99);ent("credit_card";card;26 as u32;42 as u32;0.99));
+  let sk=pl.dedupentities(shadow);
+  if(t.assert(countoftype(sk;"credit_card")==1 && countoftype(sk;"url")==1;"a URL covering a card number at equal confidence does not drop the card")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(sk));"restricted";"so the kept list is still RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  let skp=ph.assignplaceholders(sk;"0123456789abcdef");
+  let skanon=ph.applytotext(urltext;skp);
+  if(t.assert(!str.contains(skanon;card) && !str.contains(skanon;"example.com");"neither value reaches the anonymised text (\(skanon))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ph.restore(skanon;ph.mapfromentities(skp));urltext;"and it restores byte for byte")){pass=pass+1}el{fail=fail+1};
+  let same=@(ent("credit_card";url;4 as u32;42 as u32;0.99);ent("url";card;26 as u32;42 as u32;0.60));
+  if(t.assert(pl.dedupentities(same).len==1;"a more sensitive covering span still shadows a less sensitive one inside it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Consensus first-match, the less sensitive layer first ───────────────── *)
+  let v="943 476 5919";
+  let pair=@(ent("phone_us";v;11 as u32;23 as u32;0.92);ent("uk_nhs_number";v;11 as u32;23 as u32;0.95));
+  let layers=@("first";"second");
+  let fm=cn.applyranked(pair;layers;layers;"first-match";"";pl.ranksof(pair));
+  if(t.assert(fm.entities.len==1;"first-match keeps only the first layer's detection")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(firsttype(fm.entities);"uk_nhs_number";"and it carries the group's most sensitive type, not phone_us")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.maxsensitivity(pl.dedupentities(fm.entities)));"restricted";"so what the pipeline keeps from it is RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  let mr=cn.applyranked(pair;layers;layers;"most-restrictive";"";pl.ranksof(pair));
+  if(t.assert(countoftype(mr.entities;"phone_us")==1 && countoftype(mr.entities;"uk_nhs_number")==1;"most-restrictive keeps both with their own types; dedup then picks")){pass=pass+1}el{fail=fail+1};
+  let skew=cn.applyranked(pair;layers;layers;"first-match";"";pl.ranksof(@(pair.get(0))));
+  if(t.asserteq(firsttype(skew.entities);"phone_us";"ranks out of step with the detections change no type")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(firsttype(cn.apply(pair;layers;layers;"first-match";"").entities);"phone_us";"nor does apply, which passes none")){pass=pass+1}el{fail=fail+1};
+
+  (* The rating covers what consensus drops: requestsensitivity over the raw detections. *)
+  let dropped=@(ent("phone_us";v;11 as u32;23 as u32;0.92));
+  if(t.asserteq(sh.senslabel(pl.requestsensitivity(pair;dropped));"restricted";"a run's rating counts a detection that consensus did not keep")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(sh.senslabel(pl.requestsensitivity(@();@()));"public";"and is PUBLIC when nothing was found")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

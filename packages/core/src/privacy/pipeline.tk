@@ -257,7 +257,7 @@ f=seenvalue(kept:@$piientity;value:str):bool{
    ENTITIES WITH NO SPANS ARE UNTOUCHED. Requiring end>start on BOTH sides means a spanless
    entity neither shadows nor is shadowed -- the same outcome as before this change, since
    the old test `candidate.start<e.end` was also false for an empty span. Equal values are
-   still collapsed by seenvalue, span or no span.
+   still collapsed by value in dedupentities, span or no span.
 
    PL1.7 has since landed, so the regex layer is no longer the spanless case this paragraph
    was written for: regex.rundetection now recovers each match's offset from str.indexof and
@@ -275,7 +275,7 @@ f=strictlyshadows(shadow:$piientity;target:$piientity):bool{
   if(spanned){
     if(shadow.start<=target.start){
       if(shadow.end>=target.end){
-        if(shadow.confidence>=target.confidence){
+        if(shadow.confidence>=target.confidence && entityrank(shadow)>=entityrank(target)){
           if(str.contains(shadow.value;target.value)){
             if(str.eq(shadow.value;target.value)){}el{
               shadows=true
@@ -302,17 +302,69 @@ f=shadowedbyany(entities:@$piientity;target:$piientity):bool{
   <shadowed
 };
 
+(* RG1.7c. Of the detections that carry one value, the MOST SENSITIVE is kept, not the
+   first. The value's placeholder, its count and the request's rating all follow the type
+   that is kept, and keeping the first made them follow pattern or layer order: an NHS
+   number printed 3-3-4 is also a phone_us match, and a Medicare number with its IRN is also
+   a checksum-valid ABN (au_abn comes BEFORE au_medicare in getpatterns), so either could be
+   kept as the less sensitive type and rate the prompt INTERNAL. Ties keep the earliest, as
+   before. Among equal values only the unshadowed take part, so a value is dropped only when
+   every detection of it is shadowed, which is what the first-wins rule did too. The rank is
+   maxsensitivity's own, one entity at a time, so it cannot disagree with the rating.
+
+   strictlyshadows also requires the survivor to rank at least as high as what it drops:
+   a URL or e-mail address that contains a card number or TFN no longer absorbs it. Both are
+   then kept; applytotext substitutes the longer first, so the inner value's placeholder
+   may not appear in the prompt, and restore still returns the text exactly. *)
+f=entityrank(e:$piientity):i64{
+  <t.sensrank(maxsensitivity(@(e)))
+};
+
+(* True when another unshadowed detection of the same value outranks entities[i]: ranks
+   higher, or ranks the same and comes first. *)
+f=outranked(entities:@$piientity;i:i64):bool{
+  let c:$piientity=entities.get(i);
+  let mine=entityrank(c);
+  let beaten=mut.false;
+  lp(let j=0;j<entities.len;j=j+1){
+    let o:$piientity=entities.get(j);
+    if(j!=i && str.eq(o.value;c.value)){
+      let theirs=entityrank(o);
+      if(theirs>mine || (theirs==mine && j<i)){
+        if(shadowedbyany(entities;o)){}el{ beaten=true }
+      }el{}
+    }el{}
+  };
+  <beaten
+};
+
 f=dedupentities(entities:@$piientity):@$piientity{
   let kept=mut.@();
   lp(let i=0;i<entities.len;i=i+1){
     let candidate:$piientity=entities.get(i);
-    if(seenvalue(kept;candidate.value)){}el{
+    if(outranked(entities;i)){}el{
       if(shadowedbyany(entities;candidate)){}el{
         kept=kept.push(candidate)
       }
     }
   };
   <kept
+};
+
+(* RG1.7c. The rating of a run: the higher of what it kept and every detection a masking
+   layer accepted before routing, consensus and dedup. A strategy other than most-restrictive
+   can drop a detection, or pass a whole group in the clear, and neither makes the prompt
+   less sensitive than what was found in it. *)
+f=requestsensitivity(raw:@$piientity;kept:@$piientity):$sensitivitylevel{
+  let k=maxsensitivity(kept);
+  let r=maxsensitivity(raw);
+  if(ishighersensitivity(k;r)){ <k }el{};
+  <r
+};
+
+(* RG1.7c. Each detection's rank, in step, for core.privacy.consensus. *)
+f=ranksof(entities:@$piientity):@i64{
+  <entities.map(&entityrank)
 };
 
 f=maxsensitivity(entities:@$piientity):$sensitivitylevel{
@@ -641,7 +693,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
 
   (* F3b.4. Overlapping detections are resolved by the configured strategy before dedup;
      the default, most-restrictive, keeps every detection, as this list always was. *)
-  let agreed:$consensusresult=cn.apply(routed.entities;routed.layers;voters;config.consensus;config.consensusthreshold);
+  let agreed:$consensusresult=cn.applyranked(routed.entities;routed.layers;voters;config.consensus;config.consensusthreshold;ranksof(routed.entities));
   let dedupedraw=dedupentities(agreed.entities);
   (* PL1.1 — placeholders are assigned HERE, after dedup and before anonymisation, and
      nowhere else.
@@ -673,7 +725,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let sensitivity=mut.t.public();
   if(config.dryrun){
     
-    sensitivity=maxsensitivity(deduped);
+    sensitivity=requestsensitivity(allentities;deduped);
     let anonstage=$stageresult{
       stage:$pipelinestage{$anonymise:0};
       entitiesfound:dedupcount;
@@ -684,7 +736,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     stages=stages.push(anonstage)
   }el{
     anonymisedtext=anonymisetext(text;deduped);
-    sensitivity=maxsensitivity(deduped);
+    sensitivity=requestsensitivity(allentities;deduped);
     let anonstage=$stageresult{
       stage:$pipelinestage{$anonymise:0};
       entitiesfound:dedupcount;
