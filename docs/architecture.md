@@ -357,13 +357,13 @@ In-memory key-value store for session state, rate-limit counters, and circuit-br
 
 One row per AI call is specified, exportable as CSV or JSON.
 
-> **No row is currently written.** `core.storage.audit::logevent` holds the only `INSERT` into
-> `audit_log` in the tree and **has no callers**; the module's sole importer is the report engine, which
-> reads. The browser route never opens an audit store (`packages/browser/extensions/core.tk:61` —
-> `getauditstore()` returns `0`), and no CLI, proxy, broker or agent path calls `logevent` either. So the
-> limits described below — no time basis, no chain, no policy decision — are downstream of a more basic
-> one: the table is empty. The claim that the trail is "wired into every browser and CLI request path"
-> does not hold. Tracked as **GA5** and **DA1**; recorded as E4 in [claims.md](claims.md).
+> **Requests are recorded on the browser route only (GA1.4).** `/api/pipeline` calls
+> `core.storage.audit.insertevent` for a dispatch and its outcome, a privacy refusal, an approval hold
+> and a kill-switch refusal (`tests/integration/test_audit_trail_e2e.tk`; counted over the built binary
+> by `scripts/smoke_e2e.sh`), and triggers reject `UPDATE` and `DELETE` on `audit_log` (GA5.9). The CLI
+> proxy, broker and MCP server record no request (a kill-switch change is recorded from any caller), so
+> "wired into every browser and CLI request path" holds for the browser route and not for the CLI.
+> Tracked as **GA5** and **DA1**; recorded as E4 in [claims.md](claims.md).
 
 **Specified per interaction:** event type, use case, model, provider, sensitivity, risk tier, token
 counts in and out, cost, duration, correlation ID.
@@ -373,7 +373,7 @@ or override outcome, and kill-switch state. Those five fields exist only on the 
 structure in `core/governance/trace.tk`, which has no table and no insert — `complete()` writes a single
 log line and discards the structure. Persisting it is story **GA5.5**.
 
-> **Even once written, what this record evidences and what it does not.** The trail deliberately excludes prompt content
+> **What this record evidences and what it does not.** The trail deliberately excludes prompt content
 > and placeholder values. That is a defensible privacy choice and it is kept — but it has a consequence
 > worth stating rather than leaving implicit: **the trail cannot evidence that the privacy control
 > operated**, because it records nothing about what was detected, which layer detected it, or what the
@@ -381,9 +381,9 @@ log line and discards the structure. Persisting it is story **GA5.5**.
 >
 > Two further limits apply today. Timestamps are not written correctly — `created_at` receives the
 > string literal `'now()'`, so every row carries the same seven characters and there is no orderable
-> time basis (**GA5.1**). And the trail is not tamper-evident: the stored digest is a concatenation of
-> two non-secret fields, `prev_hash` is stored but is not an input to it, so nothing chains, and no
-> verifier exists (**GA5.2**, **GA5.3**).
+> time basis (**GA5.1**). The trail is a hash chain: sha256 over the previous row's hash and every field
+> (**GA5.2**), checked by `loke audit verify` (**GA5.3**); it is unkeyed and unanchored, so someone who
+> can write the file can rewrite a row and recompute every hash after it undetected.
 >
 > What the record therefore is: a **per-interaction usage and cost ledger**. An assessor distinguishes
 > *design effectiveness* — the control is present and correctly specified at a point in time, which is

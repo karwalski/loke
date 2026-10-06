@@ -138,11 +138,11 @@ withdrawn — see [metrics-baseline.md](metrics-baseline.md). The methodology to
 - Model registry: Ollama, Anthropic (Claude), OpenAI (GPT-4o), Google (Gemini), Mistral, OpenRouter, local inference
 - Context windows: Claude (200K), GPT-4o (128K), Qwen-72B (128K), Qwen-7B (32K)
 
-> **The four named selection strategies do not exist.** `cheapest-adequate`, `fastest`, `best-quality`
-> and `local-first` were listed here and score **zero matches** across `packages/` and `src/`. One fixed
-> selection path exists in `selector.tk`; there is nothing to configure and nothing to select between.
-> Story F5.3 is marked Done in the backlog and should be reopened. Recorded as D3 in
-> [claims.md](claims.md).
+> **Strategies: four named selection strategies exist** (F5.3): `cheapest-adequate`, `fastest`,
+> `best-quality` and `local-first`, in `core/router/strategy.tk`, each a comparator over one shared
+> eligibility filter, selected by name (`[routing] strategy`; `routing.strategy` on the browser route).
+> They rank the models already permitted; the adequacy floor is a fixed constant, not a measured quality
+> threshold. Recorded as D3 in [claims.md](claims.md).
 
 **Latency Tolerance** (`core/router/latency_router.tk`): three tiers — `interactive`, `considered`,
 `background` (`:18-49`). Unlocks larger models for non-urgent tasks.
@@ -178,14 +178,14 @@ parameterised queries (no string concatenation).
 case, model, provider, sensitivity, risk tier, token counts in and out, cost, duration, correlation ID.
 Never stores prompt/response content or placeholder values.
 
-> **No row is currently written, and the GA1.4 wiring claim does not hold.** `logevent` (`audit.tk:27`)
-> holds the only `INSERT` into `audit_log` in the tree and **has no callers**; the module's only importer
-> is the report engine, which reads. No browser, CLI, proxy, broker or agent path calls it, and
-> `packages/browser/extensions/core.tk:61` returns `0` for the audit store rather than opening one. The
-> table is empty, so the scorecard, the monitoring trends and the report engine below all read nothing.
+> **Requests are recorded on the browser route only (GA1.4).** `/api/pipeline` calls `audit.insertevent`
+> for a dispatch and its outcome, a privacy refusal, an approval hold and a kill-switch refusal
+> (`tests/integration/test_audit_trail_e2e.tk`; counted over the built binary by `scripts/smoke_e2e.sh`).
+> The CLI proxy, the broker and the MCP server record no request; a kill-switch change is recorded from
+> any caller, `loke killswitch` included. Triggers reject `UPDATE` and `DELETE` on `audit_log` (GA5.9).
 > Tracked as **GA5** and **DA1**; recorded as E4 in [claims.md](claims.md).
 
-> **Even once written, this is a per-interaction usage and cost ledger, not evidence that the privacy control operated.**
+> **Where it is written, this is a per-interaction usage and cost ledger, not evidence that the privacy control operated.**
 > Five fields an assessor would look for are **not** recorded: the policy decision, detected-entity
 > detail, which detection layer fired, the approval or override outcome, and kill-switch state. They
 > exist only on the `$decisiontrace` structure in `core/governance/trace.tk`, which has no table and no
@@ -195,11 +195,11 @@ Never stores prompt/response content or placeholder values.
 > consequence, stated rather than left implicit: with neither the content nor the decision recorded, the
 > trail cannot show that anything was detected or masked on a given request.
 >
-> It is also not yet tamper-evident or time-ordered. `created_at` receives the string literal `'now()'`,
-> so every row carries the same seven characters and there is no time basis (GA5.1); the stored digest is
-> a concatenation of two non-secret fields and does not incorporate the previous row, so nothing chains
-> (GA5.2) and no verifier exists (GA5.3); and nothing enforces append-only — ordinary `DELETE` and
-> `UPDATE` on `audit_log` are unrestricted (GA5.9).
+> It is a hash chain for tamper detection, within a stated limit. Each row's digest is sha256 over the
+> previous row's hash and every field (GA5.2); `loke audit verify` names the first row whose fields, hash
+> or predecessor no longer match (GA5.3), which `test_audit_trail_e2e.tk` and `scripts/smoke_e2e.sh` show
+> on an edited field, an edited hash and a deleted row. The limit: the chain is unkeyed and unanchored, so
+> someone who can write the file can rewrite a row and recompute every hash after it undetected.
 >
 > So: *design* effectiveness — the control is present and specified — is established by reading the code
 > and [architecture.md](architecture.md) §7. *Operating* effectiveness — the control ran as specified
@@ -234,8 +234,8 @@ the structure. Persisting it, and adding its fields to the audit record, is stor
 
 **Scorecard** (`core/governance/scorecard.tk`): Privacy %, compliance violations, risk tier breakdown, ownership coverage, open incidents. Trend charts (7d/30d/90d), drill-down.
 
-> **Every figure it produces is currently zero or empty.** Its inputs are the audit trail, which is never
-> written (above), and the metrics tables. Those are no longer stubbed. `metrics_raw` has been
+> **Its figures are only what the trail holds.** Its inputs are the audit trail, which records the browser
+> route's requests only (above), and the metrics tables. Those are no longer stubbed. `metrics_raw` has been
 > created since DA1.2, and `/api/pipeline` writes a row per dispatch since DA1.3. Since DA1.6,
 > `core/audit/metrics.tk` aggregates the table, but nothing on this page reads it yet (DA1.5). The compliance checks it surfaces are hardcoded: `core/governance/compliance.tk:42-56`
 > and `:82-90` assert `PASS` on the privacy and audit controls without querying the store — including
@@ -297,7 +297,7 @@ the structure. Persisting it, and adding its fields to the audit record, is stor
 
 ### HTTP Server
 
-Port 11430. Intended to be localhost-only; measured 2026-09-24, it listens on every interface, because the bind address cannot yet be set (GA2.5, T-43). ooke native binary serving both API endpoints and UI pages.
+Port 11430. Localhost-only: the server binds to `127.0.0.1` by default (`[server] host` in `ooke.toml`), and `scripts/smoke_e2e.sh` asserts with lsof that the running listener is on `127.0.0.1` only (GA2.5). ooke native binary serving both API endpoints and UI pages.
 
 **API Endpoints:**
 
@@ -373,8 +373,8 @@ ooke native binary with web view. Tab management, history, bookmarks. Chat inter
 **MCP Broker** (`mcp-broker/src/server.tk`): Port 11436. Connects local MCP servers. Per-server permissions (tool allowlist/denylist, max-cost, require-approval). Privacy pipeline on all tool call data.
 
 > **There is no audit trail on broker invocations.** No file under `packages/mcp-broker/src/` or
-> `packages/mcp-toke/src/` imports any audit module, so nothing is recorded — and there would be nothing
-> to record into, since the trail is never written at all (see Audit Trail above). The permissions and
+> `packages/mcp-toke/src/` imports any audit module, so nothing is recorded: only the browser route
+> records requests in the trail (see Audit Trail above). The permissions and
 > privacy claims do hold: `permissions.tk:25-56,206` enforces the allowlist, and
 > `proxy.tk:62` anonymises outbound tool arguments while `:33` restores inbound responses. Note the
 > asymmetry — an outbound privacy failure fails closed (`:58`), an inbound restore failure fails open with

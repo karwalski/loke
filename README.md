@@ -186,9 +186,9 @@ tiers: Interactive, Considered, Background.
 
 > The classifier is a keyword and pattern cascade, not an embedding model — deliberately cheap, and
 > described that way rather than as semantic. No latency measurement is published. The four named
-> selection strategies (cheapest-adequate, fastest, best-quality, local-first) are **not
-> implemented** — they score zero matches anywhere in the tree; one fixed selection path exists. Story
-> F5.3 is marked Done in the backlog and should be reopened. The RouteLLM cost-signal client is also
+> selection strategies (cheapest-adequate, fastest, best-quality, local-first) rank the models already
+> permitted (F5.3), selected by name in config; the adequacy floor they share is a fixed constant, not a
+> measured quality threshold. The RouteLLM cost-signal client is
 > unwired: it has zero importers, and the cost and quality figures once quoted for it were a
 > third-party result repeated without citation and are withdrawn. See
 > [docs/claims.md](docs/claims.md) D1–D6.
@@ -199,18 +199,18 @@ Kill switch (global/per-provider/per-agent), an append-only interaction ledger, 
 graduated warnings (info/advisory/caution/block), regulatory policy presets (GDPR, HIPAA, AU Privacy
 Act, CCPA), and report generation.
 
-> **The interaction ledger is not currently written.** The one function that inserts into `audit_log`
-> has no callers anywhere in the tree, the browser route never opens an audit store, and the table's
-> only reader is the report engine. So the ledger is empty, and everything downstream of it — report
-> generation, the compliance checks, the governance scorecard — reads nothing. The report engine would
-> fail regardless: its queries select two columns the table does not have. The compliance checks return
+> **The interaction ledger records requests on the browser route only** (GA1.4): `/api/pipeline` records
+> each dispatch and its outcome, a privacy refusal, an approval hold and a kill-switch refusal, and the
+> database rejects `UPDATE` and `DELETE` on the table (GA5.9). The CLI proxy, the broker and the MCP
+> server record no request, so it is not a ledger of every path. Of what reads it, the report engine
+> fails: its queries select two columns the table does not have. The compliance checks return
 > a hardcoded `PASS` on the privacy and audit controls without querying anything, including asserting
 > that the audit trail is complete. Tracked as GA5 and DA1; see [docs/claims.md](docs/claims.md) E4–E9.
 
-> **And once written it would not be tamper-evident.** The stored digest is a concatenation of two
-> non-secret fields rather than a cryptographic hash, it does not incorporate the previous record, and
-> no verification routine exists. Timestamps are not written correctly either — the insert stores the
-> literal text `now()`, so there is no time basis and therefore no period to evidence. What the ledger
+> **It is a hash chain for tamper detection, within a limit.** Each row's digest is sha256 over the
+> previous row's hash and every field (GA5.2), and `loke audit verify` names the first row whose fields,
+> hash or predecessor no longer match (GA5.3). The chain is unkeyed and unanchored: someone who can write
+> the file can rewrite a row and recompute every hash after it undetected. What the ledger
 > is designed to record is a per-interaction usage and cost account — not evidence that a control
 > operated over a period. Tracked as GA5.
 >
@@ -234,8 +234,8 @@ knowledge graph, and a memory MCP server.
 toke MCP server + broker with per-server permissions and the privacy pipeline on all tool call data.
 
 > **There is no audit trail on MCP invocations.** No file in the broker or the MCP server imports any
-> audit module, so nothing is recorded — and per the Governance note above, there would be nothing to
-> record into. The permissions and privacy claims do hold: the broker enforces its tool allowlist,
+> audit module, so nothing is recorded; per the Governance note above, only the browser route records
+> requests. The permissions and privacy claims do hold: the broker enforces its tool allowlist,
 > anonymises outbound tool arguments and restores inbound responses. Note the asymmetry — an outbound
 > privacy failure fails closed, an inbound restore failure fails open with a warning. Tracked as GA5 and
 > DA1; see [docs/claims.md](docs/claims.md) I1–I3.
