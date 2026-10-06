@@ -83,20 +83,36 @@ t=$report{
                          core.governance.scorecard counts (dispatchclause).
      request outcome     the dispatch outcomes, plus every way a request is refused before
                          anything is sent: llm_request_refused, privacy_refused,
-                         quota_exceeded, policy_deny, policy_require_approval and a
-                         request's kill_switch_refused. Reduced to ONE row per request,
+                         quota_exceeded, policy_deny, policy_require_approval and
+                         kill_switch_refused (a request the switch stopped). Reduced to ONE row per request,
                          the last written, so a request whose first hop failed and whose
                          second answered is one request whose outcome is the answer.
      control change      kill_switch_engaged, kill_switch_released.
 
    Never counted by any template: llm_dispatch (it precedes the outcome row of the same
    call, so counting both is the double count), degraded_mode_entered and
-   degraded_mode_exited (a provider's availability, not a request or a decision), and a
-   REFUSED kill-switch change. kill_switch_refused carries two meanings in the trail: the
-   browser route writes it for a request the switch stopped, with the request's hex
-   correlation id, and core.governance.killswitch writes it for a change it refused, with
-   `<scope>:<target>`. A request id never contains a colon, so the colon tells them apart;
-   GA5.32 asks for the second to have its own name.
+   degraded_mode_exited (a provider's availability, not a request or a decision),
+   kill_switch_change_refused (a change to the switch that was refused, so no control
+   changed) and kill_switch_agent_refused (an agent run the switch stopped; agents send
+   nothing to a model yet, so it is not a request).
+
+   GA5.32 — kill_switch_refused, then and now. GA5.30 read this event type as two things
+   told apart by a colon: a request the switch stopped (hex correlation id) and a refused
+   switch change (`<scope>:<target>`). The second never existed: no writer has ever
+   audited a refused change. The `<scope>:<target>` rows were core.governance.killswitch's
+   recordrefusal, written for a browser request the use-case gate stopped
+   (`use_case:browser-chat`, the same id for every such request) and for an agent run the
+   executor refused (`agent:<id>`). So the colon dropped real refused requests from the
+   compliance summary. Each meaning now has its own event type at the writer
+   (killswitch.tk), and kill_switch_refused is a request, keyed on its own id, always.
+   Rows written before GA5.32 cannot be renamed (audit_log takes INSERT only, and each
+   row's hash covers its event type), so they are read by the convention they were
+   written under, and only those rows match it, because no writer produces it now:
+
+     kill_switch_refused, `use_case:%`   a request stopped at the use-case gate. Every
+                                         one has the same correlation id, so each row is
+                                         its own request (keyed on its rowid).
+     kill_switch_refused, `agent:%`      an agent run: excluded, as its new type is.
 
    The templates:
 
@@ -166,16 +182,24 @@ f=dispatchoutcomeclause():str{
 };
 
 (* A row that is the outcome of a request, without the leading AND so the dedup subquery
-   can use it too. The kill_switch_refused arm admits the browser route's refusals only:
-   the switch's own refused changes are keyed `<scope>:<target>`. *)
+   can use it too. Classified by event type: kill_switch_refused is a request the switch
+   stopped, and the other kill-switch refusals have their own types, which are not here.
+   The one exception is a row written before GA5.32 (see above): its agent-run refusals
+   carry this type under `agent:<id>`, and are left out by that prefix. *)
 f=requestoutcomepredicate():str{
-  <"(event_type IN (\(dispatchoutcometypes()),'llm_request_refused','privacy_refused','quota_exceeded','policy_deny','policy_require_approval') OR (event_type='kill_switch_refused' AND INSTR(correlation_id,':')=0))"
+  <"(event_type IN (\(dispatchoutcometypes()),'llm_request_refused','privacy_refused','quota_exceeded','policy_deny','policy_require_approval','kill_switch_refused') AND NOT \(legacyagentrefusal()))"
+};
+
+f=legacyagentrefusal():str{
+  <"(event_type='kill_switch_refused' AND correlation_id LIKE 'agent:%')"
 };
 
 (* A fallback hop's correlation id is the request's with `-h<n>` appended; the request id
-   itself is hex, so the first "-h" is where the hop suffix starts. *)
+   itself is hex, so the first "-h" is where the hop suffix starts. A use-case refusal
+   written before GA5.32 shares `use_case:browser-chat` with every other, so it is keyed on
+   its own rowid: one row, one request. *)
 f=requestkeyexpr():str{
-  <"CASE WHEN INSTR(correlation_id,'-h')>0 THEN SUBSTR(correlation_id,1,INSTR(correlation_id,'-h')-1) ELSE correlation_id END"
+  <"CASE WHEN event_type='kill_switch_refused' AND correlation_id LIKE 'use_case:%' THEN 'legacy-row:'||rowid WHEN INSTR(correlation_id,'-h')>0 THEN SUBSTR(correlation_id,1,INSTR(correlation_id,'-h')-1) ELSE correlation_id END"
 };
 
 (* One row per request: of each request's outcome rows, the last one written. *)

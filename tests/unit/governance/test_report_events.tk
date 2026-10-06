@@ -11,6 +11,8 @@ i=db:std.db;
 i=sdb:core.storage.db;
 i=re:core.governance.reportengine;
 i=ex:core.governance.reportexport;
+i=au:core.storage.audit;
+i=ks:core.governance.killswitch;
 
 (* GA5.30 - each report template counts the event types it claims to count, once per
    request.
@@ -37,7 +39,18 @@ i=ex:core.governance.reportexport;
      rq9  policy_require_approval                 restricted
 
    and three kill-switch rows that are not requests: engaged (global:all), released
-   (provider:openai), and a refused change (use_case:bogus).
+   (provider:openai), and a refused change (kill_switch_change_refused, use_case:unrecognised),
+   plus an agent run the switch refused (kill_switch_agent_refused, agent:daily-digest).
+
+   GA5.32 - and three rows as core.governance.killswitch wrote them BEFORE GA5.32, when
+   every refusal it recorded was kill_switch_refused under `<scope>:<target>`:
+
+     rq10, rq11  kill_switch_refused, use_case:browser-chat - two browser requests the
+                 use-case gate stopped. Both have that same correlation id.
+     (agent)     kill_switch_refused, agent:daily-digest - an agent run, not a request.
+
+   GA5.30 took the colon to mean "a refused change" and dropped all three, so the two
+   requests were missing from the compliance summary. They are eleven requests in all.
 
    Every llm_dispatch row carries a cost of 9.99 and the hop-0 rows of rq3 the model
    "hop-zero", so a dispatch row counted shows up in the cost total and a request reported
@@ -102,7 +115,11 @@ f=seedeveryeventtype():i64{
   insertrow(16;"policy_require_approval";"rq9";"none";"restricted";0);
   insertrow(17;"kill_switch_engaged";"global:all";"";"";0);
   insertrow(18;"kill_switch_released";"provider:openai";"";"";0);
-  insertrow(19;"kill_switch_refused";"use_case:bogus";"";"";0);
+  insertrow(19;"kill_switch_change_refused";"use_case:unrecognised";"";"";0);
+  insertrow(20;"kill_switch_agent_refused";"agent:daily-digest";"";"";0);
+  insertrow(21;"kill_switch_refused";"use_case:browser-chat";"";"";0);
+  insertrow(22;"kill_switch_refused";"use_case:browser-chat";"";"";0);
+  insertrow(23;"kill_switch_refused";"agent:daily-digest";"";"";0);
   <store
 };
 
@@ -120,9 +137,13 @@ f=emptyreport():$report{
 };
 
 f=reportfor(store:i64;template:str;format:str):$report{
+  <reportwindow(store;template;format;marchstart();marchend())
+};
+
+f=reportwindow(store:i64;template:str;format:str;startdate:str;enddate:str):$report{
   let filter=$reportfilter{
-    startdate:marchstart();
-    enddate:marchend();
+    startdate:startdate;
+    enddate:enddate;
     reporttype:template;
     format:format
   };
@@ -168,10 +189,10 @@ f=testreproducerroutingisone():bool{
 
 (* ── every event type, every template, by exact count ──────────────────────── *)
 
-f=testcompliancecountsninerequests():bool{
+f=testcompliancecountselevenrequests():bool{
   let store=seedeveryeventtype();
   let r=reportfor(store;"compliance_summary";"text");
-  <t.assert(r.rows.len==9;"compliance_summary is one row per request: nine requests, whatever rows each wrote")
+  <t.assert(r.rows.len==11;"compliance_summary is one row per request: eleven requests, whatever rows each wrote")
 };
 
 f=testcompliancereportsthefinaloutcome():bool{
@@ -184,7 +205,7 @@ f=testcompliancereportsthefinaloutcome():bool{
 f=testcompliancecountsnocontrolchange():bool{
   let store=seedeveryeventtype();
   let r=reportfor(store;"compliance_summary";"text");
-  <t.assert(rowsof(r;"kill_switch_engaged")+rowsof(r;"kill_switch_released")==0 && rowsof(r;"kill_switch_refused")==1;"compliance_summary holds the request the switch stopped, and no kill-switch change, refused or made")
+  <t.assert(rowsof(r;"kill_switch_engaged")+rowsof(r;"kill_switch_released")+rowsof(r;"kill_switch_change_refused")+rowsof(r;"kill_switch_agent_refused")==0 && rowsof(r;"kill_switch_refused")==3;"compliance_summary holds the three requests the switch stopped (one new, two written before GA5.32), and no kill-switch change, refused or made, and no agent run")
 };
 
 f=testpiicountsfourrequests():bool{
@@ -265,12 +286,79 @@ f=testnorawvalueinanyreport():bool{
   <t.assert(ok && leaks==0;"a raw value planted in memory_drawers appears in no template in any format")
 };
 
+(* ── GA5.32: a mixed trail, written by the real writers, still verifies ─────────
+   The rows above are raw INSERTs with placeholder hashes. Here the trail is written the way
+   a loke.db that predates GA5.32 and then runs this build would hold it: two rows exactly
+   as core.governance.killswitch.auditscoped wrote them before (kill_switch_refused under
+   `<scope>:<target>`, through core.storage.audit.insertevent), then the new writers. No row
+   is rewritten, so the hash chain must verify over all six, and the report must classify
+   the old rows and the new ones together. *)
+f=legacyrefusal(scopetarget:str;usecase:str):$auditevent{
+  <$auditevent{eventtype:"kill_switch_refused";usecase:usecase;modelid:"";provider:"";sensitivity:"";risktier:"";tokensin:0 as u32;tokensout:0 as u32;costusd:0.0;durationms:0 as u32;correlationid:scopetarget}
+};
+
+f=mixedtrail():i64{
+  let store=openfreshstore();
+  let wrote=au.insertevent(store;legacyrefusal("use_case:browser-chat";"browser-chat")) && au.insertevent(store;legacyrefusal("agent:daily-digest";"")) && ks.recordrefusedrequest(store;"browser-chat";"9f8e7d6c5b4a3921") && !ks.engageusecase(store;"no-such-use-case";"x") && ks.recordrefusedagent(store;"daily-digest") && ks.engageusecase(store;"browser-chat";"x");
+  if(wrote){ <store }el{};
+  <0
+};
+
+f=testmixedtrailchainverifies():bool{
+  let store=mixedtrail();
+  let chain=au.verifychain(store);
+  let types=sdb.countquery("SELECT id FROM audit_log WHERE event_type IN ('kill_switch_refused','kill_switch_change_refused','kill_switch_agent_refused','kill_switch_engaged')";@());
+  <t.assert(store!=0 && chain.ok && chain.rowschecked==6 && types==6;"the hash chain verifies over a trail holding pre-GA5.32 refusals and the new event types")
+};
+
+f=testmixedtrailclassified():bool{
+  let store=mixedtrail();
+  let c=reportwindow(store;"compliance_summary";"text";"2000-01-01";"2099-12-31");
+  let p=reportwindow(store;"policy_changes";"text";"2000-01-01";"2099-12-31");
+  <t.assert(store!=0 && c.rows.len==2 && rowsof(c;"kill_switch_refused")==2 && p.rows.len==1 && rowsof(p;"kill_switch_engaged")==1;"over the mixed trail: two requests stopped (one old, one new), no agent run and no refused change counted, one control change")
+};
+
+
+(* ── GA5.31 Not-done: the exports escape what they carry ──────────────────────
+   A row whose fields hold a quote, a comma, a newline and a backslash, exported in each
+   format. scripts/smoke_report.sh parses the binary's output with Python's json and csv;
+   these assert the exact bytes. *)
+f=trickydetail():str{ <"llm_request / browser-chat / evil \"model\", with\nnewline \\ back" };
+
+f=trickyreport(format:str):$report{
+  let row=$reportrow{timestamp:"1773532801000";category:"compliance";detail:trickydetail();severity:"MEDIUM";value:"a,b"};
+  <$report{
+    title:"Compliance Summary Report";
+    reporttype:"compliance_summary";
+    generatedat:"2026-10-07T00:00:00Z";
+    periodstart:"2026-03-01";
+    periodend:"2026-03-31";
+    rows:@(row);
+    summary:"Summary \"quoted\"";
+    format:format
+  }
+};
+
+f=testcsvquotesasrfc4180():bool{
+  let body=ex.export(trickyreport("csv"));
+  let want="1773532801000,compliance,\"llm_request / browser-chat / evil \"\"model\"\", with\nnewline \\ back\",MEDIUM,\"a,b\"\n";
+  <t.assert(str.contains(body;want);"CSV quotes a field holding a comma, quote or newline, and doubles the quote inside it")
+};
+
+f=testjsoncarriesescapedrows():bool{
+  let body=ex.export(trickyreport("json"));
+  let head="\"row_count\":1,\"rows\":[{\"timestamp\":\"1773532801000\"";
+  let detail="\"detail\":\"llm_request / browser-chat / evil \\\"model\\\", with\\nnewline \\\\ back\"";
+  let summary="\"summary\":\"Summary \\\"quoted\\\"\"";
+  <t.assert(str.contains(body;head) && str.contains(body;detail) && str.contains(body;summary);"JSON carries the rows, with every string escaped")
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
 
   if(testreproducerroutingisone()){pass=pass+1}el{fail=fail+1};
-  if(testcompliancecountsninerequests()){pass=pass+1}el{fail=fail+1};
+  if(testcompliancecountselevenrequests()){pass=pass+1}el{fail=fail+1};
   if(testcompliancereportsthefinaloutcome()){pass=pass+1}el{fail=fail+1};
   if(testcompliancecountsnocontrolchange()){pass=pass+1}el{fail=fail+1};
   if(testpiicountsfourrequests()){pass=pass+1}el{fail=fail+1};
@@ -281,6 +369,10 @@ f=main():i64{
   if(testcosttotalexcludesdispatch()){pass=pass+1}el{fail=fail+1};
   if(testnodegradedrowanywhere()){pass=pass+1}el{fail=fail+1};
   if(testnorawvalueinanyreport()){pass=pass+1}el{fail=fail+1};
+  if(testmixedtrailchainverifies()){pass=pass+1}el{fail=fail+1};
+  if(testmixedtrailclassified()){pass=pass+1}el{fail=fail+1};
+  if(testcsvquotesasrfc4180()){pass=pass+1}el{fail=fail+1};
+  if(testjsoncarriesescapedrows()){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

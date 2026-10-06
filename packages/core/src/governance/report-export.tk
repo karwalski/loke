@@ -5,6 +5,7 @@ m=core.governance.reportexport;
 i=str:std.str;
 i=log:shared.log;
 i=re:core.governance.reportengine;
+i=jx:shared.jsonobj;
 
 f=export(report:$report):str{
   if(str.eq(report.format;"csv")){
@@ -18,22 +19,78 @@ f=export(report:$report):str{
   }
 };
 
+(* GA5.31's Not-done, closed. The CSV export wrapped the detail in quotes and nothing else,
+   and doubled no quote inside it; the JSON export carried no rows at all and escaped no
+   string, so a value with a quote or a newline in it produced a file no parser reads. A
+   report's fields come from audit_log, which the request path writes, but use_case,
+   model_id and provider are names a caller or a config file chose, so nothing here may
+   assume they are tame.
+
+   CSV is RFC 4180: a field holding a comma, a double quote, CR or LF is quoted, and a
+   double quote inside it is doubled. Records end in LF, which RFC 4180 readers (Python's
+   csv, spreadsheets) accept.
+
+   JSON strings go through shared.jsonobj's escape, the tested one (test_jsonobj,
+   test_jsonescape), not a new escaper written here. *)
+f=quotesdoubled(v:str):str{
+  <str.replace(v;"\"";"\"\"")
+};
+
+f=csvfield(v:str):str{
+  if(str.contains(v;",") || str.contains(v;"\"") || str.contains(v;"\r") || str.contains(v;"\n")){
+    <"\"\(quotesdoubled(v))\""
+  }el{};
+  <v
+};
+
+f=comma():str{ <"," };
+
+f=csvline(row:$reportrow):str{
+  <"\(str.join(comma();@(csvfield(row.timestamp);csvfield(row.category);csvfield(row.detail);csvfield(row.severity);csvfield(row.value))))\n"
+};
+
 f=tocsv(report:$report):str{
-  let out=mut."timestamp,category,detail,severity,value
-";
-  lp(let i=0;i<report.rows.len;i=i+1){ let row:$reportrow=report.rows.get(i);
-    let line=str.concat(row.timestamp;str.concat(",";str.concat(row.category;str.concat(",";str.concat("\"";str.concat(row.detail;str.concat("\"";str.concat(",";str.concat(row.severity;str.concat(",";str.concat(row.value;"
-")))))))))));
-    out=str.concat(out;line)
+  let out=mut."timestamp,category,detail,severity,value\n";
+  lp(let i=0;i<report.rows.len;i=i+1){
+    out=str.concat(out;csvline(report.rows.get(i)))
   };
-  log.info(str.concat("exported CSV report: ";str.fromint(report.rows.len));"report_export";"system");
+  log.info("exported CSV report: \(str.fromint(report.rows.len))";"report_export";"system");
   <out
 };
 
+f=braced(fields:@str):str{
+  <"{\(str.join(comma();fields))}"
+};
+
+f=jsonrow(row:$reportrow):str{
+  <braced(@(
+    "\"timestamp\":\(jx.escape(row.timestamp))";
+    "\"category\":\(jx.escape(row.category))";
+    "\"detail\":\(jx.escape(row.detail))";
+    "\"severity\":\(jx.escape(row.severity))";
+    "\"value\":\(jx.escape(row.value))"))
+};
+
+f=jsonrows(report:$report):str{
+  let out=mut."";
+  lp(let i=0;i<report.rows.len;i=i+1){
+    if(i>0){ out=str.concat(out;comma()) }el{};
+    out=str.concat(out;jsonrow(report.rows.get(i)))
+  };
+  <"[\(out)]"
+};
+
 f=tojson(report:$report):str{
-  let out=str.concat("{\"title\":\"";str.concat(report.title;str.concat("\",\"type\":\"";str.concat(report.reporttype;str.concat("\",\"period_start\":\"";str.concat(report.periodstart;str.concat("\",\"period_end\":\"";str.concat(report.periodend;str.concat("\",\"summary\":\"";str.concat(report.summary;str.concat("\",\"row_count\":";str.concat(str.fromint(report.rows.len);"}"))))))))))));
-  log.info(str.concat("exported JSON report: ";str.fromint(report.rows.len));"report_export";"system");
-  <out
+  log.info("exported JSON report: \(str.fromint(report.rows.len))";"report_export";"system");
+  <braced(@(
+    "\"title\":\(jx.escape(report.title))";
+    "\"type\":\(jx.escape(report.reporttype))";
+    "\"generated_at\":\(jx.escape(report.generatedat))";
+    "\"period_start\":\(jx.escape(report.periodstart))";
+    "\"period_end\":\(jx.escape(report.periodend))";
+    "\"summary\":\(jx.escape(report.summary))";
+    "\"row_count\":\(str.fromint(report.rows.len))";
+    "\"rows\":\(jsonrows(report))"))
 };
 
 f=totext(report:$report):str{

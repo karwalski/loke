@@ -113,7 +113,7 @@ f=isknownprovider(provider:str):bool{
 (* Refuses a provider name it does not know, so a typo cannot leave the real provider open
    while reporting it blocked. Success is the flag reading back as set. *)
 f=engageprovider(store:i64;provider:str;reason:str):bool{
-  if(store==0 || !isknownprovider(provider)){ <false }el{};
+  if(store==0 || !isknownprovider(provider)){ <refusechange(store;"provider") }el{};
   set.setbool(store;providerkey(provider);true;"governance");
   set.setstr(store;str.concat(providerkey(provider);".reason");reason;"governance");
   log.warn(str.concat("Kill switch ENGAGED for provider ";str.concat(provider;str.concat(": ";reason)));"kill-switch";"system");
@@ -122,7 +122,7 @@ f=engageprovider(store:i64;provider:str;reason:str):bool{
 };
 
 f=releaseprovider(store:i64;provider:str):bool{
-  if(store==0 || !isknownprovider(provider)){ <false }el{};
+  if(store==0 || !isknownprovider(provider)){ <refusechange(store;"provider") }el{};
   set.setbool(store;providerkey(provider);false;"governance");
   set.setstr(store;str.concat(providerkey(provider);".reason");"";"governance");
   log.info(str.concat("Kill switch released for provider ";provider);"kill-switch";"system");
@@ -217,15 +217,56 @@ f=auditscoped(store:i64;eventtype:str;scope:str;target:str):bool{
   <ok
 };
 
-(* For a caller that refused work because of a switch and has no audit row of its own
-   (core.agents.executor). page.api.pipeline records its refusals through recordevent,
-   which carries the request's fields. *)
-f=recordrefusal(store:i64;scope:str;target:str):bool{
-  <auditscoped(store;"kill_switch_refused";scope;target)
+(* GA5.32 - three event types, one meaning each. Before, recordrefusal wrote
+   kill_switch_refused for every caller with the correlation id `<scope>:<target>`, so one
+   name covered a browser request the use-case gate stopped (`use_case:browser-chat`) and
+   an agent run the executor refused (`agent:<id>`); core.governance.reportengine read the
+   colon as "a refused switch change", but nothing had ever audited a refused change, so the
+   colon dropped real refused requests from the compliance summary. Now:
+
+     kill_switch_refused         a REQUEST the switch stopped, keyed on the request's own
+                                 id, as page.api.pipeline's per-hop refusals always were
+                                 (recordevent). recordrefusedrequest is the gate's writer.
+     kill_switch_agent_refused   an agent run the switch stopped (core.agents.executor). No
+                                 request reaches a model, so no report counts it as one.
+     kill_switch_change_refused  a change to the switch that was refused: an unknown use
+                                 case or provider, a malformed agent id. Only the scope is
+                                 recorded (`<scope>:unrecognised`), never the target: it is
+                                 whatever the operator typed, and the trail keeps no free
+                                 text.
+
+   Rows written before GA5.32 keep their spelling: the trail is append-only and each row's
+   hash covers its event type. reportengine reads them by the convention they were
+   written under. *)
+f=auditplain(store:i64;eventtype:str;usecase:str;correlationid:str):bool{
+  if(store==0){ <false }el{};
+  let ok=au.insertevent(store;$auditevent{eventtype:eventtype;usecase:usecase;modelid:"";provider:"";sensitivity:"";risktier:"";tokensin:0 as u32;tokensout:0 as u32;costusd:0.0;durationms:0 as u32;correlationid:correlationid});
+  if(ok){}el{
+    log.error("kill switch: the audit row for \(eventtype) could not be written";"kill-switch";"system")
+  };
+  <ok
+};
+
+f=recordrefusedrequest(store:i64;usecase:str;requestid:str):bool{
+  <auditplain(store;"kill_switch_refused";usecase;requestid)
+};
+
+f=recordrefusedagent(store:i64;agentid:str):bool{
+  <auditscoped(store;"kill_switch_agent_refused";"agent";agentid)
+};
+
+f=recordrefusedchange(store:i64;scope:str):bool{
+  <auditplain(store;"kill_switch_change_refused";"";"\(scope):unrecognised")
+};
+
+(* A refused change is audited when there is a store to audit it in, and is still false. *)
+f=refusechange(store:i64;scope:str):bool{
+  if(store!=0){ recordrefusedchange(store;scope) }el{};
+  <false
 };
 
 f=engageusecase(store:i64;usecase:str;reason:str):bool{
-  if(store==0 || !isknownusecase(usecase)){ <false }el{};
+  if(store==0 || !isknownusecase(usecase)){ <refusechange(store;"use_case") }el{};
   set.setbool(store;usecasekey(usecase);true;"governance");
   set.setstr(store;"\(usecasekey(usecase)).reason";reason;"governance");
   log.warn("Kill switch ENGAGED for use case \(usecase): \(reason)";"kill-switch";"system");
@@ -234,7 +275,7 @@ f=engageusecase(store:i64;usecase:str;reason:str):bool{
 };
 
 f=releaseusecase(store:i64;usecase:str):bool{
-  if(store==0 || !isknownusecase(usecase)){ <false }el{};
+  if(store==0 || !isknownusecase(usecase)){ <refusechange(store;"use_case") }el{};
   set.setbool(store;usecasekey(usecase);false;"governance");
   set.setstr(store;"\(usecasekey(usecase)).reason";"";"governance");
   log.info("Kill switch released for use case \(usecase)";"kill-switch";"system");
@@ -243,7 +284,7 @@ f=releaseusecase(store:i64;usecase:str):bool{
 };
 
 f=engageagent(store:i64;agentid:str;reason:str):bool{
-  if(store==0 || !agentidvalid(agentid)){ <false }el{};
+  if(store==0 || !agentidvalid(agentid)){ <refusechange(store;"agent") }el{};
   set.setbool(store;agentkey(agentid);true;"governance");
   set.setstr(store;"\(agentkey(agentid)).reason";reason;"governance");
   log.warn("Kill switch ENGAGED for agent \(agentid): \(reason)";"kill-switch";"system");
@@ -252,7 +293,7 @@ f=engageagent(store:i64;agentid:str;reason:str):bool{
 };
 
 f=releaseagent(store:i64;agentid:str):bool{
-  if(store==0 || !agentidvalid(agentid)){ <false }el{};
+  if(store==0 || !agentidvalid(agentid)){ <refusechange(store;"agent") }el{};
   set.setbool(store;agentkey(agentid);false;"governance");
   set.setstr(store;"\(agentkey(agentid)).reason";"";"governance");
   log.info("Kill switch released for agent \(agentid)";"kill-switch";"system");

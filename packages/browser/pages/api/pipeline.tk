@@ -414,11 +414,25 @@ f=persisttrace(store:i64;run:$pipelinerun;outcome:str;provider:str;modelid:str;d
 (* The two refusals that happen before a policy decision exists. Neither was recorded
    anywhere before GA5.5, and both are exactly what an assessor asks about. *)
 f=killswitchtrace(store:i64):bool{
+  <killswitchtracefor(store;str.randhex(16))
+};
+
+f=killswitchtracefor(store:i64;rid:str):bool{
   if(store==0){ <false }el{};
-  let rid:str=str.randhex(16);
   let t0=tr.newtrace(rid;rid;"");
   let t1=tr.recordpolicy(t0;"not_evaluated";"unknown");
   <tr.persist(t1;$assessorfields{outcome:"kill_switch_refused";detectionlayers:"not_scanned";approvaloutcome:"not_applicable";killswitchstate:"engaged"})
+};
+
+(* GA5.32. A request the switch stops at the door gets a request id of its own, shared by
+   its decision trace and its audit row, so the trail holds it as a request
+   (kill_switch_refused on that id), as a refused fallback hop already was. The use-case gate
+   used to audit it as `use_case:browser-chat`, the same correlation id for every request it
+   ever refused, and the global gate did not audit it at all. *)
+f=refusedbyswitch(store:i64):bool{
+  let rid:str=str.randhex(16);
+  killswitchtracefor(store;rid);
+  <ks.recordrefusedrequest(store;"browser-chat";rid)
 };
 
 (* F3b.10. A request the privacy filter refused is audited too, as `privacy_refused`, so the
@@ -1544,15 +1558,14 @@ f=post(req:i64):i64{
     }el{}
   }el{};
   if(killswitchengaged(store)){
-    killswitchtrace(store);
+    refusedbyswitch(store);
     <http.res(403;"{\"ok\":false,\"error\":\"kill switch engaged or unreadable\"}")
   }el{};
   (* G1.6. Every request here is the browser-chat use case, so a switch on it refuses before
      the body is read or scanned: not even the local NER model is asked. forward() checks it
      again with the provider, after routing. *)
   if(ks.isusecaseblocked(store;"browser-chat")){
-    killswitchtrace(store);
-    ks.recordrefusal(store;"use_case";"browser-chat");
+    refusedbyswitch(store);
     <http.res(403;"{\"ok\":false,\"error\":\(jx.escape(ks.refusalmessage(store;"none";"browser-chat"))),\"kill_switch_scope\":\"use_case\"}")
   }el{};
 

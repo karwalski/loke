@@ -10,7 +10,10 @@
 # routing decision, a refused request is in the compliance summary, the cost total is the
 # outcome's, each format renders, a window that holds nothing reports nothing, an unknown
 # template and PDF are refused with exit 1, and a raw value planted in memory_drawers (where
-# loke.db does keep conversation text in the clear) is printed by no report.
+# loke.db does keep conversation text in the clear) is printed by no report. GA5.32: a refused
+# kill-switch change through the CLI is audited as kill_switch_change_refused and counted by no
+# template, and the JSON and CSV exports of a row holding a quote, a comma, a newline and a
+# backslash parse with Python's json and csv and give each field back exactly.
 #
 # HOME is a throwaway directory, so the real ~/.loke is never read; no port, no lock, no
 # network. The first run creates and migrates loke.db; the rows are then inserted with
@@ -63,17 +66,54 @@ check "and no dispatch or kill-switch row" $(! grep -qE "llm_dispatch|kill_switc
 run compliance generate --period 2026-03 --format csv
 check "compliance_summary in CSV exits 0" $([ "$rc" -eq 0 ]; echo $?)
 check "its header is the CSV header" $(grep -q "^timestamp,category,detail,severity,value$" "$WORK/compliance.txt"; echo $?)
-check "two requests: the answered one and the privacy refusal" $([ "$(grep -c '^17735328' "$WORK/compliance.txt")" -eq 2 ] && grep -q '"privacy_refused / browser-chat / none"' "$WORK/compliance.txt"; echo $?)
+check "two requests: the answered one and the privacy refusal" $(python3 -c '
+import csv,sys
+rows=[r for r in csv.reader(open(sys.argv[1],newline="")) if r]  # the CLI ends its output with a newline of its own
+details=sorted(r[2] for r in rows[1:])
+sys.exit(0 if rows[0]==["timestamp","category","detail","severity","value"] and details==["llm_request / browser-chat / claude-3.5-sonnet","privacy_refused / browser-chat / none"] else 1)' "$WORK/compliance.txt"; echo $?)
+
+# GA5.32: a refused kill-switch change, made through the real CLI, is audited under its
+# own event type, never the target typed, and is no control change and no request.
+HOME="$WORK/home" "$BIN" kill-switch on --use-case no-such-use-case >"$WORK/ksbad.txt" 2>&1; rc=$?
+check "a kill-switch change to an unknown use case is refused with exit 1" $([ "$rc" -eq 1 ]; echo $?)
+check "and audited as kill_switch_change_refused under its scope alone" $([ "$(sqlite3 "$DB" "SELECT COUNT() FROM audit_log WHERE event_type='kill_switch_change_refused' AND correlation_id='use_case:unrecognised'")" = 1 ] && [ "$(sqlite3 "$DB" "SELECT COUNT() FROM audit_log WHERE correlation_id LIKE '%no-such%' OR use_case LIKE '%no-such%' OR event_type='kill_switch_refused'")" = 0 ]; echo $?)
 
 run policy generate --template policy_changes --period 2026
-check "the kill-switch change is the one control change" $(grep -q "^Summary: Kill-switch changes recorded: 1\." "$WORK/policy.txt"; echo $?)
+check "the kill-switch change is the one control change, the refused one not counted" $(grep -q "^Summary: Kill-switch changes recorded: 1\." "$WORK/policy.txt"; echo $?)
+run compliance2026 generate --period 2026
+check "and the refused change is no request either" $(grep -q "^Summary: Requests audited, one row per request: 2$" "$WORK/compliance2026.txt" && ! grep -q "kill_switch" "$WORK/compliance2026.txt"; echo $?)
 
 run cost generate --template cost_savings --start 2026-03-01 --end 2026-03-31 --format json
 check "cost_savings in JSON exits 0" $([ "$rc" -eq 0 ]; echo $?)
 check "is one JSON object with one row counted and the outcome's cost, not the dispatch's" $(python3 -c '
 import json,sys
 d=json.loads(open(sys.argv[1]).read())
-sys.exit(0 if d["row_count"]==1 and "total cost $1.50" in d["summary"] and d["period_start"]=="2026-03-01" else 1)' "$WORK/cost.txt"; echo $?)
+sys.exit(0 if d["row_count"]==1 and len(d["rows"])==1 and d["rows"][0]["value"]=="$1.50" and "total cost $1.50" in d["summary"] and d["period_start"]=="2026-03-01" else 1)' "$WORK/cost.txt"; echo $?)
+
+# GA5.31's Not-done: a row whose model and provider hold a double quote, a comma, a newline
+# and a backslash, alone in November 2025. The exports are parsed with Python's json and csv and
+# each field must come back exactly as stored.
+TRICKY_MODEL="evil \"model\", with"$'\n'"newline \\ back"
+TRICKY_PROVIDER='prov,"x"\y'
+{
+  echo "INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES ('$(openssl rand -hex 8)','llm_request','browser-chat','evil \"model\", with' || char(10) || 'newline \\ back','prov,\"x\"\\y','internal','MEDIUM',10,20,0,100,'rq9','','placeholder','1762732800000');"
+} | sqlite3 "$DB" || { echo "smoke_report: seeding the escaping row failed" >&2; exit 1; }
+[ "$(sqlite3 "$DB" "SELECT COUNT() FROM audit_log WHERE model_id LIKE '%\"model\"%' AND instr(model_id,char(10))>0 AND instr(model_id,'\\')>0")" = 1 ] \
+  || { echo "smoke_report: the escaping row was not stored as intended" >&2; exit 1; }
+
+run trickyjson generate --template routing_decisions --period 2025-11 --format json
+check "JSON with a quote, comma, newline and backslash in its fields parses, and each comes back exact" $(python3 -c '
+import json,sys
+d=json.loads(open(sys.argv[1]).read())
+r=d["rows"]
+sys.exit(0 if d["row_count"]==1 and len(r)==1 and r[0]["detail"]=="llm_request / browser-chat / "+sys.argv[2] and r[0]["value"]==sys.argv[3]+" / "+sys.argv[2] else 1)' "$WORK/trickyjson.txt" "$TRICKY_MODEL" "$TRICKY_PROVIDER"; echo $?)
+
+run trickycsv generate --template routing_decisions --period 2025-11 --format csv
+check "CSV with the same row parses as RFC 4180: one record of five fields, each exact" $(python3 -c '
+import csv,sys
+rows=[r for r in csv.reader(open(sys.argv[1],newline="")) if r]  # the CLI ends its output with a newline of its own
+ok=len(rows)==2 and len(rows[1])==5 and rows[1][2]=="llm_request / browser-chat / "+sys.argv[2] and rows[1][4]==sys.argv[3]+" / "+sys.argv[2]
+sys.exit(0 if ok else 1)' "$WORK/trickycsv.txt" "$TRICKY_MODEL" "$TRICKY_PROVIDER"; echo $?)
 
 run later generate --template routing_decisions --period Q2-2026
 check "a quarter that holds nothing reports nothing" $(grep -q "^Summary: Provider calls, one row per call: 0$" "$WORK/later.txt"; echo $?)
@@ -96,7 +136,7 @@ done
 check "the value planted in memory_drawers is printed by no template in any format" $(! cat "$WORK"/*.txt | grep -q "jane.planted"; echo $?)
 
 if [ "$FAILS" -ne 0 ]; then
-  for f in empty routing compliance policy cost later regulatory pdf templates; do echo "--- $f ---"; cat "$WORK/$f.txt" 2>/dev/null; done
+  for f in empty routing compliance ksbad policy compliance2026 cost trickyjson trickycsv later regulatory pdf templates; do echo "--- $f ---"; cat "$WORK/$f.txt" 2>/dev/null; done
   echo "smoke_report: $FAILS check(s) FAILED"
   exit 1
 fi
