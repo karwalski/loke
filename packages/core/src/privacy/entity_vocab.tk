@@ -6,6 +6,8 @@ m=core.privacy.entityvocab;
 i=str:std.str;
 i=sh:shared.types;
 i=rx:core.privacy.regex;
+i=pr:core.privacy.presidio;
+i=nr:core.privacy.ner;
 
 (* RG1.7. ONE entity-type vocabulary for detectors and policy presets.
 
@@ -70,6 +72,67 @@ f=layertypetext(layerid:str):str{
     out=str.concat(out;types.get(i))
   };
   <out
+};
+
+(* RG1.7d. ONE rating per detector type, read from the layer that declares it.
+
+   core.privacy.pipeline used to keep its own lists of type names in maxsensitivity,
+   countrestricted and countconfidential, apart from what the layers declare, and they had
+   drifted: getpatterns declares phone_au, phone_us and au_abn CONFIDENTIAL and
+   countconfidential counted them so, but maxsensitivity had no branch for them and rated a
+   prompt holding only a phone number INTERNAL. The pipeline now asks this function and
+   nothing else, so the request's rating is each detection's own declared sensitivity:
+
+     - a regex type: its $patterndef.sensitivity in core.privacy.regex.getpatterns, so a
+       pattern added or re-rated there is rated the same by the pipeline with no second edit;
+     - a Presidio type: core.privacy.presidio.mapsensitivity;
+     - a NER type: core.privacy.ner.nersensitivity;
+     - a sidecar type, as core.privacy.sidecarclient.lokeentitytype names it: sidecartype,
+       below (that module imports the filter registry, which imports this one, so its
+       table cannot live there).
+
+   Where two declarations name the same type (PERSON is Presidio's, NER's and the sidecar's;
+   AU_TFN is Presidio's and, lower-cased, the regex layer's) the HIGHER is taken: a type is
+   never rated below what any layer that reports it says. Names are matched without regard
+   to case, which can only raise a rating. A type no layer declares is INTERNAL, as it was:
+   an entity with an unfamiliar label is still an entity.
+
+   tests/unit/privacy/test_type_sensitivity.tk asserts, for every type every layer emits,
+   that the pipeline's rating of it equals this and is at least the declaring layer's own. *)
+f=sidecartype(utype:str):$sensitivitylevel{
+  if(str.eq(utype;"SECRET")){ <sh.restricted() }el{};
+  if(str.eq(utype;"PERSON") || str.eq(utype;"EMAIL_ADDRESS") || str.eq(utype;"PHONE_NUMBER")){ <sh.confidential() }el{};
+  if(str.eq(utype;"ADDRESS") || str.eq(utype;"FINANCIAL")){ <sh.confidential() }el{};
+  if(str.eq(utype;"URL") || str.eq(utype;"DATE")){ <sh.internal() }el{};
+  <sh.public()
+};
+
+(* The regex layer's declaration for pattern name k, or PUBLIC when no pattern has it. *)
+f=regexdeclared(k:str):$sensitivitylevel{
+  let pats=rx.getpatterns();
+  let found=mut.sh.public();
+  lp(let i=0;i<pats.len;i=i+1){
+    let p=pats.get(i);
+    if(str.eq(p.name;k)){ found=p.sensitivity }el{}
+  };
+  <found
+};
+
+f=nerdeclared(utype:str):$sensitivitylevel{
+  let label=nr.nersensitivity(utype);
+  if(str.eq(label;"restricted")){ <sh.restricted() }el{};
+  if(str.eq(label;"confidential")){ <sh.confidential() }el{};
+  <sh.internal()
+};
+
+f=higher(a:$sensitivitylevel;b:$sensitivitylevel):$sensitivitylevel{
+  if(sh.senshigher(a;b)){ <a }el{};
+  <b
+};
+
+f=typesensitivity(dtype:str):$sensitivitylevel{
+  let utype=str.toupper(dtype);
+  <higher(higher(regexdeclared(sh.strlower(dtype));higher(pr.mapsensitivity(utype);nerdeclared(utype)));higher(sidecartype(utype);sh.internal()))
 };
 
 (* The preset types a detection of type dtype satisfies, matched without regard to case.

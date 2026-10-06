@@ -1,0 +1,165 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.typesensitivity;
+
+i=t:std.test;
+i=str:std.str;
+i=sh:shared.types;
+i=rx:core.privacy.regex;
+i=pl:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=vocab:core.privacy.entityvocab;
+i=pr:core.privacy.presidio;
+i=nr:core.privacy.ner;
+
+(* RG1.7d — one rating per detector type, and the pipeline's is the declaring layer's.
+
+   core.privacy.regex.getpatterns declared phone_au, phone_us and au_abn CONFIDENTIAL, and
+   core.privacy.pipeline.countconfidential counted them so, but pipeline.maxsensitivity kept
+   its own list of type names with no branch for them and rated them INTERNAL (measured
+   2026-10-01 with rx.detect against pl.maxsensitivity: "0412 345 678", "(555) 234-5678",
+   "51 824 753 556"). The pipeline now rates every detection by
+   core.privacy.entityvocab.typesensitivity, which reads the declaring layer.
+
+   THE DRIFT CHECK: for each of the regex layer's 22 patterns, and for every type the NER,
+   Presidio and sidecar layers emit (core.privacy.entityvocab.layertypes), the pipeline's
+   rating of one detection of that type (maxsensitivity, entityrank, countrestricted,
+   countconfidential) equals the type's declared rating, and is never below the declaring
+   layer's own. The non-regex types are also pinned to a table here, so a type added to a
+   layer's list must be rated on purpose, and a rating cannot fall without this failing.
+   Then the three measured values, end to end through pl.runforward with the regex layer. *)
+
+f=regexonly():$pipelineconfig{
+  let c=mut.pl.newconfig("http://127.0.0.1:9";"http://127.0.0.1:9");
+  c=pl.withlayer(c;fr.nerid();false);
+  c=pl.withlayer(c;fr.presidioid();false);
+  c=pl.withlayer(c;fr.privacyfilterid();false);
+  <c
+};
+
+f=one(kind:str):@$piientity{
+  <@($piientity{entitytype:kind;value:"x";start:0 as u32;end:1 as u32;confidence:0.9;placeholder:""})
+};
+
+f=label(s:$sensitivitylevel):str{ <sh.senslabel(s) };
+
+(* What the pipeline says about one detection of kind, in every way it rates one, as a
+   single word: the label when all four agree, "disagree" when they do not. *)
+f=pipelinerating(kind:str):str{
+  let es=one(kind);
+  let lv=pl.maxsensitivity(es);
+  let rankok=pl.entityrank(es.get(0))==sh.sensrank(lv);
+  let r=pl.countrestricted(es) as i64;
+  let c=pl.countconfidential(es) as i64;
+  let restricted=sh.senseq(lv;sh.restricted());
+  let confidential=sh.senseq(lv;sh.confidential());
+  let countsok=(restricted && r==1 && c==0) || (confidential && r==0 && c==1) || (!restricted && !confidential && r==0 && c==0);
+  if(rankok && countsok){ <label(lv) }el{};
+  <"disagree"
+};
+
+(* The pinned ratings of the types the model layers emit. *)
+f=pinnedtypes():@str{
+  <@("PERSON";"ORGANIZATION";"LOCATION";"DATE";"MEDICAL";"FINANCIAL";"CREDIT_CARD";"US_SSN";"AU_TFN";"EMAIL_ADDRESS";"PHONE_NUMBER";"ADDRESS";"URL";"SECRET")
+};
+f=pinnedlabels():@str{
+  <@("confidential";"internal";"internal";"internal";"confidential";"confidential";"restricted";"restricted";"restricted";"confidential";"confidential";"confidential";"internal";"restricted")
+};
+
+f=pinned(kind:str):str{
+  let ts=pinnedtypes();
+  let ls=pinnedlabels();
+  let out=mut."unpinned";
+  lp(let i=0;i<ts.len;i=i+1){
+    if(str.eq(ts.get(i);kind)){ out=ls.get(i) }el{}
+  };
+  <out
+};
+
+(* The declaring layer's own rating of kind. *)
+f=layerown(layer:str;kind:str):$sensitivitylevel{
+  if(str.eq(layer;"presidio")){ <pr.mapsensitivity(kind) }el{};
+  if(str.eq(layer;"ner")){
+    let l=nr.nersensitivity(kind);
+    if(str.eq(l;"confidential")){ <sh.confidential() }el{};
+    <sh.internal()
+  }el{};
+  <vocab.sidecartype(kind)
+};
+
+f=runlabel(text:str):str{
+  let run:$pipelinerun=pl.runforward(text;"";regexonly());
+  <label(run.result.sensitivity)
+};
+
+f=runconfidential(text:str):i64{
+  let run:$pipelinerun=pl.runforward(text;"";regexonly());
+  <pl.countconfidential(run.result.entities) as i64
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── Every regex pattern: the pipeline rates it as getpatterns declares it ──── *)
+  let pats=rx.getpatterns();
+  if(t.assert(pats.len==22;"the regex layer has the 22 patterns this check covers")){pass=pass+1}el{fail=fail+1};
+  lp(let i=0;i<pats.len;i=i+1){
+    let p=pats.get(i);
+    let want=label(p.sensitivity);
+    let name="regex \(p.name): the pipeline rates it as getpatterns declares it (\(want))";
+    if(t.asserteq(pipelinerating(p.name);want;name)){pass=pass+1}el{fail=fail+1};
+    let upper=str.toupper(p.name);
+    let uname="regex \(p.name): upper-cased, it is rated no lower";
+    if(t.assert(sh.sensrank(pl.maxsensitivity(one(upper)))>=sh.sensrank(p.sensitivity);uname)){pass=pass+1}el{fail=fail+1}
+  };
+
+  (* The three the story measured, by name. *)
+  if(t.asserteq(pipelinerating("phone_au");"confidential";"phone_au is rated CONFIDENTIAL by the pipeline, as the regex layer declares")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pipelinerating("phone_us");"confidential";"phone_us is rated CONFIDENTIAL by the pipeline, as the regex layer declares")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pipelinerating("au_abn");"confidential";"au_abn is rated CONFIDENTIAL by the pipeline, as the regex layer declares")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Every NER, Presidio and sidecar type ─────────────────────────────────────── *)
+  let layers=@("ner";"presidio";"openai-privacy-filter");
+  let covered=mut.0;
+  lp(let l=0;l<layers.len;l=l+1){
+    let layer:str=layers.get(l);
+    let types=vocab.layertypes(layer);
+    if(t.assert(types.len>0;"\(layer) declares the types it emits")){pass=pass+1}el{fail=fail+1};
+    lp(let j=0;j<types.len;j=j+1){
+      let kind:str=types.get(j);
+      let got=pipelinerating(kind);
+      let n1="\(layer) \(kind): the pipeline's rating is the vocabulary's";
+      if(t.asserteq(got;label(vocab.typesensitivity(kind));n1)){pass=pass+1}el{fail=fail+1};
+      let n2="\(layer) \(kind): and is pinned here (\(pinned(kind)))";
+      if(t.asserteq(got;pinned(kind);n2)){pass=pass+1}el{fail=fail+1};
+      let n3="\(layer) \(kind): and is not below the layer's own rating";
+      if(t.assert(sh.sensrank(pl.maxsensitivity(one(kind)))>=sh.sensrank(layerown(layer;kind));n3)){pass=pass+1}el{fail=fail+1};
+      covered=covered+1
+    }
+  };
+  if(t.assert(covered==22;"the model layers' 22 declared types were all checked (NER 6, Presidio 8, sidecar 8)")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The edges ─────────────────────────────────────────────────────────────────── *)
+  if(t.asserteq(pipelinerating("no_such_type");"internal";"a type no layer declares is INTERNAL, as before")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(label(pl.maxsensitivity(@()));"public";"and nothing found is PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pipelinerating("person");"confidential";"a lower-cased model type is rated as its declaration, not below it")){pass=pass+1}el{fail=fail+1};
+  let mixed=@(one("phone_au").get(0);one("ip_v4").get(0);one("url").get(0));
+  if(t.asserteq(label(pl.maxsensitivity(mixed));"confidential";"a phone number with an IP and a URL rates the request CONFIDENTIAL")){pass=pass+1}el{fail=fail+1};
+  let withtfn=@(one("phone_au").get(0);one("au_tfn").get(0));
+  if(t.asserteq(label(pl.maxsensitivity(withtfn));"restricted";"and a TFN still lifts it to RESTRICTED")){pass=pass+1}el{fail=fail+1};
+
+  (* ── End to end: the measured values through the production run ────────────────── *)
+  let au="Call me on 0412 345 678 tomorrow.";
+  let us="Our US office is (555) 234-5678.";
+  let abn="Invoice from ABN 51 824 753 556 attached.";
+  if(t.asserteq(runlabel(au);"confidential";"a prompt holding only an Australian mobile number is rated CONFIDENTIAL by the run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runconfidential(au)==1;"and the run counts it as the one confidential entity")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(runlabel(us);"confidential";"a prompt holding only a US phone number is rated CONFIDENTIAL by the run")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(runlabel(abn);"confidential";"a prompt holding only an ABN is rated CONFIDENTIAL by the run")){pass=pass+1}el{fail=fail+1};
+  let rr:$piidetectionresult=rx.detect(au);
+  if(t.asserteq(runlabel(au);label(rr.sensitivity);"and the run's rating is the regex layer's own for the same text")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
