@@ -1,0 +1,123 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=packages.moke.tests.testutf8cuts;
+
+i=t:std.test;
+i=str:std.str;
+i=u8:shared.utf8;
+i=md:moke.mcp.memorydemo;
+i=compute:moke.compute;
+i=up:moke.upload;
+
+(* F10.50 — moke's two byte cuts on user-visible text, against the REAL modules.
+
+   `moke.mcp.memorydemo.preview200` is the memory demo's 200-byte preview of a tool's reply,
+   and `moke.compute.daykey` is the label a timeseries chart groups a date cell under. Both
+   were a plain `str.slice(x;0;N)`, and a byte cut can stop inside a 2-, 3- or 4-byte
+   character. Each case below puts one such character ACROSS the limit, so the plain slice
+   leaves its lead byte (or bytes) behind and the output is not valid UTF-8.
+
+   The preview is cut through `shared.utf8.prefix`. The day key is NOT: a cell whose first ten
+   bytes are a numeric date is cut there (ASCII, so the cut is safe by construction), and any
+   other cell is kept whole. A boundary cut would also have been valid UTF-8, but it would
+   group `2026年10月7日` and `2026年10月8日` under one made-up label `2026年10`, which is a
+   chart that adds two days together and calls them neither. The assertions on that merge are
+   what tells the two designs apart.
+
+   One more cut found by the sweep is measured here rather than changed: `moke.upload`'s
+   `capitalise` upper-cases the FIRST BYTE of each word of a filename and joins the rest back,
+   so a name starting with a 2-byte character is split and rejoined. *)
+
+f=repeat(s:str;n:i64):str{
+  let out=mut."";
+  lp(let i=0;i<n;i=i+1){ out="\(out)\(s)" };
+  <out
+};
+
+f=labelsof(r:$result):@str{
+  <r.labels
+};
+
+f=valuesof(r:$result):@str{
+  <r.values
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let e2="é";
+  let jp="日";
+  let emoji="😀";
+  let dots="...";
+
+  (* ── preview200 ─────────────────────────────────────────────────────────────
+     Each text is 201 bytes with its last character starting before byte 200 and ending after
+     it. The kept part is everything before that character, plus the marker. *)
+  let a199=repeat("a";199);
+  let a198=repeat("a";198);
+  let a197=repeat("a";197);
+  let p2=md.preview200("\(a199)\(e2)");
+  if(t.asserteq(p2;"\(a199)\(dots)";"preview200: a 2-byte character across byte 200 is dropped whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(p2);"preview200: the 2-byte case is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  let p3=md.preview200("\(a198)\(jp)");
+  if(t.asserteq(p3;"\(a198)\(dots)";"preview200: a 3-byte character across byte 200 is dropped whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(p3);"preview200: the 3-byte case is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  let p4=md.preview200("\(a197)\(emoji)");
+  if(t.asserteq(p4;"\(a197)\(dots)";"preview200: a 4-byte character across byte 200 is dropped whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(p4);"preview200: the 4-byte case is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  let cjk=repeat(jp;100);
+  let pj=md.preview200(cjk);
+  if(t.asserteq(pj;"\(repeat(jp;66))\(dots)";"preview200: all-CJK text keeps 66 whole characters (198 bytes)")){pass=pass+1}el{fail=fail+1};
+  let a200=repeat("a";200);
+  if(t.asserteq(md.preview200(a200);a200;"preview200: exactly 200 bytes is returned whole, no marker")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(md.preview200("\(a200)b");"\(a200)\(dots)";"preview200: ASCII over 200 bytes is still cut at exactly 200")){pass=pass+1}el{fail=fail+1};
+
+  (* ── daykey: dates ──────────────────────────────────────────────────────────
+     What the timeseries is for. These must group by day exactly as before. *)
+  if(t.asserteq(compute.daykey("2026-10-07");"2026-10-07";"daykey: an ISO date is its own key")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(compute.daykey("2026-10-07T12:34:56Z");"2026-10-07";"daykey: an ISO timestamp groups under its day")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(compute.daykey("  2026-10-07 09:00  ");"2026-10-07";"daykey: a spaced date-time is trimmed and grouped under its day")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(compute.daykey("07/10/2026 23:59");"07/10/2026";"daykey: a slashed day-first date-time groups under its date")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(compute.daykey("2026-10");"2026-10";"daykey: a cell shorter than 10 bytes is its trimmed self, as before")){pass=pass+1}el{fail=fail+1};
+
+  (* ── daykey: not a numeric date, with a character across byte 10 ─────────── *)
+  let d2="abcdefghi\(e2)x";
+  let k2=compute.daykey(d2);
+  if(t.asserteq(k2;d2;"daykey: a 2-byte character across byte 10 is not cut; the cell is kept whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(k2);"daykey: the 2-byte case is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  let d3="2026年10月7日";
+  let k3=compute.daykey(d3);
+  if(t.asserteq(k3;d3;"daykey: a CJK date (3-byte 月 across byte 10) is kept whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(k3);"daykey: the 3-byte case is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  let d4="Sprint 9 \(emoji) review";
+  let k4=compute.daykey(d4);
+  if(t.asserteq(k4;d4;"daykey: a 4-byte character across byte 10 is not cut; the cell is kept whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(k4);"daykey: the 4-byte case is valid UTF-8")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(compute.daykey("Wednesday, 7 October");"Wednesday, 7 October";"daykey: ASCII text that is not a date is not cut to 10 bytes either")){pass=pass+1}el{fail=fail+1};
+
+  (* ── daykey through the timeseries: two CJK days stay two labels ─────────────
+     A boundary cut would make both rows `2026年10` and sum them into one bar. *)
+  let rows:@(@str)=@(@("2026年10月7日";"5");@("2026年10月8日";"3");@("2026年10月7日";"1"));
+  let ds=$dataset{ name:"days"; headers:@("date";"n"); rows:rows };
+  let q=$query{ op:"timeseries"; column:"n"; groupby:"date"; filtercol:""; filterval:""; topn:0 as i32; bucketcount:0 as i32; joincol:"" };
+  let r:$result=compute.execute(ds;q);
+  let labels:@str=labelsof(r);
+  if(t.assert(labels.len==2;"timeseries: two CJK dates are two labels, not one merged prefix")){pass=pass+1}el{fail=fail+1};
+  if(labels.len==2){
+    if(t.assert(u8.valid(labels.get(0)) && u8.valid(labels.get(1));"timeseries: both labels are valid UTF-8")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(valuesof(r).get(0);"6";"timeseries: the 7th sums its own two rows only")){pass=pass+1}el{fail=fail+1}
+  }el{
+    fail=fail+2
+  };
+
+  (* ── upload.capitalise: split at byte 0 and rejoined ─────────────────────────
+     Measured, not changed: no byte is dropped, and str.upper leaves a byte above 127 alone,
+     so the name comes back whole. A lone lead byte upper-cased into something else would
+     fail this. *)
+  let ete="\(e2)t\(e2)";
+  if(t.asserteq(up.capitalise(ete);ete;"capitalise: a word starting with a 2-byte character comes back whole")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(u8.valid(up.guessname("\(jp)\(jp)_report.csv"));"guessname: a CJK filename stays valid UTF-8")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
