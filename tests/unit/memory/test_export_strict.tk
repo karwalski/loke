@@ -1,0 +1,151 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.exportstrict;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=process:std.process;
+i=sdb:core.storage.db;
+i=ex:core.memory.export;
+
+(* F10.47 — the JSON memory export, judged by a strict parser and field by field.
+
+   F10.45 found that `core.governance.trace` had its own `jsonescape` which replaced a raw
+   newline with "\n" (in toke that literal IS a newline), so newline, CR and tab went out raw
+   and a multi-line value made invalid JSON. `core.memory.export` also had a local
+   `jsonescape`. This file measures the export the way an importer would read it: the file
+   `exportall` writes is opened by Python as UTF-8 (strict, so invalid UTF-8 fails) and parsed
+   with `json.loads` (strict by default, so a raw control character inside a string fails).
+
+   A memory export holds the user's own text, so parsing is not enough: Python also checks
+   that the file holds exactly the drawers stored, in order, each with exactly the expected
+   keys (nothing added, nothing dropped) and every string field equal to the value stored. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-memory-export-strict")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* One drawer and its score row. `created_at` is epoch seconds, distinct per drawer, so the
+   export's ORDER BY gives the order the checker expects. *)
+f=adddrawer(fv:@str;ts:str):bool{
+  let drawer=mt db.exec("INSERT INTO memory_drawers (id,wing,hall,room,role,content,sensitivity,created_at) VALUES (?,?,?,?,?,?,?,?)";@(fv.get(0);fv.get(1);fv.get(2);fv.get(3);fv.get(4);fv.get(5);fv.get(7);ts)) {
+    $ok:v true;
+    $err:e false
+  };
+  let score=mt db.exec("INSERT INTO memory_scores (id,tags,score,created_at,accessed_at) VALUES (?,?,0.75,?,?)";@(fv.get(0);fv.get(6);ts;ts)) {
+    $ok:v true;
+    $err:e false
+  };
+  <drawer && score
+};
+
+(* 0 when the file at `path` is valid UTF-8, parses as strict JSON, and holds exactly the
+   drawers in `fields` (eight strings each: id, wing, hall, room, role, content, tags,
+   sensitivity) with their stored values, score 0.75 and created_at 1790000000 plus the
+   index. 2: not UTF-8 or not JSON. 3: the wrong number of drawers. 4: a key added or
+   dropped. 5: a string field differs. 6: score or created_at differs. 99: python3 could not
+   be started (F10.44: the spawn's error side is 0, never an empty array). *)
+f=strictexport(path:str;fields:@str):i64{
+  let py="import json,sys
+try:
+    with open(sys.argv[1],encoding='utf-8') as fh:
+        d=json.loads(fh.read())
+except (ValueError,OSError):
+    sys.exit(2)
+exp=sys.argv[2:]
+keys=['id','wing','hall','room','role','content','tags','sensitivity']
+if not isinstance(d,list) or len(d)!=len(exp)//8:
+    sys.exit(3)
+for i,o in enumerate(d):
+    if not isinstance(o,dict) or set(o)!=set(keys+['score','created_at']):
+        sys.exit(4)
+    for j,k in enumerate(keys):
+        if o[k]!=exp[i*8+j]:
+            sys.exit(5)
+    if o['score']!=0.75 or o['created_at']!=1790000000+i:
+        sys.exit(6)
+sys.exit(0)";
+  let argv=mut.@("python3";"-c";py;path);
+  lp(let k=0;k<fields.len;k=k+1){ argv=argv.push(fields.get(k)) };
+  let h=mt process.spawn(argv) { $ok:h h; $err:e 0 };
+  let rc=mut.99;
+  if(h==0){}el{ rc=process.wait(h) as i64 };
+  <rc
+};
+
+f=writefile(path:str;body:str):bool{
+  <mt file.write(path;body) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(t.assert(openfreshstore()==1;"the store opened on a fresh file and its migrations ran")){pass=pass+1}el{fail=fail+1};
+
+  (* Five drawers, each a kind of text a memory palace holds: plain, multi-line, CR and tab,
+     quotes and backslashes (including a literal backslash-n), other control characters,
+     and multi-byte UTF-8. Awkward characters are in every string field, not only content. *)
+  let d0=@("mem-plain";"work";"Hall";"Room";"user";"a plain memory";"alpha,beta";"PUBLIC");
+  let d1=@("mem-lines";"personal";"Notes\nmore";"misc";"assistant";"line one\nline two\n\nline four";"a\nb";"CONFIDENTIAL");
+  let d2=@("mem-crtab";"work";"Tab\there";"Room\r";"user";"carriage\rreturn and\ttab\r\n";"t\tag";"INTERNAL");
+  let d3=@("mem-\"quoted\"";"work";"C:\\tmp";"Room";"user";"he said \"hi\" then typed \\n literally and C:\\\\share";"q\"t";"RESTRICTED");
+  let d4=@("mem-ctl";"work";"Hall";"Room";"user";"esc \x1b[0m bell \x07 ff \x0c start \x01 unit \x1f, café 日本 😀";"ü,ß";"PUBLIC");
+  let all=@(d0;d1;d2;d3;d4);
+  let fields=mut.@();
+  let added=mut.0;
+  lp(let i=0;i<all.len;i=i+1){
+    let d=all.get(i);
+    if(adddrawer(d;str.fromint(1790000000 + i))){ added=added+1 }el{};
+    lp(let k=0;k<d.len;k=k+1){ fields=fields.push(d.get(k)) }
+  };
+  if(t.assert(added==5;"all five drawers and their score rows were stored")){pass=pass+1}el{fail=fail+1};
+
+  (* Control: the checker rejects a raw newline inside a string, and an added key. *)
+  let rawnl=str.concat(testdir();"/rawnl.json");
+  writefile(rawnl;"[{\"id\":\"a\nb\"}]");
+  if(t.assert(strictexport(rawnl;@("a\nb";"";"";"";"";"";"";""))==2;"control: the checker rejects a raw newline inside a JSON string")){pass=pass+1}el{fail=fail+1};
+  let extra=str.concat(testdir();"/extra.json");
+  writefile(extra;"[{\"id\":\"x\",\"wing\":\"\",\"hall\":\"\",\"room\":\"\",\"role\":\"\",\"content\":\"\",\"tags\":\"\",\"sensitivity\":\"\",\"score\":0.75,\"created_at\":1790000000,\"leak\":\"\"}]");
+  if(t.assert(strictexport(extra;@("x";"";"";"";"";"";"";""))==4;"control: the checker rejects an object with a key added")){pass=pass+1}el{fail=fail+1};
+
+  (* The production path: exportall writes the file an importer reads. *)
+  let out=str.concat(testdir();"/export.json");
+  let res=ex.exportall(0;out;$exportformat{$json:0};0);
+  if(t.assert(res.count==5 as i32;"exportall reports the five stored drawers")){pass=pass+1}el{fail=fail+1};
+  let rc=strictexport(out;fields);
+  if(t.assert(rc!=99;"python3 was started to judge the export")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rc!=2;"the JSON export of memories holding newlines, CR, tab, quotes, backslashes, control characters and UTF-8 is valid UTF-8 and strict JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rc!=3 && rc!=4;"and holds exactly the stored drawers, each with exactly the expected keys, nothing added or dropped")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rc==0;"and every field decodes to exactly the value stored")){pass=pass+1}el{fail=fail+1};
+
+  (* One drawer at a time, so a failure names the character class that broke it. *)
+  let names=@("plain text";"newlines";"CR and tab";"quotes and backslashes";"other control characters and multi-byte UTF-8");
+  lp(let i=0;i<all.len;i=i+1){
+    openfreshstore();
+    adddrawer(all.get(i);"1790000000");
+    let one=str.concat(testdir();"/one.json");
+    ex.exportall(0;one;$exportformat{$json:0};0);
+    let label="a memory holding \(names.get(i)) exports as strict JSON that round-trips every field";
+    if(t.assert(strictexport(one;all.get(i))==0;label)){pass=pass+1}el{fail=fail+1}
+  };
+
+  <fail
+};
