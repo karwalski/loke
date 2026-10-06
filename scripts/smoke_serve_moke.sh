@@ -246,8 +246,33 @@ api POST /api/mcp/invoke '{}'                            400 'tool_name is requi
 api POST /api/mcp/invoke '{"tool_name":"nosuchtool","args":{}}' 200 'unknown tool: nosuchtool' "and an unknown tool is reported as one"
 # MK6.7: compress answered {"toon":"~","savings_pct":94} for this input. It must carry both rows
 # as TOON's table and measure the saving from the two lengths (17 characters to 15, 11%).
-api POST /api/mcp/invoke '{"tool_name":"compress","args":{"json":"[{\"a\":1},{\"a\":2}]"}}' 200 '[2]{a}:' "compress writes the two rows as a TOON table, not ~"
-api POST /api/mcp/invoke '{"tool_name":"compress","args":{"json":"[{\"a\":1},{\"a\":2}]"}}' 200 'toon_chars\\\":15,\\\"savings_pct\\\":11,' "and measures the saving from the lengths, 17 characters to 15"
+# Each layer of the answer is decoded strictly and the WHOLE answer compared, so a TOON with the
+# right header and the wrong rows, or one figure invented, fails. Then decompress through the
+# same route must give the input back byte for byte, and a shape the codec cannot encode must be
+# refused as a failed call that names it and reports no figure.
+tool_exact() {  # tool args-json label python-condition-on-(inv, answer)
+  local out
+  out=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' \
+    -d "{\"tool_name\":\"$1\",\"args\":$2}" "http://127.0.0.1:$PORT/api/mcp/invoke")
+  if printf '%s' "$out" | python3 -c '
+import json, sys
+inv = json.loads(sys.stdin.read())
+answer = None
+if inv["success"]:
+    answer = json.loads(json.loads(inv["result_json"])["content"][0]["text"])
+assert eval(sys.argv[1]), "success=%s answer=%s error=%s" % (inv["success"], json.dumps(answer)[:200], inv["error"][:160])
+' "$4"; then
+    echo "  ok   POST /api/mcp/invoke $1: $3"
+  else
+    echo "  FAIL POST /api/mcp/invoke $1: $3: $(printf '%s' "$out" | head -c 200)" >&2; fail=1
+  fi
+}
+tool_exact compress '{"json":"[{\"a\":1},{\"a\":2}]"}' "the two rows as a TOON table, not ~, and every figure measured (17 characters to 15, 11%)" \
+  'answer == {"toon": "[2]{a}:\n  1\n  2", "json_chars": 17, "minified_json_chars": 17, "toon_chars": 15, "savings_pct": 11, "savings_vs_minified_pct": 11}'
+tool_exact decompress '{"toon":"[2]{a}:\n  1\n  2"}' "the TOON compress wrote decodes back to the input, byte for byte" \
+  'answer == {"json": "[{\"a\":1},{\"a\":2}]"}'
+tool_exact compress '{"json":"{\"a\":{\"b\":1}}"}' "a nested object is refused, named, with no saving reported" \
+  'inv["success"] is False and "nested object" in inv["error"] and "savings" not in inv["error"]'
 # MK6.10: anonymise answered with an "original" field holding the text as sent, and analyse
 # listed each entity's value. The POST echoes the caller's own arguments back in args_json, so
 # the scan is of the tool's answer, result_json, every layer of which is decoded strictly; the
@@ -306,14 +331,15 @@ api GET  '/api/agents/diary?agent_id=nosuchagent' ""    404 'agent not found: no
 
 # MK6.6: state shared across moke's pre-forked workers. Each worker used to keep its own copy,
 # and eight reads after six invocations reported 0,0,0,1,0,0,1,1. Every read must now see all of
-# them: the nosuchtool and two compress invocations above and five more here (MK6.7 added the
-# compress pair, MK6.10 the anonymise, analyse and profile calls); the five memory calls above.
+# them: the nosuchtool, compress, decompress and refused compress invocations above and five more
+# here (MK6.7 added the compress and decompress calls, MK6.10 the anonymise, analyse and profile
+# calls); the five memory calls above.
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -m 20 -X POST -H 'Content-Type: application/json' \
     -d '{"tool_name":"nosuchtool","args":{}}' "http://127.0.0.1:$PORT/api/mcp/invoke"
 done
 for i in 1 2 3 4 5 6 7 8; do
-  api GET /api/mcp/tools  "" 200 '"total_invocations":11}' "read $i of the tool log sees all eleven invocations"
+  api GET /api/mcp/tools  "" 200 '"total_invocations":12}' "read $i of the tool log sees all twelve invocations"
   api GET /api/mcp/memory "" 200 '"total_invocations":5}' "read $i of the memory log sees all five calls"
   api GET '/api/agents/diary?agent_id=data-quality-scanner' "" 200 '"total_runs":1,' "read $i of the scanner sees its run"
   api GET /api/agents     "" 200 '"output_summary":"2 changes: 1 added, 1 removed' "read $i of the agents panel sees the schema run"
