@@ -15,7 +15,7 @@
 // without ever being run in a browser (RV1.4).
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -23,19 +23,37 @@ const [url, checksPath] = process.argv.slice(2);
 if (!url || !checksPath) { console.error('usage: ui_check.mjs <url> <checks.json>'); process.exit(2); }
 const checks = JSON.parse(readFileSync(checksPath, 'utf8'));
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const PORT = Number(process.env.UI_CHECK_PORT || 9333);
+// Port 0 lets Chrome pick a free port and write it to <profile>/DevToolsActivePort, so two
+// runs (or a Chrome left behind by a killed one) can never share a debugging port. A fixed
+// 9333 once let a stale headless Chrome answer for a new run. UI_CHECK_PORT still overrides.
+const FIXED = process.env.UI_CHECK_PORT ? Number(process.env.UI_CHECK_PORT) : 0;
 const profile = mkdtempSync(join(tmpdir(), 'ui_check_'));
 
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${PORT}`,
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${FIXED}`,
   `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
   '--disable-extensions', 'about:blank'], { stdio: 'ignore' });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A gate stopped mid-run sends SIGTERM to this process; take Chrome down with it.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(sig, () => {
+    try { chrome.kill('SIGKILL'); } catch {}
+    try { rmSync(profile, { recursive: true, force: true }); } catch {}
+    process.exit(1);
+  });
+}
 let exitCode = 1;
+let PORT = FIXED;
 try {
   let target;
   for (let i = 0; i < 80 && !target; i++) {
     try {
+      if (!PORT) {
+        const f = join(profile, 'DevToolsActivePort');
+        if (!existsSync(f)) throw new Error('no port yet');
+        PORT = Number(readFileSync(f, 'utf8').split('\n')[0]);
+        if (!PORT) throw new Error('no port yet');
+      }
       const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
       target = list.find((t) => t.type === 'page');
     } catch { await sleep(250); }
