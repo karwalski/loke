@@ -52,11 +52,11 @@ reduces disclosure without preventing identification. See
 [docs/research/disclosure-measurement-findings.md](docs/research/disclosure-measurement-findings.md)
 for the evidence base and for what loke must not claim.
 
-> **The filter currently fails open, and this is the most serious defect in the project.** In
-> `packages/browser/pages/api/pipeline.tk`, if the detection sidecar does not answer, the fallback
-> branch increments a counter from five substring checks and **never reassigns the anonymised text** —
-> so the original, unmodified prompt is sent to the provider. A filter that fails open is worse than
-> no filter, because the user believes one ran. Tracked as NC1.9.
+> **The filter used to fail open on the browser path; it now fails closed (NC1.9, GA1.10).** In
+> `packages/browser/pages/api/pipeline.tk` a detection sidecar that did not answer once sent the original
+> prompt on. The route now runs `core.privacy.pipeline` and answers 503, sending nothing, when
+> `issafetoforward` is false, as when no detection layer completed (the property is tested on the core
+> pipeline in `tests/unit/privacy/test_fail_closed.tk`). See [docs/claims.md](docs/claims.md) A11, A13.
 
 ```
 PRIMARY PATH — no custody                 FALLBACK PATH — redact and send

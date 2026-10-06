@@ -319,7 +319,7 @@ Port 11430. Intended to be localhost-only; measured 2026-09-24, it listens on ev
 > `core/audit/metrics.tk` aggregates it (DA1.6). The endpoint does not call either. Wiring it is
 > **DA1.5**. Recorded as F1 and F2 in [claims.md](claims.md).
 >
-> **`/api/pipeline` does not use the core pipeline** — see the Pipeline Orchestrator note above (A13).
+> **`/api/pipeline` runs the core pipeline** — see the Pipeline Orchestrator note above (A13).
 
 ### Extensibility
 
@@ -461,12 +461,12 @@ and optimiser.
 
 The following GA (General Availability) epics have been completed, bringing all core engine features into active use across browser and CLI modes:
 
-- **GA1: Pipeline Integration** (GA1.1-GA1.9) — **This epic should be reopened.** It was marked complete
-  on the claim that the privacy pipeline, response restoration, kill switch, audit logging, token
-  optimisation, semantic cache, router and governance policy are all wired into the browser handler. None
-  of the eight is reachable from the route the browser actually serves
-  (`packages/browser/pages/api/pipeline.tk`, registered at `packages/browser/src/_handlers.tk:129`), and
-  the audit trail is not written from anywhere at all. See the Pipeline Orchestrator and Audit Trail notes
-  above, and A13/E4 in [claims.md](claims.md). Tracked as **NC1.3**, **NC1.9**, **AD1.6**, **GA5**, **DA1**.
+- **GA1: Pipeline Integration** (GA1.1-GA1.10) — the privacy pipeline, response restoration, kill switch,
+  audit logging, token optimisation, semantic cache, router and governance policy are called from the
+  route the browser serves (`packages/browser/pages/api/pipeline.tk`, registered at
+  `packages/browser/src/_handlers.tk:132`). An earlier mechanical sweep deleted six of those calls; GA1.10
+  restored them. The cache is a miss unless its embedding model is installed. Re-verified 2026-10-07
+  (GA1.11): see the Pipeline Orchestrator note above and A13/K6 in [claims.md](claims.md), which name the
+  smokes and tests behind each call. The audit trail's own limits are in the Audit Trail notes above.
 - **GA2: Security Hardening** (GA2.1-GA2.5) — API keys saved through settings go to the OS keychain (keys already in `settings.json` are not migrated, GA2.1), auto-redaction on all log output, and localhost-only binding is intended but not enforced (GA2.5, T-43). Two items in this epic did not hold: database encryption is not active (above), and the source licence headers were subsequently removed wholesale by a migration script. Attribution is via `LICENSE` and `NOTICE`.
 - **GA3: UX Alignment** (GA3.1-GA3.7) — Full accessibility overhaul with ARIA labels, graduated 4-level warning system, simple/advanced view toggle, pre-send cost estimation, cancel in-flight requests, feedback comments on thumbs-down, sensitivity explanation tooltips.

@@ -402,8 +402,8 @@ log line and discards the structure. Persisting it is story **GA5.5**.
   not a property of the language or the host: nothing prevents a direct HTTP call being written, and
   loke ships a flag that disables the pipeline. It is also not a property of the *machine* — loke sees
   only traffic addressed to it. Six classes of bypass are enumerated and testable (AD1.6). And
-  *traversing* F3 is not the same as F3 having masked anything: on the fallback path the detection stack
-  can currently fail open and transmit unmodified text (NC1.9).
+  *traversing* F3 is not the same as F3 having masked anything; the pipeline now fails closed when no
+  detection layer completed (NC1.9, `tests/unit/privacy/test_fail_closed.tk`).
 - **Structured PII is redacted from logs.** All log output passes through the auto-redaction filter
   (F1.3 / GA2.4), and debug mode is subject to the same rules as production. Its scope is the regex
   pattern set plus a sensitive-key list, so it removes emails, phone numbers, card numbers, API keys and

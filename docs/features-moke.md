@@ -15,13 +15,13 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 > moke's UI is a published measurement** — the cost and savings figures are per-session estimates, and the
 > project publishes figures only from [metrics-baseline.md](metrics-baseline.md).
 >
-> The most consequential case: moke's privacy demonstration calls loke's `/api/pipeline`, which does
-> **not** invoke `core.privacy.pipeline`. It calls the privacy-filter sidecar on port 11435 directly and,
-> when the sidecar is not running, falls through to five literal column-name checks that count entities
-> without altering the text — then forwards the unaltered text to the provider while still showing an
-> entity count and a sensitivity badge. **So with the sidecar down, moke's confirmation modal can report
-> anonymisation that did not happen.** Tracked as **NC1.9** (fail closed) and **AD1.6**; recorded as A13
-> in [claims.md](claims.md).
+> moke's privacy demonstration calls loke's `/api/pipeline`, which runs `core.privacy.pipeline` and
+> answers 503, sending nothing, when no detection layer completed (NC1.9, GA1.10). It used to call the
+> privacy-filter sidecar directly and, with the sidecar down, forward the unaltered text while still
+> showing an entity count; that path is gone. `scripts/smoke_e2e.sh` checks moke → loke → model over the
+> built binaries and that the model saw only placeholders. Re-verified 2026-10-07 (GA1.11); recorded as
+> A13 and K6 in [claims.md](claims.md), which name the tests behind each call loke's route makes.
+>
 
 ---
 
