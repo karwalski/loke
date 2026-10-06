@@ -75,8 +75,9 @@ is what /api/tags and /api/ps list instead of `fake:latest`. Unset, both behave 
 F5.3a: RECORDER_FAIL_MODELS (comma-separated) names models whose /api/generate answers as
 `silent` does, so one recorder can stand in for an Ollama on which one model fails.
 The `harness` mode answers /api/generate as `echo` does, names no task to the intent
-classifier, and reports "Jane Citizen" from the NER /api/chat only when the request holds
-that name (`answer` and `echo` report it whatever the text).
+classifier, and reports "Jane Citizen" from the NER /api/chat only when a user message of
+the request holds that name (`answer` and `echo` report it whatever the text). F3.9d: only
+the user messages, because core.privacy.ner's own system message names "Jane Citizen".
 
 MK19.9: paths under /proxy-test/ answer the cases moke's /api/proxy must handle, in any mode.
 /proxy-test/json answers a small JSON document with a marker; /proxy-test/redirect answers 302
@@ -155,6 +156,19 @@ def _strings(v):
     if isinstance(v, dict):
         return [s for x in v.values() for s in _strings(x)]
     return []
+
+
+def _usertext(body):
+    """The content of every `user` message of an Ollama /api/chat body, joined; "" when the
+    body is not one. Not the system message, which is the caller's instruction (F3.9d)."""
+    try:
+        msgs = json.loads(body).get("messages", [])
+    except (ValueError, AttributeError):
+        return ""
+    if not isinstance(msgs, list):
+        return ""
+    return "\n".join(m.get("content", "") for m in msgs
+                     if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str))
 
 
 def _field(body, key):
@@ -253,7 +267,10 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == "/api/chat" and MODE == "harness":
             # F3.9: an NER model that reports "Jane Citizen" only when the text holds it, so
             # a case without a name is not credited with one the text does not contain.
-            found = NER if "Jane Citizen" in body else "[]"
+            # F3.9d: the text is the user messages' content alone. core.privacy.ner's own
+            # system message names "Jane Citizen" as its example, so matching the whole body
+            # reported the name on every request.
+            found = NER if "Jane Citizen" in _usertext(body) else "[]"
             self._send({"model": "fake", "message": {"role": "assistant", "content": found}, "done": True})
         elif p == "/api/chat" and "Classify the intent" in body:
             # core.router.intent's classification request (VM1.6f): a task name.

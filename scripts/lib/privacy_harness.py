@@ -18,7 +18,10 @@ tests/unit/privacy/test_template.tk and test_template_render.tk.
 
 The detector cases name every type core.privacy.regex.getpatterns emits, each with a value
 tests/unit/privacy/test_regex.tk shows that layer detecting, plus a PERSON for the NER layer
-(the recorder's /api/chat always reports "Jane Citizen") and a control with no identifier.
+(the recorder's /api/chat reports "Jane Citizen" when the user message it is sent holds that
+name, F3.9d) and a control with no identifier. Every dispatched cell also checks, in the
+reply's privacy_layers, that the NER layer completed and found one entity exactly when the
+scanned text holds the name and none otherwise.
 CASE_TYPES below must equal the regex layer's list; the harness reads that list from
 regex.tk and fails if they differ, so a new detector cannot go unexercised silently.
 
@@ -186,6 +189,26 @@ def system_of(body):
         return ""
 
 
+def ner_layer(reply):
+    """The NER layer's entry in a reply's privacy_layers (F3b.10), or {}."""
+    for l in reply.get("privacy_layers", []) or []:
+        if isinstance(l, dict) and l.get("layer") == "ner":
+            return l
+    return {}
+
+
+def check_ner(T, reply, scanned, name):
+    """F3.9d: the stand-in's NER answer is judged by what loke reports the layer found. It must
+    have scanned, and found the one PERSON exactly when the text loke scanned (system prompt
+    and text) holds "Jane Citizen", and nothing otherwise. With the stand-in matching the
+    whole request body, NER's own system message made every cell report one."""
+    ner = ner_layer(reply)
+    want = 1 if "Jane Citizen" in scanned else 0
+    T.check(ner.get("state") == "completed" and ner.get("detections") == want,
+            "%s: the NER layer completed and reported %d detection(s) (got %s %s)"
+            % (name, want, ner.get("state"), ner.get("detections")))
+
+
 def send_held(T, pipeline, approve, bodies, req, value, name, cell):
     """POST req; if it is held for approval (GA5.26), check nothing was sent while held, approve
     it and send it again. Returns (status, reply, the requests the stand-in received)."""
@@ -351,6 +374,8 @@ def main():
                     "%s: the reply is restored byte for byte" % name)
             T.check(PLACEHOLDER.search(reply.get("response", "")) is None,
                     "%s: no placeholder survives into what the user reads" % name)
+            # 6. The NER layer found the name only where the text holds it (F3.9d).
+            check_ner(T, reply, sysp + "\n" + user, name)
             # 5. The guardian reached the model, as /api/generate's `system` (F3.9a).
             cell["dispatched"] = True
             cell["guardian"] = system_of(body).startswith(GUARDIAN)
@@ -385,6 +410,7 @@ def main():
                 T.check("You are assisting a customer." in sysfield and "Be brief." in sysfield,
                         "%s: the rest of the caller's system prompt reached the model" % name)
                 T.check(reply.get("response") == "echo: " + clean, "%s: the reply is the text's echo, unchanged" % name)
+                check_ner(T, reply, req["system_prompt"] + "\n" + clean, name)
         cell["passed"] = T.fail == before_fail
         syscells.append(cell)
 
