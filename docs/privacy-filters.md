@@ -298,15 +298,16 @@ not usable: a number outside 0 to 1, a negative, an exponent (`7e-1`), a word, a
 boolean, a form the reader does not take (an inline table such as `privacy = { consensus_threshold = 0.7 }`,
 a quoted key), or any value in a file that is not valid TOML. A usable value is `0`, `1`, or `0.` or `1.`
 followed by digits and at most 1, quoted or not. `shared.config.privacyerror` says why, and
-`core.privacy.layerconfig.resolve` returns that as its error, so the refusal carries the layers prefix
-(the prefix is added in `pipeline.tk`; filed as F3b.17). The reason names the key and the value as
-written, which is configuration, not user data. Tests: `tests/unit/shared/test_config_numbers.tk` (each
-case, by its exact reason); `test_consensus_pipeline.tk` ("an out-of-range privacy.consensus_threshold
-refuses the run and says why", "a privacy_filter_threshold of the wrong type refuses the run"). Not
-measured over the built binary; the string below is what the unit test asserts on.
+`core.privacy.layerconfig.resolve` returns that as its error under its own `[privacy]` prefix (F3b.17),
+not the `privacy.layers` one. The reason names the key and the value as written, which is
+configuration, not user data. Tests: `tests/unit/shared/test_config_numbers.tk` (each case, by its
+exact reason); `test_consensus_pipeline.tk` ("an out-of-range privacy.consensus_threshold refuses the
+run and says why", "a privacy_filter_threshold of the wrong type refuses the run");
+`tests/unit/privacy/test_config_refusal_source.tk` (each of the three sources' refusal, asserted whole).
+Measured by `scripts/smoke_e2e.sh` against the built binary, as above:
 
 ```
-privacy.layers in config.toml cannot be applied: privacy.consensus_threshold = 1.5 is not a number from 0 to 1
+[privacy] in config.toml cannot be applied: privacy.consensus_threshold = 1.5 is not a number from 0 to 1
 ```
 
 When both are malformed, the layers error is the one reported. Test: `test_entity_routing_pipeline.tk`
@@ -324,6 +325,7 @@ it was written). It is false, and the run must not be sent, when any of these ho
 | A veto layer accepted a detection (F3b.2) | `the <id> privacy layer is in veto mode and found PII above its threshold` | `test_layer_config_pipeline.tk`; `scripts/smoke_e2e.sh` |
 | `[[privacy.layers]]` cannot be applied (F3b.2) | `privacy.layers in config.toml cannot be applied: ...` | `test_layer_config_pipeline.tk`; `scripts/smoke_e2e.sh` |
 | `[[privacy.entity_routing]]` cannot be applied (F3b.5) | `privacy.entity_routing in config.toml cannot be applied: ...` | `test_entity_routing_pipeline.tk`; `scripts/smoke_e2e.sh` |
+| A `[privacy]` threshold is set and cannot be used (F3b.16, F3b.17) | `[privacy] in config.toml cannot be applied: ...` | `test_config_refusal_source.tk`; `test_consensus_pipeline.tk`; `scripts/smoke_e2e.sh` |
 
 - **A system prompt does not drop a refusal (F3b.15).** `core.privacy.systemprompt.run` rebuilds the run
   and once dropped `vetoedby` and `layererror`, so a request with a `system_prompt` that a veto or a

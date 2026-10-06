@@ -755,6 +755,13 @@ else
   judge "a malformed [[privacy.entity_routing]] refuses even a request with no PII, naming the line" 503 '"error":"privacy.entity_routing in config.toml cannot be applied: config.toml line 1: entity_type private_person is not a type any layer reports","refused":true'
   if [ -s "$SEEN" ]; then echo "  FAIL the model received a request the malformed routing refused" >&2; fail=1
   else echo "  ok   and the model received nothing"; fi
+  # F3b.16/F3b.17: a [privacy] threshold that is set and cannot be used refuses, under its own
+  # table's name, not privacy.layers.
+  printf '[privacy]\nconsensus_threshold = 1.5\n' > "$WORK/lk/home/.loke/config.toml"
+  pipe_post "what is the capital of France" ""
+  judge "an unusable privacy.consensus_threshold refuses even a request with no PII, naming [privacy]" 503 '"error":"[privacy] in config.toml cannot be applied: privacy.consensus_threshold = 1.5 is not a number from 0 to 1","refused":true'
+  if [ -s "$SEEN" ]; then echo "  FAIL the model received a request the unusable threshold refused" >&2; fail=1
+  else echo "  ok   and the model received nothing"; fi
   rm -f "$WORK/lk/home/.loke/config.toml"
 fi
 # GA1.5: the token optimiser, between the privacy filter and dispatch. scripts/lib/http_recorder.py

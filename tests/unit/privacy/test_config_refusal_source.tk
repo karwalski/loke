@@ -1,0 +1,61 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.configrefusalsource;
+
+i=t:std.test;
+i=str:std.str;
+i=pl:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=lyc:core.privacy.layerconfig;
+i=cfg:shared.config;
+
+(* F3b.17 — a config.toml that cannot be applied refuses every run, and the refusal names
+   the part of the file that is wrong: [[privacy.layers]], [[privacy.entity_routing]] or a
+   [privacy] threshold. Before F3b.17 a threshold error (F3b.16) was refused as
+   "privacy.layers in config.toml cannot be applied: privacy.consensus_threshold = 1.5 ...",
+   because pipeline.refusalreason put the layers prefix on every error resolve returned.
+
+   Each reason is asserted whole, through the production path a request takes: the text is
+   read by shared.config.fromtext, applied by pipeline.withlokeconfig and refused by
+   pipeline.runforward; refusalreason is what /api/pipeline answers with. The regex layer
+   alone runs, so no other process is needed. *)
+
+f=regexonly():$pipelineconfig{
+  let c=mut.pl.newconfig("http://127.0.0.1:9";"http://127.0.0.1:9");
+  c=pl.withlayer(c;fr.nerid();false);
+  c=pl.withlayer(c;fr.presidioid();false);
+  c=pl.withlayer(c;fr.privacyfilterid();false);
+  <c
+};
+
+(* The reason a run made with the config.toml text is refused, or "" when it is not. *)
+f=reason(text:str):str{
+  let r=pl.runforward("what is the capital of France";"";pl.withlokeconfig(regexonly();cfg.fromtext(text)));
+  if(pl.issafetoforward(r)){ <"" }el{};
+  <pl.refusalreason(r)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(t.asserteq(reason("[privacy]\nconsensus_threshold = 0.7\n");"";"a usable threshold is not refused")){pass=pass+1}el{fail=fail+1};
+
+  let layers="privacy.layers in config.toml cannot be applied: config.toml line 1: mode must be detect-and-mask, detect-only or veto";
+  if(t.asserteq(reason("[[privacy.layers]]\nid = \"ner\"\nmode = \"block\"\n");layers;"a malformed [[privacy.layers]] entry is refused under privacy.layers")){pass=pass+1}el{fail=fail+1};
+
+  let routing="privacy.entity_routing in config.toml cannot be applied: config.toml line 1: entity_type private_person is not a type any layer reports";
+  if(t.asserteq(reason("[[privacy.entity_routing]]\nentity_type = \"private_person\"\npreferred_layers = [\"ner\"]\n");routing;"a malformed [[privacy.entity_routing]] is refused under privacy.entity_routing")){pass=pass+1}el{fail=fail+1};
+
+  let consensus="[privacy] in config.toml cannot be applied: privacy.consensus_threshold = 1.5 is not a number from 0 to 1";
+  if(t.asserteq(reason("[privacy]\nconsensus_threshold = 1.5\n");consensus;"an unusable privacy.consensus_threshold is refused under [privacy], not privacy.layers")){pass=pass+1}el{fail=fail+1};
+
+  let pf="[privacy] in config.toml cannot be applied: privacy.privacy_filter_threshold = true is not a number from 0 to 1";
+  if(t.asserteq(reason("[privacy]\nprivacy_filter_threshold = true\n");pf;"an unusable privacy.privacy_filter_threshold is refused under [privacy], not privacy.layers")){pass=pass+1}el{fail=fail+1};
+
+  (* The prefix is added once, whichever caller words the refusal. *)
+  if(t.asserteq(lyc.refusal(lyc.resolve(fr.layers("";"");"[privacy]\nconsensus_threshold = 1.5\n").error);consensus;"layerconfig.refusal does not prefix a [privacy] error twice")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
