@@ -1,0 +1,286 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.reportevents;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=sdb:core.storage.db;
+i=re:core.governance.reportengine;
+i=ex:core.governance.reportexport;
+
+(* GA5.30 - each report template counts the event types it claims to count, once per
+   request.
+
+   The templates applied no event filter. Since DA1.9 the browser route writes an
+   llm_dispatch row before the provider is called and an outcome row after, on the same
+   correlation id, so one forwarded request was two routing decisions, and a kill-switch
+   change was a third. The database here is seeded with every event type the audit trail
+   writes (grep event types in packages/: the browser route, core.governance.killswitch and
+   core.router.degraded), and each template is asserted by exact count.
+
+   The seeded requests, all dated inside March 2026:
+
+     rq1  llm_dispatch + llm_request              confidential, cost 1.50
+     rq2  llm_dispatch + llm_request_failed       internal
+     rq3  llm_dispatch + llm_request_failed, then its fallback hop rq3-h1:
+          llm_dispatch + llm_request              confidential, cost 0.25
+          and degraded_mode_entered / degraded_mode_exited on rq3
+     rq4  privacy_refused                         restricted
+     rq5  llm_request_refused
+     rq6  kill_switch_refused (the switch stopped the request)
+     rq7  quota_exceeded
+     rq8  policy_deny
+     rq9  policy_require_approval                 restricted
+
+   and three kill-switch rows that are not requests: engaged (global:all), released
+   (provider:openai), and a refused change (use_case:bogus).
+
+   Every llm_dispatch row carries a cost of 9.99 and the hop-0 rows of rq3 the model
+   "hop-zero", so a dispatch row counted shows up in the cost total and a request reported
+   by its first hop rather than its outcome shows up by model.
+
+   Rows are inserted with raw SQL because the point is the event_type and created_at
+   values, and insertevent stamps created_at from the clock. INSERT is the one statement
+   audit_log accepts after GA5.9. The hash is a placeholder; the chain is covered by
+   tests/unit/storage/test_audit_append_only.tk. *)
+
+f=marchstart():str{ <"2026-03-01" };
+f=marchend():str{ <"2026-03-31" };
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-report-events")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* Rows are dated one second apart in insertion order from 15 March, so the report's
+   newest-first order is the reverse of the order below. *)
+f=insertrow(n:i64;eventtype:str;corrid:str;modelid:str;sensitivity:str;cents:i64):bool{
+  let created=1773532800000+n*1000;
+  <mt db.exec("INSERT INTO audit_log (id,event_type,use_case,model_id,provider,sensitivity,risk_tier,tokens_in,tokens_out,cost_usd_cents,duration_ms,correlation_id,prev_hash,hash,created_at) VALUES (?,?,'browser-chat',?,'anthropic',?,'MEDIUM',10,20,?,100,?,'','placeholder',?)";@(
+    str.randhex(16);
+    eventtype;
+    modelid;
+    sensitivity;
+    str.fromint(cents);
+    corrid;
+    str.fromi64(created))) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+f=seedeveryeventtype():i64{
+  let store=openfreshstore();
+  insertrow(1;"llm_dispatch";"rq1";"claude-3.5-sonnet";"confidential";999);
+  insertrow(2;"llm_request";"rq1";"claude-3.5-sonnet";"confidential";150);
+  insertrow(3;"llm_dispatch";"rq2";"claude-3.5-sonnet";"internal";999);
+  insertrow(4;"llm_request_failed";"rq2";"claude-3.5-sonnet";"internal";0);
+  insertrow(5;"llm_dispatch";"rq3";"hop-zero";"confidential";999);
+  insertrow(6;"llm_request_failed";"rq3";"hop-zero";"confidential";0);
+  insertrow(7;"degraded_mode_entered";"rq3";"llama3";"";0);
+  insertrow(8;"llm_dispatch";"rq3-h1";"hop-one";"confidential";999);
+  insertrow(9;"llm_request";"rq3-h1";"hop-one";"confidential";25);
+  insertrow(10;"degraded_mode_exited";"rq3";"llama3";"";0);
+  insertrow(11;"privacy_refused";"rq4";"none";"restricted";0);
+  insertrow(12;"llm_request_refused";"rq5";"claude-3.5-sonnet";"internal";0);
+  insertrow(13;"kill_switch_refused";"rq6";"claude-3.5-sonnet";"internal";0);
+  insertrow(14;"quota_exceeded";"rq7";"none";"internal";0);
+  insertrow(15;"policy_deny";"rq8";"none";"internal";0);
+  insertrow(16;"policy_require_approval";"rq9";"none";"restricted";0);
+  insertrow(17;"kill_switch_engaged";"global:all";"";"";0);
+  insertrow(18;"kill_switch_released";"provider:openai";"";"";0);
+  insertrow(19;"kill_switch_refused";"use_case:bogus";"";"";0);
+  <store
+};
+
+f=emptyreport():$report{
+  <$report{
+    title:"";
+    reporttype:"";
+    generatedat:"";
+    periodstart:"";
+    periodend:"";
+    rows:@();
+    summary:"";
+    format:""
+  }
+};
+
+f=reportfor(store:i64;template:str;format:str):$report{
+  let filter=$reportfilter{
+    startdate:marchstart();
+    enddate:marchend();
+    reporttype:template;
+    format:format
+  };
+  <mt re.generate(store;filter) {
+    $ok:r r;
+    $err:e emptyreport()
+  }
+};
+
+(* How many of a report's rows have a detail that starts with this event type. A row's
+   detail is "<event_type> / <use_case> / <model_id>". *)
+f=rowsof(r:$report;eventtype:str):i64{
+  let prefix="\(eventtype) /";
+  let n=mut.0;
+  lp(let i=0;i<r.rows.len;i=i+1){
+    let row:$reportrow=r.rows.get(i);
+    if(str.startswith(row.detail;prefix)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=rowsmentioning(r:$report;text:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<r.rows.len;i=i+1){
+    let row:$reportrow=r.rows.get(i);
+    if(str.contains(row.detail;text)){ n=n+1 }el{}
+  };
+  <n
+};
+
+
+(* ── W74's reproducer, as filed in GA5.30 ─────────────────────────────────── *)
+
+f=testreproducerroutingisone():bool{
+  let store=openfreshstore();
+  insertrow(1;"llm_dispatch";"req-1";"claude-3.5-sonnet";"confidential";0);
+  insertrow(2;"llm_request";"req-1";"claude-3.5-sonnet";"confidential";0);
+  insertrow(3;"kill_switch_engaged";"global:all";"";"";0);
+  let r=reportfor(store;"routing_decisions";"text");
+  <t.assert(r.rows.len==1;"a dispatch-plus-outcome pair and a kill-switch change are ONE routing decision, not three")
+};
+
+
+(* ── every event type, every template, by exact count ──────────────────────── *)
+
+f=testcompliancecountsninerequests():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"compliance_summary";"text");
+  <t.assert(r.rows.len==9;"compliance_summary is one row per request: nine requests, whatever rows each wrote")
+};
+
+f=testcompliancereportsthefinaloutcome():bool{
+  (* rq3's first hop failed and its fallback answered: the request's row is the answer. *)
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"compliance_summary";"text");
+  <t.assert(rowsmentioning(r;"hop-one")==1 && rowsmentioning(r;"hop-zero")==0;"a request with a fallback is reported once, by the hop that answered")
+};
+
+f=testcompliancecountsnocontrolchange():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"compliance_summary";"text");
+  <t.assert(rowsof(r;"kill_switch_engaged")+rowsof(r;"kill_switch_released")==0 && rowsof(r;"kill_switch_refused")==1;"compliance_summary holds the request the switch stopped, and no kill-switch change, refused or made")
+};
+
+f=testpiicountsfourrequests():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"pii_detection_log";"text");
+  <t.assert(r.rows.len==4;"pii_detection_log: the four requests classified confidential or restricted (rq1, rq3, rq4, rq9), once each")
+};
+
+f=testroutingcountsfourcalls():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"routing_decisions";"text");
+  <t.assert(r.rows.len==4;"routing_decisions: one row per provider call, the four llm_request and llm_request_failed rows")
+};
+
+f=testroutinghasnodispatchrow():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"routing_decisions";"text");
+  <t.assert(rowsof(r;"llm_dispatch")==0 && rowsof(r;"llm_request")==2 && rowsof(r;"llm_request_failed")==2;"routing_decisions reports outcomes only: two answered, two failed, no dispatch row")
+};
+
+f=testpolicychangesaretheswitch():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"policy_changes";"text");
+  <t.assert(r.rows.len==2 && rowsof(r;"kill_switch_engaged")==1 && rowsof(r;"kill_switch_released")==1;"policy_changes: the switch engaged and released, not a policy_deny or a held request")
+};
+
+f=testcostcountsfourcalls():bool{
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"cost_savings";"text");
+  <t.assert(r.rows.len==4;"cost_savings: one row per provider call")
+};
+
+f=testcosttotalexcludesdispatch():bool{
+  (* Each dispatch row carries 9.99, so counting any of them moves the total off 1.75. *)
+  let store=seedeveryeventtype();
+  let r=reportfor(store;"cost_savings";"text");
+  <t.assert(str.contains(r.summary;"total cost $1.75");"cost_savings totals the outcome rows only: $1.75")
+};
+
+f=testnodegradedrowanywhere():bool{
+  let store=seedeveryeventtype();
+  let names=@("compliance_summary";"pii_detection_log";"routing_decisions";"policy_changes";"cost_savings");
+  let n=mut.0;
+  lp(let i=0;i<names.len;i=i+1){
+    let r=reportfor(store;names.get(i);"text");
+    n=n+rowsof(r;"degraded_mode_entered")+rowsof(r;"degraded_mode_exited")+rowsof(r;"llm_dispatch")
+  };
+  <t.assert(n==0;"no template reports a dispatch reservation or a degraded-mode row")
+};
+
+
+(* ── GA5.31: what a report can print ───────────────────────────────────────────
+   A report reads audit_log, which is designed to hold no raw value. loke.db does hold raw
+   text elsewhere: memory_drawers keeps a conversation's content in the clear (the sealed
+   placeholder_map_records has no plaintext column, X8.2). A value is planted there, on a
+   request inside the window, and no template in any format may print it. The INSERT's
+   result is part of the assertion, so a schema change that loses the table fails here
+   rather than passing on a plant that never happened. *)
+
+f=plantedvalue():str{ <"jane.planted@example.com" };
+
+f=testnorawvalueinanyreport():bool{
+  let store=seedeveryeventtype();
+  let content="Email \(plantedvalue()) about the invoice";
+  let ok=mt db.exec("INSERT INTO memory_drawers (id,wing,hall,room,role,content,session_id,model_id,sensitivity,created_at) VALUES ('md-1','work','finance','invoices','user',?,'rq1','claude-3.5-sonnet','CONFIDENTIAL','1773532801000')";@(content)) {
+    $ok:v true;
+    $err:e false
+  };
+  let names=@("compliance_summary";"pii_detection_log";"routing_decisions";"policy_changes";"cost_savings");
+  let formats=@("text";"csv";"json");
+  let leaks=mut.0;
+  lp(let i=0;i<names.len;i=i+1){
+    lp(let j=0;j<formats.len;j=j+1){
+      let body=ex.export(reportfor(store;names.get(i);formats.get(j)));
+      if(str.contains(body;"jane.planted")){ leaks=leaks+1 }el{}
+    }
+  };
+  <t.assert(ok && leaks==0;"a raw value planted in memory_drawers appears in no template in any format")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(testreproducerroutingisone()){pass=pass+1}el{fail=fail+1};
+  if(testcompliancecountsninerequests()){pass=pass+1}el{fail=fail+1};
+  if(testcompliancereportsthefinaloutcome()){pass=pass+1}el{fail=fail+1};
+  if(testcompliancecountsnocontrolchange()){pass=pass+1}el{fail=fail+1};
+  if(testpiicountsfourrequests()){pass=pass+1}el{fail=fail+1};
+  if(testroutingcountsfourcalls()){pass=pass+1}el{fail=fail+1};
+  if(testroutinghasnodispatchrow()){pass=pass+1}el{fail=fail+1};
+  if(testpolicychangesaretheswitch()){pass=pass+1}el{fail=fail+1};
+  if(testcostcountsfourcalls()){pass=pass+1}el{fail=fail+1};
+  if(testcosttotalexcludesdispatch()){pass=pass+1}el{fail=fail+1};
+  if(testnodegradedrowanywhere()){pass=pass+1}el{fail=fail+1};
+  if(testnorawvalueinanyreport()){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

@@ -64,32 +64,58 @@ t=$report{
    reasoning for converting the parameter rather than re-representing the column — the
    chain digest covers created_at's stored text — is in msrangeof itself.
 
-   GA5.6 — the event-type filters. This is a DECISION and it changed behaviour, so it is
-   stated rather than buried. The five templates filtered on `event_type LIKE '%pii%'`,
-   `'%routing%'`, `'%compliance%'` and so on. The only event_type anything in this
-   repository ever writes to audit_log is 'llm_request' (browser/pages/api/pipeline.tk is
-   the single writer), so all five filters matched zero rows independently of the date
-   bug — fixing the window alone would have left every report empty and looking correct.
+   GA5.6 — the event-type filters, as first decided. The five templates filtered on
+   `event_type LIKE '%pii%'`, `'%routing%'` and so on, and matched nothing: at the time the
+   only event type written was 'llm_request'. GA5.6 dropped the filters, which was right
+   then and wrong as soon as the trail grew.
 
-   Each template is therefore mapped onto what the trail ACTUALLY records:
+   GA5.30 — the event-type filters, as they stand. The trail now holds, per request on the
+   browser route, an `llm_dispatch` row written BEFORE the provider is called (the
+   disclosure reservation, DA1.9) and then an outcome row on the same correlation id; plus
+   refusals, kill-switch changes and degraded-mode rows. With no filter, one forwarded
+   request was two routing decisions and a kill-switch change was a third. The event types
+   are therefore named, once each, in the clauses below, and every template says which:
 
-     compliance_summary  every audited event in the window. A compliance summary of an
-                         audit trail is the trail.
-     pii_detection_log   the events classified CONFIDENTIAL or RESTRICTED. That
-                         classification is the only record the trail keeps of sensitive
-                         content having been seen, and governance/dashboard.tk already
-                         treats exactly those two values as the privacy-coverage
-                         numerator, so the two agree.
-     routing_decisions   every audited event, reported by provider and model. Each row
-                         records where the request was sent, which is the routing outcome.
-     policy_changes      event_type LIKE '%policy%' — KEPT, and structurally empty,
-                         because nothing writes a policy-change event yet. An empty
-                         policy-changes report means "not recorded", not "none happened",
-                         and the summary says so rather than letting a reader infer the
-                         stronger claim.
-     cost_savings        every audited event, with the cost figure. Note that the request
-                         path writes cost 0.0 deliberately until LS1.1y, so the total is
-                         honestly zero rather than absent.
+     dispatch outcome    llm_request, llm_request_failed. A provider was called and this
+                         is what came of it. One row per attempt: a fallback hop has its
+                         own correlation id (`<id>-h<n>`) and its own outcome, because it
+                         is its own call to its own provider. The same pair
+                         core.governance.scorecard counts (dispatchclause).
+     request outcome     the dispatch outcomes, plus every way a request is refused before
+                         anything is sent: llm_request_refused, privacy_refused,
+                         quota_exceeded, policy_deny, policy_require_approval and a
+                         request's kill_switch_refused. Reduced to ONE row per request,
+                         the last written, so a request whose first hop failed and whose
+                         second answered is one request whose outcome is the answer.
+     control change      kill_switch_engaged, kill_switch_released.
+
+   Never counted by any template: llm_dispatch (it precedes the outcome row of the same
+   call, so counting both is the double count), degraded_mode_entered and
+   degraded_mode_exited (a provider's availability, not a request or a decision), and a
+   REFUSED kill-switch change. kill_switch_refused carries two meanings in the trail: the
+   browser route writes it for a request the switch stopped, with the request's hex
+   correlation id, and core.governance.killswitch writes it for a change it refused, with
+   `<scope>:<target>`. A request id never contains a colon, so the colon tells them apart;
+   GA5.32 asks for the second to have its own name.
+
+   The templates:
+
+     compliance_summary  every request outcome in the window, one row per request.
+     pii_detection_log   the request outcomes classified CONFIDENTIAL or RESTRICTED, one
+                         row per request. That classification is the only record the
+                         trail keeps of sensitive content having been seen, and
+                         governance/dashboard.tk treats exactly those two values as the
+                         privacy-coverage numerator, so the two agree.
+     routing_decisions   every dispatch outcome, reported by provider and model.
+     policy_changes      every control change. It used to be `event_type LIKE '%policy%'`,
+                         which matched policy_deny and policy_require_approval: decisions
+                         ABOUT requests, reported as changes TO policy. The kill switch is
+                         the only governance control whose changes the trail records;
+                         an edit to the policy itself is not recorded, and the summary
+                         says so.
+     cost_savings        every dispatch outcome, with the cost figure. Cost attaches to a
+                         call, and the request path writes cost 0.0 deliberately until
+                         LS1.1y, so the total is honestly zero rather than absent.
 
    DA1.5 in its second location: every row's severity was the literal "INFO" and every
    row's value was the empty string, so a cost report carried no cost. Severity now comes
@@ -127,6 +153,43 @@ f=auditwindowsql(extrafilter:str):str{
     s.createdatwindowclause();
     extrafilter;
     s.createdatdescorder()))
+};
+
+
+(* The two event types that mean a provider was called and answered or failed. *)
+f=dispatchoutcometypes():str{
+  <"'llm_request','llm_request_failed'"
+};
+
+f=dispatchoutcomeclause():str{
+  <" AND event_type IN (\(dispatchoutcometypes()))"
+};
+
+(* A row that is the outcome of a request, without the leading AND so the dedup subquery
+   can use it too. The kill_switch_refused arm admits the browser route's refusals only:
+   the switch's own refused changes are keyed `<scope>:<target>`. *)
+f=requestoutcomepredicate():str{
+  <"(event_type IN (\(dispatchoutcometypes()),'llm_request_refused','privacy_refused','quota_exceeded','policy_deny','policy_require_approval') OR (event_type='kill_switch_refused' AND INSTR(correlation_id,':')=0))"
+};
+
+(* A fallback hop's correlation id is the request's with `-h<n>` appended; the request id
+   itself is hex, so the first "-h" is where the hop suffix starts. *)
+f=requestkeyexpr():str{
+  <"CASE WHEN INSTR(correlation_id,'-h')>0 THEN SUBSTR(correlation_id,1,INSTR(correlation_id,'-h')-1) ELSE correlation_id END"
+};
+
+(* One row per request: of each request's outcome rows, the last one written. *)
+f=requestoutcomeclause():str{
+  let pred=requestoutcomepredicate();
+  <" AND \(pred) AND rowid IN (SELECT MAX(rowid) FROM audit_log WHERE \(pred) GROUP BY \(requestkeyexpr()))"
+};
+
+f=controlchangeclause():str{
+  <" AND event_type IN ('kill_switch_engaged','kill_switch_released')"
+};
+
+f=piiclause():str{
+  <"\(requestoutcomeclause()) AND UPPER(sensitivity) IN ('CONFIDENTIAL','RESTRICTED')"
 };
 
 
@@ -286,60 +349,60 @@ f=runreport(filter:$reportfilter;extrafilter:str;reporttype:str;title:str;catego
 f=generatecompliance(conn:i64;filter:$reportfilter):$report{
   <runreport(
     filter;
-    "";
+    requestoutcomeclause();
     "compliance_summary";
     "Compliance Summary Report";
     "compliance";
     "sensitivity";
-    "Total audited events";
+    "Requests audited, one row per request";
     "")
 };
 
 f=generatepii(conn:i64;filter:$reportfilter):$report{
   <runreport(
     filter;
-    " AND UPPER(sensitivity) IN ('CONFIDENTIAL','RESTRICTED')";
+    piiclause();
     "pii_detection_log";
     "PII Detection Log";
     "pii";
     "sensitivity";
-    "Events handling confidential or restricted content";
+    "Requests handling confidential or restricted content";
     "")
 };
 
 f=generaterouting(conn:i64;filter:$reportfilter):$report{
   <runreport(
     filter;
-    "";
+    dispatchoutcomeclause();
     "routing_decisions";
     "Routing Decisions Report";
     "routing";
     "provider";
-    "Total routing decisions";
+    "Provider calls, one row per call";
     "")
 };
 
 f=generatepolicychanges(conn:i64;filter:$reportfilter):$report{
   <runreport(
     filter;
-    " AND event_type LIKE '%policy%'";
+    controlchangeclause();
     "policy_changes";
     "Policy Changes Report";
     "policy";
     "risk";
-    "Policy change events recorded";
-    ". Nothing in loke writes a policy-change event to the audit trail yet, so a count of zero here means NOT RECORDED rather than none occurred")
+    "Kill-switch changes recorded";
+    ". The kill switch is the only control whose changes the audit trail records. An edit to the policy itself is NOT RECORDED, so its absence here does not mean none occurred")
 };
 
 f=generatecost(conn:i64;filter:$reportfilter):$report{
   <runreport(
     filter;
-    "";
+    dispatchoutcomeclause();
     "cost_savings";
     "Cost and Savings Report";
     "cost";
     "cost";
-    "Total audited events";
+    "Provider calls";
     ". Cost is recorded as 0.0 on every request until LS1.1y wires the provider cost estimate, so a total of $0.00 is what the trail holds rather than what was spent")
 };
 
