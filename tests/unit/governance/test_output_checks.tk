@@ -1,0 +1,123 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.outputchecks;
+
+i=t:std.test;
+i=str:std.str;
+i=process:std.process;
+i=ag:core.governance.aigov;
+i=tr:core.governance.trace;
+
+(* F10.45 — the two output checks in core.governance that could not do what they said.
+
+   `aigov.assessoutput` looked for a card number, a phone number and an SSN with
+   `str.matches`, which matches the WHOLE string, so it saw one only when the model's entire
+   output was that bare number; its "this sentence has a digit" check was the same call on
+   `\d`, true only for a one-character sentence. It now asks the regex layer
+   (`core.privacy.regex.detect`), the detectors the request path uses on the way out, with
+   their digit-boundary, checksum and letter-boundary guards, so scanning a response can
+   never be weaker than scanning the prompt was.
+
+   `trace.tojson` escaped strings with a local `jsonescape` that replaced a raw newline with
+   `"\n"`, which in toke IS a newline, and did the same for CR (written as a second raw
+   newline) and tab. Only backslash and quote were escaped, so a multi-line prompt produced
+   invalid JSON. It now uses `shared.jsonobj.escape`, the project's escaper, which also
+   writes every other control character as \u00XX.
+
+   The JSON assertions do not trust a substring: the output is handed to Python's
+   `json.loads`, which is strict by default (a raw control character inside a string is an
+   error), and Python also compares each decoded field against the original text, so an
+   escape that parses but changes the value fails too.
+
+   Neither function had a caller when this was written; this pins them before one exists. *)
+
+f=pii(text:str):bool{
+  <ag.assessoutput(text).piiinoutput
+};
+
+f=claims(text:str):i64{
+  <ag.assessoutput(text).factualclaimcount as i64
+};
+
+f=risk(text:str):str{
+  <ag.assessoutput(text).risklevel
+};
+
+f=sample(prompt:str;response:str;rid:str;detail:str):$decisiontrace{
+  let step=$traceentry{step:"scan";detail:detail;timestamp:"2026-10-07T00:00:00Z"};
+  <$decisiontrace{
+    requestid:rid;
+    correlationid:"corr-1";
+    originalinput:prompt;
+    piidetected:"email:1";
+    anonymisationapplied:true;
+    compressionapplied:false;
+    riskclassification:"medium";
+    policydecision:"allow";
+    modelselected:"ollama/llama3";
+    provider:"ollama";
+    promptsent:prompt;
+    responsereceived:response;
+    deanonymisationapplied:true;
+    finaloutput:response;
+    steps:@(step);
+    durationms:12
+  }
+};
+
+(* 0 when Python's strict json.loads accepts `j` and the fields decode to the given
+   originals; 2 when it does not parse; 3 when it parses but a value differs; 99 when
+   python3 could not be started. *)
+f=strictjson(j:str;prompt:str;response:str;rid:str;detail:str):i64{
+  let py="import json,sys
+try:
+    d=json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(2)
+ok=d['promptsent']==sys.argv[2] and d['responsereceived']==sys.argv[3] and d['requestid']==sys.argv[4] and d['steps'][0]['detail']==sys.argv[5] and d['durationms']==12 and d['anonymisationapplied'] is True
+sys.exit(0 if ok else 3)";
+  let h=mt process.spawn(@("python3";"-c";py;j;prompt;response;rid;detail)) { $ok:h h; $err:e 0 };
+  let rc=mut.99;
+  if(h==0){}el{ rc=process.wait(h) as i64 };
+  <rc
+};
+
+f=jsonok(prompt:str;response:str;rid:str;detail:str):bool{
+  <strictjson(tr.tojson(sample(prompt;response;rid;detail));prompt;response;rid;detail)==0
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── assessoutput: a number INSIDE a sentence ───────────────────────────────── *)
+  if(t.assert(pii("Your card number is 4111 1111 1111 1111, keep it safe.");"a card number inside a sentence is PII in the output")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pii("Charge it to 5500-0000-0000-0004 today");"a dashed Mastercard number inside a sentence is PII")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pii("You can call the office on 415-555-2671 after nine.");"a US phone number inside a sentence is PII in the output")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pii("Ring 0412 345 678 after lunch.");"an Australian mobile inside a sentence is PII in the output")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pii("The form lists her SSN as 078-05-1120 on page two.");"an SSN inside a sentence is PII in the output")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(risk("The form lists her SSN as 078-05-1120 on page two.");"high";"and PII in the output makes the risk high")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pii("4111 1111 1111 1111");"a bare card number, the one case the old check saw, is still PII")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pii("Write to jo.bloggs@example.com.au about it.");"an email address is still PII in the output")){pass=pass+1}el{fail=fail+1};
+
+  (* ── assessoutput: near misses the regex layer's guards reject ─────────────── *)
+  if(t.assert(!pii("Order 12345 shipped in 2024 and cost 99 dollars.");"ordinary numbers in a sentence are not PII")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pii("The reference is 4111 1111 1111, three groups only.");"twelve card-like digits are not a card number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pii("Part 41111111111111112 is back in stock.");"a card-shaped fragment of a longer digit run is not a card number")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pii("Batch 078-05-11205 passed inspection.");"an SSN shape followed by another digit is not an SSN")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(risk("The weather was fine.");"low";"text with no PII and no claims is low risk")){pass=pass+1}el{fail=fail+1};
+
+  (* ── assessoutput: the factual-claim count sees a digit anywhere ────────────── *)
+  if(t.assert(claims("Revenue rose 12 percent. Costs fell by 3 points. Staff were happy")==2;"two sentences carrying a number are two factual claims")){pass=pass+1}el{fail=fail+1};
+
+  (* ── trace.tojson: strict JSON for every awkward character ─────────────────── *)
+  if(t.assert(jsonok("plain prompt";"plain reply";"req-1";"nothing odd");"a trace of plain text is strict JSON that decodes to its fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jsonok("line one\nline two";"reply\nover\nlines";"req-2";"a\nb");"a trace holding newlines is strict JSON that decodes to its fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jsonok("carriage\rreturn";"tab\there";"req-3";"cr\r and tab\t");"a trace holding CR and tab is strict JSON that decodes to its fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jsonok("she said \"hi\"";"a back\\slash and \\n literally";"req-\"4\"";"quote \" backslash \\");"a trace holding quotes and backslashes is strict JSON that decodes to its fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(jsonok("escape \x1b[0m and bell \x07";"form\x0cfeed and \x01 start";"req-5";"unit \x1f sep");"a trace holding other control characters is strict JSON that decodes to its fields")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strictjson("{\"promptsent\":\"a\nb\"}";"a\nb";"";"";"")==2;"control: the checker itself rejects a raw newline inside a JSON string")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
