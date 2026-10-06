@@ -1,0 +1,120 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.policy.presets.catalog;
+i=str:std.str;
+i=s:core.policy.schema;
+i=ty:core.policy.types;
+i=reg:core.policy.presets.registry;
+i=jx:shared.jsonobj;
+
+(* RG1.9. The preset catalogue the governance UI shows, derived from the registry at run
+   time. moke's governance page carried its own hand-written table of presets, which named
+   neither APRA preset and had drifted from the registry. The page now draws its list, its
+   fields and each rule's status from catalogjson(registryviews()), so a preset added to the
+   registry appears without a UI change.
+
+   A view is one preset as the registry gives it: its id, its $policy, its jurisdiction and
+   its rule list. catalogjson takes the views as a parameter, not the registry, so a test can
+   hand it a registry with a preset added or a rule reclassified and see the output change. *)
+t=$presetview{
+  id:str;
+  policy:$policy;
+  jurisdiction:str;
+  rules:@$policyrule
+};
+
+f=view(id:str;p:$policy;jurisdiction:str;rules:@$policyrule):$presetview{
+  <$presetview{id:id;policy:p;jurisdiction:jurisdiction;rules:rules}
+};
+
+f=registryviews():@$presetview{
+  let names=reg.names();
+  let out=mut.@();
+  lp(let i=0;i<names.len;i=i+1){
+    let n=names.get(i);
+    out=out.push(view(n;reg.byname(n);reg.jurisdictionfor(n);reg.rulesfor(n)))
+  };
+  <out
+};
+
+(* A rule's status is the class its own description opens with, which is how the APRA
+   presets (RG1.1, RG1.2) and the AU Privacy preset mark them and what their tests assert:
+     EVALUABLE            a preset field loke's policy code reads; decided by
+                          core.policy.loader.evaluate, which nothing on the request path calls
+     DOCUMENTATION ONLY   the entity's obligation, logged and never decided by loke
+     UNIMPLEMENTED        a control loke does not have, with the story that would build it
+                          (au-privacy writes NOT IMPLEMENTED)
+   Anything else is unclassified: the older presets (GDPR, HIPAA, CCPA and the rest) state the
+   law, not what loke does about it. There is deliberately no "enforced" status. RG1.1 found
+   that no preset rule acts on live traffic, and a rule is not to be shown as active until the
+   request path evaluates presets and this function can tell. *)
+f=rulestatus(description:str):str{
+  if(str.startswith(description;"EVALUABLE")){ <"evaluable" }el{};
+  if(str.startswith(description;"DOCUMENTATION ONLY")){ <"documentation" }el{};
+  if(str.startswith(description;"UNIMPLEMENTED")){ <"unimplemented" }el{};
+  if(str.startswith(description;"NOT IMPLEMENTED")){ <"unimplemented" }el{};
+  <"unclassified"
+};
+
+f=statusof(r:$policyrule):str{
+  <rulestatus(r.description)
+};
+
+f=countstatus(rules:@$policyrule;wanted:str):i64{
+  let n=mut.0;
+  lp(let i=0;i<rules.len;i=i+1){
+    if(str.eq(statusof(rules.get(i));wanted)){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* True only once something on the request path evaluates a preset. RG1.1: nothing calls
+   core.policy.loader.evaluate there, and core.governance.rulesengine has no importers. *)
+f=enforcedonrequestpath():bool{
+  <false
+};
+
+f=enforcementnote():str{
+  <"Presets are not enforced on the request path. Nothing in loke evaluates a preset against live traffic (RG1.1), so no rule below allows, blocks or warns on a request. EVALUABLE rules are ones loke's policy code can decide; it does not yet act on them."
+};
+
+f=boolword(b:bool):str{
+  if(b){ <"true" }el{ <"false" }
+};
+
+f=comma():str{ <"," };
+
+f=quoted(x:str):str{
+  <jx.escape(x)
+};
+
+f=strlistjson(xs:@str):str{
+  <"[\(str.join(comma();xs.map(&quoted)))]"
+};
+
+f=rulejson(r:$policyrule):str{
+  <"{\"id\":\(jx.escape(r.id)),\"status\":\(jx.escape(statusof(r))),\"action\":\(jx.escape(r.action)),\"severity\":\(jx.escape(r.severity)),\"description\":\(jx.escape(r.description))}"
+};
+
+f=nevaluable(rules:@$policyrule):i64{ <countstatus(rules;"evaluable") };
+f=ndocumentation(rules:@$policyrule):i64{ <countstatus(rules;"documentation") };
+f=nunimplemented(rules:@$policyrule):i64{ <countstatus(rules;"unimplemented") };
+f=nunclassified(rules:@$policyrule):i64{ <countstatus(rules;"unclassified") };
+
+f=countsjson(rules:@$policyrule):str{
+  <"{\"evaluable\":\(nevaluable(rules)),\"documentation\":\(ndocumentation(rules)),\"unimplemented\":\(nunimplemented(rules)),\"unclassified\":\(nunclassified(rules))}"
+};
+
+f=viewjson(v:$presetview):str{
+  let p:$policy=v.policy;
+  <"{\"id\":\(jx.escape(v.id)),\"name\":\(jx.escape(p.name)),\"jurisdiction\":\(jx.escape(v.jurisdiction)),\"description\":\(jx.escape(p.description)),\"source\":\(jx.escape(p.source)),\"classification_default\":\(jx.escape(p.classificationdefault)),\"approval_above\":\(jx.escape(p.requireapprovalabove)),\"cross_border_allowed\":\(boolword(p.crossborderallowed)),\"blocked\":\(strlistjson(p.blockedentitytypes)),\"counts\":\(countsjson(v.rules)),\"rules\":[\(str.join(comma();v.rules.map(&rulejson)))]}"
+};
+
+f=catalogjson(views:@$presetview):str{
+  <"{\"enforced_on_request_path\":\(boolword(enforcedonrequestpath())),\"enforcement_note\":\(jx.escape(enforcementnote())),\"presets\":[\(str.join(comma();views.map(&viewjson)))]}"
+};
+
+f=registryjson():str{
+  <catalogjson(registryviews())
+};

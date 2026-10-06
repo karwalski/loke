@@ -36,7 +36,7 @@ moke runs on port 11432 via `ooke-toke serve` and communicates with loke on port
 | **Feedback system** | Thumbs up/down buttons on every LLM response. Feedback stored locally, exportable via settings. Feedback score shown on governance dashboard. |
 | **Cost tracking** | Session stats show the token counts (in/out) and cost loke reports with each reply. The governance savings view shows the bytes loke's optimiser measured per request and the local/cloud ratio; token and cost savings read "not measured". |
 | **Model routing** | Settings page configures Anthropic/OpenAI keys. Pipeline auto-routes: if API key present, uses Claude; otherwise falls back to Ollama (local). |
-| **Governance dashboard** | Full risk breakdown (low/medium/high), request log with risk badges, compliance report generation, regulatory presets. |
+| **Governance dashboard** | Full risk breakdown (low/medium/high), request log with risk badges, compliance report generation, and the regulatory presets listed from loke's preset registry with each rule's status (not enforced on the request path). |
 | **Memory palace** | Hierarchical wing/hall/room/drawer navigation with semantic search, AAAK compression, and persistent storage. |
 | **MCP tools** | Tool browser, broker status, memory operations — invoke MCP tools with JSON args and see results. |
 | **Data type detection** | 26-detector cascade identifies PII, dates, currency, percentages, IDs, booleans, geo coordinates, URLs, and more. |
@@ -335,6 +335,16 @@ Toggle to immediately block all external LLM traffic. Pulsing red banner when ac
 - Feedback score (thumbs up %)
 - Request count
 - Local vs cloud ratio (pie chart)
+
+**Regulatory Presets (RG1.9):**
+The preset selector, the selected preset's fields and rules, and a table of every preset are built
+from `GET /api/presets`, which moke derives at run time from loke's preset registry
+(`core.policy.presets.registry` through `core.policy.presets.catalog`). The page holds no preset of
+its own, so a preset added to the registry, such as `apra-cps-234` and `apra-cps-230`, is listed
+without a template change. Each rule shows the status its description declares: evaluable (loke's
+policy code can decide it), documentation only, UNIMPLEMENTED, or not classified. None is shown as
+enforced, because **presets are not enforced on the request path** (RG1.1), and the page says so.
+Saving a selection writes `governance.policy` to loke's settings, which nothing in loke reads.
 
 **Compliance Reporting:**
 Generate reports as inline, CSV, or JSON. Templates for: EU GDPR, AU Privacy Act, HIPAA, CCPA, UK GDPR, Singapore PDPA.

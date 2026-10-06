@@ -113,5 +113,12 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/connections" "$ROOT/tests/ui/connections_mk198.json"
   rc=$?
 fi
+# RG1.9: the governance page's presets come from loke's preset registry through moke's
+# /api/presets, each rule with its real status and the page saying presets are not enforced;
+# a registry with a preset added or a rule reclassified changes what the page shows.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/governance" "$ROOT/tests/ui/governance_rg19.json"
+  rc=$?
+fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
 exit $rc

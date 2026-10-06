@@ -1,0 +1,170 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.policy.presetcatalog;
+
+i=t:std.test;
+i=str:std.str;
+i=s:core.policy.schema;
+i=ty:core.policy.types;
+i=reg:core.policy.presets.registry;
+i=cat:core.policy.presets.catalog;
+i=jx:shared.jsonobj;
+i=page:page.moke.api.presets;
+
+(* RG1.9. moke's /api/presets body, which the governance page builds its preset list, details
+   and rule table from, must be the preset registry and nothing else. Three things are
+   asserted against the PRODUCTION page module and registry:
+     1. the body the page serves is the registry's catalogue, preset for preset and rule for
+        rule, with each rule's status the class its own description declares;
+     2. no rule is shown as enforced, the CPS 230 degrade-to-local rule is UNIMPLEMENTED, and
+        the body says plainly that presets are not enforced on the request path (RG1.1);
+     3. the drift guard: given a test registry with a preset added, or with a rule
+        reclassified, the page's body changes with it. A page with its own hard-coded list
+        fails here, as the old template's PRESETS table would have. *)
+
+f=occurrences(hay:str;needle:str):i64{
+  let parts=str.split(hay;needle);
+  <(parts.len as i64)-1
+};
+
+f=presethead(id:str;name:str;jurisdiction:str):str{
+  <"{\"id\":\(jx.escape(id)),\"name\":\(jx.escape(name)),\"jurisdiction\":\(jx.escape(jurisdiction)),"
+};
+
+f=rulehead(id:str;status:str):str{
+  <"{\"id\":\(jx.escape(id)),\"status\":\(jx.escape(status)),"
+};
+
+f=countsof(ev:i64;doc:i64;unimpl:i64;uncl:i64):str{
+  <"\"counts\":{\"evaluable\":\(ev),\"documentation\":\(doc),\"unimplemented\":\(unimpl),\"unclassified\":\(uncl)}"
+};
+
+(* The text of one preset's entry: from its head to the next preset's head, or the end. *)
+f=entryof(body:str;id:str):str{
+  let marker="{\"id\":\(jx.escape(id)),\"name\":";
+  let after=str.split(body;marker);
+  if(after.len<2 as u64){ <"" }el{};
+  let upto=str.split(after.get(1);"]},{\"id\":");
+  <upto.get(0)
+};
+
+(* A preset no registry holds, for the drift guard. *)
+f=driftpolicy():$policy{
+  <$policy{
+    version:"1.0";
+    name:"Drift Guard Test Preset";
+    description:"A preset that exists only in this test's registry.";
+    source:"builtin:test-drift-preset";
+    priority:0;
+    classificationdefault:"internal";
+    providers:@();
+    anonymisation:@();
+    budget:$budgetlimit{period:"monthly";maxtokens:0;maxcostusd:0.0;actiononexceed:"advisory"};
+    retention:$retentionpolicy{auditlogdays:0;conversationdays:0;piimappingdays:0;cachedays:0};
+    mcpservers:@();
+    allowedusecases:@();
+    blockedentitytypes:@("drift_entity");
+    crossborderallowed:true;
+    requireapprovalabove:"restricted";
+    customrules:@()
+  }
+};
+
+f=driftrules():@$policyrule{
+  <@(
+    $policyrule{id:"drift-evaluable";description:"EVALUABLE — a test rule.";action:"warn";severity:"low"};
+    $policyrule{id:"drift-unimplemented";description:"UNIMPLEMENTED TEST — a test rule.";action:"log";severity:"low"}
+  )
+};
+
+(* The CPS 230 rules with cps230-degrade-to-local reclassified as EVALUABLE. *)
+f=reclassified():@$policyrule{
+  let rs=reg.rulesfor("apra-cps-230");
+  let out=mut.@();
+  lp(let i=0;i<rs.len;i=i+1){
+    let r:$policyrule=rs.get(i);
+    if(str.eq(r.id;"cps230-degrade-to-local")){
+      out=out.push($policyrule{id:r.id;description:"EVALUABLE — reclassified by the drift guard.";action:r.action;severity:r.severity})
+    }el{
+      out=out.push(r)
+    }
+  };
+  <out
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let body=page.body();
+  let names=reg.names();
+
+  (* ── 1. the page's body is the registry ─────────────────────────────────────── *)
+  if(t.assert(str.eq(body;cat.registryjson());"the page serves the registry's catalogue")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(body;",\"counts\":{")==(names.len as i64);"the page lists exactly as many presets as the registry names")){pass=pass+1}el{fail=fail+1};
+  let missingpreset=mut.0;
+  let wrongrule=mut.0;
+  let totalrules=mut.0;
+  lp(let i=0;i<names.len;i=i+1){
+    let n=names.get(i);
+    let p:$policy=reg.byname(n);
+    if(str.contains(body;presethead(n;p.name;reg.jurisdictionfor(n)))){}el{
+      missingpreset=missingpreset+1;
+      if(t.assert(false;"the page lists the registry preset with its registry name and jurisdiction: \(n)")){}el{}
+    };
+    let entry=entryof(body;n);
+    let rs=reg.rulesfor(n);
+    lp(let k=0;k<rs.len;k=k+1){
+      let r:$policyrule=rs.get(k);
+      totalrules=totalrules+1;
+      if(str.contains(entry;rulehead(r.id;cat.rulestatus(r.description)))){}el{
+        wrongrule=wrongrule+1;
+        if(t.assert(false;"the page shows the registry rule with the status its description declares: \(r.id)")){}el{}
+      }
+    }
+  };
+  if(t.assert(missingpreset==0;"every registry preset is on the page with its registry name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(wrongrule==0;"every registry rule is on the page under its own preset with its own status")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(body;"\"status\":")==totalrules;"the page shows no rule the registry does not hold")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the two APRA presets, by name from the registry ────────────────────────── *)
+  let p234:$policy=reg.byname("apra-cps-234");
+  let p230:$policy=reg.byname("apra-cps-230");
+  if(t.assert(str.contains(body;presethead("apra-cps-234";p234.name;"AU"));"the page lists apra-cps-234 under its registry name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body;presethead("apra-cps-230";p230.name;"AU"));"the page lists apra-cps-230 under its registry name")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(p234.name;"APRA CPS 234") && str.startswith(p230.name;"APRA CPS 230");"the registry names are the APRA standards")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 2. statuses: the counts RG1.1 and RG1.2 assert, and nothing enforced ────── *)
+  if(t.assert(str.contains(entryof(body;"apra-cps-234");countsof(7;19;4;0));"CPS 234 shows 7 evaluable, 19 documentation-only, 4 unimplemented (RG1.1)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(entryof(body;"apra-cps-230");countsof(4;26;6;0));"CPS 230 shows 4 evaluable, 26 documentation-only, 6 unimplemented (RG1.2)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body;rulehead("cps230-degrade-to-local";"unimplemented"));"cps230-degrade-to-local is shown UNIMPLEMENTED: no tolerance is checked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body;rulehead("cps234-preset-not-enforced";"unimplemented"));"cps234-preset-not-enforced is shown UNIMPLEMENTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body;"\"status\":\"enforced\"") && !str.contains(body;"\"status\":\"active\"");"no rule is shown as enforced or active")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(body;"{\"enforced_on_request_path\":false,");"the body says presets are not enforced on the request path")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(body;"Presets are not enforced on the request path.");"and says it in words the page shows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(cat.rulestatus("EVALUABLE — x");"evaluable") && str.eq(cat.rulestatus("DOCUMENTATION ONLY — x");"documentation") && str.eq(cat.rulestatus("UNIMPLEMENTED RG1.8 — x");"unimplemented") && str.eq(cat.rulestatus("NOT IMPLEMENTED — x");"unimplemented") && str.eq(cat.rulestatus("Users have a right");"unclassified");"each description class maps to its status, and an unmarked rule is unclassified")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. drift guard: a test registry changes what the page shows ─────────────── *)
+  let views=cat.registryviews();
+  let added=views.push(cat.view("test-drift-preset";driftpolicy();"XX";driftrules()));
+  let addedbody=page.bodyfor(added);
+  if(t.assert(str.contains(addedbody;presethead("test-drift-preset";"Drift Guard Test Preset";"XX"));"a preset added to the registry is shown by the page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(entryof(addedbody;"test-drift-preset");countsof(1;0;1;0));"with its rules' statuses counted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(addedbody;",\"counts\":{")==(names.len as i64)+1;"and the page lists one more preset")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(body;"test-drift-preset");"the production page does not carry it")){pass=pass+1}el{fail=fail+1};
+
+  let changed=mut.@();
+  lp(let i=0;i<views.len;i=i+1){
+    let v:$presetview=views.get(i);
+    if(str.eq(v.id;"apra-cps-230")){
+      changed=changed.push(cat.view(v.id;v.policy;v.jurisdiction;reclassified()))
+    }el{
+      changed=changed.push(v)
+    }
+  };
+  let changedbody=page.bodyfor(changed);
+  if(t.assert(str.contains(changedbody;rulehead("cps230-degrade-to-local";"evaluable"));"a rule reclassified in the registry changes status on the page")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(entryof(changedbody;"apra-cps-230");countsof(5;26;5;0));"and the preset's counts follow it")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

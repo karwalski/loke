@@ -875,6 +875,29 @@ for planted in "$EMAIL" "$VETOMAIL"; do
   elif [[ "$dump" == *"$planted"* ]] || [[ "$dump" == *"$ph"* ]]; then echo "  FAIL the database holds '$planted' or its sha256" >&2; fail=1
   else echo "  ok   F3b.10: the database holds neither '$planted' nor its sha256"; fi
 done
+# RG1.9: moke's /api/presets, which the governance page is built from, carries both APRA
+# presets under their registry names, every rule with a status that is never "enforced", and
+# says presets are not enforced on the request path.
+PRES=$(curl -s -m 10 http://127.0.0.1:11432/api/presets)
+pv=$(printf '%s' "$PRES" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception as e: print("not JSON: %s" % e); sys.exit()
+p={x["id"]:x for x in d.get("presets",[])}
+bad=[]
+for i,n in (("apra-cps-234","APRA CPS 234 "),("apra-cps-230","APRA CPS 230 ")):
+    if i not in p or not p[i]["name"].startswith(n): bad.append("%s missing or misnamed" % i)
+st={r["status"] for x in d.get("presets",[]) for r in x["rules"]}
+if not st <= {"evaluable","documentation","unimplemented","unclassified"}: bad.append("statuses %s" % sorted(st))
+deg=[r["status"] for r in p.get("apra-cps-230",{}).get("rules",[]) if r["id"]=="cps230-degrade-to-local"]
+if deg!=["unimplemented"]: bad.append("cps230-degrade-to-local is %s" % deg)
+if d.get("enforced_on_request_path") is not False or "not enforced on the request path" not in d.get("enforcement_note",""): bad.append("enforcement not stated")
+print("; ".join(bad) or "ok %d" % len(p))
+')
+case "$pv" in
+  ok*) echo "  ok   RG1.9: /api/presets lists the registry's presets (${pv#ok }), both APRA presets by name, nothing shown enforced" ;;
+  *) echo "  FAIL RG1.9 /api/presets: $pv" >&2; fail=1 ;;
+esac
 # MK6.13: no body loke sent to the model in this whole run was one Ollama's decoder refuses.
 if [ -s "$SEEN.badjson" ]; then echo "  FAIL the model was sent a body that is not strict JSON: $(head -c 300 "$SEEN.badjson")" >&2; fail=1
 else echo "  ok   every body sent to the model in this run was strict JSON"; fi
