@@ -189,8 +189,159 @@
     }
   }
 
+  /* ── MK20.3: is what a flow SAYS true of the data it loads? ──────────────
+   *
+   * A flow is presenter narration, said out loud to an audience, and a demo of a
+   * privacy product that misdescribes its own data is worse than no demo. So the
+   * claims a flow makes are checked against the dataset rather than trusted:
+   *
+   *   - every load step states its outcome as data, `outcome: { sensitivity,
+   *     redacted }`, and that must equal the dataset's sensitivity and its
+   *     declared PII columns — the columns moke's request names "PII columns (will
+   *     be redacted)" (templates/chat.tkt). A PUBLIC dataset may claim nothing;
+   *   - every snake_case column a step names must be a column of the dataset that
+   *     step is about (the most recent load), so a misspelt or borrowed column fails;
+   *   - a sentence that talks about redaction, masking or placeholders is a claim of
+   *     redaction unless it is negated, and is allowed only where the dataset has
+   *     columns to redact. Where it has none, the narration must say so;
+   *   - a synthetic dataset is called SYNTHETIC and fabricated; a real one names its
+   *     publisher and licence from the manifest;
+   *   - no figures (they live in docs/metrics-baseline.md), and none of the claims
+   *     withdrawn from the website.
+   *
+   * `datasets` maps id -> { sensitivity, pii, kind, columns, provenance }. Pure, so
+   * the gate runs it over flows.json and the real CSV headers with no browser.
+   * Returns an array of problems; empty means every claim checked out. */
+  var WITHDRAWN = ['architecturally impossible', 'never sees real data',
+                   'cannot be bypassed', 'no data leaves'];
+  var REDACTION_WORD = /\b(redact\w*|mask\w*|placeholders?)\b/i;
+  var NEGATION = /\b(no|not|nothing|none|never|neither|nor|zero)\b/i;
+  var COLUMN_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+  var STORY_ID = /\b[A-Z]{1,4}\d+(?:\.\d+)*[a-z]?\b/g;
+  var NUMBER_WORD = /\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|hundred|thousand|million|dozen|percent)\b/i;
+  var LICENCE_WORDS = { 'cc-by': /\bCC BY\b/, 'apache-2.0': /\bApache-2\.0\b/ };
+
+  function sentencesOf(text) {
+    return String(text || '').replace(PLACEHOLDER, 'X')
+      .split(/[.!?;:](?:\s+|$)|\s—\s/)
+      .filter(function (s) { return s.trim().length > 0; });
+  }
+
+  function namedColumns(text, extra) {
+    var plain = String(text || '').replace(PLACEHOLDER, ' ');
+    var found = plain.match(COLUMN_TOKEN) || [];
+    (extra || []).forEach(function (c) {
+      if (c.indexOf('_') === -1 && new RegExp('\\b' + c + '\\b').test(plain)) found.push(c);
+    });
+    return found;
+  }
+
+  function sameSet(a, b) {
+    var x = (a || []).slice().sort(), y = (b || []).slice().sort();
+    return x.length === y.length && x.every(function (v, i) { return v === y[i]; });
+  }
+
+  function checkClaims(flow, datasets) {
+    var problems = [];
+    var fid = (flow && flow.id) || '?';
+    var steps = (flow && flow.steps) || [];
+    var current = null;     // the id of the dataset the narration is about
+    var said = {};          // id -> all text said while it was current
+
+    steps.forEach(function (step, i) {
+      var at = 'flow ' + fid + ' step ' + i;
+      var words = [step.title, step.narration, step.prompt].filter(Boolean).join(' — ');
+      var lower = words.toLowerCase();
+
+      WITHDRAWN.forEach(function (phrase) {
+        if (lower.indexOf(phrase) !== -1) problems.push(at + ': carries the withdrawn claim "' + phrase + '"');
+      });
+      var spoken = [step.title, step.narration].filter(Boolean).join(' ')
+        .replace(PLACEHOLDER, ' ').replace(STORY_ID, ' ');
+      if (/\d|%/.test(spoken) || NUMBER_WORD.test(spoken)) {
+        problems.push(at + ': narration states a figure (figures live only in docs/metrics-baseline.md)');
+      }
+
+      if (step.kind === 'load') {
+        var d = datasets[step.dataset];
+        if (!d) { problems.push(at + ': loads ' + step.dataset + ', which the manifest does not list'); current = null; return; }
+        current = step.dataset;
+        var o = step.outcome;
+        if (!o) {
+          problems.push(at + ': load step states no outcome to check');
+        } else {
+          if (o.sensitivity !== d.sensitivity) {
+            problems.push(at + ': claims sensitivity ' + o.sensitivity + ' but ' + step.dataset + ' is ' + d.sensitivity);
+          }
+          (o.redacted || []).forEach(function (c) {
+            if ((d.columns || []).indexOf(c) === -1) problems.push(at + ': claims redaction of ' + c + ', which ' + step.dataset + ' does not have');
+          });
+          if (d.sensitivity === 'PUBLIC' && (o.redacted || []).length) {
+            problems.push(at + ': claims redaction on PUBLIC dataset ' + step.dataset);
+          }
+          if (!sameSet(o.redacted, d.pii)) {
+            problems.push(at + ': claims redaction of [' + (o.redacted || []).join(', ') + '] but '
+                          + step.dataset + ' declares [' + (d.pii || []).join(', ') + ']');
+          }
+        }
+        if (String(step.narration || '').indexOf('{{dataset.sensitivity}}') === -1 && String(step.narration || '').indexOf(d.sensitivity) === -1) {
+          problems.push(at + ': does not state the sensitivity of ' + step.dataset);
+        }
+        if (d.kind === 'synthetic') {
+          if (!/SYNTHETIC/.test(step.narration) || !/fabricated/i.test(step.narration)) {
+            problems.push(at + ': ' + step.dataset + ' is synthetic and the narration must say SYNTHETIC and fabricated');
+          }
+        } else {
+          var pv = d.provenance || {};
+          var lic = LICENCE_WORDS[String(pv.licence || '').toLowerCase()];
+          if (!pv.publisher || step.narration.indexOf(pv.publisher) === -1) {
+            problems.push(at + ': real dataset ' + step.dataset + ' must name its publisher (' + pv.publisher + ')');
+          }
+          if (!lic || !lic.test(step.narration)) {
+            problems.push(at + ': real dataset ' + step.dataset + ' must name its licence (' + pv.licence + ')');
+          }
+        }
+      }
+      if (!current) return;
+      var cd = datasets[current];
+      namedColumns(words, cd.pii).forEach(function (c) {
+        if ((cd.columns || []).indexOf(c) === -1) {
+          problems.push(at + ': names column ' + c + ', which ' + current + ' does not have');
+        }
+      });
+      said[current] = (said[current] || '') + ' ' + [step.title, step.narration].filter(Boolean).join('. ');
+    });
+
+    Object.keys(said).forEach(function (id) {
+      var d = datasets[id];
+      var pii = (d.pii || []);
+      var claims = sentencesOf(said[id]).filter(function (s) { return REDACTION_WORD.test(s); });
+      var affirmative = claims.filter(function (s) { return !NEGATION.test(s); });
+      var negated = claims.filter(function (s) { return NEGATION.test(s); });
+      if (!pii.length) {
+        affirmative.forEach(function (s) {
+          problems.push('flow ' + fid + ': claims redaction on ' + id + ', which has no column to redact: "' + s.trim() + '"');
+        });
+        if (!negated.length) problems.push('flow ' + fid + ': never says that nothing in ' + id + ' is redacted');
+      } else {
+        if (!affirmative.length) problems.push('flow ' + fid + ': never says which columns of ' + id + ' are redacted');
+        affirmative.forEach(function (s) {
+          namedColumns(s, pii).forEach(function (c) {
+            if (pii.indexOf(c) === -1) problems.push('flow ' + fid + ': claims ' + c + ' of ' + id + ' is redacted, but it is not declared');
+          });
+        });
+        pii.forEach(function (c) {
+          if (namedColumns(said[id], pii).indexOf(c) === -1) problems.push('flow ' + fid + ': never names ' + c + ', a redacted column of ' + id);
+        });
+      }
+    });
+    return problems;
+  }
+
   var api = {
     KINDS: KINDS,
+    WITHDRAWN: WITHDRAWN,
+    checkClaims: checkClaims,
     NAVIGATE: NAVIGATE, LOAD: LOAD, FILL: FILL, GENERATE: GENERATE,
     ADVANCE: ADVANCE, WAIT: WAIT, DONE: DONE,
     render: render,
