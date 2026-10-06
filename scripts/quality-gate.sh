@@ -333,6 +333,14 @@ step_checks() {
       || { python3 ./scripts/check_default_ports.py >&2; failed=1; }
   fi
 
+  # F3b.11: docs/privacy-filters.md documents only privacy config keys the code reads, and
+  # every key and consensus strategy the code accepts is documented.
+  if [[ -f ./scripts/check_privacy_doc_keys.py ]]; then
+    echo "  the privacy-filter document's config keys are the ones the code reads (F3b.11)"
+    python3 ./scripts/check_privacy_doc_keys.py >/dev/null 2>&1 \
+      || { python3 ./scripts/check_privacy_doc_keys.py >&2; failed=1; }
+  fi
+
   if [[ -f ./scripts/check_moke_estimates.sh ]]; then
     echo "  moke invents no token count or saving (GA1.5c)"
     bash ./scripts/check_moke_estimates.sh >/dev/null \

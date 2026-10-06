@@ -129,22 +129,21 @@ Multi-layer PII detection, reversible placeholder mapping and guardian prompt in
 prompt through the filter before it leaves is a contributor invariant enforced by review, not a
 property of the host.
 
-> **That invariant does not currently hold on the browser path.** The route the browser serves for
-> `/api/pipeline` does not invoke the core privacy pipeline at all: it calls the privacy-filter sidecar
-> on port 11435 directly and, when the sidecar does not answer, falls through to five literal
-> column-name checks that count entities **without altering the text**, then forwards that unaltered
-> text to the provider while still reporting an entity count and a sensitivity label. There is no
-> restore step, kill-switch check, audit write, optimiser, cache or policy evaluation on that route. The
-> CLI proxy, the MCP broker, the MCP server and the agent executor do use the core pipeline. Failing
-> closed is tracked as NC1.9, the bypass corpus that would catch it in CI as AD1.6, and epic GA1 needs
-> reopening. See [docs/claims.md](docs/claims.md) A13.
+> **The browser path runs the core pipeline (GA1.1, GA1.10, NC1.9; checked against the code
+> 2026-10-06, F3b.11).** `POST /api/pipeline` (`packages/browser/pages/api/pipeline.tk`) scans the text
+> and any `system_prompt` with `core.privacy.systemprompt.runforward`, refuses with 503 when no
+> detection layer completed or the privacy config is refused, and calls the kill switch, governance
+> policy, audit, optimiser, cache, router and response restoration. `scripts/smoke_privacy_harness.sh`
+> checks over the built binary that no request but the local NER layer's carries a raw identifier,
+> for every built-in template and regex detector type. The claims register's A11 and A13 rows predate
+> this and are to be re-verified (GA1.11). See [docs/claims.md](docs/claims.md).
 
-> **Status of the multi-layer composition:** the consensus, layer-config, layer-health,
-> entity-routing, filter-registry, org-policy, evaluation, per-layer-metrics and sidecar-client modules
-> are written but **not currently wired** into the pipeline orchestrator, which uses its own
-> de-duplication. Ten Epic F3b modules have zero importers. The four named consensus strategies are not
-> implemented — the strategy argument is accepted and ignored — and no entity-type routing
-> configuration is read. Tracked as AD1.7.
+> **Status of the multi-layer composition:** the pipeline runs its layers from a filter registry
+> through one health path, applies `[[privacy.layers]]`, `[[privacy.entity_routing]]` and
+> `privacy.consensus_strategy` from `config.toml`, records per-layer metrics in the audit chain, and
+> `loke privacy evaluate` compares the layers. Organisation-managed policies and custom model
+> registration are not built. What each setting does, and the test behind it:
+> [docs/privacy-filters.md](docs/privacy-filters.md).
 
 - **Regex detector** — 22 patterns (email, AU and US phone, credit card, TFN, ABN, SSN, IPv4, URL,
   API key, Medicare, BSB, bank account, CRN, passport, driver licence, super member number, UK NHS

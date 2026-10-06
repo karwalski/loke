@@ -63,45 +63,28 @@ Set with `privacy.consensus_strategy` in `config.toml`; an empty or unrecognised
 
 **Layer Health** (`core/privacy/layer_health.tk`): Monitors availability of each layer. System degrades gracefully — remains operational with at least one layer available. Reports HEALTHY or DEGRADED status.
 
-> **Most of the multi-layer composition above is written but not wired.** Since 2026-10-01 the
-> pipeline runs its layers from `filter_registry.tk` (F3b.1), each through `layer_health.tk` (F3b.6),
-> `sidecar_client.tk` is the privacy-filter layer (F3b.3), and `pipeline.run` resolves overlapping
-> detections through `consensus.tk` under the configured strategy (F3b.4; the per-entity record of
-> detecting layers is on the in-memory run, not in `/api/pipeline` or the audit trail). Six Epic F3b
-> modules — `entity_routing.tk`, `layer_config.tk`, `filter_metrics.tk`, `evaluation.tk`,
-> `org_policy.tk` and `template.tk` — still have **zero importers**.
->
-> Specifically: no entity-routing or
-> layer-priority configuration is read. No HEALTHY/DEGRADED status is aggregated — degradation happens
-> via each layer's own `isavailable()`. `Evaluation Mode` has no invocation point (there is no
-> `loke privacy evaluate` command) and no labelled corpus to run against (**AD1.1**). No per-layer
-> metrics are recorded. The privacy-filter sidecar — which runs a real published model — is a
-> detection layer of `pipeline.run` when `privacy.privacy_filter = true` is set in `config.toml`
-> (**F3b.3**; off by default, loopback only, counted completed or degraded like NER and Presidio). The
-> sidecar applies its `confidence_threshold`, and the client sends the configured
-> `privacy.privacy_filter_threshold` and reads back the value applied (**AD1.4**), so with the layer on,
-> that operating point governs what the pipeline anonymises.
->
-> Wiring these or withdrawing the claim is **AD1.7**. Recorded as B1–B10 in [claims.md](claims.md).
+> **What of the multi-layer composition is wired (F3b.11, verified against the code 2026-10-06).**
+> `pipeline.run` runs its layers from `filter_registry.tk` (F3b.1), each through `layer_health.tk`
+> (F3b.6); `sidecar_client.tk` is the privacy-filter layer when `privacy.privacy_filter = true`
+> (F3b.3). It applies `[[privacy.layers]]` (`layer_config.tk`, F3b.2) and
+> `[[privacy.entity_routing]]` (`entity_routing.tk`, F3b.5) from `config.toml`, resolves overlaps
+> under `privacy.consensus_strategy` (`consensus.tk`, F3b.4) and records per-layer metrics
+> (`filter_metrics.tk`, F3b.10). `loke privacy evaluate` runs every layer side by side and scores
+> them against a labelled file (`comparison.tk`, `evaluation.tk`, F3b.9). Not wired: `org_policy.tk`
+> (F3b.8) and `template.tk` have no importer, and there is no custom-model registration (F3b.7).
+> `mcp-broker` and the agent executor build the default registry and read none of these settings.
+> Detail, with the test behind each statement: [privacy-filters.md](privacy-filters.md). Recorded as
+> B1–B10 in [claims.md](claims.md).
 
 **Pipeline Orchestrator** (`core/privacy/pipeline.tk`): Sequences all layers, deduplicates overlapping detections, escalates sensitivity classification (PUBLIC → INTERNAL → CONFIDENTIAL → RESTRICTED), generates reversible placeholders, injects guardian prompt.
 
-> **The browser request path does not use this orchestrator, and the GA1 completion claim does not
-> hold.** The route registered for `/api/pipeline` is `packages/browser/pages/api/pipeline.tk`
-> (`packages/browser/src/_handlers.tk:34-35,129`), which imports only `std.http`, `std.str`, `std.json`
-> and `std.file`. It calls the sidecar on port 11435 directly and, when the sidecar does not answer,
-> falls through to five literal `str.contains` checks (`:36-41`) that increment an entity counter
-> **without altering the text** — then posts that unaltered text to `api.anthropic.com` (`:56`) or Ollama
-> (`:62`) while still returning an `entities_found` count and a `sensitivity` label. None of the nine
-> capabilities listed for that path previously — full detection stack, response restoration, kill-switch
-> check, audit logging, token optimisation, semantic cache, routing, governance policy evaluation — is
-> present on it. The only browser file importing `core.privacy.pipeline`,
-> `packages/browser/extensions/core.tk:5`, is reached solely from `pages/installer.tk`.
->
-> The orchestrator's real consumers are the CLI proxy (`packages/cli/src/proxy.tk:9`), the MCP broker
-> (`packages/mcp-broker/src/proxy.tk:8`), the MCP server (`packages/mcp-toke/src/tools.tk:8`), the agent
-> executor and the response scanner. Failing closed instead of open is **NC1.9**; the bypass corpus that
-> would catch this in CI is **AD1.6**. Recorded as A11, A13 and K6 in [claims.md](claims.md).
+> **The browser request path uses this orchestrator (GA1.1, GA1.10, NC1.9; checked against the code
+> 2026-10-06, F3b.11).** `POST /api/pipeline` (`packages/browser/pages/api/pipeline.tk`) scans the text
+> and any `system_prompt` with `core.privacy.systemprompt.runforward` and refuses with 503 when
+> `pipeline.issafetoforward` is false; it also calls the kill switch, governance policy, audit,
+> optimiser, cache, router and response restoration. Other consumers: the CLI (`ask`, `proxy`,
+> `privacy evaluate`), the MCP broker, the MCP server and the agent executor. Claims A11, A13 and K6 in
+> [claims.md](claims.md) predate this and are to be re-verified (GA1.11).
 
 **Placeholder System** (`core/privacy/placeholder.tk`): Generates `[ENTITY_TYPE_N]` tokens (e.g.
 `[EMAIL_1]`, `[PERSON_2]`). Stores original → placeholder mapping. Restores placeholders in LLM responses
@@ -116,7 +99,7 @@ to original values.
 > also has an off-by-one: the loop bound at `placeholder.tk:46` is `i>len` where valid indices end at
 > `len-1`, so it reads one index past the end of the entry array (**PL1.2**).
 
-**Evaluation Mode** (`core/privacy/evaluation.tk`): Measures layer quality against labelled datasets — precision, recall, F1 score per layer. *(Unwired — see the F3b note above.)*
+**Evaluation Mode** (`core/privacy/evaluation.tk`): Measures layer quality against labelled datasets — precision, recall, F1 score per layer. Invoked by `loke privacy evaluate --file <labelled.jsonl>` (F3b.9); there is no UI panel.
 
 **Metrics** (`core/privacy/filter_metrics.tk`): Records, for each request, every layer's detection and accepted counts, counts and confidences by entity type, and measured time, with the consensus outcome; returned by `/api/pipeline` and bound into the audit hash chain (F3b.10). No dashboard or MCP surface shows them yet.
 
