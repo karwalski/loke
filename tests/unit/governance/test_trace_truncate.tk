@@ -1,0 +1,114 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.governance.tracetruncate;
+
+i=t:std.test;
+i=str:std.str;
+i=process:std.process;
+i=tr:core.governance.trace;
+
+(* F10.48 — `trace.truncate` keeps a byte limit and never splits a UTF-8 character.
+
+   The decision trace keeps the first 200 BYTES of the prompt and the reply (`tojson`). The
+   cut was a plain `str.slice(s;0;200)`, so a prompt in Japanese, or one holding an emoji,
+   could be cut inside a character: the trace then held invalid UTF-8, and so did its JSON.
+   The limit stays a byte limit (the stored text is never longer than it was); the cut moves
+   back to the last complete character at or before it.
+
+   The JSON assertions pass `tojson`'s output to Python as an argument. Python decodes argv
+   with surrogateescape, so `os.fsencode` gives back the exact bytes, which are then decoded
+   as strict UTF-8 (a split character fails) and parsed with strict `json.loads`. *)
+
+f=sample(prompt:str):$decisiontrace{
+  <$decisiontrace{
+    requestid:"req-utf8";
+    correlationid:"corr-1";
+    originalinput:prompt;
+    piidetected:"";
+    anonymisationapplied:false;
+    compressionapplied:false;
+    riskclassification:"low";
+    policydecision:"allow";
+    modelselected:"ollama/llama3";
+    provider:"ollama";
+    promptsent:prompt;
+    responsereceived:prompt;
+    deanonymisationapplied:false;
+    finaloutput:prompt;
+    steps:@();
+    durationms:1
+  }
+};
+
+(* 0 when `j` is valid UTF-8 and strict JSON whose promptsent and responsereceived both
+   equal `want`; 2 when the bytes are not UTF-8; 3 when it is not JSON; 4 when a value
+   differs; 99 when python3 could not be started (F10.44 convention). *)
+f=strictutf8json(j:str;want:str):i64{
+  let py="import json,os,sys
+raw=os.fsencode(sys.argv[1])
+try:
+    text=raw.decode('utf-8')
+except UnicodeDecodeError:
+    sys.exit(2)
+try:
+    d=json.loads(text)
+except ValueError:
+    sys.exit(3)
+sys.exit(0 if d['promptsent']==sys.argv[2] and d['responsereceived']==sys.argv[2] else 4)";
+  let h=mt process.spawn(@("python3";"-c";py;j;want)) { $ok:h h; $err:e 0 };
+  let rc=mut.99;
+  if(h==0){}el{ rc=process.wait(h) as i64 };
+  <rc
+};
+
+f=repeat(s:str;n:i64):str{
+  let out=mut."";
+  lp(let i=0;i<n;i=i+1){ out="\(out)\(s)" };
+  <out
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let jp="日";
+  let emoji="😀";
+  let ell="...";
+  let one="a";
+  let split=str.slice(jp;0;2);
+
+  (* ASCII: still a byte limit, cut exactly at it. *)
+  let a250=repeat(one;250);
+  if(t.asserteq(tr.truncate(a250;200);"\(repeat(one;200))\(ell)";"ASCII longer than the limit is cut at exactly 200 bytes and marked")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tr.truncate(repeat(one;200);200);repeat(one;200);"a string of exactly the limit is left alone")){pass=pass+1}el{fail=fail+1};
+
+  (* 3-byte characters: 67 of them are 201 bytes; byte 200 is inside the 67th. *)
+  let cjk=repeat(jp;67);
+  if(t.assert(str.len(cjk)==201;"fixture: 67 three-byte characters are 201 bytes")){pass=pass+1}el{fail=fail+1};
+  let cjkcut=tr.truncate(cjk;200);
+  if(t.asserteq(cjkcut;"\(repeat(jp;66))\(ell)";"3-byte characters crossing byte 200 are cut before the split character, not inside it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(cjkcut)<=203;"and the cut text is never longer than the byte limit plus the marker")){pass=pass+1}el{fail=fail+1};
+
+  (* 4-byte characters: "a" plus 50 emoji is 201 bytes; byte 200 is the 4th byte of the
+     50th emoji, so a byte cut keeps 3 of its 4 bytes. *)
+  let emo="a\(repeat(emoji;50))";
+  if(t.assert(str.len(emo)==201;"fixture: one ASCII byte and 50 four-byte characters are 201 bytes")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(tr.truncate(emo;200);"a\(repeat(emoji;49))\(ell)";"4-byte characters crossing byte 200 are cut before the split character, not inside it")){pass=pass+1}el{fail=fail+1};
+
+  (* A 2-byte character split after its lead byte. *)
+  let latin="\(repeat(one;199))é and more";
+  if(t.asserteq(tr.truncate(latin;200);"\(repeat(one;199))\(ell)";"a 2-byte character split after its lead byte is dropped whole")){pass=pass+1}el{fail=fail+1};
+
+  (* A boundary exactly at the limit keeps every complete character. *)
+  let exact="\(repeat(one;197))\(jp)xyz";
+  if(t.asserteq(tr.truncate(exact;200);"\(repeat(one;197))\(jp)\(ell)";"a character ending exactly at byte 200 is kept")){pass=pass+1}el{fail=fail+1};
+
+  (* The trace's JSON: valid UTF-8, strict JSON, and the truncated value round-trips. *)
+  if(t.assert(strictutf8json("{\"promptsent\":\"\(split)\"}";"")==2;"control: the checker rejects a JSON string holding a split character")){pass=pass+1}el{fail=fail+1};
+  let rc=strictutf8json(tr.tojson(sample(cjk));"\(repeat(jp;66))\(ell)");
+  if(t.assert(rc!=99;"python3 was started to judge the trace JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rc==0;"a trace whose prompt and reply are 3-byte characters crossing byte 200 is valid UTF-8, strict JSON, and holds the truncated text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(strictutf8json(tr.tojson(sample(emo));"a\(repeat(emoji;49))\(ell)")==0;"and so is one whose prompt and reply are 4-byte characters crossing byte 200")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
