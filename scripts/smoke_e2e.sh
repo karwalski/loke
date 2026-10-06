@@ -679,6 +679,54 @@ else
     *skipped=*privacy_filter*) echo "  ok   and the record lists privacy_filter as skipped: $pflayers" ;;
     *) echo "  FAIL with the sidecar down the detection layers are '$pflayers'" >&2; fail=1 ;;
   esac
+  # F3b.8: an organisation policy (~/.loke/loke.policy.json, read per request) that requires the
+  # privacy filter refuses while the sidecar is down, the refusal F3b.6 left to it: 503 naming
+  # the layer and the policy, nothing to the model, audited and alerted. A malformed policy
+  # refuses even clean text; a consensus floor raises a weaker strategy, and the reply says so.
+  POLICY="$WORK/lk/home/.loke/loke.policy.json"
+  if [ -e "$POLICY" ]; then echo "  FAIL a loke.policy.json already exists in the throwaway HOME; the policy check would not own it" >&2; fail=1
+  else
+    printf '{"required_layers":["openai-privacy-filter"]}\n' > "$POLICY"
+    OPALERT='governance alert: privacy organisation policy: organisation policy loke.policy.json requires the openai-privacy-filter privacy layer'
+    OPALERTS_BEFORE=$(grep -cF "$OPALERT" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
+    : > "$SEEN"
+    pipe_post "summarise what $PFNAME asked about the invoice" ""
+    judge "F3b.8: a policy requiring the privacy filter refuses while the sidecar is down, naming the layer and the policy" 503 '"error":"organisation policy loke.policy.json requires the openai-privacy-filter privacy layer, and it did not scan this request: privacy-filter sidecar unreachable","refused":true'
+    if [ -s "$SEEN" ]; then echo "  FAIL F3b.8: the model received a request the policy refused" >&2; fail=1
+    else echo "  ok   and the model received nothing"; fi
+    case "$BODY" in
+      *"$PFNAME"*) echo "  FAIL F3b.8: the refusal repeats the name" >&2; fail=1 ;;
+      *) echo "  ok   and the refusal does not repeat the name" ;;
+    esac
+    oprid=$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("request_id",""))' 2>/dev/null)
+    oprows=$(dl "SELECT group_concat(event_type,',') FROM (SELECT event_type FROM audit_log WHERE correlation_id='$oprid' ORDER BY event_type)")
+    if [ -n "$oprid" ] && [ "$oprows" = "org_policy_violation,privacy_refused" ]; then echo "  ok   F3b.8: the refusal is audited as org_policy_violation and privacy_refused on its request id"
+    else echo "  FAIL F3b.8: audit rows for the policy refusal are '$oprows' for '$oprid'" >&2; fail=1; fi
+    OPALERTS_AFTER=$(grep -cF "$OPALERT" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
+    if [ "${OPALERTS_AFTER:-0}" -gt "${OPALERTS_BEFORE:-0}" ] && ! grep -q "$PFNAME" "$WORK/lk/home/.loke/loke.log"; then
+      echo "  ok   F3b.8: a governance alert names the required layer, and loke.log holds no name"
+    else echo "  FAIL F3b.8: no policy alert in loke.log (before ${OPALERTS_BEFORE:-0}, after ${OPALERTS_AFTER:-0}), or the log holds the name" >&2; fail=1; fi
+    printf '{"minimum_layers":"two"}\n' > "$POLICY"
+    pipe_post "what is the capital of France" ""
+    judge "F3b.8: a malformed policy refuses even a request with no PII, naming the fault" 503 '"error":"organisation policy loke.policy.json cannot be applied: minimum_layers must be a whole number from 0 to 4","refused":true'
+    if [ -s "$SEEN" ]; then echo "  FAIL F3b.8: the model received a request the malformed policy refused" >&2; fail=1
+    else echo "  ok   and the model received nothing"; fi
+    # The floor: under unanimous the email (found by regex alone) would go in clear.
+    printf '{"locked_consensus":"most-restrictive"}\n' > "$POLICY"
+    printf '[privacy]\nconsensus_strategy = "unanimous"\n' > "$WORK/lk/home/.loke/config.toml"
+    : > "$SEEN"
+    pipe_post "hello there, please write to $EMAIL" ""
+    judge "F3b.8: a consensus floor raises unanimous to most-restrictive, and the reply's consensus says so" 200 '"consensus":{"strategy":"most-restrictive","configured_strategy":"unanimous","raised_by":"organisation policy",'
+    judge "and lists the override" 200 '"org_policy_overrides":["privacy.consensus_strategy unanimous is raised to most-restrictive"]'
+    if [ ! -s "$SEEN" ]; then echo "  FAIL F3b.8: the model received nothing under the consensus floor" >&2; fail=1
+    elif grep -qF "$EMAIL" "$SEEN"; then echo "  FAIL F3b.8: the model received the email in clear under the consensus floor" >&2; fail=1
+    else echo "  ok   and the model did not receive the email"; fi
+    oprid=$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("request_id",""))' 2>/dev/null)
+    if [ -n "$oprid" ] && [ "$(dl "SELECT COUNT() FROM audit_log WHERE correlation_id='$oprid' AND event_type='org_policy_override'")" = "1" ]; then
+      echo "  ok   F3b.8: the override is audited as org_policy_override on its request id"
+    else echo "  FAIL F3b.8: no org_policy_override audit row for '$oprid'" >&2; fail=1; fi
+    rm -f "$POLICY"
+  fi
   rm -f "$WORK/lk/home/.loke/config.toml"
 fi
 # MK6.16: Presidio's offsets count code points and loke's strings are bytes. http_recorder.py

@@ -5,68 +5,302 @@ m=core.privacy.orgpolicy;
 i=str:std.str;
 i=json:std.json;
 i=file:std.file;
+i=jx:shared.jsonobj;
+i=sh:shared.types;
+i=cfg:shared.config;
+i=fr:core.privacy.filterregistry;
+i=cn:core.privacy.consensus;
+i=lh:core.privacy.layerhealth;
+
+(* F3b.8. An organisation's privacy policy, applied OVER the user's config.toml on every run of
+   core.privacy.pipeline.
+
+   The file is loke.policy.json in the user's loke directory (~/.loke/loke.policy.json), a JSON
+   object with any of these keys:
+
+     minimum_layers            a whole number 0 to 4: at least this many layers must complete a
+                               scan and mask (vote) on each request, or it is refused
+     required_layers           layer ids: each must be enabled, masking (not detect-only) and
+                               complete a scan on each request, or it is refused
+     locked_consensus          "most-restrictive" only: a weaker privacy.consensus_strategy is
+                               raised to it, and the run records what was configured
+     banned_layers             layer ids (not regex): the layer is not consulted; a
+                               configuration that enables it refuses every request
+     max_confidence_threshold  0 to 1: a layer's confidence_threshold, the privacy-filter
+                               threshold and, for confidence-weighted, consensus_threshold
+                               above it are lowered (clamped) to it
+     enforced                  true or false; true when absent. false leaves config.toml alone
+     description               ignored
+
+   THE ONE RULE: a policy can only make privacy stricter than config.toml makes it. Every
+   field either refuses a request, masks at least what the configuration would have masked, or
+   stops a layer from being sent text when the configuration that enables it is refused. That
+   is why locked_consensus takes only most-restrictive (the other strategies are not ordered
+   by strictness, so locking one could mask less than the user's choice), why a threshold is
+   lowered and never raised, and why a banned layer that the configuration enables refuses the
+   request rather than being dropped quietly: dropping it would mask less than config.toml
+   asks for. The regex layer cannot be banned: it always runs (F3b.2).
+
+   FAIL CLOSED. A file that is present and cannot be read, is not a JSON object, names a key
+   this module does not know (or one twice), or gives a value it cannot use refuses every
+   request, naming the fault, as a malformed [[privacy.layers]] does. A MISSING file is no
+   policy: nothing changes, and the pipeline masks exactly what it did without this module.
+
+   NOT TAMPER-PROOF. The file sits in the user's own loke directory, and the user can delete
+   it. Distribution by the compliance engine (A3) and a locked location are not built. *)
 
 t=$orgprivacypolicy{
+  (* false only for notloaded(): the pipeline reads the file at run time. *)
+  loaded:bool;
+  present:bool;
+  enforced:bool;
+  (* Why the policy refuses every request whatever the run finds: the file cannot be applied,
+     or (after apply) the configuration enables a banned layer. Empty otherwise. *)
+  error:str;
   minimumlayers:i64;
-  requiredlayers:str;
+  requiredlayers:@str;
   lockedconsensus:str;
-  bannedlayers:str;
-  maxconfidencethreshold:f64;
-  enforced:bool
+  bannedlayers:@str;
+  (* As written in the file, "0.9"; empty when the key is absent. *)
+  maxthreshold:str;
+  (* After apply: each setting of config.toml the policy overrode, and the consensus strategy
+     it raised (empty when none was). Setting names and policy values only, never text. *)
+  notes:@str;
+  raisedfrom:str
 };
 
-f=defaultpolicy():$orgprivacypolicy{
-  <$orgprivacypolicy{
-    minimumlayers:1;
-    requiredlayers:"";
-    lockedconsensus:"";
-    bannedlayers:"";
-    maxconfidencethreshold:1.0;
-    enforced:false
-  }
+(* A policy applied to one run's registry and consensus settings. *)
+t=$orgapplied{
+  registry:$filterregistry;
+  consensus:str;
+  consensusthreshold:str;
+  policy:$orgprivacypolicy
 };
 
-f=loadpolicy(path:str):$orgprivacypolicy{
-  let content=mt file.read(path) {$ok:v v; $err:e ""};
-  if(str.len(content)<5){
-    <defaultpolicy()
-  }el{
-    let parsed=json.dec(content);
-    let minlayers=json.str(parsed;"minimum_layers");
-    let required=json.str(parsed;"required_layers");
-    let locked=json.str(parsed;"locked_consensus");
-    let banned=json.str(parsed;"banned_layers");
-    let enforced=str.contains(content;"enforced");
-    let ml=mut.1;
-    if(str.len(minlayers)>0){ml=2}el{};
-    <$orgprivacypolicy{
-      minimumlayers:ml;
-      requiredlayers:required;
-      lockedconsensus:locked;
-      bannedlayers:banned;
-      maxconfidencethreshold:1.0;
-      enforced:enforced
-    }
-  }
+f=filename():str{ <"loke.policy.json" };
+
+f=policypath():str{ <sh.lokefile(filename()) };
+
+(* How every refusal and note names the policy. Not the full path: it holds the user's home. *)
+f=header():str{
+  <"organisation policy \(filename())"
 };
 
-f=validate(policy:$orgprivacypolicy;activelayers:i64;consensus:str):str{
-  let violations=mut."";
-  if(activelayers<policy.minimumlayers){
-    violations=str.concat(violations;"VIOLATION: fewer than minimum required layers active. ")
+f=notloaded():$orgprivacypolicy{
+  <$orgprivacypolicy{loaded:false;present:false;enforced:false;error:"";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:""}
+};
+
+(* No policy file: nothing is changed. *)
+f=absent():$orgprivacypolicy{
+  <$orgprivacypolicy{loaded:true;present:false;enforced:false;error:"";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:""}
+};
+
+f=broken(fault:str):$orgprivacypolicy{
+  <$orgprivacypolicy{loaded:true;present:true;enforced:true;error:"\(header()) cannot be applied: \(fault)";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:""}
+};
+
+f=knownkey(key:str):bool{
+  <str.eq(key;"minimum_layers") || str.eq(key;"required_layers") || str.eq(key;"locked_consensus") || str.eq(key;"banned_layers") || str.eq(key;"max_confidence_threshold") || str.eq(key;"enforced") || str.eq(key;"description")
+};
+
+f=layerids():@str{
+  <@(fr.regexid();fr.nerid();fr.presidioid();fr.privacyfilterid())
+};
+
+f=listed(items:@str;id:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<items.len;i=i+1){
+    if(str.eq(items.get(i);id)){ found=true }el{}
+  };
+  <found
+};
+
+f=quoted(raw:str):bool{ <str.startswith(raw;"\"") };
+
+f=knownlayers():str{ <str.join(", ";layerids()) };
+
+f=parses(body:str):bool{
+  <mt json.dec(body) { $ok:v true; $jsonerr:e false }
+};
+
+f=readable(path:str):bool{
+  <mt file.read(path) { $ok:v true; $err:e false }
+};
+
+f=count(n:i64):str{ <str.fromint(n) };
+
+(* The ids in the array at key, or why they cannot be used. *)
+f=layerlisterror(o:$json;key:str):str{
+  if(!jx.has(o;key)){ <"" }el{};
+  let raw=jx.rawvalue(o;key);
+  let shape="\(key) must be an array of layer ids";
+  if(!str.startswith(raw;"[")){ <shape }el{};
+  let n=mt json.arr(o;key) { $ok:a a.len as i64; $jsonerr:e 0-1 };
+  let ids=jx.strelems(o;key);
+  if(n<0 || (ids.len as i64)!=n){ <shape }el{};
+  let seen=mut.@();
+  lp(let i=0;i<ids.len;i=i+1){
+    let id:str=ids.get(i);
+    if(!listed(layerids();id)){ <"\(key) names \(id), which is not a layer loke has (\(knownlayers()))" }el{};
+    if(listed(seen;id)){ <"\(key) names \(id) twice" }el{};
+    seen=seen.push(id)
+  };
+  <""
+};
+
+(* Why a parsed policy object cannot be applied, or "". *)
+f=fault(o:$json):str{
+  let keys=jx.keys(o);
+  let seen=mut.@();
+  lp(let i=0;i<keys.len;i=i+1){
+    let k:str=keys.get(i);
+    if(!knownkey(k)){ <"\(k) is not a policy key" }el{};
+    if(listed(seen;k)){ <"\(k) is given twice" }el{};
+    seen=seen.push(k)
+  };
+  if(jx.has(o;"enforced")){
+    let e=jx.rawvalue(o;"enforced");
+    if(!str.eq(e;"true") && !str.eq(e;"false")){ <"enforced must be true or false" }el{}
   }el{};
-  if(str.len(policy.lockedconsensus)>0){
-    if(!str.eq(consensus;policy.lockedconsensus)){
-      violations=str.concat(violations;"VIOLATION: consensus strategy does not match org policy. ")
+  if(jx.has(o;"minimum_layers")){
+    let raw=jx.rawvalue(o;"minimum_layers");
+    let n=mt str.toint(raw) { $ok:x x; $err:e 0-1 };
+    if(!str.isdigit(raw) || n<0 || n>(layerids().len as i64)){ <"minimum_layers must be a whole number from 0 to 4" }el{}
+  }el{};
+  let req=layerlisterror(o;"required_layers");
+  if(str.len(req)>0){ <req }el{};
+  let ban=layerlisterror(o;"banned_layers");
+  if(str.len(ban)>0){ <ban }el{};
+  let banned=jx.strelems(o;"banned_layers");
+  if(listed(banned;fr.regexid())){ <"banned_layers cannot name regex: the regex layer always runs" }el{};
+  let required=jx.strelems(o;"required_layers");
+  lp(let i=0;i<required.len;i=i+1){
+    let id:str=required.get(i);
+    if(listed(banned;id)){ <"\(id) is both required and banned" }el{}
+  };
+  if(jx.has(o;"locked_consensus")){
+    let raw=jx.rawvalue(o;"locked_consensus");
+    let v=jx.strvalue(o;"locked_consensus";"");
+    let floor=cn.defaultstrategy();
+    if(!quoted(raw) || !cn.isknown(v)){ <"locked_consensus must be \(floor)" }el{};
+    if(!str.eq(v;floor)){ <"locked_consensus can only be \(floor): a policy can only make masking stricter, and no other strategy masks at least what every other does" }el{}
+  }el{};
+  if(jx.has(o;"max_confidence_threshold")){
+    if(!cfg.isthreshold(jx.rawvalue(o;"max_confidence_threshold"))){ <"max_confidence_threshold must be a number from 0 to 1" }el{}
+  }el{};
+  <""
+};
+
+(* A policy file's text. Anything that cannot be applied refuses every request. *)
+f=fromtext(text:str):$orgprivacypolicy{
+  let body=str.trim(text);
+  if(!str.startswith(body;"{")){ <broken("it is not a JSON object") }el{};
+  if(!parses(body)){ <broken("it is not valid JSON") }el{};
+  let o=mt json.dec(body) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  let why=fault(o);
+  if(str.len(why)>0){ <broken(why) }el{};
+  let minimum=mt str.toint(jx.rawvalue(o;"minimum_layers")) { $ok:x x; $err:e 0 };
+  let locked=jx.strvalue(o;"locked_consensus";"");
+  let maxt=mut."";
+  if(jx.has(o;"max_confidence_threshold")){ maxt=jx.rawvalue(o;"max_confidence_threshold") }el{};
+  <$orgprivacypolicy{loaded:true;present:true;enforced:!str.eq(jx.rawvalue(o;"enforced");"false");error:"";minimumlayers:minimum;requiredlayers:jx.strelems(o;"required_layers");lockedconsensus:locked;bannedlayers:jx.strelems(o;"banned_layers");maxthreshold:maxt;notes:@();raisedfrom:""}
+};
+
+(* The policy at path: absent() when there is no file, broken when it cannot be read. *)
+f=load(path:str):$orgprivacypolicy{
+  if(!file.exists(path)){ <absent() }el{};
+  if(!readable(path)){ <broken("the file cannot be read") }el{};
+  <fromtext(mt file.read(path) { $ok:v v; $err:e "" })
+};
+
+(* The policy a run applies: the one the config carries, or the file read now. *)
+f=resolved(p:$orgprivacypolicy):$orgprivacypolicy{
+  if(p.loaded){ <p }el{};
+  <load(policypath())
+};
+
+f=applies(p:$orgprivacypolicy):bool{
+  <p.present && p.enforced && str.len(p.error)==0
+};
+
+f=asnumber(s:str):f64{
+  <mt str.tof64(s) { $ok:x x; $err:e 0.0 }
+};
+
+f=withresult(p:$orgprivacypolicy;error:str;notes:@str;raisedfrom:str):$orgprivacypolicy{
+  <$orgprivacypolicy{loaded:p.loaded;present:p.present;enforced:p.enforced;error:error;minimumlayers:p.minimumlayers;requiredlayers:p.requiredlayers;lockedconsensus:p.lockedconsensus;bannedlayers:p.bannedlayers;maxthreshold:p.maxthreshold;notes:notes;raisedfrom:raisedfrom}
+};
+
+(* The policy over one run's registry and consensus settings. With no policy, or one that is
+   not enforced or cannot be applied, the settings are returned as they were. *)
+f=apply(p:$orgprivacypolicy;reg:$filterregistry;consensus:str;cthreshold:str):$orgapplied{
+  if(!applies(p)){ <$orgapplied{registry:reg;consensus:consensus;consensusthreshold:cthreshold;policy:p} }el{};
+  let out=mut.reg;
+  let notes=mut.@();
+  let strategy=mut.consensus;
+  let raised=mut."";
+  let effective=cn.effective(consensus);
+  if(str.len(p.lockedconsensus)>0 && !str.eq(effective;p.lockedconsensus)){
+    raised=effective;
+    strategy=p.lockedconsensus;
+    notes=notes.push("privacy.consensus_strategy \(effective) is raised to \(p.lockedconsensus)")
+  }el{};
+  (* Only enabled layers are clamped and noted: a threshold on a layer that is off decides
+     nothing, and a note for it would raise an alert every run for nothing. *)
+  let ct=mut.cthreshold;
+  if(str.len(p.maxthreshold)>0){
+    let ceiling=asnumber(p.maxthreshold);
+    lp(let i=0;i<reg.filters.len;i=i+1){
+      let f:$privacyfilter=fr.get(out;reg.filters.get(i).id);
+      if(f.enabled && f.threshold>ceiling){
+        out=fr.setpolicy(out;f.id;f.enabled;f.priority;f.mode;ceiling;f.entityfilter);
+        notes=notes.push("the \(f.id) layer's confidence_threshold is lowered to \(p.maxthreshold)")
+      }el{}
+    };
+    let pfid=fr.privacyfilterid();
+    let pf=fr.get(out;pfid);
+    if(pf.enabled && str.len(pf.param)>0 && asnumber(pf.param)>ceiling){
+      out=fr.setparam(out;pfid;p.maxthreshold);
+      notes=notes.push("privacy.privacy_filter_threshold is lowered to \(p.maxthreshold)")
+    }el{};
+    if(str.eq(cn.effective(strategy);"confidence-weighted") && cn.parsethreshold(cthreshold)>ceiling){
+      ct=p.maxthreshold;
+      notes=notes.push("privacy.consensus_threshold is lowered to \(p.maxthreshold)")
     }el{}
   }el{};
-  <violations
+  let error=mut."";
+  lp(let i=0;i<p.bannedlayers.len;i=i+1){
+    let id:str=p.bannedlayers.get(i);
+    if(fr.get(out;id).enabled && str.len(error)==0){
+      error="\(header()) bans the \(id) privacy layer, and this configuration enables it (switch it off in config.toml)"
+    }el{};
+    out=fr.setenabled(out;id;false)
+  };
+  <$orgapplied{registry:out;consensus:strategy;consensusthreshold:ct;policy:withresult(p;error;notes;raised)}
 };
 
-f=isenforced(policy:$orgprivacypolicy):bool{
-  <policy.enforced
-};
-
-f=formatpolicy(policy:$orgprivacypolicy):str{
-  <str.concat("Org Policy: min_layers=";str.concat(str.fromint(policy.minimumlayers);str.concat(" required=";str.concat(policy.requiredlayers;str.concat(" consensus=";str.concat(policy.lockedconsensus;str.concat(" enforced=";str.concat(str.fromint(policy.enforced as i64);""))))))))
+(* Why the policy refuses a run made with registry reg, whose layers ended in states (one per
+   entry, in order) and whose masking layers were voters; "" when it does not. *)
+f=refusal(p:$orgprivacypolicy;reg:$filterregistry;states:@$layerstatus;voters:@str):str{
+  if(!p.present){ <"" }el{};
+  if(str.len(p.error)>0){ <p.error }el{};
+  if(!p.enforced){ <"" }el{};
+  let h=header();
+  lp(let r=0;r<p.requiredlayers.len;r=r+1){
+    let id:str=p.requiredlayers.get(r);
+    let at=mut.0-1;
+    lp(let i=0;i<reg.filters.len && i<states.len;i=i+1){
+      if(str.eq(reg.filters.get(i).id;id)){ at=i }el{}
+    };
+    if(at<0){ <"\(h) requires the \(id) privacy layer, and it is not in the layer registry" }el{};
+    let st:$layerstatus=states.get(at);
+    if(!st.enabled){ <"\(h) requires the \(id) privacy layer, and this configuration does not enable it" }el{};
+    if(!lh.iscompleted(st)){ <"\(h) requires the \(id) privacy layer, and it did not scan this request: \(st.reason)" }el{};
+    if(str.eq(reg.filters.get(at).mode;fr.detectonly())){ <"\(h) requires the \(id) privacy layer to mask, and this configuration sets it detect-only" }el{}
+  };
+  let did=voters.len as i64;
+  if(did<p.minimumlayers){
+    <"\(h) requires at least \(count(p.minimumlayers)) privacy layers to mask each request, and \(count(did)) did"
+  }el{};
+  <""
 };

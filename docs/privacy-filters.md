@@ -41,6 +41,10 @@ Each layer's availability check and scan is a branch on its id in `core.privacy.
 
 `core.privacy.pipeline.run(text; basesystemprompt; config)`:
 
+0. **The organisation policy** (`core.privacy.orgpolicy.apply`, F3b.8), if `~/.loke/loke.policy.json`
+   exists, is applied over the config: a banned layer is switched off (so it is sent nothing), a weaker
+   consensus strategy is raised, thresholds above the maximum are lowered. See
+   [Organisation policy](#organisation-policy-lokepolicyjson-f3b8).
 1. **Every registry entry, in registry order** (the order `[[privacy.layers]]` priorities give, below):
    1. `layerhealth.consult`: a disabled entry is sent nothing and recorded as a skipped stage; an
       enabled one is probed and scanned only if it answers. The call is timed in milliseconds,
@@ -60,7 +64,8 @@ Each layer's availability check and scan is a branch on its id in `core.privacy.
 3. **Entity routing** (`entityrouting.apply`, F3b.5) keeps, for each routed type, only the detections
    of the layers its route accepts.
 4. A `[[privacy.layers]]` error, or failing that a `[[privacy.entity_routing]]` error, is put on the
-   run (`layererror`).
+   run (`layererror`). What the organisation policy refuses (its own error, a required layer that did
+   not scan, too few masking layers) is put on the run as `policyerror`, with a governance alert.
 5. **Consensus** (`consensus.apply`, F3b.4) groups overlapping detections and decides mask or pass
    for each under `privacy.consensus_strategy`. Under first-match, if a group's most sensitive
    detection is not the one masked, the masked one carries that type (`consensus.applyranked`, RG1.7c).
@@ -98,6 +103,11 @@ The settings below take effect only where the pipeline config is built with
 
 The config is read when it is built: per request for `/api/pipeline`, at start-up for the others.
 
+The organisation policy (`loke.policy.json`, F3b.8) is not part of that config: `pipeline.run` reads it
+on **every run, for every caller above**, including `mcp-broker` and the agent executor, unless the
+caller gave the config one (`pipeline.withorgpolicy`, which the tests use). `loke privacy evaluate`
+(`core.privacy.comparison`) makes the layer calls itself and does not apply it.
+
 ## Configuration
 
 `config.toml` is `~/.loke/config.toml`. Every key in this section is optional; with none of them the
@@ -123,10 +133,20 @@ pipeline behaves as described under [Migration](#migration-guide-for-existing-de
 | `entity_type` | `packages/core/src/privacy/entity_routing.tk` | `test_entity_routing.tk` ("the type is matched without regard to case", "a type no layer reports") |
 | `preferred_layers` | `packages/core/src/privacy/entity_routing.tk` | `test_entity_routing_pipeline.tk` ("PERSON preferring Presidio is credited to Presidio alone") |
 | `fallback_layers` | `packages/core/src/privacy/entity_routing.tk` | `test_entity_routing_pipeline.tk` ("the sidecar switched off gives way to the fallback, NER") |
+| `minimum_layers` | `packages/core/src/privacy/org_policy.tk` | `tests/unit/privacy/test_org_policy.tk` ("minimum_layers 3 is read as 3, not as a constant"); `tests/unit/privacy/test_org_policy_pipeline.tk` ("with Presidio down two do not, and the run is refused") |
+| `required_layers` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("a required layer that is down refuses the run", "a required layer config.toml switches off refuses", "a required layer set detect-only refuses"); `scripts/smoke_e2e.sh` |
+| `locked_consensus` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("the policy raises it to most-restrictive: the name, the card and the email are masked"); `scripts/smoke_e2e.sh` |
+| `banned_layers` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("a banned layer the configuration enables refuses the run, naming it", "config.toml cannot re-enable it: still refused, still sent nothing") |
+| `max_confidence_threshold` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("max_confidence_threshold 0.9 clamps Presidio's threshold, so its 0.92 detection masks the name", "clamped, it is asked at 0.9 and the name is masked") |
+| `enforced` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy.tk` ("enforced: false is read as false, and the policy applies nothing"); `test_org_policy_pipeline.tk` ("a policy with enforced: false changes nothing") |
+| `description` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy.tk` ("the word enforced in a description does not turn enforcement on") |
 <!-- privacy-config-keys:end -->
 
+The last seven keys are not `config.toml` keys: they are the keys of the organisation policy file,
+`~/.loke/loke.policy.json` (below).
+
 `scripts/check_privacy_doc_keys.py` (in the quality gate) fails if a key in that table is not a string
-literal in the file named beside it, or if `layer_config.tk` or `entity_routing.tk` accepts a key, or
+literal in the file named beside it, or if `layer_config.tk`, `entity_routing.tk` or `org_policy.tk` accepts a key, or
 `consensus.tk` a strategy, that this document does not list. It checks that each key is *read*, not
 what is done with it; the tests named do that.
 
@@ -315,6 +335,59 @@ Measured by `scripts/smoke_e2e.sh` against the built binary, as above:
 When both are malformed, the layers error is the one reported. Test: `test_entity_routing_pipeline.tk`
 ("with both malformed, the layers error is the one reported").
 
+## Organisation policy (`loke.policy.json`, F3b.8)
+
+An organisation's policy is `~/.loke/loke.policy.json`, a JSON object with the keys in the table above.
+`core.privacy.pipeline.run` reads it on every run and applies it **over** `config.toml`
+(`core.privacy.orgpolicy`). `packages/privacy-filter/sample-org-policy.json` is an example; it is
+accepted as written (test: `test_org_policy.tk`, "the shipped sample policy is accepted").
+
+**A policy can only make privacy stricter than `config.toml`.** Each field either refuses a request,
+masks at least what the configuration masks, or stops a layer being sent text:
+
+| Key | What it does | Refusal reason, or note |
+|---|---|---|
+| `required_layers` | Each named layer must be enabled, not `detect-only`, and complete a scan on this request, or the run is refused. This is the refusal F3b.6 left to this story: a required layer that is down refuses rather than degrades. | `organisation policy loke.policy.json requires the <id> privacy layer, and it did not scan this request: <reason>`; `... and this configuration does not enable it`; `... requires the <id> privacy layer to mask, and this configuration sets it detect-only` |
+| `minimum_layers` | 0 to 4. At least this many layers must complete and mask (vote); a detect-only layer does not count. | `organisation policy loke.policy.json requires at least <n> privacy layers to mask each request, and <m> did` |
+| `banned_layers` | The layer is switched off before the run, so it is sent nothing. If `config.toml` (or the default, for `ner` and `presidio`) enables it, **every request is refused** until it is switched off in `[[privacy.layers]]`: dropping it quietly would mask less than the configuration asks for. `config.toml` cannot re-enable it. `regex` cannot be banned. | `organisation policy loke.policy.json bans the <id> privacy layer, and this configuration enables it (switch it off in config.toml)` |
+| `locked_consensus` | Only `most-restrictive`, a floor: a configured strategy that is anything else is raised to it, never silently. The other strategies are not ordered by strictness, so locking one could mask less than the user's own choice; a policy naming one is refused as malformed. | note `privacy.consensus_strategy <s> is raised to most-restrictive` |
+| `max_confidence_threshold` | 0 to 1. **Clamped, not refused**: an enabled layer's `confidence_threshold`, a set `privacy.privacy_filter_threshold` (with the sidecar on) and, under `confidence-weighted`, `privacy.consensus_threshold` above it are lowered to it, so more is accepted and masked. A lower threshold is never raised. The privacy-filter sidecar's own default, used when `privacy_filter_threshold` is unset, is not checked. | note `the <id> layer's confidence_threshold is lowered to <max>` (and the two `privacy.` forms) |
+| `enforced` | `false` leaves `config.toml` alone (the file must still be valid). Absent means `true`. | |
+| `description` | Ignored. | |
+
+Test of the rule: `test_org_policy_pipeline.tk` ("under every policy field and five user configurations,
+each run is refused or masks every value the user's configuration masks").
+
+**Fail closed.** A policy file that is present and cannot be read, is not a JSON object, is not valid
+JSON, names a key it does not know (a misspelling is not ignored) or a key twice, or gives a value it
+cannot use refuses **every** request, naming the fault: `organisation policy loke.policy.json cannot be
+applied: <fault>`. That holds even for a file that says `enforced: false`. Tests: `test_org_policy.tk`
+(twenty malformed files by their exact fault, and a file that cannot be read);
+`test_org_policy_pipeline.tk` ("a malformed policy refuses a request with no PII", "one that cannot be
+read refuses too"). A **missing** file is no policy: nothing changes, byte for byte
+(`test_org_policy_pipeline.tk`, "and masks byte for byte what the pipeline masks with no policy at all").
+
+**Surfaced.** Every run the policy refuses raises a governance alert (`core.governance.alert`, kind
+`privacy_org_policy`, severity `critical`, logged as `governance alert: privacy organisation policy:
+<reason>; the request is refused`), and every run whose configuration it overrode raises one at `warn`
+naming each override. Both name layers, settings and policy values, never text. On `POST
+/api/pipeline` a refused request is audited as `org_policy_violation` as well as `privacy_refused`, and an
+overridden one as `org_policy_override`; the reply's `consensus` object carries `configured_strategy` and
+`raised_by` when the floor raised the strategy, and `org_policy_overrides` lists the overrides. With no
+policy, none of these appears. Measured by `scripts/smoke_e2e.sh` against the built binary:
+
+```
+organisation policy loke.policy.json requires the openai-privacy-filter privacy layer, and it did not scan this request: privacy-filter sidecar unreachable
+organisation policy loke.policy.json cannot be applied: minimum_layers must be a whole number from 0 to 4
+```
+
+**Not built.** The file is in the user's own loke directory, which the user can edit or delete: nothing
+makes it tamper-proof. It is not distributed by the compliance engine (A3), and the governance dashboard
+(G4) does not show violations; they are in the alert log, the audit trail and the reply. `/api/health`
+reports the layers as `config.toml` configures them, not as the policy changes them. The alerts are not
+de-duplicated across runs. The CLI proxy, `loke ask` and `mcp-broker` refuse with the policy's reason
+like any other refusal, but write no `org_policy_*` audit row: only `POST /api/pipeline` does.
+
 ## Fail-closed rules
 
 `pipeline.issafetoforward(run)` is a plain bool (not a result type, because of toke trap T-18 at the time
@@ -328,10 +401,13 @@ it was written). It is false, and the run must not be sent, when any of these ho
 | `[[privacy.layers]]` cannot be applied (F3b.2) | `privacy.layers in config.toml cannot be applied: ...` | `test_layer_config_pipeline.tk`; `scripts/smoke_e2e.sh` |
 | `[[privacy.entity_routing]]` cannot be applied (F3b.5) | `privacy.entity_routing in config.toml cannot be applied: ...` | `test_entity_routing_pipeline.tk`; `scripts/smoke_e2e.sh` |
 | A `[privacy]` threshold is set and cannot be used (F3b.16, F3b.17) | `[privacy] in config.toml cannot be applied: ...` | `test_config_refusal_source.tk`; `test_consensus_pipeline.tk`; `scripts/smoke_e2e.sh` |
+| The organisation policy refuses it (F3b.8): it cannot be applied, a required layer did not scan, too few masking layers, a banned layer is enabled | `organisation policy loke.policy.json ...` (above) | `test_org_policy_pipeline.tk`; `scripts/smoke_e2e.sh` |
 
 - **A system prompt does not drop a refusal (F3b.15).** `core.privacy.systemprompt.run` rebuilds the run
   and once dropped `vetoedby` and `layererror`, so a request with a `system_prompt` that a veto or a
-  malformed layers config should have refused was forwarded. Both are copied now. Test:
+  malformed layers config should have refused was forwarded. Both are copied now, and so is the
+  organisation policy's `policyerror` (F3b.8; test: `test_org_policy_pipeline.tk`, "a run with a system
+  prompt is refused by the policy too"). Test:
   `tests/unit/audit/test_layer_metrics_audit.tk` ("a veto is not lost when the request carries a system
   prompt: the run is refused").
 - **An unknown consensus strategy is the union** (`most-restrictive`), above.
@@ -490,9 +566,9 @@ request, not that no harm follows. Definitions, and the only figures this projec
   registration interface. A layer is a branch on its id in `core.privacy.layerhealth`; adding one is a
   code change. The sidecar reads its own model list from `packages/privacy-filter/models.json`; loke does
   not.
-- **Organisation-managed layer policies (F3b.8).** `core.privacy.orgpolicy` and
-  `packages/privacy-filter/sample-org-policy.json` exist; nothing reads them on any request path, so no
-  organisation setting overrides `config.toml`.
+- **Organisation policy distribution and display (F3b.8).** The policy is enforced (above), but it is
+  not distributed by the compliance engine (A3), not protected from the user editing it, and not shown
+  on the governance dashboard (G4).
 - **Settings UI** for layers, routing or consensus. They are set in `config.toml` only.
 - **Privacy-layer settings in the policy presets.** The GDPR, HIPAA, Australian Privacy Act and other
   presets in `packages/core/src/policy/presets` set anonymisation rules, blocked entity types and
@@ -534,6 +610,7 @@ config at all:
 | An empty config.toml, and one with settings but no `[[privacy.layers]]`, mask the same values, count and order | `test_layer_config_pipeline.tk` ("an empty config.toml masks exactly the same values", "so does a config.toml with settings but no [[privacy.layers]]") |
 | No routing is byte for byte unchanged (anonymised text, entities with spans and confidences, consensus records) | `test_entity_routing_pipeline.tk` ("an empty config.toml masks byte for byte the same", "and one with no [[privacy.entity_routing]] masks byte for byte what the default does") |
 | A config.toml that does not mention consensus masks what the default does, and the default masks as many entities as the pre-consensus dedup did | `test_consensus_pipeline.tk` ("a config.toml that does not mention consensus masks what the default does", "and it masks as many entities as the pre-consensus pipeline did") |
+| No `loke.policy.json` masks byte for byte what the pipeline masks with no policy at all (F3b.8) | `test_org_policy_pipeline.tk` ("and masks byte for byte what the pipeline masks with no policy at all", "with the file gone, the run masks byte for byte as before") |
 
 These compare against the current pipeline without config, and in one case against the pre-consensus
 dedup rule; no test runs an older loke binary.
@@ -565,7 +642,8 @@ What **does** change for an existing deployment, with no configuration:
    refused config) or one request before relying on it.
 4. **To undo**, delete the entries: with none, the behaviour above returns.
 
-`mcp-broker` and the agent executor do not read any of these settings.
+`mcp-broker` and the agent executor do not read any of these settings. They do apply an organisation
+policy (`loke.policy.json`), which every run reads.
 
 ## Open decisions
 

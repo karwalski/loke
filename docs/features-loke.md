@@ -70,9 +70,9 @@ Set with `privacy.consensus_strategy` in `config.toml`; an empty or unrecognised
 > `[[privacy.entity_routing]]` (`entity_routing.tk`, F3b.5) from `config.toml`, resolves overlaps
 > under `privacy.consensus_strategy` (`consensus.tk`, F3b.4) and records per-layer metrics
 > (`filter_metrics.tk`, F3b.10). `loke privacy evaluate` runs every layer side by side and scores
-> them against a labelled file (`comparison.tk`, `evaluation.tk`, F3b.9). Not wired: `org_policy.tk`
-> (F3b.8) and `template.tk` have no importer, and there is no custom-model registration (F3b.7).
-> `mcp-broker` and the agent executor build the default registry and read none of these settings.
+> them against a labelled file (`comparison.tk`, `evaluation.tk`, F3b.9). An organisation policy, `~/.loke/loke.policy.json` (`org_policy.tk`, F3b.8), is applied over `config.toml` on every run (required and banned layers, a minimum layer count, a most-restrictive consensus floor, a maximum confidence threshold), only ever making privacy stricter; it is not distributed by the compliance engine and the user can delete it.
+> Not wired: `template.tk` has no importer, and there is no custom-model registration (F3b.7).
+> `mcp-broker` and the agent executor build the default registry and read none of the `config.toml` settings, though they do apply the organisation policy.
 > Detail, with the test behind each statement: [privacy-filters.md](privacy-filters.md). Recorded as
 > B1–B10 in [claims.md](claims.md).
 

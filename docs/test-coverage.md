@@ -582,7 +582,9 @@ concurrent rebuild of `/tmp/loke-tests/libloke.a` can fake a crash.
     parsed, so any value becomes the literal `2` and a five-layer policy validates at two — fail-open;
     `enforced` is `str.contains(content;"enforced")`, so `{"enforced": false}` loads as **true**;
     `max_confidence_threshold` is never read; and `validate` ignores both `requiredlayers` and
-    `bannedlayers`, so a configuration running a banned layer reports no violation.
+    `bannedlayers`, so a configuration running a banned layer reports no violation. **Fixed by F3b.8
+    (2026-10-07):** the module was rewritten and is applied by `core.privacy.pipeline.run`; each field
+    is read and enforced (`tests/unit/privacy/test_org_policy.tk`, `test_org_policy_pipeline.tk`).
 24. **`core.privacy.consensus.resolveoverlaps` ignores its strategy argument and resolves nothing.**
     `unanimous`, `majority`, `most-restrictive` and a nonexistent strategy are identical
     pass-throughs, and a single-layer detection survives `unanimous`.

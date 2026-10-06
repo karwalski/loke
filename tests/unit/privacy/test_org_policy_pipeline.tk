@@ -1,0 +1,319 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.orgpolicypipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=log:shared.log;
+i=pl:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=op:core.privacy.orgpolicy;
+i=fm:core.privacy.filtermetrics;
+i=cfg:shared.config;
+i=sh:shared.types;
+(* For $resolvedentity. *)
+i=cn:core.privacy.consensus;
+
+(* F3b.8 — an organisation policy (loke.policy.json) over the user's configuration, judged by
+   what the production pipeline (core.privacy.pipeline.runforward) masks, refuses and records.
+
+   scripts/lib/http_recorder.py stands in for NER (Ollama /api/chat, PERSON at 0.78), Presidio
+   (/analyze, PERSON rated 0.92) and the privacy-filter sidecar (/detect: "Jane Citizen" at
+   0.95 and "Tuesday" at 0.4, applying the threshold it is sent). A loopback port nothing
+   serves (9) is a layer that is down. The regex layer finds the card and the email.
+
+   What is judged:
+     - no policy file: masking byte for byte what the pipeline masks with no policy at all;
+     - required_layers: refused, naming the layer and the policy, when the layer is down, off
+       in config.toml, or detect-only; forwarded when it scans;
+     - minimum_layers: refused when fewer masking layers completed;
+     - banned_layers: never sent text; config.toml enabling it refuses every request;
+     - locked_consensus: a weaker strategy raised, recorded on the run and in the reply's
+       consensus object;
+     - max_confidence_threshold: a higher threshold clamped, so more is masked;
+     - a malformed or unreadable policy refuses even clean text;
+     - THE RULE: under every policy field, a run is either refused or masks at least every
+       value the user's own configuration masks;
+     - the governance alert for each, with no text in loke.log;
+     - the system-prompt path (core.privacy.systemprompt) keeps the refusal. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_orgpolicy_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+(* Regex, NER and Presidio, the model layers at the given URLs; the privacy filter off. *)
+f=three(purl:str;ourl:str):$pipelineconfig{
+  <pl.newconfig(purl;ourl)
+};
+
+f=withtoml(c:$pipelineconfig;text:str):$pipelineconfig{
+  <pl.withlokeconfig(c;cfg.fromtext(text))
+};
+
+f=policy(c:$pipelineconfig;json:str):$pipelineconfig{
+  <pl.withorgpolicy(c;op.fromtext(json))
+};
+
+(* The anonymised text with each entity's placeholder replaced by its type and position. *)
+f=canonical(r:$pipelinerun):str{
+  let out=mut.r.result.anonymised;
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    let mark="<\(e.entitytype)#\(str.fromint(i))>";
+    out=str.replace(out;e.placeholder;mark)
+  };
+  <out
+};
+
+f=conf(x:f64):str{
+  <str.fromint((x*1000.0) as i64)
+};
+
+(* Every entity's type, value, span and confidence, in order, then every consensus record. *)
+f=fingerprint(r:$pipelinerun):str{
+  let out=mut.@();
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    out=out.push("\(e.entitytype)|\(e.value)|\(str.fromint(e.start as i64))|\(str.fromint(e.end as i64))|\(conf(e.confidence))")
+  };
+  lp(let i=0;i<r.resolved.len;i=i+1){
+    let re:$resolvedentity=r.resolved.get(i);
+    out=out.push("\(re.entitytype)|\(re.value)|\(re.detectinglayers)|\(re.action)")
+  };
+  <str.join(";";out)
+};
+
+f=identical(a:$pipelinerun;b:$pipelinerun):bool{
+  <str.eq(canonical(a);canonical(b)) && str.eq(fingerprint(a);fingerprint(b)) && a.totalentities==b.totalentities && pl.issafetoforward(a)==pl.issafetoforward(b) && str.eq(a.consensus;b.consensus)
+};
+
+(* Whether r is refused, or masks every value base masked. *)
+f=noweaker(r:$pipelinerun;base:$pipelinerun):bool{
+  if(!pl.issafetoforward(r)){ <true }el{};
+  let ok=mut.true;
+  lp(let i=0;i<base.result.entities.len;i=i+1){
+    let e:$piientity=base.result.entities.get(i);
+    if(str.contains(r.result.anonymised;e.value)){ ok=false }el{}
+  };
+  <ok
+};
+
+f=writepolicy(body:str):bool{
+  let made=mt file.mkdir(sh.lokedir()) {$ok:v v;$err:e false};
+  <mt file.write(op.policypath();body) {$ok:v v;$err:e false}
+};
+
+f=shell(args:@str):bool{
+  let h=mt process.spawn(args) { $ok:h h; $err:e 0 };
+  if(h==0){ <false }el{};
+  process.wait(h);
+  <true
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let rlog="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";rlog;"\(base).port")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  if(t.assert(rec!=0 && str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  let url="http://127.0.0.1:\(port)";
+  let dead="http://127.0.0.1:9";
+  let logp=log.logpath();
+
+  let text="Jane Citizen paid with 4111111111111111, mail jane@example.com";
+  let name="Jane Citizen";
+  let card="4111111111111111";
+  let email="jane@example.com";
+  let clean="what is the capital of France";
+  let h="organisation policy loke.policy.json";
+  let alertline="governance alert: privacy organisation policy: ";
+
+  (* ── No policy file: byte for byte what the pipeline masks with no policy ────── *)
+  if(t.assert(!file.exists(op.policypath());"there is no loke.policy.json in the test's HOME")){pass=pass+1}el{fail=fail+1};
+  let nopolicy=pl.runforward(text;"";pl.withorgpolicy(three(url;url);op.absent()));
+  let nofile=pl.runforward(text;"";three(url;url));
+  if(t.assert(pl.issafetoforward(nofile) && !str.contains(nofile.result.anonymised;name) && !str.contains(nofile.result.anonymised;card) && !str.contains(nofile.result.anonymised;email);"with no policy file the run masks the name, the card and the email")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(identical(nofile;nopolicy);"and masks byte for byte what the pipeline masks with no policy at all (\(canonical(nofile)))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(nofile.policyerror)==0 && nofile.policynotes.len==0 && str.len(nofile.policyraisedfrom)==0;"and records no policy action")){pass=pass+1}el{fail=fail+1};
+  let ucfg=withtoml(three(url;url);"[privacy]\nconsensus_strategy = \"unanimous\"\n");
+  if(t.assert(identical(pl.runforward(text;"";ucfg);pl.runforward(text;"";pl.withorgpolicy(ucfg;op.absent())));"so does a configuration with a weaker strategy: nothing overrides it")){pass=pass+1}el{fail=fail+1};
+  let offrun=pl.runforward(text;"";policy(ucfg;"{\"locked_consensus\":\"most-restrictive\",\"banned_layers\":[\"presidio\"],\"enforced\":false}"));
+  if(t.assert(identical(offrun;pl.runforward(text;"";ucfg)) && pl.issafetoforward(offrun);"a policy with enforced: false changes nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(identical(pl.runforward(text;"";policy(three(url;url);"{}"));nofile);"and an empty policy masks what no policy masks")){pass=pass+1}el{fail=fail+1};
+
+  (* ── required_layers ─────────────────────────────────────────────────────────── *)
+  let req="{\"required_layers\":[\"presidio\"]}";
+  let up=pl.runforward(text;"";policy(three(url;url);req));
+  if(t.assert(pl.issafetoforward(up) && identical(up;nofile);"a required layer that scans: forwarded, masking what it masked")){pass=pass+1}el{fail=fail+1};
+  let alerts0=countof(readfile(logp);alertline);
+  let downnopolicy=pl.runforward(text;"";pl.withorgpolicy(three(dead;url);op.absent()));
+  if(t.assert(pl.issafetoforward(downnopolicy);"with no policy, Presidio down is only degraded (F3b.6)")){pass=pass+1}el{fail=fail+1};
+  let down=pl.runforward(text;"";policy(three(dead;url);req));
+  if(t.assert(!pl.issafetoforward(down);"a required layer that is down refuses the run")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.refusalreason(down);"\(h) requires the presidio privacy layer, and it did not scan this request: Presidio sidecar unreachable";"naming the layer, the policy and why")){pass=pass+1}el{fail=fail+1};
+  let log1=readfile(logp);
+  if(t.assert(countof(log1;alertline)==alerts0+1 && str.contains(log1;"\(alertline)\(h) requires the presidio privacy layer");"a governance alert is raised for it")){pass=pass+1}el{fail=fail+1};
+  let presoff=withtoml(three(url;url);"[[privacy.layers]]\nid = \"presidio\"\nenabled = false\n");
+  let reqoff=pl.runforward(text;"";pl.withorgpolicy(presoff;op.fromtext(req)));
+  if(t.asserteq(pl.refusalreason(reqoff);"\(h) requires the presidio privacy layer, and this configuration does not enable it";"a required layer config.toml switches off refuses")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(reqoff);"and is not forwarded")){pass=pass+1}el{fail=fail+1};
+  let reqpf=pl.runforward(text;"";policy(three(url;url);"{\"required_layers\":[\"openai-privacy-filter\"]}"));
+  if(t.asserteq(pl.refusalreason(reqpf);"\(h) requires the openai-privacy-filter privacy layer, and this configuration does not enable it";"the privacy filter, off by default, refuses when required")){pass=pass+1}el{fail=fail+1};
+  let nerdo=withtoml(three(url;url);"[[privacy.layers]]\nid = \"ner\"\nmode = \"detect-only\"\n");
+  let reqdo=pl.runforward(text;"";pl.withorgpolicy(nerdo;op.fromtext("{\"required_layers\":[\"ner\"]}")));
+  if(t.asserteq(pl.refusalreason(reqdo);"\(h) requires the ner privacy layer to mask, and this configuration sets it detect-only";"a required layer set detect-only refuses")){pass=pass+1}el{fail=fail+1};
+
+  (* ── minimum_layers ──────────────────────────────────────────────────────────── *)
+  let min3=pl.runforward(text;"";policy(three(url;url);"{\"minimum_layers\":3}"));
+  if(t.assert(pl.issafetoforward(min3) && identical(min3;nofile);"three masking layers meet minimum_layers 3")){pass=pass+1}el{fail=fail+1};
+  let min3down=pl.runforward(text;"";policy(three(dead;url);"{\"minimum_layers\":3}"));
+  if(t.asserteq(pl.refusalreason(min3down);"\(h) requires at least 3 privacy layers to mask each request, and 2 did";"with Presidio down two do not, and the run is refused")){pass=pass+1}el{fail=fail+1};
+  let min3do=pl.runforward(text;"";pl.withorgpolicy(nerdo;op.fromtext("{\"minimum_layers\":3}")));
+  if(t.assert(!pl.issafetoforward(min3do);"a detect-only layer does not count towards the minimum")){pass=pass+1}el{fail=fail+1};
+
+  (* ── banned_layers ───────────────────────────────────────────────────────────── *)
+  let ban="{\"banned_layers\":[\"presidio\"]}";
+  let analysed0=countof(readfile(rlog);"POST /analyze");
+  let banned=pl.runforward(text;"";policy(three(url;url);ban));
+  if(t.asserteq(pl.refusalreason(banned);"\(h) bans the presidio privacy layer, and this configuration enables it (switch it off in config.toml)";"a banned layer the configuration enables refuses the run, naming it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(rlog);"POST /analyze")==analysed0;"and the banned layer was sent nothing")){pass=pass+1}el{fail=fail+1};
+  let reenabled=withtoml(three(url;url);"[[privacy.layers]]\nid = \"presidio\"\nenabled = true\n");
+  let rerun=pl.runforward(text;"";pl.withorgpolicy(reenabled;op.fromtext(ban)));
+  if(t.assert(!pl.issafetoforward(rerun) && countof(readfile(rlog);"POST /analyze")==analysed0;"config.toml cannot re-enable it: still refused, still sent nothing")){pass=pass+1}el{fail=fail+1};
+  let banok=pl.runforward(text;"";pl.withorgpolicy(presoff;op.fromtext(ban)));
+  let presoffrun=pl.runforward(text;"";pl.withorgpolicy(presoff;op.absent()));
+  if(t.assert(pl.issafetoforward(banok) && identical(banok;presoffrun);"with it switched off in config.toml, the run is forwarded and masks what that configuration masks")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(rlog);"POST /analyze")==analysed0;"and Presidio is still sent nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── locked_consensus: the floor ─────────────────────────────────────────────── *)
+  let weak=pl.runforward(text;"";pl.withorgpolicy(ucfg;op.absent()));
+  if(t.assert(str.contains(weak.result.anonymised;name) && str.contains(weak.result.anonymised;email);"unanimous alone leaves the name (2 of 3) and the email (1 of 3) in clear")){pass=pass+1}el{fail=fail+1};
+  let floored=pl.runforward(text;"";policy(ucfg;"{\"locked_consensus\":\"most-restrictive\"}"));
+  if(t.assert(pl.issafetoforward(floored) && !str.contains(floored.result.anonymised;name) && !str.contains(floored.result.anonymised;email) && !str.contains(floored.result.anonymised;card);"the policy raises it to most-restrictive: the name, the card and the email are masked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(floored.consensus;"most-restrictive") && str.eq(floored.policyraisedfrom;"unanimous");"the run records the strategy applied and the one configured")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.join("|";floored.policynotes);"privacy.consensus_strategy unanimous is raised to most-restrictive";"and the override")){pass=pass+1}el{fail=fail+1};
+  let reply=fm.summaryjsonwith(floored.layermetrics;floored.consensus;floored.policyraisedfrom;floored.vetoedby;floored.resolved;floored.voters;floored.routingnotes);
+  if(t.assert(str.contains(reply;"\"consensus\":{\"strategy\":\"most-restrictive\",\"configured_strategy\":\"unanimous\",\"raised_by\":\"organisation policy\",");"the reply's consensus object shows the override")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.policyjson(floored);",\"org_policy_overrides\":[\"privacy.consensus_strategy unanimous is raised to most-restrictive\"]";"and the reply lists it")){pass=pass+1}el{fail=fail+1};
+  let log2=readfile(logp);
+  if(t.assert(str.contains(log2;"\(alertline)\(h) overrode this configuration: privacy.consensus_strategy unanimous is raised to most-restrictive");"a governance alert is raised for the override")){pass=pass+1}el{fail=fail+1};
+  let plain=fm.summaryjsonwith(nofile.layermetrics;nofile.consensus;nofile.policyraisedfrom;nofile.vetoedby;nofile.resolved;nofile.voters;nofile.routingnotes);
+  if(t.assert(str.eq(plain;fm.summaryjson(nofile.layermetrics;nofile.consensus;nofile.vetoedby;nofile.resolved;nofile.voters;nofile.routingnotes)) && str.len(pl.policyjson(nofile))==0;"with no policy the reply's fields are unchanged")){pass=pass+1}el{fail=fail+1};
+  let atfloor=pl.runforward(text;"";policy(three(url;url);"{\"locked_consensus\":\"most-restrictive\"}"));
+  if(t.assert(identical(atfloor;nofile) && atfloor.policynotes.len==0;"a configuration already at the floor is not overridden")){pass=pass+1}el{fail=fail+1};
+
+  (* ── max_confidence_threshold: clamped ───────────────────────────────────────── *)
+  let high=withtoml(three(url;url);"[[privacy.layers]]\nid = \"presidio\"\nconfidence_threshold = 0.95\n\n[[privacy.layers]]\nid = \"ner\"\nconfidence_threshold = 0.95\n");
+  let highrun=pl.runforward(text;"";pl.withorgpolicy(high;op.absent()));
+  if(t.assert(str.contains(highrun.result.anonymised;name);"with NER and Presidio at threshold 0.95, the name is not masked")){pass=pass+1}el{fail=fail+1};
+  let clamped=pl.runforward(text;"";pl.withorgpolicy(high;op.fromtext("{\"max_confidence_threshold\":0.9}")));
+  if(t.assert(pl.issafetoforward(clamped) && !str.contains(clamped.result.anonymised;name);"max_confidence_threshold 0.9 clamps Presidio's threshold, so its 0.92 detection masks the name")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.join("|";clamped.policynotes);"the ner layer's confidence_threshold is lowered to 0.9|the presidio layer's confidence_threshold is lowered to 0.9";"each clamp is noted")){pass=pass+1}el{fail=fail+1};
+  let tue="Jane Citizen called Tuesday";
+  let pfonly=pl.withlayer(pl.withlayer(pl.withprivacyfilter(three(url;url);true;url;"0.99");"ner";false);"presidio";false);
+  let pfhigh=pl.runforward(tue;"";pl.withorgpolicy(pfonly;op.absent()));
+  if(t.assert(str.contains(pfhigh.result.anonymised;name);"the privacy filter asked at 0.99 does not report the name (0.95)")){pass=pass+1}el{fail=fail+1};
+  let pfclamped=pl.runforward(tue;"";pl.withorgpolicy(pfonly;op.fromtext("{\"max_confidence_threshold\":0.9}")));
+  if(t.assert(!str.contains(pfclamped.result.anonymised;name) && str.contains(readfile(rlog);"\"threshold\":0.9}");"clamped, it is asked at 0.9 and the name is masked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Malformed and unreadable policies refuse even clean text ────────────────── *)
+  let malformed=pl.runforward(clean;"";policy(three(url;url);"{\"minimum_layers\":\"two\"}"));
+  if(t.assert(!pl.issafetoforward(malformed);"a malformed policy refuses a request with no PII")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.refusalreason(malformed);"\(h) cannot be applied: minimum_layers must be a whole number from 0 to 4";"naming the fault")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writepolicy("{\"required_layers\":[\"presidio\"]}");"a policy is written to the test's loke directory")){pass=pass+1}el{fail=fail+1};
+  let disk=pl.runforward(text;"";three(dead;url));
+  if(t.assert(str.startswith(pl.refusalreason(disk);"\(h) requires the presidio privacy layer");"the pipeline reads it at run time, with no config change")){pass=pass+1}el{fail=fail+1};
+  let viaconfig=pl.runforward(text;"";pl.configured(dead;url));
+  if(t.assert(!pl.issafetoforward(viaconfig);"and so does a config built from config.toml (pl.configured)")){pass=pass+1}el{fail=fail+1};
+  writepolicy("not json");
+  let notjson=pl.runforward(clean;"";three(url;url));
+  if(t.asserteq(pl.refusalreason(notjson);"\(h) cannot be applied: it is not a JSON object";"a policy file that is not JSON refuses every request")){pass=pass+1}el{fail=fail+1};
+  writepolicy("{}");
+  shell(@("chmod";"000";op.policypath()));
+  let unreadable=pl.runforward(clean;"";three(url;url));
+  if(t.asserteq(pl.refusalreason(unreadable);"\(h) cannot be applied: the file cannot be read";"one that cannot be read refuses too")){pass=pass+1}el{fail=fail+1};
+  shell(@("chmod";"600";op.policypath()));
+  file.delete(op.policypath());
+  if(t.assert(identical(pl.runforward(text;"";three(url;url));nofile);"with the file gone, the run masks byte for byte as before")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The system prompt path keeps the refusal ──────────────────────────────────── *)
+  let sprun=sp.runforward(text;"You are terse.";policy(three(dead;url);req));
+  if(t.assert(!pl.issafetoforward(sprun) && str.startswith(pl.refusalreason(sprun);"\(h) requires the presidio");"a run with a system prompt is refused by the policy too")){pass=pass+1}el{fail=fail+1};
+
+  (* ── THE RULE: no policy field masks less than the user's own configuration ──── *)
+  let policies=@(
+    "{\"minimum_layers\":0}";
+    "{\"minimum_layers\":2}";
+    "{\"required_layers\":[\"regex\"]}";
+    "{\"required_layers\":[\"ner\",\"presidio\"]}";
+    "{\"banned_layers\":[\"ner\"]}";
+    "{\"banned_layers\":[\"openai-privacy-filter\"]}";
+    "{\"locked_consensus\":\"most-restrictive\"}";
+    "{\"max_confidence_threshold\":0}";
+    "{\"max_confidence_threshold\":0.5}";
+    "{\"max_confidence_threshold\":1}";
+    "{\"minimum_layers\":2,\"required_layers\":[\"presidio\"],\"locked_consensus\":\"most-restrictive\",\"banned_layers\":[\"openai-privacy-filter\"],\"max_confidence_threshold\":0.95}"
+  );
+  let users=@(
+    "";
+    "[privacy]\nconsensus_strategy = \"unanimous\"\n";
+    "[privacy]\nconsensus_strategy = \"confidence-weighted\"\nconsensus_threshold = 0.99\n";
+    "[[privacy.layers]]\nid = \"presidio\"\nconfidence_threshold = 0.95\n";
+    "[[privacy.layers]]\nid = \"ner\"\nenabled = false\n"
+  );
+  let weaker=mut.0;
+  let detail=mut."";
+  lp(let u=0;u<users.len;u=u+1){
+    let uc=withtoml(three(url;url);users.get(u));
+    let userbase=pl.runforward(text;"";pl.withorgpolicy(uc;op.absent()));
+    lp(let k=0;k<policies.len;k=k+1){
+      let r=pl.runforward(text;"";pl.withorgpolicy(uc;op.fromtext(policies.get(k))));
+      if(!noweaker(r;userbase)){
+        weaker=weaker+1;
+        detail="\(detail) [user \(str.fromint(u)), policy \(policies.get(k))]"
+      }el{}
+    }
+  };
+  if(t.assert(weaker==0;"under every policy field and five user configurations, each run is refused or masks every value the user's configuration masks\(detail)")){pass=pass+1}el{fail=fail+1};
+
+  let logall=readfile(logp);
+  if(t.assert(!str.contains(logall;name) && !str.contains(logall;card) && !str.contains(logall;email);"loke.log holds nothing of the text")){pass=pass+1}el{fail=fail+1};
+
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(rlog);
+  file.delete("\(rlog).headers");
+  file.delete("\(rlog).bodies");
+  file.delete("\(base).port");
+  <fail
+};
