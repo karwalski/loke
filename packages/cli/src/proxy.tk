@@ -16,6 +16,8 @@ i=ptypes:core.providers.types;
 i=router:core.router.router;
 i=disp:core.providers.dispatcher;
 i=cfg:shared.config;
+i=ks:core.governance.killswitch;
+i=sdb:core.storage.db;
 i=str:std.str;
 
 t=$proxyconfig{
@@ -105,8 +107,27 @@ f=parseopts(args:@str):$proxyconfig{
    Restoration is core.privacy.placeholder.restore over a map built from the entities
    the filter found — this call site and mcpbroker.proxy are the only two in the
    repository, and both were in never-compiled trees. *)
-f=handlerequest(reqbody:str;cfg:$proxyconfig;pipecfg:$pipelineconfig):str{
+f=handlerequest(reqbody:str;cfg:$proxyconfig;pipecfg:$pipelineconfig;store:i64):str{
+  <handlerequestwith(reqbody;cfg;pipecfg;store;disp.new(disp.getapikeys();""))
+};
+
+(* G1.6. The kill switch is asked first, before the request is read or scanned, as the
+   browser path asks it: the global switch, the target's provider and the "cli-proxy" use
+   case each refuse, and so does a store of 0 (ks.isblocked fails closed). `d` is the
+   dispatcher, a recorder's in tests. *)
+f=refusedbyswitch(store:i64;provider:str):str{
+  let why=ks.refusalmessage(store;provider;"cli-proxy");
+  <"{\"error\":\"kill_switch\",\"message\":\(jx.escape(why))}"
+};
+
+f=handlerequestwith(reqbody:str;cfg:$proxyconfig;pipecfg:$pipelineconfig;store:i64;d:$dispatcher):str{
   let cid=log.newcorrelationid();
+  let provider:$provider=router.providerfromstr(cfg.targettool);
+  let pname=router.providerstr(provider);
+  if(ks.isblocked(store;pname;"cli-proxy")){
+    log.warn("proxy: refused by the kill switch, nothing sent";"proxy";cid);
+    <refusedbyswitch(store;pname)
+  }el{};
   let parsed=mt json.dec(reqbody) {
     $ok:j j;
     $jsonerr:e jx.emptyobj()
@@ -150,12 +171,10 @@ f=handlerequest(reqbody:str;cfg:$proxyconfig;pipecfg:$pipelineconfig):str{
     temperature:0.0;
     stream:false
   };
-  let keys=disp.getapikeys();
-  let provider:$provider=router.providerfromstr(cfg.targettool);
   (* LS1.1j — trydispatch and isdispatched. The old `mt disp.dispatch(...)` could not see a
      failure (T-18): its $ok arm ran on a failed dispatch and read .content off the error
      payload, which segfaults. *)
-  let response=disp.trydispatch(disp.new(keys;"");request;provider);
+  let response=disp.trydispatch(d;request;provider);
   if(disp.isdispatched(response)){}el{
     log.error("proxy: dispatch failed — \(disp.dispatcherror(response))";"proxy";cid);
     <"{\"error\":\"upstream failure\"}"
@@ -224,6 +243,8 @@ f=start(cfg:$proxyconfig;lokecfg:$lokeconfig):i64{
   );
 
   let pipecfg=pipe.withlokeconfig(pipe.newconfig(lokecfg.presidiourl;lokecfg.ollamaurl);lokecfg);
+  (* G1.6. The store the kill switch is read from, once; 0 refuses every request. *)
+  let store=mt sdb.openstore(lokecfg.datadir) { $ok:st 1; $err:e 0 };
 
   (* F10.39: std.net.listen takes an address string, "host:port". Handed the port as an
      integer it segfaulted at toke 0b0bc4e (T-49), and toke 3.1.0 rejects it (E4031). The
@@ -247,7 +268,7 @@ f=start(cfg:$proxyconfig;lokecfg:$lokeconfig):i64{
     if(conn>0){
       let reqbody=net.read(conn);
       if(str.len(reqbody)>0){
-        let response=handlerequest(reqbody;cfg;pipecfg);
+        let response=handlerequest(reqbody;cfg;pipecfg;store);
         net.write(conn;response);
         intercepted=intercepted+1
       }el{};

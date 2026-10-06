@@ -1,0 +1,289 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.killswitchpaths;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=process:std.process;
+i=jx:shared.jsonobj;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=ks:core.governance.killswitch;
+i=rtr:core.router.router;
+i=fb:core.router.fallback;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+i=nd:core.nocustody.dispatch;
+i=px:cli.proxy;
+i=h:page.api.pipeline;
+
+(* G1.6 — `loke kill-switch on` stops every call a model is asked to answer, on every path that
+   makes one, and fails closed.
+
+   The paths, each driven through its production module with scripts/lib/http_recorder.py
+   standing in for Ollama on a loopback port (nothing here can reach a provider: every hop is
+   local, and the one cloud provider a mutant could reach has no client):
+     1. loke ask           core.router.fallback.dispatchchain, use case "cli-ask"
+     2. the CLI proxy      cli.proxy.handlerequestwith, use case "cli-proxy"
+     3. no-custody         core.nocustody.dispatch.attempt, use case "no-custody"
+     4. the browser path   page.api.pipeline.walkchainat, per hop, use case "browser-chat"
+   For each: with the switch released the stand-in receives the request (the control), and
+   with the global switch, the provider's switch or the path's use-case switch engaged it
+   receives NOTHING. Then with no store, and with a settings table that cannot be read, each
+   path refuses: an unreadable switch is an engaged one.
+
+   What is judged is what ARRIVED at the stand-in (the count of POSTs in its log), and the
+   refusal each path answers with. *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(hd==0){}el{ process.wait(hd); };
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=openfreshstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-kill-switch-paths");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=hop(id:str;p:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:p;
+      contextwindow:8000 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"hand-built hop";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=chainof(hops:@$routingdecision;sens:$sensitivitylevel):$fallbackchain{
+  <$fallbackchain{chainhops:hops;chainsens:sens;chainnote:""}
+};
+
+f=request():$completionrequest{
+  <$completionrequest{
+    modelid:"";
+    messages:@(pt.usermsg("an anonymised prompt"));
+    systemprompt:"";
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=nokeys():$apikeys{
+  <$apikeys{anthropic:"";openai:""}
+};
+
+f=allow():$policydecision{
+  <$policydecision{$allow:""}
+};
+
+(* Every POST the stand-in has received. *)
+f=posts(logp:str):i64{
+  let lines=str.split(readfile(logp);"\n");
+  let n=mut.0;
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;"POST ")){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=hidesettings():bool{
+  <mt db.exec("ALTER TABLE settings RENAME TO settings_away";@()) { $ok:v true; $err:e false }
+};
+
+f=restoresettings():bool{
+  <mt db.exec("ALTER TABLE settings_away RENAME TO settings";@()) { $ok:v true; $err:e false }
+};
+
+(* The no-custody request: a dataset, its profile, and a question about it. *)
+f=ncrequest():str{
+  let profile="DATASET: accounts | ROWS: 2 | COLS: 2\nCOLS: customer(text,nulls=0%,distinct=2,unique) region(text,nulls=0%,distinct=2,low)";
+  <"{\"dataset_name\":\"accounts\",\"headers\":[\"customer\",\"region\"],\"rows\":[[\"Harriet Oyelaran\",\"north\"],[\"Bartholomew Quist\",\"south\"]],\"profile\":\(jx.escape(profile))}"
+};
+
+f=ncquestion():str{
+  <"DATASET: accounts | ROWS: 2 | COLS: 2\n\nWhich region has the most customers?"
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let pub=$sensitivitylevel{$public:0};
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let hex:str=str.randhex(8);
+  let ob="/tmp/loke_ksp_ollama_\(hex)";
+  file.delete("\(ob).log");
+  file.delete("\(ob).port");
+  let rec=mt process.spawn(@("env";"RECORDER_MODELS=fake:latest";"python3";"scripts/lib/http_recorder.py";"\(ob).log";"\(ob).port";"echo")) { $ok:h h; $err:e 0 };
+  let oport=waitport("\(ob).port");
+  if(t.assert(rec!=0 && str.len(oport)>0;"the Ollama stand-in came up")){pass=pass+1}el{fail=fail+1};
+  let obase="http://127.0.0.1:\(oport)";
+  let logp="\(ob).log";
+  let live=disp.new(nokeys();obase);
+  let cfg=rtr.newconfig(deadurl());
+  let chain=chainof(@(hop("fake:latest";$provider{$ollama:0}));pub);
+
+  (* ── 1. loke ask: core.router.fallback.dispatchchain ─────────────────────────────── *)
+  let a0=posts(logp);
+  let actl=fb.dispatchchain(store;"cli-ask";live;chain;cfg;request();"";"ks-ask-ctl");
+  if(t.assert(fb.answered(actl) && posts(logp)==a0+1;"CONTROL: with no switch engaged, loke ask's hop reaches the stand-in and is answered")){pass=pass+1}el{fail=fail+1};
+
+  ks.engage(store;"G1.6 test";0 as i32);
+  let a1=posts(logp);
+  let aglob=fb.dispatchchain(store;"cli-ask";live;chain;cfg;request();"";"ks-ask-global");
+  if(t.assert(posts(logp)==a1 && aglob.chainattempted.len==0;"LOKE ASK SENDS NOTHING WITH THE GLOBAL KILL SWITCH ON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!fb.answered(aglob) && str.contains(aglob.chainfailures;"kill switch");"and it fails, saying the kill switch refused it")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+
+  ks.engageprovider(store;"ollama";"G1.6 test");
+  let a2=posts(logp);
+  let aprov=fb.dispatchchain(store;"cli-ask";live;chain;cfg;request();"";"ks-ask-prov");
+  if(t.assert(posts(logp)==a2 && !fb.answered(aprov);"loke ask sends nothing to a provider switched off")){pass=pass+1}el{fail=fail+1};
+  ks.releaseprovider(store;"ollama");
+
+  if(t.assert(ks.engageusecase(store;"cli-ask";"G1.6 test");"cli-ask is a use case the switch accepts")){pass=pass+1}el{fail=fail+1};
+  let a3=posts(logp);
+  let ause=fb.dispatchchain(store;"cli-ask";live;chain;cfg;request();"";"ks-ask-use");
+  if(t.assert(posts(logp)==a3 && !fb.answered(ause);"nor with the cli-ask use case switched off")){pass=pass+1}el{fail=fail+1};
+  let aother=fb.dispatchchain(store;"cli-proxy";live;chain;cfg;request();"";"ks-ask-other");
+  if(t.assert(fb.answered(aother) && posts(logp)==a3+1;"CONTROL: another use case is not refused by that switch")){pass=pass+1}el{fail=fail+1};
+  ks.releaseusecase(store;"cli-ask");
+
+  let a4=posts(logp);
+  let anostore=fb.dispatchchain(0;"cli-ask";live;chain;cfg;request();"";"ks-ask-nostore");
+  if(t.assert(posts(logp)==a4 && !fb.answered(anostore);"with no store loke ask sends nothing: an unreadable switch is engaged")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 2. The CLI proxy: cli.proxy.handlerequestwith ─────────────────────────────── *)
+  let pcfg=px.defaultconfig("ollama");
+  let body="{\"prompt\":\"Summarise the notes from the Thursday planning meeting.\"}";
+  let p0=posts(logp);
+  let pctl=px.handlerequestwith(body;pcfg;localonly();store;live);
+  if(t.assert(posts(logp)==p0+1 && !str.contains(pctl;"kill_switch");"CONTROL: with no switch engaged, the proxy forwards to the stand-in")){pass=pass+1}el{fail=fail+1};
+
+  ks.engage(store;"G1.6 test";0 as i32);
+  let p1=posts(logp);
+  let pglob=px.handlerequestwith(body;pcfg;localonly();store;live);
+  if(t.assert(posts(logp)==p1;"THE PROXY SENDS NOTHING WITH THE GLOBAL KILL SWITCH ON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pglob;"\"error\":\"kill_switch\"") && str.contains(pglob;"loke kill-switch off");"and answers a kill-switch refusal saying how to release it")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+
+  ks.engageprovider(store;"ollama";"G1.6 test");
+  let p2=posts(logp);
+  px.handlerequestwith(body;pcfg;localonly();store;live);
+  if(t.assert(posts(logp)==p2;"the proxy sends nothing to a provider switched off")){pass=pass+1}el{fail=fail+1};
+  ks.releaseprovider(store;"ollama");
+
+  ks.engageusecase(store;"cli-proxy";"G1.6 test");
+  let p3=posts(logp);
+  px.handlerequestwith(body;pcfg;localonly();store;live);
+  if(t.assert(posts(logp)==p3;"nor with the cli-proxy use case switched off")){pass=pass+1}el{fail=fail+1};
+  ks.releaseusecase(store;"cli-proxy");
+
+  let p4=posts(logp);
+  let pnostore=px.handlerequestwith(body;pcfg;localonly();0;live);
+  if(t.assert(posts(logp)==p4 && str.contains(pnostore;"kill_switch");"with no store the proxy sends nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. No-custody: core.nocustody.dispatch.attempt ───────────────────────────── *)
+  let n0=posts(logp);
+  let nctl=nd.attempt(ncrequest();ncquestion();"";store;obase;"ks-nc-ctl";"rid-nc-ctl";"sess-ks");
+  if(t.assert(nd.dispatched(nctl) && posts(logp)==n0+1;"CONTROL: with no switch engaged, the no-custody dispatch reaches the stand-in")){pass=pass+1}el{fail=fail+1};
+
+  ks.engage(store;"G1.6 test";0 as i32);
+  let n1=posts(logp);
+  let nglob=nd.attempt(ncrequest();ncquestion();"";store;obase;"ks-nc-global";"rid-nc-global";"sess-ks");
+  if(t.assert(posts(logp)==n1 && str.eq(nd.refusalof(nglob);"provider_blocked") && nd.statusof(nglob)==403;"THE NO-CUSTODY DISPATCH SENDS NOTHING WITH THE GLOBAL KILL SWITCH ON, and refuses with 403")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+
+  if(t.assert(ks.engageusecase(store;"no-custody";"G1.6 test");"no-custody is a use case the switch accepts")){pass=pass+1}el{fail=fail+1};
+  let n2=posts(logp);
+  let nuse=nd.attempt(ncrequest();ncquestion();"";store;obase;"ks-nc-use";"rid-nc-use";"sess-ks");
+  if(t.assert(posts(logp)==n2 && str.eq(nd.refusalof(nuse);"provider_blocked");"nor with the no-custody use case switched off")){pass=pass+1}el{fail=fail+1};
+  ks.releaseusecase(store;"no-custody");
+
+  (* ── 4. The browser path, every hop: page.api.pipeline.walkchainat ─────────────── *)
+  let bcfg=rtr.configfromsettings(store;deadurl());
+  let bchain=chainof(@(hop("fake";$provider{$ollama:0}));pub);
+  let run0=sp.runforward("Summarise the notes from the Thursday planning meeting.";"";localonly());
+  let b0=posts(logp);
+  let bctl=h.walkchainat(store;run0;bchain;bcfg;h.privacyfields(run0);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;deadurl();"");
+  if(t.assert(str.startswith(bctl;"200") && posts(logp)>b0;"CONTROL: with no switch engaged, the browser hop reaches the stand-in")){pass=pass+1}el{fail=fail+1};
+
+  ks.engage(store;"G1.6 test";0 as i32);
+  let b1=posts(logp);
+  let run1=sp.runforward("Summarise the notes from the Thursday planning meeting.";"";localonly());
+  let bglob=h.walkchainat(store;run1;bchain;bcfg;h.privacyfields(run1);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;deadurl();"");
+  if(t.assert(posts(logp)==b1 && str.startswith(bglob;"403");"A BROWSER HOP SENDS NOTHING WITH THE GLOBAL KILL SWITCH ON, and the reply is 403")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.killswitchengaged(store);"and post()'s own guard, ahead of the scan, reads it engaged")){pass=pass+1}el{fail=fail+1};
+  ks.release(store);
+
+  (* ── 5. A settings table that cannot be read is an engaged switch, on every path ─── *)
+  if(t.assert(hidesettings();"the settings table is renamed away, so every read of a switch fails")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ks.globalblocked(store) && ks.isblocked(store;"ollama";"cli-ask");"AN UNREADABLE GLOBAL FLAG BLOCKS, where isengaged reads it as off")){pass=pass+1}el{fail=fail+1};
+  let u0=posts(logp);
+  let uask=fb.dispatchchain(store;"cli-ask";live;chain;cfg;request();"";"ks-ask-unread");
+  px.handlerequestwith(body;pcfg;localonly();store;live);
+  let unc=nd.attempt(ncrequest();ncquestion();"";store;obase;"ks-nc-unread";"rid-nc-unread";"sess-ks");
+  let run2=sp.runforward("Summarise the notes from the Thursday planning meeting.";"";localonly());
+  let ubr=h.walkchainat(store;run2;bchain;bcfg;h.privacyfields(run2);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;deadurl();"");
+  if(t.assert(posts(logp)==u0;"WITH THE SWITCH UNREADABLE, NO PATH SENDS ANYTHING: loke ask, the proxy, no-custody and the browser hop")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!fb.answered(uask) && !nd.dispatched(unc) && str.startswith(ubr;"403") && h.killswitchengaged(store);"and each refuses")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(restoresettings();"the settings table is restored")){pass=pass+1}el{fail=fail+1};
+  let u1=posts(logp);
+  let uback=fb.dispatchchain(store;"cli-ask";live;chain;cfg;request();"";"ks-ask-back");
+  if(t.assert(fb.answered(uback) && posts(logp)==u1+1;"CONTROL: readable and released, loke ask is answered again")){pass=pass+1}el{fail=fail+1};
+
+  if(rec==0){}el{ process.kill(rec); process.wait(rec); };
+  file.delete(logp);
+  file.delete("\(logp).headers");
+  file.delete("\(logp).bodies");
+  file.delete("\(ob).port");
+  <fail
+};

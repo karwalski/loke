@@ -1,0 +1,284 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.degradelocal;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=rtr:core.router.router;
+i=fb:core.router.fallback;
+i=dg:core.router.degraded;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+i=h:page.api.pipeline;
+
+(* RG1.8 — a request routed to a cloud provider that fails is answered by a local model, the
+   reply says it was degraded, and the provider's disruption is recorded on entry and exit.
+
+   The chain is the PRODUCTION one: core.router.router.routechainpreferinstalled, as
+   page.api.pipeline.forward builds it, with the browser path's own configuration (prefer_local
+   on, fallback_to_cloud off, local-first). A code-review request at the instant tolerance has
+   no local model fast enough (qwen2.5:72b is the only local code reviewer, at 8 tok/s), so
+   its first choice is a cloud model; the degrade hop is the installed local model.
+
+   Stand-ins (scripts/lib/http_recorder.py, loopback): an Ollama with qwen2.5:72b installed
+   that echoes its prompt, an Anthropic that answers, and one that answers nothing. The second
+   cloud hop is OpenAI, which this path has no client for, so it is refused in-process and
+   nothing leaves the machine. The key is not a key.
+
+   Asserted: (1) the chain degrades to an INSTALLED local model and only as its last hop;
+   (2) when the cloud hops fail, the local hop answers and the reply carries "degraded"; (3)
+   entry is recorded once per disruption and exit when the provider answers again, with its
+   duration; (4) a local first choice is never "degraded"; (5) the same through loke ask's
+   dispatcher; (6) what the approval rule (GA5.26, F5.3a) does to a degrade hop, measured. *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(hd==0){}el{ process.wait(hd); };
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=openfreshstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-degrade-local");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=fakekey():str{
+  <"sk-ant-not-a-real-key-000000"
+};
+
+f=allow():$policydecision{
+  <$policydecision{$allow:""}
+};
+
+f=reviewtext():str{
+  <"Please review this code for bugs: def add(a, b): return a - b"
+};
+
+f=hop(id:str;p:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:p;
+      contextwindow:8000 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"hand-built hop";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=chainof(hops:@$routingdecision;sens:$sensitivitylevel):$fallbackchain{
+  <$fallbackchain{chainhops:hops;chainsens:sens;chainnote:""}
+};
+
+f=request():$completionrequest{
+  <$completionrequest{
+    modelid:"";
+    messages:@(pt.usermsg("an anonymised prompt"));
+    systemprompt:"";
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=label(c:$fallbackchain;i:i64):str{
+  if(i>=0 && i<(c.chainhops.len as i64)){}el{ <"" };
+  <rtr.hoplabel(c.chainhops.get(i))
+};
+
+f=locals(c:$fallbackchain):i64{
+  let n=mut.0;
+  lp(let i=0;i<c.chainhops.len;i=i+1){
+    if(rtr.isclouddecision(c.chainhops.get(i))){}el{ n=n+1 }
+  };
+  <n
+};
+
+f=anycloud(c:$fallbackchain):bool{
+  let found=mut.false;
+  lp(let i=0;i<c.chainhops.len;i=i+1){
+    if(rtr.isclouddecision(c.chainhops.get(i))){ found=true }el{}
+  };
+  <found
+};
+
+f=lines(logp:str;prefix:str):i64{
+  let ls=str.split(readfile(logp);"\n");
+  let n=mut.0;
+  lp(let i=0;i<ls.len;i=i+1){
+    let ln:str=ls.get(i);
+    if(str.startswith(ln;prefix)){ n=n+1 }el{}
+  };
+  <n
+};
+
+f=rows(ev:str;provider:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE event_type=? AND provider=?";@(ev;provider);"n";0-1)
+};
+
+f=lastduration(ev:str;provider:str):i64{
+  <sdb.scalari64("SELECT duration_ms AS n FROM audit_log WHERE event_type=? AND provider=? ORDER BY id DESC LIMIT 1";@(ev;provider);"n";0-1)
+};
+
+f=startrec(base:str;models:str;mode:str):i64{
+  file.delete("\(base).log");
+  file.delete("\(base).port");
+  let env="RECORDER_MODELS=\(models)";
+  <mt process.spawn(@("env";env;"python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port";mode)) { $ok:h h; $err:e 0 }
+};
+
+f=stoprec(rec:i64;base:str):i64{
+  if(rec==0){}el{ process.kill(rec); process.wait(rec); };
+  file.delete("\(base).log");
+  file.delete("\(base).log.headers");
+  file.delete("\(base).log.bodies");
+  file.delete("\(base).port");
+  <0
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let pub=$sensitivitylevel{$public:0};
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let hex:str=str.randhex(8);
+  let ob="/tmp/loke_dg_ollama_\(hex)";
+  let ab="/tmp/loke_dg_anthropic_\(hex)";
+  let sb="/tmp/loke_dg_silent_\(hex)";
+  let orec=startrec(ob;"qwen2.5:72b";"echo");
+  let arec=startrec(ab;"";"answer");
+  let srec=startrec(sb;"";"silent");
+  let oport=waitport("\(ob).port");
+  let aport=waitport("\(ab).port");
+  let sport=waitport("\(sb).port");
+  if(t.assert(str.len(oport)>0 && str.len(aport)>0 && str.len(sport)>0;"the three stand-ins came up")){pass=pass+1}el{fail=fail+1};
+  let obase="http://127.0.0.1:\(oport)";
+  let aurl="http://127.0.0.1:\(aport)/v1/messages";
+  let surl="http://127.0.0.1:\(sport)/v1/messages";
+  let ologp="\(ob).log";
+  let alogp="\(ab).log";
+  let slogp="\(sb).log";
+
+  (* ── 1. The production chain degrades to an installed local model, last ─────────── *)
+  let browsercfg=rtr.configfromsettings(store;deadurl());
+  if(t.assert(browsercfg.preferlocal && !browsercfg.fallbacktocloud;"the browser path's configuration: prefer_local on, fallback_to_cloud off")){pass=pass+1}el{fail=fail+1};
+  let router=rtr.new(browsercfg);
+  let chain=rtr.routechainpreferinstalled(router;@("qwen2.5:72b");reviewtext();pub;0 as u32;$latencytolerance{$instant:0};"dg-chain";h.maxhops());
+  let n=chain.chainhops.len as i64;
+  if(t.assert(n>=2 && rtr.isclouddecision(chain.chainhops.get(0));"a code review at instant tolerance is first routed to a cloud model (got \(label(chain;0)))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(label(chain;n-1);"ollama:qwen2.5:72b";"A CLOUD-FIRST CHAIN ENDS WITH THE LOCAL MODEL IT DEGRADES TO, the installed one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(locals(chain)==1;"and that is its only local hop: the cloud hops are tried first")){pass=pass+1}el{fail=fail+1};
+  let nodeg=rtr.routechainpreferinstalled(router;@("gemma3:4b");reviewtext();pub;0 as u32;$latencytolerance{$instant:0};"dg-chain-none";h.maxhops());
+  if(t.assert(nodeg.chainhops.len>0 && locals(nodeg)==0;"CONTROL: with no installed local model that reviews code there is no degrade hop, rather than one Ollama does not have")){pass=pass+1}el{fail=fail+1};
+  let full=rtr.routechain(router;reviewtext();pub;0 as u32;$latencytolerance{$instant:0};"dg-chain-full";h.maxhops());
+  if(t.asserteq(label(full;(full.chainhops.len as i64)-1);"ollama:qwen2.5:72b";"routechain itself, on the full catalogue, ends with the same degrade hop")){pass=pass+1}el{fail=fail+1};
+  let localfirst=rtr.routechain(router;"Write a haiku about the sea";pub;0 as u32;$latencytolerance{$instant:0};"dg-chain-local";h.maxhops());
+  if(t.assert(!rtr.isclouddecision(localfirst.chainhops.get(0)) && !anycloud(localfirst);"CONTROL: a local first choice gets no extra hop, and no cloud one")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 2. The cloud hops fail; the local hop answers; the reply says so ───────────── *)
+  let run1=sp.runforward(reviewtext();"";localonly());
+  let s0=lines(slogp;"POST /v1/messages");
+  let o0=lines(ologp;"POST /api/generate");
+  let r1=h.walkchainat(store;run1;chain;browsercfg;h.privacyfields(run1);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;surl;fakekey());
+  if(t.assert(lines(slogp;"POST /v1/messages")==s0+1;"the cloud first choice was sent, to the stand-in that answers nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lines(ologp;"POST /api/generate")==o0+1 && str.contains(readfile(ologp);"qwen2.5:72b");"and the local degrade hop was sent to the installed model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(r1;"200") && str.contains(r1;"\"answered_by\":\"ollama:qwen2.5:72b\"");"WHEN THE CLOUD PROVIDER FAILS, THE LOCAL MODEL ANSWERS (got \(str.slice(r1;0;3)))")){pass=pass+1}el{fail=fail+1};
+  let from1=label(chain;0);
+  if(t.assert(str.contains(r1;"\"degraded\":true") && str.contains(r1;"\"degraded_from\":\"\(from1)\"");"THE REPLY IS MARKED DEGRADED, naming the provider that failed")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(r1;"def add(a, b)");"the answer is the local model's (the stand-in echoes its prompt)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("degraded_mode_entered";"anthropic")==1 && dg.since(store;"anthropic")>0;"ENTRY INTO DEGRADED MODE IS RECORDED, with the time it began")){pass=pass+1}el{fail=fail+1};
+
+  let run2=sp.runforward(reviewtext();"";localonly());
+  let r2=h.walkchainat(store;run2;chain;browsercfg;h.privacyfields(run2);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;surl;fakekey());
+  if(t.assert(str.contains(r2;"\"degraded\":true") && rows("degraded_mode_entered";"anthropic")==1;"a second degraded answer is marked, and is the same disruption: no second entry row")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. The provider answers again: exit is recorded with the disruption's length ── *)
+  let a0=lines(alogp;"POST /v1/messages");
+  let run3=sp.runforward(reviewtext();"";localonly());
+  let r3=h.walkchainat(store;run3;chain;browsercfg;h.privacyfields(run3);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(lines(alogp;"POST /v1/messages")==a0+1 && str.contains(r3;"\"answered_by\":\"\(from1)\"");"the provider answers again")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(r3;"\"degraded\"");"and that reply is not marked degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("degraded_mode_exited";"anthropic")==1 && lastduration("degraded_mode_exited";"anthropic")>=0 && dg.since(store;"anthropic")==0;"EXIT FROM DEGRADED MODE IS RECORDED with its duration, and the disruption is closed")){pass=pass+1}el{fail=fail+1};
+  let run4=sp.runforward(reviewtext();"";localonly());
+  h.walkchainat(store;run4;chain;browsercfg;h.privacyfields(run4);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;aurl;fakekey());
+  if(t.assert(rows("degraded_mode_exited";"anthropic")==1;"an answer with no disruption open records nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 4. A local first choice is never degraded ───────────────────────────────────── *)
+  let lchain=chainof(@(hop("qwen2.5:72b";$provider{$ollama:0}));pub);
+  let run5=sp.runforward(reviewtext();"";localonly());
+  let r5=h.walkchainat(store;run5;lchain;browsercfg;h.privacyfields(run5);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;surl;fakekey());
+  if(t.assert(str.startswith(r5;"200") && !str.contains(r5;"\"degraded\"");"CONTROL: a local first choice answered locally is not marked degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(dg.noteanswer(store;hop("qwen2.5:72b";$provider{$ollama:0});hop("qwen2.5:7b";$provider{$ollama:0});"dg-local");"";"and records nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 5. loke ask's dispatcher degrades the same way ───────────────────────────── *)
+  let live=disp.new($apikeys{anthropic:"";openai:""};obase);
+  let askcfg=rtr.newconfig(deadurl());
+  let achain=chainof(@(hop("gemini-test";$provider{$google:0});hop("qwen2.5:72b";$provider{$ollama:0}));pub);
+  let ask=fb.dispatchchain(store;"cli-ask";live;achain;askcfg;request();"";"dg-ask");
+  if(t.assert(fb.answered(ask) && ask.chaindegraded;"LOKE ASK: a failed cloud first choice is answered locally and marked degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ask.chainnotice;"degraded: google:gemini-test did not answer");"with the line it prints")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("degraded_mode_entered";"google")==1;"and the entry is recorded for that provider")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 6. The approval rule and the degrade hop, measured ────────────────────────────
+     F5.3a refuses a hop to another destination when the request was held for approval, a
+     cloud-to-local hop included (approval_destination). Whether that ever stops a degrade
+     hop: approval is asked only for RESTRICTED data, and RESTRICTED data is never routed to
+     a cloud model first, so an approved request has no cloud first choice to degrade from. *)
+  if(t.assert(!h.isrequireapproval(h.decide(run1));"a request that can go to the cloud first is not held for approval, so the approval rule does not limit its degrade hop")){pass=pass+1}el{fail=fail+1};
+  let rrun=sp.runforward("Our tax file number is 123 456 782. Please summarise the attached letter.";"";localonly());
+  let rres:$piidetectionresult=rrun.result;
+  if(t.assert(sh.senseq(rres.sensitivity;sh.restricted());"a tax file number makes the request RESTRICTED")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(h.isrequireapproval(h.decide(rrun));"and it is held for approval")){pass=pass+1}el{fail=fail+1};
+  let rchain=rtr.routechainpreferinstalled(router;@("qwen2.5:7b");rres.anonymised;rres.sensitivity;rrun.totalentities;$latencytolerance{$instant:0};"dg-restricted";h.maxhops());
+  if(t.assert(rchain.chainhops.len>0 && !anycloud(rchain);"ITS CHAIN HOLDS NO CLOUD HOP, so an approved request is never a cloud first choice that degrades")){pass=pass+1}el{fail=fail+1};
+
+  stoprec(orec;ob);
+  stoprec(arec;ab);
+  stoprec(srec;sb);
+  <fail
+};

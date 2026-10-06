@@ -90,9 +90,9 @@ f=isengaged(store:i64):bool{
 
 (* ── T10.1 / G1.6: per-provider scope ─────────────────────────────────────────────
    One persisted flag per provider, beside the global one. A provider is blocked when the
-   global switch is engaged OR its own flag is. The global switch still fails closed on an
-   unreadable store (page.api.pipeline.killswitchengaged); a provider flag that cannot be
-   read defaults to false, because the global check has already refused that case. *)
+   global switch is engaged OR its own flag is. A global or provider flag that cannot be
+   read blocks, in blockedscope (G1.6, 2026-10-01); before, both defaulted to "not
+   engaged" on a read error. *)
 f=providers():@str{
   <@("anthropic";"openai";"google";"mistral";"openrouter";"ollama";"local")
 };
@@ -135,7 +135,9 @@ f=releaseprovider(store:i64;provider:str):bool{
    and in the same settings table, so a switch survives a restart exactly as they do.
 
    The use cases are the ones a request path actually passes to isblocked, and no others:
-   today that is "browser-chat", page.api.pipeline's POST. core.governance.usecases has a
+   "browser-chat" (page.api.pipeline's POST), "cli-ask" (core.router.fallback.dispatchchain,
+   for loke ask), "cli-proxy" (cli.proxy) and "no-custody" (core.nocustody.dispatch.attempt).
+   core.governance.usecases has a
    registry of other ids, and nothing on a request path consults it, so accepting one of
    them here would report a use case switched off while nothing refuses it. Agent ids are
    user-defined, so an agent id is checked for shape only: 1 to 64 characters of
@@ -146,7 +148,7 @@ f=releaseprovider(store:i64;provider:str):bool{
    set.getboolor cannot do: it returns its default on an error, and the default for "is
    this switched off" is false. A flag with no row is not engaged. *)
 f=usecases():@str{
-  <@("browser-chat")
+  <@("browser-chat";"cli-ask";"cli-proxy";"no-custody")
 };
 
 f=usecasekey(usecase:str):str{
@@ -189,6 +191,14 @@ f=flagfailclosed(key:str):bool{
     $ok:rows set.boolrowsor(rows;false);
     $err:e true
   }
+};
+
+(* G1.6. The global switch read for a request path: engaged, or not readable. isengaged
+   answers "not engaged" when the settings table cannot be read (set.getboolor's default),
+   which is right for a status display and wrong for a gate. *)
+f=globalblocked(store:i64):bool{
+  if(store==0){ <true }el{};
+  <isengaged(store) || flagfailclosed(settingkey())
 };
 
 (* One audit_log row per change of a scoped switch and per refusal it causes where the
@@ -264,11 +274,17 @@ f=isagentblocked(store:i64;agentid:str):bool{
 };
 
 (* Which switch blocks this request, or "" when none does: "store" (no store, fail
-   closed), "global", "provider" or "use_case", in that order. *)
+   closed), "global", "provider" or "use_case", in that order.
+
+   G1.6, 2026-10-01. The global and provider flags are read fail closed here, as the scoped
+   ones always were. isengaged and the provider read went through set.getboolor, whose
+   default on a READ ERROR is "not engaged", so with the settings table unreadable every
+   request path that asks isblocked (loke ask, the proxy, the browser hops, the no-custody
+   dispatch) read the switch as off. isengaged is still asked first, for its auto-release. *)
 f=blockedscope(store:i64;provider:str;usecase:str):str{
   if(store==0){ <"store" }el{};
-  if(isengaged(store)){ <"global" }el{};
-  if(set.getboolor(store;providerkey(provider);false)){ <"provider" }el{};
+  if(globalblocked(store)){ <"global" }el{};
+  if(flagfailclosed(providerkey(provider))){ <"provider" }el{};
   if(isusecaseblocked(store;usecase)){ <"use_case" }el{};
   <""
 };

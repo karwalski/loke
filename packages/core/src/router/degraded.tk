@@ -1,0 +1,109 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.router.degraded;
+
+i=rtr:core.router.router;
+i=set:core.storage.settings;
+i=au:core.storage.audit;
+i=str:std.str;
+i=jx:shared.jsonobj;
+i=log:shared.log;
+i=t:shared.types;
+
+(* RG1.8 — degraded mode: a request first routed to a cloud provider that was answered by a
+   local model because the cloud hops failed.
+
+   The local hop itself is core.router.router.degradehop, put at the end of a cloud-first
+   chain by routechain. This module says whether an answer was degraded, gives the reply its
+   marker, and records the provider's disruption so it can be measured against a tolerance:
+
+     - ENTRY: the first degraded answer for a provider writes an audit_log row
+       `degraded_mode_entered` (provider column the cloud provider, model the local model
+       that answered, correlation id the request's) and keeps the time it began in the
+       settings table (`routing.degraded.<provider>.since`, milliseconds).
+     - Further degraded answers while it lasts write nothing more; each reply still carries
+       the marker.
+     - EXIT: the next answer from that provider as the first choice clears the time and
+       writes `degraded_mode_exited`, whose duration_ms is how long the provider was
+       answered for locally, from the first degraded answer to the first answer after it.
+
+   The time is in settings, so a disruption survives a restart and the CLI and the server,
+   which share loke.db, see the same one. A request whose first choice was local is never
+   degraded and never ends a disruption: it says nothing about the provider. With no store
+   nothing is recorded; the answer still carries its marker. *)
+
+f=isdegraded(first:$routingdecision;answering:$routingdecision):bool{
+  <rtr.isclouddecision(first) && !rtr.isclouddecision(answering)
+};
+
+(* From the hop's `provider:model` label (core.router.router.hoplabel). A provider name has no
+   colon; a model id may (qwen2.5:72b), so the model is everything after the first. *)
+f=providerof(d:$routingdecision):str{
+  <str.split(rtr.hoplabel(d);":").get(0)
+};
+
+f=modelof(d:$routingdecision):str{
+  <str.trimprefix(rtr.hoplabel(d);"\(providerof(d)):")
+};
+
+f=sincekey(provider:str):str{
+  <"routing.degraded.\(provider).since"
+};
+
+(* When the provider's current disruption began, in milliseconds, or 0 when there is none. *)
+f=since(store:i64;provider:str):i64{
+  if(store==0){ <0 }el{};
+  <set.getintor(store;sincekey(provider);0)
+};
+
+(* The reply fields for a degraded answer, to append to a JSON object; "" when it was not. *)
+f=marker(first:$routingdecision;answering:$routingdecision):str{
+  if(isdegraded(first;answering)){}el{ <"" };
+  <",\"degraded\":true,\"degraded_from\":\(jx.escape(rtr.hoplabel(first)))"
+};
+
+(* The line `loke ask` prints for a degraded answer; "" when it was not. *)
+f=notice(first:$routingdecision;answering:$routingdecision):str{
+  if(isdegraded(first;answering)){}el{ <"" };
+  <"degraded: \(rtr.hoplabel(first)) did not answer, so a local model (\(rtr.hoplabel(answering))) did"
+};
+
+f=durationu32(ms:i64):u32{
+  if(ms<0){ <0 as u32 }el{};
+  if(ms>4294967295){ <4294967295 as u32 }el{};
+  <ms as u32
+};
+
+f=auditrow(store:i64;eventtype:str;provider:str;modelid:str;durationms:i64;cid:str):bool{
+  let ok=au.insertevent(store;$auditevent{eventtype:eventtype;usecase:"";modelid:modelid;provider:provider;sensitivity:"";risktier:"";tokensin:0 as u32;tokensout:0 as u32;costusd:0.0;durationms:durationu32(durationms);correlationid:cid});
+  if(ok){}el{
+    log.error("degraded mode: the \(eventtype) row for \(provider) could not be written";"router.degraded";cid)
+  };
+  <ok
+};
+
+(* Records what an answer means for its first choice's provider, and says what it did:
+   "entered", "continuing", "exited", or "" (nothing to record). `answering` is the hop that
+   answered. *)
+f=noteanswer(store:i64;first:$routingdecision;answering:$routingdecision;cid:str):str{
+  if(store==0 || !rtr.isclouddecision(first)){ <"" }el{};
+  let provider=providerof(first);
+  let began=since(store;provider);
+  let now=t.nowms();
+  if(isdegraded(first;answering)){
+    if(began>0){ <"continuing" }el{};
+    set.setint(store;sincekey(provider);now;"routing");
+    auditrow(store;"degraded_mode_entered";provider;modelof(answering);0;cid);
+    log.warn("degraded mode entered: \(provider) failed and a local model answered";"router.degraded";cid);
+    <"entered"
+  }el{};
+  if(began>0 && str.eq(providerof(answering);provider)){
+    set.setint(store;sincekey(provider);0;"routing");
+    let lasted=now-began;
+    auditrow(store;"degraded_mode_exited";provider;modelof(answering);lasted;cid);
+    log.info("degraded mode exited: \(provider) answered again after \(lasted) ms";"router.degraded";cid);
+    <"exited"
+  }el{};
+  <""
+};

@@ -507,6 +507,41 @@ f=hopallowed(cfg:$routerconfig;firstlocal:bool;hop:$routingdecision;sensitivity:
    no more than eight further candidates whatever it is.
 
    The intent is classified once, not once per hop. *)
+(* RG1.8. Whether any hop of a chain is a local model. *)
+f=anylocal(hops:@$routingdecision):bool{
+  let found=mut.false;
+  lp(let i=0;i<hops.len;i=i+1){
+    if(!isclouddecision(hops.get(i))){ found=true }el{}
+  };
+  <found
+};
+
+(* RG1.8 — the hop a cloud-first chain degrades to when every cloud hop fails: a LOCAL model,
+   chosen by the same selector and the same route-level check as every other hop, from the
+   catalogue without the models already in the chain. Two things are relaxed, and only for
+   this hop, because a degraded answer is better than none: prefer_local is on (so only a
+   local candidate is looked for first) and the latency tier is background (so a local model
+   too slow for the first choice's tier still qualifies). The sensitivity is the chain's, and
+   a local model is permitted at every level, so this hop never widens where the prompt may
+   go: it keeps it on this machine. Anything the selector answers that is not local (its own
+   cloud retry) is not a degrade hop, and noroute is answered instead. *)
+f=degradehop(rtr:$router;task:$tasktype;finalsensitivity:$sensitivitylevel;seen:@str;cid:str):$routingdecision{
+  let cfg:$routerconfig=rtr.config;
+  let d=routedecided($router{config:$routerconfig{
+    ollamaurl:cfg.ollamaurl;
+    preferlocal:true;
+    maxcostper1k:cfg.maxcostper1k;
+    defaulttolerance:cfg.defaulttolerance;
+    strategy:cfg.strategy;
+    fallbacktocloud:cfg.fallbacktocloud
+  };registry:reg.excluding(rtr.registry;seen)};task;finalsensitivity;$latencytolerance{$background:0};cid);
+  if(isrouted(d) && !isclouddecision(d)){
+    log.info("route chain: \(hoplabel(d)) is the local model this chain degrades to";"router";cid);
+    <d
+  }el{};
+  <noroute("no local model to degrade to")
+};
+
 f=routechain(
   rtr:$router;
   text:str;
@@ -549,13 +584,32 @@ f=routechain(
       done=true
     }
   };
+  (* RG1.8. A chain whose first choice is a cloud model and which holds no local hop ends with
+     the local model it degrades to, one hop past maxhops: it is tried only when every cloud
+     hop has failed or been refused. *)
+  if(firstlocal || anylocal(hops)){
+    <$fallbackchain{chainhops:hops;chainsens:finalsensitivity;chainnote:first.reason}
+  }el{};
+  let degrade=degradehop(rtr;task;finalsensitivity;seen;cid);
+  if(isrouted(degrade)){
+    hops=hops.push(degrade)
+  }el{
+    log.info("route chain: no local model to degrade to if the cloud hops fail";"router";cid)
+  };
   <$fallbackchain{chainhops:hops;chainsens:finalsensitivity;chainnote:first.reason}
 };
 
 (* F5.3a. routechain against the models Ollama reports as installed, kept only if its first
    choice is LOCAL, exactly as routepreferinstalled keeps a single route: knowing what is
    installed can change which local models the chain holds, never whether it goes to the
-   cloud. An empty list means the install state is unknown, and routes as routechain does. *)
+   cloud. An empty list means the install state is unknown, and routes as routechain does.
+
+   RG1.8. When BOTH chains choose a cloud model first, the installed one is kept. Their cloud
+   hops are the same (the two catalogues hold the same cloud models, and no local model of
+   either met the first choice's constraints), and the installed chain's degrade hop is a
+   local model Ollama actually has, where the full catalogue's could be one that is not
+   installed and would be refused at the hop. So this changes which local model a failed
+   cloud chain degrades to, and still never whether a request goes to the cloud. *)
 f=routechainpreferinstalled(
   rtr:$router;
   installed:@str;
@@ -569,7 +623,12 @@ f=routechainpreferinstalled(
   if(installed.len>0){
     let first=routechain($router{config:rtr.config;registry:reg.installedonly(rtr.registry;installed)};text;piisensitivity;piientitycount;tolerance;cid;maxhops);
     if(first.chainhops.len>0){
-      if(!isclouddecision(first.chainhops.get(0))){ <first }el{}
+      if(!isclouddecision(first.chainhops.get(0))){ <first }el{};
+      let full=routechain(rtr;text;piisensitivity;piientitycount;tolerance;cid;maxhops);
+      if(full.chainhops.len>0){
+        if(isclouddecision(full.chainhops.get(0))){ <first }el{}
+      }el{};
+      <full
     }el{}
   }el{};
   <routechain(rtr;text;piisensitivity;piientitycount;tolerance;cid;maxhops)

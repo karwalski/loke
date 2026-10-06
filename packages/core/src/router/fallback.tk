@@ -4,6 +4,8 @@
 m=core.router.fallback;
 
 i=rtr:core.router.router;
+i=dg:core.router.degraded;
+i=ks:core.governance.killswitch;
 i=disp:core.providers.dispatcher;
 i=pt:core.providers.types;
 i=log:shared.log;
@@ -23,15 +25,26 @@ i=t:shared.types;
    and nothing else. A refused hop is never in it. That is what a test reads to show that a
    hop was not tried, without a provider being contacted to find out.
 
-   What this does not do: it records no disclosure row and checks no kill switch. Its one
-   caller, the CLI's `loke ask`, does neither for a first choice either. The browser request
-   path (page.api.pipeline) does both, per hop, so it walks the same chain itself (F5.3a):
-   it builds it with rtr.routechainpreferinstalled and asks the same gate,
-   rtr.chainhopallowed, before each send. *)
+   G1.6, 2026-10-01: the kill switch is asked for EVERY hop, immediately after the gate and
+   before the send, with the store and the caller's use case ("cli-ask" for loke ask). The
+   global switch, the hop's provider and the use case each refuse it, and so does a store
+   that is 0 or cannot be read (ks.isblocked fails closed). A refused hop is not sent and is
+   not in chainattempted; chainfailures says which switch refused it.
+
+   RG1.8: an answer from a local hop after a cloud first choice is degraded. chaindegraded
+   says so, chainnotice is the line to show, and core.router.degraded.noteanswer records the
+   provider's disruption.
+
+   What this does not do: it records no disclosure row. The browser request path
+   (page.api.pipeline) does, per hop, so it walks the same chain itself (F5.3a): it builds
+   it with rtr.routechainpreferinstalled and asks the same gate, rtr.chainhopallowed, before
+   each send. *)
 t=$chainoutcome{
   chainanswer:$completionresponse;
   chainattempted:@str;
-  chainfailures:str
+  chainfailures:str;
+  chaindegraded:bool;
+  chainnotice:str
 };
 
 f=hoplabel(d:$routingdecision):str{
@@ -57,28 +70,36 @@ f=answered(o:$chainoutcome):bool{
 (* overridemodel, when not empty, is a model the user named (`loke ask --model`). It
    replaces the first hop's model id and there is no fallback: the user asked for that
    model, not for whatever answers. The first hop is still checked before it is sent. *)
-f=dispatchchain(d:$dispatcher;chain:$fallbackchain;cfg:$routerconfig;req:$completionrequest;overridemodel:str;cid:str):$chainoutcome{
+f=dispatchchain(store:i64;usecase:str;d:$dispatcher;chain:$fallbackchain;cfg:$routerconfig;req:$completionrequest;overridemodel:str;cid:str):$chainoutcome{
   let hops=chain.chainhops;
   let attempted=mut.@();
   if(hops.len==0){
-    <$chainoutcome{chainanswer:pt.nocompletion(chain.chainnote);chainattempted:attempted;chainfailures:chain.chainnote}
+    <$chainoutcome{chainanswer:pt.nocompletion(chain.chainnote);chainattempted:attempted;chainfailures:chain.chainnote;chaindegraded:false;chainnotice:""}
   }el{};
   let limit=mut.hops.len;
   if(str.len(overridemodel)>0){ limit=1 }el{};
   let answer=mut.pt.nocompletion("no hop of the route was permitted to be sent");
   let failures=mut."";
   let done=mut.false;
+  let answeredat=mut.0-1;
   lp(let i=0;i<limit && !done;i=i+1){
     let hop:$routingdecision=hops.get(i);
     let label=hoplabel(hop);
-    if(rtr.chainhopallowed(cfg;chain;i as i64)){
-      let spec:$modelspec=hop.model;
+    let spec:$modelspec=hop.model;
+    let provider=rtr.providerstr(spec.provider);
+    let blocked=rtr.chainhopallowed(cfg;chain;i as i64) && ks.isblocked(store;provider;usecase);
+    if(blocked){
+      failures="\(failures)\(label) refused: \(ks.refusalmessage(store;provider;usecase)) ";
+      log.warn("fallback: \(label) is switched off by the kill switch and was not sent";"router.fallback";cid)
+    }el{};
+    if(rtr.chainhopallowed(cfg;chain;i as i64) && !blocked){
       let modelid=mut.spec.id;
       if(str.len(overridemodel)>0){ modelid=overridemodel }el{};
       attempted=attempted.push(label);
       let r=disp.trydispatch(d;requestfor(req;modelid);spec.provider);
       if(disp.isdispatched(r)){
         answer=r;
+        answeredat=i as i64;
         done=true
       }el{
         failures="\(failures)\(label) failed: \(disp.dispatcherror(r)); ";
@@ -86,8 +107,16 @@ f=dispatchchain(d:$dispatcher;chain:$fallbackchain;cfg:$routerconfig;req:$comple
         answer=r
       }
     }el{
-      log.warn("fallback: \(label) is not permitted for this request (sensitivity \(t.senslabel(chain.chainsens))) and was not sent";"router.fallback";cid)
+      if(!blocked){
+        log.warn("fallback: \(label) is not permitted for this request (sensitivity \(t.senslabel(chain.chainsens))) and was not sent";"router.fallback";cid)
+      }el{}
     }
   };
-  <$chainoutcome{chainanswer:answer;chainattempted:attempted;chainfailures:failures}
+  if(answeredat<0){
+    <$chainoutcome{chainanswer:answer;chainattempted:attempted;chainfailures:failures;chaindegraded:false;chainnotice:""}
+  }el{};
+  let first:$routingdecision=hops.get(0);
+  let answering:$routingdecision=hops.get(answeredat);
+  dg.noteanswer(store;first;answering;cid);
+  <$chainoutcome{chainanswer:answer;chainattempted:attempted;chainfailures:failures;chaindegraded:dg.isdegraded(first;answering);chainnotice:dg.notice(first;answering)}
 };
