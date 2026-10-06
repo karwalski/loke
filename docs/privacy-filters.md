@@ -54,7 +54,9 @@ Each layer's availability check and scan is a branch on its id in `core.privacy.
       text exactly is counted as *unplaced* (MK6.16).
    5. If the layer was enabled and unavailable, or its scan failed: it counts towards
       `layersdegraded` and is logged with its id and reason.
-2. A real layer that the registry does not hold at all is recorded as a skipped stage.
+2. A real layer that the registry does not hold at all is recorded as a skipped stage. The entity
+   types only a degraded layer was configured to mask are recorded as `uncovered`, and a governance
+   alert is raised for them (see [Health](#health)).
 3. **Entity routing** (`entityrouting.apply`, F3b.5) keeps, for each routed type, only the detections
    of the layers its route accepts.
 4. A `[[privacy.layers]]` error, or failing that a `[[privacy.entity_routing]]` error, is put on the
@@ -346,15 +348,56 @@ it was written). It is false, and the run must not be sent, when any of these ho
 ## Health
 
 `core.privacy.layerhealth` probes each enabled layer with its own client, before every run and on every
-`GET /api/health` (no background monitor, no stored history). `/api/health` carries `privacy_layers`:
-`{"state","summary","layers":[{"id","enabled","state","reason"}]}` for the layers `/api/pipeline` runs.
-The overall state is `healthy`, `degraded` (at least one enabled layer is unavailable) or `unhealthy`
-(none available, or none enabled). `formathealthstatus` gives `HEALTHY: all N layers available`,
-`DEGRADED: a/N layers available` or `UNHEALTHY: no detection layer available (0/N)`. Tests:
-`tests/unit/privacy/test_layer_health.tk`, `test_layer_registry_pipeline.tk`,
-`tests/unit/browser/test_health_handler.tk`, `scripts/smoke_e2e.sh`.
+`GET /api/health` (no background monitor, no stored history). A probe is the layer's own health check
+(Presidio's and the sidecar's `GET /health`, Ollama's model list); no user text is sent to a layer that
+has not answered it. `/api/health` carries `privacy_layers`:
+`{"state","summary","layers":[{"id","enabled","state","reason"}],"uncovered_types":[...]}` for the
+layers `/api/pipeline` runs. The overall state is `healthy`, `degraded` (at least one enabled layer is
+unavailable) or `unhealthy` (none available, or none enabled). `formathealthstatus` gives
+`HEALTHY: all N layers available`, `DEGRADED: a/N layers available` or
+`UNHEALTHY: no detection layer available (0/N)`.
 
-Not built: the governance alert when the only layer for a type is down, and a dashboard widget (F3b.6).
+**Degradation is continued, and shown, never silent.** A layer that is down is skipped: it counts
+towards `layers_degraded`, is logged with its id and reason, and leaves a skipped stage carrying the
+reason. The run goes on with the layers that answered, and is refused only when none completed
+([Fail-closed rules](#fail-closed-rules)).
+
+**Uncovered entity types and the governance alert (G1).** `layerhealth.uncoveredtypes` lists each
+entity type that a degraded layer was configured to mask (it reports the type, is not `detect-only`,
+and its `entity_filter` does not exclude it) and that no layer that answered masks. Types are the same
+when their names match without regard to case, or when `core.privacy.entityvocab.presettypes` gives
+them the same non-empty set of preset types: Presidio's `EMAIL_ADDRESS` is the regex layer's `email`,
+and the sidecar's `ADDRESS` is NER's `LOCATION`, but the sidecar's `SECRET` (a password or a key) is not
+the regex layer's `api_key`. With the default layers and the sidecar down, that leaves `SECRET`.
+`pipeline.run` records the list on the run (`uncovered`) and, when it is not empty, raises a governance
+alert through `core.governance.alert` (kind `privacy_layer_coverage`, severity `warn`; logged as
+`governance alert: privacy layer coverage: no available detection layer masks <types>; the layers
+configured for them are down: <id> (<reason>), ...`). The alert is raised in `run`, so the CLI proxy,
+`loke ask` and the MCP broker, which call `run` themselves, raise it too. It names types, layers and
+reasons, never text. It is raised once per run that has a gap; there is no de-duplication across runs
+and no webhook (the alert config is the log-only default). The reply to `POST /api/pipeline` carries
+`uncovered_entity_types`, and `/api/health` `uncovered_types` from the probe.
+
+An uncovered type does **not** refuse the request: a request whose only gap is that a sidecar is down
+is forwarded, as the degraded rule says, with the gap alerted and in the reply. Refusing when a
+particular layer is down is an organisation policy (`required_layers`, `minimum_layers`), which is
+F3b.8 and not built. Entity routing (F3b.5) is unchanged: a route with no available layer accepts the
+type from every layer that ran, which never masks less than no route.
+
+**Dashboard.** moke's dashboard (`/dashboard`) has a *Privacy layers* panel that reads `privacy_layers`
+from `/api/health` (moke's own `/api/health` returns loke's body) every 15 seconds: the overall state,
+each layer with its state and reason, and the uncovered types. When loke does not answer, or answers
+without `privacy_layers`, it reads `unknown`, never healthy.
+
+Tests: `tests/unit/privacy/test_layer_coverage.tk` (two `http_recorder.py` stand-ins killed between
+runs: degraded counts, skip reasons, forwardable, the uncovered types, the alert in `loke.log` with no
+text in it, the health report, and refusal with every layer down), `test_layer_health.tk`,
+`test_layer_registry_pipeline.tk`, `tests/unit/browser/test_health_handler.tk`, `scripts/smoke_e2e.sh`
+(the sidecar killed: `/api/health` and the reply name `SECRET`, and the alert is in `loke.log`), and
+`tests/ui/layerhealth_f3b6.json` in `scripts/smoke_ui.sh` (the panel against the live `/api/health`, and
+against a degraded and an unreachable answer).
+
+Not built: a cached last-checked state or health history; each run and each `/api/health` call probes.
 
 ## `loke privacy evaluate` (F3b.9)
 

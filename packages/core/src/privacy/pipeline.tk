@@ -20,6 +20,7 @@ i=lyc:core.privacy.layerconfig;
 i=er:core.privacy.entityrouting;
 i=fm:core.privacy.filtermetrics;
 i=vocab:core.privacy.entityvocab;
+i=alert:core.governance.alert;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
    detection layers exist, which are enabled, the order they run in and the URL and setting
@@ -85,7 +86,11 @@ t=$pipelinerun{
   voters:@str;
   (* F3b.10. core.privacy.entityrouting's notes for this run: a routed type taken from its
      fallback layers, or from every layer. Type names and layer ids only. *)
-  routingnotes:@str
+  routingnotes:@str;
+  (* F3b.6. The entity types no layer that completed masks, because the only layers configured
+     for them were down this run (core.privacy.layerhealth.uncoveredtypes). Type names only.
+     The run is still forwardable on that account; run raises a governance alert. *)
+  uncovered:@str
 };
 
 
@@ -468,6 +473,21 @@ f=unregisteredstages(reg:$filterregistry):@$stageresult{
   <out
 };
 
+(* F3b.6. The governance alert for a coverage gap: kind privacy_layer_coverage, severity warn,
+   through core.governance.alert with its default config (logged as "governance alert: ...";
+   no webhook is configured from anywhere yet). The message names types, layers and reasons,
+   never text. A degraded run is still forwardable: the alert is what makes the gap seen. *)
+f=coveragealertkind():str{ <"privacy_layer_coverage" };
+
+f=coveragealert(msg:str):bool{
+  <alert.send(alert.defaultconfig();alert.makealert(coveragealertkind();"warn";msg))
+};
+
+(* ["PERSON","SECRET"]: the run's uncovered types, for a reply. *)
+f=uncoveredjson(r:$pipelinerun):str{
+  <lh.typesjson(r.uncovered)
+};
+
 f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let requestid=str.randhex(16);
   log.info("pipeline start";"pipeline";requestid);
@@ -482,6 +502,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let unplaced=mut.0;
   let vetoedby=mut."";
   let metrics=mut.@();
+  let states=mut.@();
 
   (* F3b.1 / F3b.6. Every detection layer, in registry order, through the one path in
      core.privacy.layerhealth: a disabled entry is recorded as a skipped stage and sent
@@ -497,6 +518,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     let lr:$layerresult=lh.consult(layer;text);
     let tookms=t.nowms()-began;
     let st:$layerstatus=lr.status;
+    states=states.push(st);
     (* F3b.2. Only the detections the layer's threshold and entity filter accept count; a
        detect-only layer's are not masked and it does not vote; a veto layer's refuse. A
        layer that did not complete reported nothing, so this is empty for it. *)
@@ -536,6 +558,11 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   lp(let ai=0;ai<absent.len;ai=ai+1){
     stages=stages.push(absent.get(ai))
   };
+  (* F3b.6. A type only a down layer was configured to mask is masked by nothing this run:
+     a governance alert (G1), raised here rather than in runforward because the CLI proxy,
+     loke ask and the MCP broker call run and issafetoforward themselves. *)
+  let uncovered=lh.uncoveredtypes(reg;states);
+  if(uncovered.len>0){ coveragealert(lh.coveragemessage(reg;states;uncovered)) }el{};
 
   (* F3b.5. A routed entity type is accepted only from the layers its route names; with no
      route this returns the detections as they are. *)
@@ -637,7 +664,8 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     layererror:cfgerror;
     layermetrics:fm.withrouted(metrics;routed.layers;routed.entities);
     voters:voters;
-    routingnotes:routed.notes
+    routingnotes:routed.notes;
+    uncovered:uncovered
   }
 };
 

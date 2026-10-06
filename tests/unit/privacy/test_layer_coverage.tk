@@ -1,0 +1,183 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.layercoverage;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=log:shared.log;
+i=pl:core.privacy.pipeline;
+i=pt:core.privacy.pipelinetypes;
+i=fr:core.privacy.filterregistry;
+i=lh:core.privacy.layerhealth;
+
+(* F3b.6 — graceful degradation, judged on the production pipeline while the layers it runs
+   go down one at a time.
+
+   Two scripts/lib/http_recorder.py stand-ins, one for Presidio and one for the privacy-filter
+   sidecar, each on its own OS-assigned port. NER is switched off, so the layers are regex
+   (in-process), Presidio and the privacy filter. The test kills the sidecar's stand-in and
+   then Presidio's between runs and judges, after each kill:
+
+     - the run: completed and degraded counts, the skipped stage's reason, whether it may be
+       forwarded, and `uncovered`, the entity types no answering layer masks;
+     - the governance alert (G1) core.privacy.pipeline.run raises for those types, read from
+       loke.log in the runner's throwaway HOME, and that it carries no text;
+     - the health report a surface reads (/api/health's privacy_layers), through the same
+       probe;
+   and, with every layer down, that the run is refused (NC1.9: never fail open).
+
+   The expected uncovered types follow from core.privacy.entityvocab: with the sidecar down,
+   regex and Presidio still mask everything it reports except DATE and SECRET (Presidio has
+   no DATE; the regex layer's api_key is not a password, so it is not SECRET). With Presidio
+   down too, PERSON, LOCATION and ORGANIZATION join them, in registry order (Presidio runs
+   before the sidecar); the sidecar's ADDRESS is the same preset type as Presidio's LOCATION,
+   so it is named once. Presidio's EMAIL_ADDRESS,
+   PHONE_NUMBER, US_SSN and CREDIT_CARD are never listed: the regex layer masks them as
+   email, phone_au, ssn_us and credit_card. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_layercov_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+f=stagename(st:$pipelinestage):str{
+  <mt st {
+    $regexscan:v "regex";
+    $nerscan:v "ner";
+    $presidioscan:v "presidio";
+    $dedup:v "dedup";
+    $anonymise:v "anonymise";
+    $guardianinject:v "guardian";
+    $privacyfilterscan:v "privacy_filter"
+  }
+};
+
+f=skipreason(run:$pipelinerun;name:str):str{
+  let r=mut."";
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    if(str.eq(stagename(sr.stage);name)){ r=sr.skipreason }el{}
+  };
+  <r
+};
+
+(* Regex on, NER off, Presidio at purl and the privacy filter at pfurl. *)
+f=layersat(purl:str;pfurl:str):$pipelineconfig{
+  <pl.withlayer(pl.withprivacyfilter(pl.newconfig(purl;"http://127.0.0.1:59993");true;pfurl;"");fr.nerid();false)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let plog="\(base).presidio.log";
+  let flog="\(base).pf.log";
+  let precp=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";plog;"\(base).presidio.port")) { $ok:h h; $err:e 0 };
+  let frec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";flog;"\(base).pf.port")) { $ok:h h; $err:e 0 };
+  let pport=waitport("\(base).presidio.port");
+  let fport=waitport("\(base).pf.port");
+  if(t.assert(precp!=0 && frec!=0 && str.len(pport)>0 && str.len(fport)>0;"both stand-ins came up")){pass=pass+1}el{fail=fail+1};
+  let purl="http://127.0.0.1:\(pport)";
+  let pfurl="http://127.0.0.1:\(fport)";
+  let cfg=layersat(purl;pfurl);
+  let text="Jane Citizen called Tuesday";
+  let logp=log.logpath();
+  let alertline="governance alert: privacy layer coverage";
+
+  (* ── Every layer up ─────────────────────────────────────────────────────── *)
+  let up=pl.runforward(text;"";cfg);
+  let uc:str=str.fromint(up.layerscompleted as i64);
+  if(t.assert(up.layerscompleted==3 as u32 && up.layersdegraded==0 as u32;"with every layer answering, regex, Presidio and the privacy filter complete (completed=\(uc))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.uncoveredjson(up);"[]";"and no entity type is uncovered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(logp);alertline)==0;"so no coverage alert is raised")){pass=pass+1}el{fail=fail+1};
+  let hup=lh.checkhealth(cfg.layers);
+  if(t.asserteq(lh.overall(hup);"healthy";"and the health report is healthy")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.reportjson(hup);"\"uncovered_types\":[]");"with no uncovered type in the JSON a surface reads")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The sidecar killed mid-run ─────────────────────────────────────────── *)
+  if(frec!=0){ process.kill(frec); process.wait(frec); }el{};
+  let detects=countof(readfile(flog);"POST /detect");
+  let one=pl.runforward(text;"";cfg);
+  let oc:str=str.fromint(one.layerscompleted as i64);
+  let od:str=str.fromint(one.layersdegraded as i64);
+  if(t.assert(one.layerscompleted==2 as u32 && one.layersdegraded==1 as u32;"with the sidecar killed, its layer is DEGRADED, not completed (completed=\(oc), degraded=\(od))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(flog);"POST /detect")==detects;"and nothing was sent to it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(skipreason(one;"privacy_filter");"privacy-filter sidecar unreachable";"its stage is skipped with the reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(one);"the run continues with the layers that answered: still forwardable")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.uncoveredjson(one);"[\"DATE\",\"SECRET\"]";"the types only the sidecar was configured to mask are uncovered: DATE and SECRET")){pass=pass+1}el{fail=fail+1};
+  let log1=readfile(logp);
+  if(t.assert(countof(log1;alertline)==1;"one governance alert is raised for the gap")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(log1;"no available detection layer masks DATE, SECRET; the layers configured for them are down: openai-privacy-filter (privacy-filter sidecar unreachable)");"naming the types, the layer and its reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(log1;"Jane") && !str.contains(log1;"Citizen");"and loke.log holds nothing of the text")){pass=pass+1}el{fail=fail+1};
+  let hone=lh.checkhealth(cfg.layers);
+  if(t.asserteq(lh.overall(hone);"degraded";"the health report reads degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lh.reportjson(hone);"\"uncovered_types\":[\"DATE\",\"SECRET\"]");"and names the same uncovered types")){pass=pass+1}el{fail=fail+1};
+
+  (* A detect-only sidecar masks nothing, so its going down leaves nothing uncovered and is
+     not alerted on; it is still degraded. *)
+  let detectonly=pl.withlayers(cfg;fr.setpolicy(cfg.layers;fr.privacyfilterid();true;4;fr.detectonly();0.0;""));
+  let dor=pl.runforward(text;"";detectonly);
+  if(t.assert(dor.layersdegraded==1 as u32;"a detect-only sidecar that is down is degraded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.uncoveredjson(dor);"[]";"but uncovers nothing: it was configured to mask nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(logp);alertline)==1;"so no second alert is raised")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Presidio killed too ────────────────────────────────────────────────── *)
+  if(precp!=0){ process.kill(precp); process.wait(precp); }el{};
+  let two=pl.runforward(text;"";cfg);
+  let tc:str=str.fromint(two.layerscompleted as i64);
+  if(t.assert(two.layerscompleted==1 as u32 && two.layersdegraded==2 as u32;"with Presidio killed as well, only regex completes (completed=\(tc))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(skipreason(two;"presidio");"Presidio sidecar unreachable";"Presidio's stage is skipped with its reason")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(pl.issafetoforward(two);"one completed layer is still enough to forward (NC1.9's degraded rule)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.uncoveredjson(two);"[\"PERSON\",\"LOCATION\",\"ORGANIZATION\",\"DATE\",\"SECRET\"]";"and every type only the two sidecars masked is uncovered, each once")){pass=pass+1}el{fail=fail+1};
+  let log2=readfile(logp);
+  if(t.assert(countof(log2;alertline)==2 && str.contains(log2;"presidio (Presidio sidecar unreachable)");"a second alert names both down layers")){pass=pass+1}el{fail=fail+1};
+  let htwo=lh.checkhealth(cfg.layers);
+  if(t.assert(htwo.availablelayers==1 && str.eq(lh.overall(htwo);"degraded");"the health report: one of three available, degraded")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Every detection layer down: refused ────────────────────────────────── *)
+  let noregex=pl.withlayer(cfg;fr.regexid();false);
+  let none=pl.runforward("card 4111 1111 1111 1111";"";noregex);
+  let nc:str=str.fromint(none.layerscompleted as i64);
+  if(t.assert(none.layerscompleted==0 as u32 && none.layersdegraded==2 as u32;"with regex off and both sidecars down, no layer completes (completed=\(nc))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(none);"with every detection layer down, the run is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pl.refusalreason(none);"no privacy detection layer is available");"and the refusal says why")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lh.overall(lh.checkhealth(noregex.layers));"unhealthy";"and the health report reads unhealthy")){pass=pass+1}el{fail=fail+1};
+
+  file.delete(plog);
+  file.delete(flog);
+  file.delete("\(plog).headers");
+  file.delete("\(flog).headers");
+  file.delete("\(plog).bodies");
+  file.delete("\(flog).bodies");
+  file.delete("\(base).presidio.port");
+  file.delete("\(base).pf.port");
+  <fail
+};

@@ -120,5 +120,12 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/governance" "$ROOT/tests/ui/governance_rg19.json"
   rc=$?
 fi
+# F3b.6: the dashboard's privacy layer widget shows what loke's /api/health reports for each
+# detection layer (through moke's same-origin /api/health), and says unknown, never healthy,
+# when loke does not answer.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/dashboard" "$ROOT/tests/ui/layerhealth_f3b6.json"
+  rc=$?
+fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
 exit $rc

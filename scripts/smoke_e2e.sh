@@ -650,13 +650,25 @@ else
   health_get
   judge "/api/health lists the privacy filter from config.toml, enabled and answering" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"healthy"'
   judge "and the in-process regex layer as healthy" 200 '{"id":"regex","enabled":true,"state":"healthy"'
+  judge "with every configured layer for each type answering, no entity type is uncovered" 200 '"uncovered_types":[]}'
   # The sidecar down: the layer is degraded, recorded as skipped, and nothing claims it scanned.
   kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null
   health_get
   judge "with the sidecar down, /api/health reports it unavailable, with the reason the pipeline records" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"unavailable","reason":"privacy-filter sidecar unreachable"}'
   judge "and the privacy layers as a whole degraded" 200 '"privacy_layers":{"state":"degraded"'
+  # Of the sidecar's types, only SECRET (a password or key) has no other layer here to mask it:
+  # NER answers PERSON, DATE, FINANCIAL and LOCATION (the sidecar's ADDRESS), regex email,
+  # phone and url. Whether Presidio answers on this machine changes nothing in that list.
+  judge "F3b.6: and names SECRET as the entity type no answering layer masks" 200 '"uncovered_types":["SECRET"]}'
+  PFALERT='governance alert: privacy layer coverage: no available detection layer masks SECRET; the layers configured for them are down: openai-privacy-filter (privacy-filter sidecar unreachable)'
+  ALERTS_BEFORE=$(grep -cF "$PFALERT" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
   pipe_post "summarise what $PFNAME asked about the invoice" ""
   judge "with the privacy filter down and other layers completing, the request is still answered (degraded)" 200 '"layers_degraded":'
+  judge "F3b.6: and the reply names the uncovered entity type" 200 '"uncovered_entity_types":["SECRET"]'
+  ALERTS_AFTER=$(grep -cF "$PFALERT" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
+  if [ "${ALERTS_AFTER:-0}" -ge 1 ] && [ "${ALERTS_AFTER:-0}" -gt "${ALERTS_BEFORE:-0}" ] && ! grep -q "$PFNAME" "$WORK/lk/home/.loke/loke.log"; then
+    echo "  ok   F3b.6: the request raised a governance alert naming SECRET and the down sidecar, and loke.log holds no name"
+  else echo "  FAIL F3b.6: no coverage alert in loke.log for the request (before ${ALERTS_BEFORE:-0}, after ${ALERTS_AFTER:-0}), or the log holds the name" >&2; fail=1; fi
   pflayers=$(dl "SELECT detection_layers FROM disclosure_log ORDER BY rowid DESC LIMIT 1")
   case "$pflayers" in
     *skipped=*privacy_filter*) echo "  ok   and the record lists privacy_filter as skipped: $pflayers" ;;

@@ -10,6 +10,8 @@ i=ner:core.privacy.ner;
 i=presidio:core.privacy.presidio;
 i=pf:core.privacy.sidecarclient;
 i=t:shared.types;
+i=lyc:core.privacy.layerconfig;
+i=vocab:core.privacy.entityvocab;
 
 (* F3b.6. The one health and degradation path every detection layer goes through.
 
@@ -45,11 +47,14 @@ t=$layerstatus{
   detectioncount:i64
 };
 
+(* uncovered: the entity types no answering layer masks, because the only layers configured
+   for them are down (F3b.6, see uncoveredtypes below). *)
 t=$healthreport{
   layers:@$layerstatus;
   totallayers:i64;
   availablelayers:i64;
-  degraded:bool
+  degraded:bool;
+  uncovered:@str
 };
 
 (* What one layer did with one text: its status, and when it completed, what it found.
@@ -159,6 +164,105 @@ f=isdegraded(s:$layerstatus):bool{
 
 (* Probes every entry of the registry. totallayers counts the ENABLED layers; a disabled one
    is reported, with state disabled, and does not count against health. *)
+(* ── Coverage (F3b.6, G1) ─────────────────────────────────────────────── *)
+
+(* Whether detector types a and b are the same entity type: the same name without regard to
+   case, or the same non-empty set of preset types in core.privacy.entityvocab, the one place
+   detector names are related to each other (RG1.7). So Presidio's EMAIL_ADDRESS is the regex
+   layer's email and its US_SSN is ssn_us, while the sidecar's SECRET (a password or an API
+   key) is not the regex layer's api_key (an API key only). *)
+f=sametype(a:str;b:str):bool{
+  if(str.eq(t.strlower(a);t.strlower(b))){ <true }el{};
+  let pa=vocab.presettypes(a);
+  let pb=vocab.presettypes(b);
+  if(pa.len==0 || pa.len!=pb.len){ <false }el{};
+  lp(let i=0;i<pa.len;i=i+1){
+    if(!vocab.contains(pb;pa.get(i))){ <false }el{}
+  };
+  <true
+};
+
+(* Whether layer f, as configured, masks detector type ty: it reports the type, is not
+   detect-only, and its entity_filter does not exclude it. *)
+f=covers(f:$privacyfilter;ty:str):bool{
+  if(!lyc.masks(f)){ <false }el{};
+  let types=vocab.layertypes(f.id);
+  lp(let i=0;i<types.len;i=i+1){
+    let d:str=types.get(i);
+    if(sametype(d;ty) && lyc.infilter(f.entityfilter;d)){ <true }el{}
+  };
+  <false
+};
+
+f=answered(s:$layerstatus):bool{
+  <str.eq(s.state;"completed") || str.eq(s.state;"healthy")
+};
+
+(* Whether any layer that answered masks ty. states are in step with reg.filters. *)
+f=coveredbyany(reg:$filterregistry;states:@$layerstatus;ty:str):bool{
+  lp(let i=0;i<reg.filters.len && i<states.len;i=i+1){
+    if(answered(states.get(i)) && covers(reg.filters.get(i);ty)){ <true }el{}
+  };
+  <false
+};
+
+f=listedtype(list:@str;ty:str):bool{
+  lp(let i=0;i<list.len;i=i+1){
+    if(sametype(list.get(i);ty)){ <true }el{}
+  };
+  <false
+};
+
+(* The entity types left with no layer to mask them: each type a DEGRADED layer (enabled, and
+   unavailable or failed) was configured to mask that no layer that answered masks. This is
+   the story's "the unavailable layer was the only one configured for an entity type". A
+   type no enabled layer was ever configured for is not here: that is configuration, not
+   health. Each type once, named as the first degraded layer reports it. states are in step
+   with reg.filters: the statuses consult (a run) or probe (a health check) returned. *)
+f=uncoveredtypes(reg:$filterregistry;states:@$layerstatus):@str{
+  let out=mut.@();
+  lp(let i=0;i<reg.filters.len && i<states.len;i=i+1){
+    let f:$privacyfilter=reg.filters.get(i);
+    if(isdegraded(states.get(i))){
+      let types=vocab.layertypes(f.id);
+      lp(let j=0;j<types.len;j=j+1){
+        let ty:str=types.get(j);
+        if(covers(f;ty) && !listedtype(out;ty) && !coveredbyany(reg;states;ty)){ out=out.push(ty) }el{}
+      }
+    }el{}
+  };
+  <out
+};
+
+(* ["PERSON","SECRET"]. Type names only. *)
+f=encodedtype(ty:str):str{ <json.enc(ty) };
+f=comma():str{ <"," };
+f=listsep():str{ <", " };
+
+f=typesjson(types:@str):str{
+  <"[\(str.join(comma();types.map(&encodedtype)))]"
+};
+
+f=coversany(f:$privacyfilter;types:@str):bool{
+  lp(let i=0;i<types.len;i=i+1){
+    if(covers(f;types.get(i))){ <true }el{}
+  };
+  <false
+};
+
+(* What the governance alert says (G1): the types, and each degraded layer configured for
+   one of them, with its reason. A degraded layer whose types other layers still mask is not
+   named: it is in the run's degraded count, not in this gap. Names and reasons only; never
+   anything from the text. *)
+f=coveragemessage(reg:$filterregistry;states:@$layerstatus;types:@str):str{
+  let down=mut.@();
+  lp(let i=0;i<reg.filters.len && i<states.len;i=i+1){
+    let s:$layerstatus=states.get(i);
+    if(isdegraded(s) && coversany(reg.filters.get(i);types)){ down=down.push("\(s.id) (\(s.reason))") }el{}
+  };
+  <"privacy layer coverage: no available detection layer masks \(str.join(listsep();types)); the layers configured for them are down: \(str.join(listsep();down)). Requests continue with the layers that answered."
+};
+
 f=checkhealth(reg:$filterregistry):$healthreport{
   let statuses=mut.@();
   let available=mut.0;
@@ -174,7 +278,8 @@ f=checkhealth(reg:$filterregistry):$healthreport{
     layers:statuses;
     totallayers:total;
     availablelayers:available;
-    degraded:available<total || available==0
+    degraded:available<total || available==0;
+    uncovered:uncoveredtypes(reg;statuses)
   }
 };
 
@@ -209,7 +314,8 @@ f=statusjson(s:$layerstatus):str{
   <"{\"id\":\(id),\"enabled\":\(enabled),\"state\":\(state),\"reason\":\(reason)}"
 };
 
-(* {"state":"degraded","summary":"...","layers":[{"id":"regex","enabled":true,"state":"healthy",...}]} *)
+(* {"state":"degraded","summary":"...","layers":[{"id":"regex","enabled":true,"state":"healthy",...}],
+   "uncovered_types":["SECRET"]} *)
 f=reportjson(report:$healthreport):str{
   let items=mut.@();
   lp(let i=0;i<report.layers.len;i=i+1){
@@ -218,5 +324,5 @@ f=reportjson(report:$healthreport):str{
   let state=json.enc(overall(report));
   let summary=json.enc(formathealthstatus(report));
   let layers=str.join(",";items);
-  <"{\"state\":\(state),\"summary\":\(summary),\"layers\":[\(layers)]}"
+  <"{\"state\":\(state),\"summary\":\(summary),\"layers\":[\(layers)],\"uncovered_types\":\(typesjson(report.uncovered))}"
 };
