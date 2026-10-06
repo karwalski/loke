@@ -60,8 +60,16 @@ Each layer's availability check and scan is a branch on its id in `core.privacy.
 4. A `[[privacy.layers]]` error, or failing that a `[[privacy.entity_routing]]` error, is put on the
    run (`layererror`).
 5. **Consensus** (`consensus.apply`, F3b.4) groups overlapping detections and decides mask or pass
-   for each under `privacy.consensus_strategy`.
-6. **Dedup** of what consensus kept.
+   for each under `privacy.consensus_strategy`. Under first-match, if a group's most sensitive
+   detection is not the one masked, the masked one carries that type (`consensus.applyranked`, RG1.7c).
+6. **Dedup** of what consensus kept (`dedupentities`). Of equal values, the most sensitive detection
+   is kept, whatever the layer or pattern order; a covering span (a URL, an email address) only drops
+   a span inside it that ranks no higher (`strictlyshadows`), so a card number or TFN inside a URL
+   is kept (RG1.7c).
+   The request's **sensitivity** is the higher of what dedup kept and every detection a masking layer
+   accepted before routing, consensus and dedup (`requestsensitivity`, RG1.7c), so no strategy or
+   route can lower it. Test: `test_dedup_sensitivity.tk`. Detections from a detect-only layer do not
+   count towards it.
 7. **Placeholders** are assigned, salted with the run's request id (PL1.1).
 8. **Anonymisation** replaces each value with its placeholder (skipped on a dry run).
 9. The **guardian** system prompt is built over the base system prompt.
