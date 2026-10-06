@@ -41,8 +41,8 @@ f=defaultconfig():$lokeconfig{
     defaultprovider:"ollama";
     (* AD1.4. Unset: core.privacy.sidecarclient then sends no threshold and the
        privacy-filter sidecar applies its own default, confidence_threshold in
-       packages/privacy-filter/models.json. A string because std.toml has no float
-       accessor at this toolchain, e.g. privacy_filter_threshold = "0.5". *)
+       packages/privacy-filter/models.json. Text, because std.toml has no float
+       accessor; written quoted or not, privacy_filter_threshold = 0.5 or "0.5" (F3b.16). *)
     pfthreshold:"";
     (* F3b.3. The privacy-filter sidecar as a detection layer of core.privacy.pipeline.
        Off unless the operator turns it on (privacy.privacy_filter = true): the sidecar is a
@@ -108,6 +108,153 @@ f=tomlstr(doc:i64;key:str;fallback:str):str{
   }
 };
 
+(* F3b.16. The numeric privacy settings, privacy.consensus_threshold and
+   privacy.privacy_filter_threshold, are kept as text (core.privacy.consensus and
+   core.privacy.sidecarclient take text), but std.toml has no float accessor: read with
+   toml.str alone, an unquoted 0.7 was "" and the default applied with no word. A value is
+   now taken as a string, else as an integer, else as written on its line of the file's
+   text (an unquoted float). privacyerror says when one is set and cannot be used. *)
+f=numberkeys():@str{
+  <@("privacy.consensus_threshold";"privacy.privacy_filter_threshold")
+};
+
+(* The line with any comment removed: a # outside quotes starts one. *)
+f=stripcomment(s:str):str{
+  let n=str.len(s) as i64;
+  let q=mut.0;
+  let cut=mut.0-1;
+  lp(let i=0;i<n && cut<0;i=i+1){
+    let c=str.charat(s;i);
+    if(q==0){
+      if(c==35){ cut=i }el{
+        if(c==34 || c==39){ q=c }el{}
+      }
+    }el{
+      if(c==q){ q=0 }el{}
+    }
+  };
+  if(cut<0){ <s }el{};
+  <t.strslice(s;0;cut)
+};
+
+(* "[ privacy ]" as privacy; "[[privacy.layers]]" as privacy.layers. *)
+f=headername(line:str):str{
+  let inner=mut.str.replace(line;" ";"");
+  lp(let k=0;str.startswith(inner;"[");k=k+1){ inner=t.strslice(inner;1;str.len(inner) as i64) };
+  lp(let k=0;str.endswith(inner;"]");k=k+1){ inner=t.strslice(inner;0;(str.len(inner) as i64)-1) };
+  <inner
+};
+
+(* The value of a dotted key as written in text: `leaf = v` under its [section], or
+   `section.leaf = v` before any table. Empty when no line sets it that way. *)
+f=rawvalue(text:str;key:str):str{
+  let section=t.strslice(key;0;str.indexof(key;"."));
+  let leaf=tomlleaf(key);
+  let lines=str.split(text;"\n");
+  let table=mut."";
+  let found=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let line=str.trim(stripcomment(lines.get(i)));
+    if(str.startswith(line;"[")){ table=headername(line) }el{
+      let eq=str.indexof(line;"=");
+      if(eq>0){
+        let name=str.trim(t.strslice(line;0;eq));
+        if((str.eq(table;section) && str.eq(name;leaf)) || (str.len(table)==0 && str.eq(name;key))){
+          found=str.trim(t.strslice(line;eq+1;str.len(line) as i64))
+        }el{}
+      }el{}
+    }
+  };
+  <found
+};
+
+(* Whether the key's leaf name appears anywhere outside a comment: a form rawvalue does not
+   read (an inline table, a quoted key) still counts as set. *)
+f=mentioned(text:str;key:str):bool{
+  let leaf=tomlleaf(key);
+  let lines=str.split(text;"\n");
+  let seen=mut.false;
+  lp(let i=0;i<lines.len;i=i+1){
+    if(str.contains(stripcomment(lines.get(i));leaf)){ seen=true }el{}
+  };
+  <seen
+};
+
+f=hasstr(tab:i64;leaf:str):bool{
+  if(tab==0){ <false }el{};
+  <mt toml.str(tab;leaf) { $ok:v true; $err:e false }
+};
+
+f=hasint(tab:i64;leaf:str):bool{
+  if(tab==0){ <false }el{};
+  <mt toml.i64(tab;leaf) { $ok:v true; $err:e false }
+};
+
+f=intof(tab:i64;leaf:str):i64{
+  <mt toml.i64(tab;leaf) { $ok:v v; $err:e 0 }
+};
+
+(* A numeric setting as text: a TOML string as it is, an integer in decimal, an unquoted
+   float as written; the fallback when the key is not set. *)
+f=tomlnumber(doc:i64;text:str;key:str;fallback:str):str{
+  let tab=tomltable(doc;key);
+  let leaf=tomlleaf(key);
+  if(hasstr(tab;leaf)){ <tomlstr(doc;key;fallback) }el{};
+  if(hasint(tab;leaf)){ <str.fromint(intof(tab;leaf)) }el{};
+  let raw=rawvalue(text;key);
+  if(str.len(raw)>0){ <raw }el{};
+  <fallback
+};
+
+f=numberset(doc:i64;text:str;key:str):bool{
+  let tab=tomltable(doc;key);
+  let leaf=tomlleaf(key);
+  <hasstr(tab;leaf) || hasint(tab;leaf) || (str.len(rawvalue(text;key))>0) || mentioned(text;key)
+};
+
+(* 0 or 1, or 0 or 1 with a point and at least one digit after it, at most 1: the forms
+   core.privacy.sidecarclient.isthreshold sends. No sign, no exponent. *)
+f=isthreshold(s:str):bool{
+  if(str.eq(s;"0") || str.eq(s;"1")){ <true }el{};
+  if(str.len(s)<3 || str.indexof(s;".")!=1){ <false }el{};
+  let frac=t.strslice(s;2;str.len(s) as i64);
+  if(!str.isdigit(frac)){ <false }el{};
+  if(str.startswith(s;"0")){ <true }el{};
+  <str.startswith(s;"1") && str.len(str.replace(frac;"0";""))==0
+};
+
+(* Why a numeric privacy setting in this text cannot be used, or empty. doc is 0 when the
+   text is not TOML. *)
+f=numbererror(doc:i64;text:str;key:str):str{
+  if(!numberset(doc;text;key)){ <"" }el{};
+  if(doc==0){ <"config.toml is not valid TOML, so the \(key) it sets cannot be read" }el{};
+  let v=tomlnumber(doc;text;key;"");
+  if(str.len(v)==0){ <"\(key) is set in a form loke cannot read; write it on its own line under [privacy], e.g. \(tomlleaf(key)) = 0.5" }el{};
+  if(isthreshold(v)){ <"" }el{};
+  <"\(key) = \(v) is not a number from 0 to 1"
+};
+
+f=numbererrors(doc:i64;text:str):str{
+  let keys=numberkeys();
+  let found=mut."";
+  lp(let i=0;i<keys.len;i=i+1){
+    if(str.len(found)==0){ found=numbererror(doc;text;keys.get(i)) }el{}
+  };
+  <found
+};
+
+(* F3b.16. Why the numeric privacy settings in a config.toml text cannot be applied, or
+   empty when each is absent or a usable threshold. A value that is set and unusable (out of
+   range, not a number, a boolean, or in a file that is not TOML) is not replaced by its
+   default: core.privacy.layerconfig.resolve returns this as its error, which refuses every
+   run made with the config, as a malformed [[privacy.layers]] entry is refused (F3b.2). *)
+f=privacyerror(text:str):str{
+  <mt toml.load(text) {
+    $ok:doc numbererrors(doc;text);
+    $err:e numbererrors(0;text)
+  }
+};
+
 f=tomlport(doc:i64;fallback:u16):u16{
   let tab=tomltable(doc;"server.port");
   if(tab==0){ <fallback }el{};
@@ -141,11 +288,11 @@ f=configfrom(doc:i64;text:str):$lokeconfig{
     presidiourl:tomlstr(doc;"privacy.presidio_url";defaults.presidiourl);
     llmlinguaurl:tomlstr(doc;"privacy.llmlingua_url";defaults.llmlinguaurl);
     defaultprovider:tomlstr(doc;"providers.default";defaults.defaultprovider);
-    pfthreshold:tomlstr(doc;"privacy.privacy_filter_threshold";defaults.pfthreshold);
+    pfthreshold:tomlnumber(doc;text;"privacy.privacy_filter_threshold";defaults.pfthreshold);
     usepf:tomlbool(doc;"privacy.privacy_filter";defaults.usepf);
     pfurl:tomlstr(doc;"privacy.privacy_filter_url";defaults.pfurl);
     consensusstrategy:tomlstr(doc;"privacy.consensus_strategy";defaults.consensusstrategy);
-    consensusthreshold:tomlstr(doc;"privacy.consensus_threshold";defaults.consensusthreshold);
+    consensusthreshold:tomlnumber(doc;text;"privacy.consensus_threshold";defaults.consensusthreshold);
     routingstrategy:tomlstr(doc;"routing.strategy";defaults.routingstrategy);
     routingpreferlocal:tomlbool(doc;"routing.prefer_local";defaults.routingpreferlocal);
     routingfallbacktocloud:tomlbool(doc;"routing.fallback_to_cloud";defaults.routingfallbacktocloud);

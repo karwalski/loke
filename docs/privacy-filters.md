@@ -105,10 +105,10 @@ pipeline behaves as described under [Migration](#migration-guide-for-existing-de
 | Key | Read by | Test |
 |---|---|---|
 | `privacy.consensus_strategy` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_consensus_pipeline.tk` ("privacy.consensus_strategy is read from config.toml") |
-| `privacy.consensus_threshold` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_consensus_pipeline.tk` ("privacy.consensus_threshold reaches confidence-weighted") |
+| `privacy.consensus_threshold` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_consensus_pipeline.tk` ("privacy.consensus_threshold reaches confidence-weighted", "an unquoted privacy.consensus_threshold = 0.99 reaches confidence-weighted as 0.99", "an out-of-range privacy.consensus_threshold refuses the run"); `tests/unit/shared/test_config_numbers.tk` (each form, F3b.16) |
 | `privacy.privacy_filter` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_privacy_filter_layer.tk`; `scripts/smoke_e2e.sh` |
 | `privacy.privacy_filter_url` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_privacy_filter_layer.tk`; `scripts/smoke_e2e.sh` |
-| `privacy.privacy_filter_threshold` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_sidecar_threshold.tk`; `scripts/smoke_e2e.sh` |
+| `privacy.privacy_filter_threshold` | `packages/shared/src/config.tk` | `tests/unit/privacy/test_sidecar_threshold.tk`; `tests/unit/shared/test_config_numbers.tk` ("an unquoted float privacy_filter_threshold is read"); `tests/unit/privacy/test_consensus_pipeline.tk` ("a privacy_filter_threshold of the wrong type refuses the run"); `scripts/smoke_e2e.sh` |
 | `privacy.presidio_url` | `packages/shared/src/config.tk` | `tests/unit/shared/test_config_loaded.tk` (read from config.toml); that `pipeline.served()` passes it to `/api/pipeline`'s registry: not tested |
 | `[[privacy.layers]]` | `packages/core/src/privacy/layer_config.tk` | `tests/unit/privacy/test_layer_config.tk`, `tests/unit/privacy/test_layer_config_pipeline.tk`, `scripts/smoke_e2e.sh` |
 | `id` | `packages/core/src/privacy/layer_config.tk` | `test_layer_config.tk` ("an unknown id", "an entry with no id") |
@@ -133,7 +133,7 @@ what is done with it; the tests named do that.
 ```toml
 [privacy]
 consensus_strategy = "most-restrictive"   # the default
-consensus_threshold = "0.5"               # confidence-weighted only; write it quoted
+consensus_threshold = 0.5                 # confidence-weighted only; 0.5 or "0.5"
 ```
 
 Detections are grouped: two belong to one group when their spans overlap, or when their values are
@@ -152,13 +152,18 @@ order. A layer that did not scan does not vote.
 - An empty, unknown or **mis-cased** strategy name is applied as `most-restrictive`, and the run records
   that it was. Tests: `test_consensus.tk` ("an UNKNOWN strategy is most-restrictive", "a MIS-CASED
   strategy is most-restrictive"); `test_consensus_pipeline.tk` ("and a mis-cased one").
-- `consensus_threshold` unset is 0.5; a value outside 0 to 1 is clamped. Test: `test_consensus.tk`
-  ("an unset threshold is 0.5", "and clamped to 0..1").
-- **Write the threshold as a quoted string.** It is read with `toml.str`. Measured 2026-10-06 with a
-  scratch program against `shared.config.fromtext` (not in the test suite): `consensus_threshold = 0.7`
-  unquoted reads as unset, so 0.5 is applied, with no warning; the same holds for
-  `privacy_filter_threshold`. A quoted value that is not a number (`"abc"`) reads as 0, under which
-  confidence-weighted masks every group. Filed as **F3b.16**.
+- `consensus_threshold` unset is 0.5. Test: `test_consensus.tk` ("an unset threshold is 0.5").
+- **Quoted or not** (F3b.16). `consensus_threshold` and `privacy_filter_threshold` are read as a TOML
+  string (`"0.7"`), an unquoted float (`0.7`) or an integer (`0` or `1`); `shared.config` keeps the text
+  as written. std.toml has no float accessor, so an unquoted float is read from its line of the file:
+  `consensus_threshold = v` under `[privacy]`, or `privacy.consensus_threshold = v` before any table.
+  Tests: `tests/unit/shared/test_config_numbers.tk` (each form); `test_consensus_pipeline.tk` ("an
+  unquoted privacy.consensus_threshold = 0.99 reaches confidence-weighted as 0.99"). Until F3b.16 an
+  unquoted value read as unset and the default applied with no warning.
+- **A threshold that is set and cannot be used refuses every run** (F3b.16), as a malformed
+  `[[privacy.layers]]` does: see [Malformed configuration](#malformed-configuration-refuses-every-request).
+  It is never replaced by the default. `consensus.tk` still clamps a value outside 0 to 1
+  (`test_consensus.tk`, "and clamped to 0..1"), but no such value reaches it from `config.toml` now.
 - **Every strategy except `most-restrictive` can leave a detected value in the clear, including one only
   the regex layer found.** Consensus has no regex guard: under `unanimous` or `majority`, an email only
   the regex layer found is passed and sent unmasked. Test: `test_consensus_pipeline.tk` ("majority masks
@@ -286,6 +291,22 @@ built binary (`POST /api/pipeline` answers 503 with `"refused":true`, and the mo
 ```
 privacy.layers in config.toml cannot be applied: config.toml line 1: mode must be detect-and-mask, detect-only or veto
 privacy.entity_routing in config.toml cannot be applied: config.toml line 1: entity_type private_person is not a type any layer reports
+```
+
+`privacy.consensus_threshold` and `privacy.privacy_filter_threshold` are refused (F3b.16) when set and
+not usable: a number outside 0 to 1, a negative, an exponent (`7e-1`), a word, an empty string, a
+boolean, a form the reader does not take (an inline table such as `privacy = { consensus_threshold = 0.7 }`,
+a quoted key), or any value in a file that is not valid TOML. A usable value is `0`, `1`, or `0.` or `1.`
+followed by digits and at most 1, quoted or not. `shared.config.privacyerror` says why, and
+`core.privacy.layerconfig.resolve` returns that as its error, so the refusal carries the layers prefix
+(the prefix is added in `pipeline.tk`; filed as F3b.17). The reason names the key and the value as
+written, which is configuration, not user data. Tests: `tests/unit/shared/test_config_numbers.tk` (each
+case, by its exact reason); `test_consensus_pipeline.tk` ("an out-of-range privacy.consensus_threshold
+refuses the run and says why", "a privacy_filter_threshold of the wrong type refuses the run"). Not
+measured over the built binary; the string below is what the unit test asserts on.
+
+```
+privacy.layers in config.toml cannot be applied: privacy.consensus_threshold = 1.5 is not a number from 0 to 1
 ```
 
 When both are malformed, the layers error is the one reported. Test: `test_entity_routing_pipeline.tk`
@@ -487,7 +508,7 @@ What **does** change for an existing deployment, with no configuration:
    [privacy]
    privacy_filter = true
    privacy_filter_url = "http://127.0.0.1:11435"   # the default
-   privacy_filter_threshold = "0.0"                # quoted; the sidecar's score threshold (AD1.4)
+   privacy_filter_threshold = 0.0                  # quoted or not; the sidecar's score threshold (AD1.4)
    ```
 
    With it on and down, it is a degraded layer, not a refusal.
