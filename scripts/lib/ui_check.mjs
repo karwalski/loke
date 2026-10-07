@@ -75,7 +75,21 @@ try {
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Page.navigate', { url });
-  for (let i = 0; i < 80 && !events.includes('Page.loadEventFired'); i++) await sleep(250);
+  // X8.11: under heavy load the load event can take longer than the old 20 s wait, and the checks
+  // then ran against a blank or half-loaded page and all failed at once. Wait up to 90 s for the
+  // page this run asked for to be fully loaded, and stop with a clear error if it never is.
+  const loaded = async () => {
+    const r = await send('Runtime.evaluate', { expression:
+      `document.readyState === 'complete' && location.href.startsWith(${JSON.stringify(url)})`,
+      returnByValue: true });
+    return r.result && r.result.result && r.result.result.value === true;
+  };
+  let ready = false;
+  for (let i = 0; i < 360 && !ready; i++) {
+    if (events.includes('Page.loadEventFired') && await loaded()) ready = true;
+    else await sleep(250);
+  }
+  if (!ready) throw new Error(`page did not finish loading: ${url}`);
   await sleep(500);
 
   let failed = 0;
