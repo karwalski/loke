@@ -5,7 +5,8 @@ m=loke.core.auth.refresh;
 
 i=time:std.time;
 i=http:std.http;
-i=encoding:std.encoding;
+i=json:std.json;
+i=jx:shared.jsonobj;
 i=str:std.str;
 i=log:shared.log;
 i=reach:shared.reachability;
@@ -71,8 +72,14 @@ f=dorefresh(tokenurl:str;clientid:str;refreshtok:str):$refreshresult{
    an $httpresp on the ok arm and an httperr on the err arm — so `resp.status` had
    no established type. It also tested `!$httpok`, a type sigil on a local, which
    never read the bool it was meant to. *)
+(* VM1.6i. Success is a 2xx carrying an access token. The test was `status>400`, so a 400,
+   which is what RFC 6749 answers for an expired or revoked refresh token (invalid_grant),
+   was a SUCCESS with an empty access token, and getvalidtoken stored that empty token over
+   the old one; 1xx and 3xx were successes too. Each field is read with the typed std.json
+   accessors: `encoding.jsonfield` is an untyped (i64,i64) ABI helper and was handed
+   `str.frombytes(resp.body)` unmatched, a `str!EncodingErr` since toke 3.1.0. *)
 f=refreshfromresp(resp:$httpresp;refreshtok:str):$refreshresult{
-  if(resp.status>400){
+  if(resp.status<200 || resp.status>=300){
     <$refreshresult{
       ok:false;
       accesstoken:"";
@@ -81,16 +88,19 @@ f=refreshfromresp(resp:$httpresp;refreshtok:str):$refreshresult{
       status:resp.status;
       errormsg:"refresh failed with status \(resp.status)"
     }
+  }el{};
+  let body=mt str.frombytes(resp.body) { $ok:s s; $err:e "" };
+  let o=mt json.dec(body) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  let access=jx.strvalue(o;"access_token";"");
+  if(str.len(access)==0){
+    <$refreshresult{ok:false;accesstoken:"";refreshtoken:"";expiresin:0;status:resp.status;errormsg:"refresh answer carried no access token"}
+  }el{};
+  let newrefresh=jx.strvalue(o;"refresh_token";"");
+  let exp=mt json.i64(o;"expires_in") { $ok:n n; $err:x 0 };
+  if(str.len(newrefresh)==0){
+    <$refreshresult{ok:true;accesstoken:access;refreshtoken:refreshtok;expiresin:exp;status:resp.status;errormsg:""}
   }el{
-    let bodystr=str.frombytes(resp.body);
-    let access=encoding.jsonfield(bodystr;"access_token");
-    let newrefresh=encoding.jsonfield(bodystr;"refresh_token");
-    let exp=encoding.jsonfieldint(bodystr;"expires_in");
-    if(str.len(newrefresh)==0){
-      <$refreshresult{ok:true;accesstoken:access;refreshtoken:refreshtok;expiresin:exp;status:resp.status;errormsg:""}
-    }el{
-      <$refreshresult{ok:true;accesstoken:access;refreshtoken:newrefresh;expiresin:exp;status:resp.status;errormsg:""}
-    }
+    <$refreshresult{ok:true;accesstoken:access;refreshtoken:newrefresh;expiresin:exp;status:resp.status;errormsg:""}
   }
 };
 
@@ -114,10 +124,16 @@ f=getvalidtoken(cfg:$oauthconfig):str{
         let result=dorefresh(cfg.tokenurl;cfg.clientid;refreshtok);
         if(result.ok){
           store.updateaccesstoken(cfg.adapterid;result.accesstoken;now+result.expiresin);
+          (* VM1.6i: a server that rotates refresh tokens invalidates the old one, so the
+             new one is stored too. It was dropped, and the next refresh then failed. *)
+          if(!str.eq(result.refreshtoken;refreshtok)){
+            store.updaterefreshtoken(cfg.adapterid;result.refreshtoken);
+          }el{};
           log.info(str.concat("loke.core.auth.refresh: token refreshed for ";cfg.adapterid);"auth.refresh";"");
           <result.accesstoken
         }el{
-          if(result.status>400){
+          (* A 400 is permanent too: RFC 6749's invalid_grant (VM1.6i). *)
+          if(result.status>=400){
             if(result.status<500){
               log.warn(str.concat("loke.core.auth.refresh: permanent refresh failure for ";cfg.adapterid);"auth.refresh";"");
               store.cleartokens(cfg.adapterid);

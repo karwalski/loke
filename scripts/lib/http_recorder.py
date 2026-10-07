@@ -16,7 +16,8 @@ Presidio (/health, /analyze), the privacy-filter sidecar (/detect, /anonymise, A
 (/mcp), Exo (/v1/health, /v1/nodes, /v1/chat/completions), Ollama's /api/show and loke's own
 /api/pipeline, and since VM1.6h a policy document (/policy.json), and since VM1.6g an OAuth
 token endpoint (/oauth/token, /oauth/revoke) and GitHub's create-issue path
-(/repos/<owner>/<repo>/issues, answered 201); any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
+(/repos/<owner>/<repo>/issues, answered 201), and since VM1.6i a `?status=NNN` query on any
+of those paths answers that status instead with the same body; any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
 compact (no spaces after `:`), as Ollama's are, because shared.jsonobj's nested lookup
 matches `"key":` exactly.
 
@@ -238,6 +239,11 @@ class H(http.server.BaseHTTPRequestHandler):
         return body
 
     def _send(self, obj, code=200):
+        # VM1.6i: `?status=NNN` on any path answers that status with the path's usual body,
+        # so a client can be seen to refuse a non-2xx even when the body looks like success.
+        m = re.search(r"[?&]status=(\d{3})(?:&|$)", self.path)
+        if m:
+            code = int(m.group(1))
         b = json.dumps(obj, separators=SEPS).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")

@@ -24,6 +24,8 @@ i=refresh:loke.core.auth.refresh;
 i=rep:core.feedback.report;
 i=fbp:core.feedback.pipeline;
 i=h:page.api.pipeline;
+i=kcs:std.keychain;
+i=tstore:loke.core.auth.tokenstore;
 
 (* VM1.6g. Every hosted call site, judged over TLS by what a stand-in on loopback received.
 
@@ -57,10 +59,23 @@ i=h:page.api.pipeline;
    site's name and the stand-in's URL. The child exits 0 only when the site reports the
    stand-in's answer. As in test_https_verify.tk, env(1) is a system binary, so the child runs
    without the real-HOME guard's library; it keeps the throwaway HOME. No request leaves the
-   machine, no key is real, and nothing reads or writes a keychain: core.auth.oauth.revoke reads
-   its token from the keychain, so it is not driven here (it is the same call as
-   exchangecode). Nothing in production reads SSL_CERT_FILE from loke's configuration, and the
-   test CA lives in this run's scratch directory only. *)
+   machine, and no key is real. core.auth.oauth.revoke reads its token from the keychain, so it
+   is not driven here (it is the same call as exchangecode). Nothing in production reads
+   SSL_CERT_FILE from loke's configuration, and the test CA lives in this run's scratch
+   directory only.
+
+   VM1.6i. The same stand-in, judged on what each site READ from the answer: exchangecode
+   reports the endpoint's access_token and refresh_token each from its own field (it used to
+   report the refresh token as the access token); submitbatchat reads the issue's html_url
+   from GitHub's 201. With `?status=NNN` the stand-in answers the same body under that status,
+   so a site that ignores the status is seen to: a 400 from the token endpoint and a 401 from
+   GitHub are failures that name the status and no token, for exchangecode, dorefresh,
+   submitbatchat and submittogithubat. And completeauthorise and getvalidtoken are driven into
+   a KEYCHAIN, which must be a throwaway one (X8.7): the "store" child creates a keychain file
+   under the throwaway HOME, selects it with std.keychain.use before any keychain call, and
+   destroys it, as tests/unit/storage/test_keychain.tk does. If it cannot be created or
+   selected the child stops before its first keychain call. The accounts are read back by
+   their spelled-out names, so a store that put each token under the other's account fails. *)
 
 f=scratch():str{
   let hex:str=str.randhex(8);
@@ -185,19 +200,106 @@ f=oauthcfg(tokenurl:str):$oauthconfig{
   <$oauthconfig{adapterid:"tls-test";clientid:"client-tls-test";authoriseurl:"";tokenurl:tokenurl;scopes:"read";revokeurl:"";callbackport:0}
 };
 
+f=notokens():$tokenset{
+  <$tokenset{accesstoken:"";refreshtoken:"";expiresat:0;scopes:""}
+};
+
+(* 0 when each token came from its own field and the expiry from expires_in (3600 s);
+   4 when the access token is the refresh token (VM1.6i as found); 6 when the refresh token
+   is wrong; 7 when the expiry is; 1 when no access token came back. *)
 f=childoauth(url:str):i64{
   let tok=mt oauth.exchangecode(oauthcfg(url);"code-tls-test";"verifier-tls-test";"http://localhost:8739/callback") {
-    $ok:ts ts.accesstoken;
-    $oautherr:e ""
+    $ok:v v;
+    $oautherr:e notokens()
   };
-  if(str.eq(tok;"recorder-access-token")){ <0 }el{};
-  if(str.eq(tok;"recorder-refresh-token")){ <4 }el{};
-  <1
+  if(str.eq(tok.accesstoken;"recorder-refresh-token")){ <4 }el{};
+  if(!str.eq(tok.accesstoken;"recorder-access-token")){ <1 }el{};
+  if(!str.eq(tok.refreshtoken;"recorder-refresh-token")){ <6 }el{};
+  let left=tok.expiresat-(sh.nowms()/1000);
+  if(left<3500 || left>3700){ <7 }el{};
+  <0
+};
+
+(* The token endpoint answers 400 with a body that looks like success. 0 when exchangecode
+   answers its error naming the status and no token; 1 when it answered $ok. *)
+f=childoauthstatus(url:str):i64{
+  let desc=mt oauth.exchangecode(oauthcfg(url);"code-tls-test";"verifier-tls-test";"http://localhost:8739/callback") {
+    $ok:v "answered-ok";
+    $oautherr:e e.errordesc
+  };
+  if(desc=="answered-ok"){ <1 }el{};
+  if(str.contains(desc;"recorder-")){ <2 }el{};
+  if(str.contains(desc;"400")){ <0 }el{};
+  <3
 };
 
 f=childrefresh(url:str):i64{
   let r=refresh.dorefresh(url;"client-tls-test";"refresh-tls-test");
-  if(r.ok && str.eq(r.accesstoken;"recorder-access-token")){ <0 }el{ <1 }
+  if(r.ok && str.eq(r.accesstoken;"recorder-access-token") && str.eq(r.refreshtoken;"recorder-refresh-token")){ <0 }el{ <1 }
+};
+
+f=childrefreshstatus(url:str):i64{
+  let r=refresh.dorefresh(url;"client-tls-test";"refresh-tls-test");
+  if(r.ok){ <1 }el{};
+  if(str.contains(r.errormsg;"recorder-") || str.contains(r.errormsg;"refresh-tls-test")){ <2 }el{};
+  if(r.status==400 && str.len(r.accesstoken)==0){ <0 }el{ <3 }
+};
+
+(* ── The keychain (X8.7: a throwaway keychain file, never the user's) ───────────── *)
+
+f=kcread(adapterid:str;field:str):str{
+  <mt kcs.get("dev.loke";"oauth.\(adapterid).\(field)") { $some:v v; $none:v "" }
+};
+
+f=kchas(adapterid:str):bool{
+  <kcs.exists("dev.loke";"oauth.\(adapterid).access_token")
+};
+
+f=tokencfg(adapterid:str;tokenurl:str):$oauthconfig{
+  <$oauthconfig{adapterid:adapterid;clientid:"client-tls-test";authoriseurl:"";tokenurl:tokenurl;scopes:"read";revokeurl:"";callbackport:0}
+};
+
+f=bit(ok:bool;b:i64):i64{
+  if(ok){ <0 }el{ <b }
+};
+
+(* completeauthorise and getvalidtoken, into a throwaway keychain. `url` is the stand-in's
+   token endpoint. Exits with one bit per property that FAILED, 0 when all held; 255 when
+   no throwaway keychain could be made, and then no keychain call has been made at all. *)
+f=childstore(url:str):i64{
+  let hex:str=str.randhex(8);
+  let kp="\(std.homedir())/loke-test-oauth-\(hex).keychain-db";
+  if(!kcs.create(kp;"loke-throwaway")){ <255 }el{};
+  if(!kcs.use(kp)){ kcs.destroy(kp); <255 }el{};
+  let cfg=oauthcfg(url);
+  let auth=$authstate{stateparam:"state-tls-test";codeverifier:"verifier-tls-test";redirecturi:"http://localhost:8739/callback"};
+  let done=mt oauth.completeauthorise(cfg;auth;"state-tls-test";"code-tls-test") { $ok:v true; $oautherr:e false };
+  let failed=mut.bit(done && tstore.loadexpiresat("tls-test")>0;1);
+  failed=failed+bit(str.eq(kcread("tls-test";"access_token");"recorder-access-token");2);
+  failed=failed+bit(str.eq(kcread("tls-test";"refresh_token");"recorder-refresh-token");4);
+
+  (* A state mismatch, and a token endpoint answering 400, store nothing. *)
+  let mcfg=tokencfg("tls-mismatch";url);
+  let mism=mt oauth.completeauthorise(mcfg;auth;"forged-state";"code-tls-test") { $ok:v true; $oautherr:e false };
+  let dcfg=tokencfg("tls-denied";"\(url)?status=400");
+  let denied=mt oauth.completeauthorise(dcfg;auth;"state-tls-test";"code-tls-test") { $ok:v true; $oautherr:e false };
+  failed=failed+bit(!mism && !kchas("tls-mismatch") && !denied && !kchas("tls-denied");8);
+
+  (* A refresh that rotates the refresh token: both new tokens are stored. *)
+  kcs.set("dev.loke";"oauth.tls-test.access_token";"old-access-token");
+  kcs.set("dev.loke";"oauth.tls-test.refresh_token";"old-refresh-token");
+  kcs.set("dev.loke";"oauth.tls-test.expires_at";"0");
+  let fresh=refresh.getvalidtoken(cfg);
+  failed=failed+bit(str.eq(fresh;"recorder-access-token") && str.eq(kcread("tls-test";"access_token");"recorder-access-token");16);
+  failed=failed+bit(str.eq(kcread("tls-test";"refresh_token");"recorder-refresh-token");32);
+
+  (* A refresh answered 400 (invalid_grant) is permanent: no token, and the stored ones go. *)
+  kcs.set("dev.loke";"oauth.tls-test.expires_at";"0");
+  let gone=refresh.getvalidtoken(tokencfg("tls-test";"\(url)?status=400"));
+  failed=failed+bit(str.len(gone)==0 && !kchas("tls-test");64);
+
+  kcs.destroy(kp);
+  <failed
 };
 
 f=issue():$issuereport{
@@ -223,6 +325,19 @@ f=childbatch(url:str):i64{
   <1
 };
 
+(* GitHub answers 401 with a body that looks like a created issue. 0 when the batch is a
+   failure naming the status and not the token. *)
+f=childbatchstatus(url:str):i64{
+  let r=fbp.submitbatchat(ghcfg();batch();url);
+  if(r.ok){ <1 }el{};
+  if(str.contains(r.err;"gh-tls-test-token")){ <2 }el{};
+  if(str.contains(r.err;"401") && str.len(r.issueurl)==0){ <0 }el{ <3 }
+};
+
+f=childreportstatus(url:str):i64{
+  if(rep.submittogithubat(issue();url;"gh-tls-test-token")){ <1 }el{ <0 }
+};
+
 f=child(site:str;url:str):i64{
   if(site=="pipeline"){ <childpipeline(url;false) }el{};
   if(site=="pipeline-killed"){ <childpipeline(url;true) }el{};
@@ -232,6 +347,11 @@ f=child(site:str;url:str):i64{
   if(site=="refresh"){ <childrefresh(url) }el{};
   if(site=="report"){ <childreport(url) }el{};
   if(site=="batch"){ <childbatch(url) }el{};
+  if(site=="oauth-status"){ <childoauthstatus(url) }el{};
+  if(site=="refresh-status"){ <childrefreshstatus(url) }el{};
+  if(site=="batch-status"){ <childbatchstatus(url) }el{};
+  if(site=="report-status"){ <childreportstatus(url) }el{};
+  if(site=="store"){ <childstore(url) }el{};
   <9
 };
 
@@ -350,19 +470,36 @@ f=main():i64{
 
   (* ── OAuth token exchange and refresh ───────────────────────────────────────── *)
   let cx=runsite(self;ca;"oauth";"\(good)/oauth/token");
-  (* DEFECT, VM1.6i: exchangecode answers $ok, but its tokenset's access token holds the
-     REFRESH token the endpoint sent (measured here). The send is right; the reading of the
-     answer is not. When it is fixed, this child exits 0 and the assertion must be turned
-     round to cx==0. *)
-  if(t.assert(cx==4;"DEFECT VM1.6i: exchangecode answered over verified TLS, but reports the refresh token as the access token")){pass=pass+1}el{fail=fail+1};
+  (* VM1.6i, turned round: exchangecode reported the REFRESH token as the access token. *)
+  if(t.assert(cx!=4;"oauth: exchangecode does not report the refresh token as the access token (VM1.6i)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cx==0;"oauth: exchangecode reports access_token as the access token, refresh_token as the refresh token, and expires_in as the expiry")){pass=pass+1}el{fail=fail+1};
   let xbody=lastbody(glog;"POST /oauth/token ");
   if(t.assert(str.contains(xbody;"grant_type=authorization_code&code=code-tls-test") && str.contains(xbody;"code_verifier=verifier-tls-test");"oauth: the form-encoded token request arrived")){pass=pass+1}el{fail=fail+1};
   let xh=lastheaders(ghdr;"POST /oauth/token");
   if(t.assert(str.contains(xh;"application/x-www-form-urlencoded") && countof(str.lower(xh);"content-type:")==1;"oauth: with exactly one Content-Type, the form one")){pass=pass+1}el{fail=fail+1};
 
   let cr=runsite(self;ca;"refresh";"\(good)/oauth/token");
-  if(t.assert(cr==0;"refresh: dorefresh read the stand-in's new token over verified TLS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cr==0;"refresh: dorefresh read the stand-in's new access and refresh tokens over verified TLS")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(lastbody(glog;"POST /oauth/token ");"grant_type=refresh_token&refresh_token=refresh-tls-test");"refresh: the refresh request arrived")){pass=pass+1}el{fail=fail+1};
+
+  (* VM1.6i: a non-2xx answer is a failure, even with a body that looks like success. The
+     old tests were `status>400`, so 400 (invalid_grant) was a success. *)
+  let xs=runsite(self;ca;"oauth-status";"\(good)/oauth/token?status=400");
+  if(t.assert(xs==0;"oauth: a 400 from the token endpoint is an error naming the status, and no token")){pass=pass+1}el{fail=fail+1};
+  let rs=runsite(self;ca;"refresh-status";"\(good)/oauth/token?status=400");
+  if(t.assert(rs==0;"refresh: a 400 from the token endpoint is a failure with status 400 and no token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countlines(glog;"POST /oauth/token?status=400 ")==2;"oauth, refresh: both 400 requests did arrive, so the failures are the answers' and not the sends'")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The keychain: completeauthorise and getvalidtoken (throwaway keychain, X8.7) ─ *)
+  let cs=runsite(self;ca;"store";"\(good)/oauth/token");
+  if(t.assert(cs!=255;"store: a throwaway keychain was created and selected")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && cs%2==0;"store: completeauthorise answered ok and stored an expiry")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && (cs/2)%2==0;"store: the access token is in the keychain under oauth.<id>.access_token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && (cs/4)%2==0;"store: the refresh token is in the keychain under oauth.<id>.refresh_token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && (cs/8)%2==0;"store: a state mismatch and a 400 from the token endpoint store nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && (cs/16)%2==0;"store: getvalidtoken refreshes an expired token and stores the new access token")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && (cs/32)%2==0;"store: and stores a rotated refresh token in place of the old one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(cs>=0 && cs<255 && (cs/64)%2==0;"store: a refresh answered 400 is permanent: no token, and the stored tokens are cleared")){pass=pass+1}el{fail=fail+1};
 
   (* ── Feedback to the GitHub issues API ──────────────────────────────────────── *)
   let cf=runsite(self;ca;"report";"\(good)/repos/o/r/issues");
@@ -371,10 +508,21 @@ f=main():i64{
   let fh=lastheaders(ghdr;"POST /repos/o/r/issues");
   if(t.assert(str.contains(fh;"authorization: token gh-tls-test-token") && str.contains(fh;"accept: application/vnd.github+json");"report: with its authorization and accept headers")){pass=pass+1}el{fail=fail+1};
   let cb=runsite(self;ca;"batch";"\(good)/repos/o/r/issues");
-  (* DEFECT, VM1.6i: submitbatchat reports success but reads no issue URL from GitHub's 201
-     answer (and it reports success whatever the status). Turn round to cb==0 when fixed. *)
-  if(t.assert(cb==5;"DEFECT VM1.6i: submitbatchat answered over verified TLS, but read no issue URL from the 201")){pass=pass+1}el{fail=fail+1};
+  (* VM1.6i, turned round: submitbatchat read no issue URL from the 201. *)
+  if(t.assert(cb==0;"batch: submitbatchat reports success with the issue URL read from the 201's html_url")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(lastbody(glog;"POST /repos/o/r/issues ");"Feedback: tls-probe");"batch: the batch issue arrived")){pass=pass+1}el{fail=fail+1};
+  (* VM1.6i: and success whatever the status. *)
+  let bs=runsite(self;ca;"batch-status";"\(good)/repos/o/r/issues?status=401");
+  if(t.assert(bs==0;"batch: a 401 from GitHub is a failure naming the status, with no issue URL and no token")){pass=pass+1}el{fail=fail+1};
+  let fs=runsite(self;ca;"report-status";"\(good)/repos/o/r/issues?status=401");
+  if(t.assert(fs==0;"report: a 401 from GitHub is a failure")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countlines(glog;"POST /repos/o/r/issues?status=401 ")==2;"batch, report: both 401 requests did arrive")){pass=pass+1}el{fail=fail+1};
+
+  (* Tokens are secrets: none of the stand-in's tokens, nor the test's own refresh token or
+     GitHub token, is in loke's log, which every child above wrote to under this HOME. *)
+  let lokelog=readfile(sh.lokefile("loke.log"));
+  if(t.assert(str.contains(lokelog;"auth.oauth");"the children's log is where this test reads it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(lokelog;"recorder-access-token") && !str.contains(lokelog;"recorder-refresh-token") && !str.contains(lokelog;"refresh-tls-test") && !str.contains(lokelog;"gh-tls-test-token") && !str.contains(lokelog;"code-tls-test");"no token or code was written to loke's log")){pass=pass+1}el{fail=fail+1};
 
   if(t.assert(str.contains(readfile("\(glog).tls");"handshake ok");"every arrival above came over a completed TLS handshake")){pass=pass+1}el{fail=fail+1};
 

@@ -7,7 +7,8 @@ i=time:std.time;
 i=crypto:std.crypto;
 i=http:std.http;
 i=str:std.str;
-i=encoding:std.encoding;
+i=json:std.json;
+i=jx:shared.jsonobj;
 i=log:shared.log;
 i=reach:shared.reachability;
 i=pkce:loke.core.auth.pkce;
@@ -24,6 +25,13 @@ t=$authstate{
   stateparam:str;
   codeverifier:str;
   redirecturi:str
+};
+
+(* VM1.6i: the outcome of a token exchange; see exchange below. *)
+t=$tokenreply{
+  ok:bool;
+  tokens:$tokenset;
+  err:$oautherr
 };
 
 f=newconfig(adapterid:str;clientid:str;authoriseurl:str;tokenurl:str;scopes:str):$oauthconfig{
@@ -97,36 +105,73 @@ f=generatestate():str{
    Sending to a remote token endpoint is a product decision with a privacy review, since a token request carries the authorisation code and the client id:
    F10.41. *)
 f=exchangecode(cfg:$oauthconfig;code:str;codeverifier:str;redir:str):$tokenset!$oautherr{
+  let x=exchange(cfg;code;codeverifier;redir);
+  if(x.ok){ <$ok(x.tokens) }el{};
+  <$err(x.err)
+};
+
+(* VM1.6i. The exchange's outcome as a plain struct, so that neither exchangecode nor
+   completeauthorise carries a result out of a match arm. Before this, the send's ok arm
+   answered tokensfromresp's own `$tokenset!$oautherr`, a function that returned a BARE
+   `$tokenset` or `$oautherr`, and it read its tokens with `encoding.jsonfield`, an untyped
+   (i64,i64) ABI helper, from `str.frombytes(resp.body)` left unmatched (a `str!EncodingErr`
+   since toke 3.1.0). Measured by tests/integration/test_hosted_tls.tk: the caller's
+   `accesstoken` held the REFRESH token. Each token is now read from its own field with the
+   typed std.json accessors.
+
+   Success is a 2xx carrying an access token, and nothing else. The old test was
+   `status>400`, so a 400 (RFC 6749's invalid_grant) was a success with an empty token, and
+   so were 1xx and 3xx. No token, code or verifier is written to a log or to an error. *)
+f=notokens():$tokenset{
+  <$tokenset{accesstoken:"";refreshtoken:"";expiresat:0;scopes:""}
+};
+
+f=failed(cfg:$oauthconfig;errorcode:str;errordesc:str):$tokenreply{
+  <$tokenreply{ok:false;tokens:notokens();err:$oautherr{adapterid:cfg.adapterid;errorcode:errorcode;errordesc:errordesc}}
+};
+
+f=issuccess(status:u64):bool{
+  <status>=200 && status<300
+};
+
+f=exchange(cfg:$oauthconfig;code:str;codeverifier:str;redir:str):$tokenreply{
   if(!reach.isloopbackurl(cfg.tokenurl)){
     log.warn("token exchange refused: only a loopback token endpoint is sent to (F10.39)";"auth.oauth";"");
-    <$err($oautherr{adapterid:cfg.adapterid;errorcode:"network_error";errordesc:"token request failed"})
+    <failed(cfg;"network_error";"token request failed")
   }el{};
   <mt http.postheaders(cfg.tokenurl;"grant_type=authorization_code&code=\(code)&redirect_uri=\(redir)&client_id=\(cfg.clientid)&code_verifier=\(codeverifier)";@(@("content-type";"application/x-www-form-urlencoded"))) {
     $ok:r tokensfromresp(cfg;r);
-    $err:e $err($oautherr{adapterid:cfg.adapterid;errorcode:"network_error";errordesc:"token request failed"})
+    $err:e failed(cfg;"network_error";"token request failed")
   }
 };
 
 (* Reading the response in its own function is what establishes its type. Binding
    `let resp=mt ... { $ok:r r; $err:e $err(...) }` gave resp two different types,
    so resp.status and resp.body resolved against no struct at all. *)
-f=tokensfromresp(cfg:$oauthconfig;resp:$httpresp):$tokenset!$oautherr{
-  if(resp.status>400){
+f=tokensfromresp(cfg:$oauthconfig;resp:$httpresp):$tokenreply{
+  if(!issuccess(resp.status)){
     let msg="token endpoint returned \(resp.status)";
     log.warn("loke.core.auth.oauth: \(msg)";"auth.oauth";"");
-    <$oautherr{adapterid:cfg.adapterid;errorcode:"token_exchange_failed";errordesc:msg}
-  }el{
-    let bodystr=str.frombytes(resp.body);
-    let access=encoding.jsonfield(bodystr;"access_token");
-    let refreshtok=encoding.jsonfield(bodystr;"refresh_token");
-    let expiresin=encoding.jsonfieldint(bodystr;"expires_in");
-    log.info("loke.core.auth.oauth: tokens acquired for \(cfg.adapterid)";"auth.oauth";"");
-    <$tokenset{
+    <failed(cfg;"token_exchange_failed";msg)
+  }el{};
+  let body=mt str.frombytes(resp.body) { $ok:s s; $err:e "" };
+  let o=mt json.dec(body) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  let access=jx.strvalue(o;"access_token";"");
+  if(str.len(access)==0){
+    log.warn("loke.core.auth.oauth: token response carried no access token";"auth.oauth";"");
+    <failed(cfg;"token_exchange_failed";"token response carried no access token")
+  }el{};
+  let expiresin=mt json.i64(o;"expires_in") { $ok:n n; $err:x 0 };
+  log.info("loke.core.auth.oauth: tokens acquired for \(cfg.adapterid)";"auth.oauth";"");
+  <$tokenreply{
+    ok:true;
+    tokens:$tokenset{
       accesstoken:access;
-      refreshtoken:refreshtok;
+      refreshtoken:jx.strvalue(o;"refresh_token";"");
       expiresat:time.nowunix()+expiresin;
       scopes:cfg.scopes
-    }
+    };
+    err:$oautherr{adapterid:cfg.adapterid;errorcode:"";errordesc:""}
   }
 };
 
@@ -161,21 +206,24 @@ f=beginauthorise(cfg:$oauthconfig):$authstate{
 
 
 
+(* VM1.6i. A failed exchange stores nothing and answers its error. Before, the error arm
+   assigned an `$err(...)` to the tokenset being built and savetokens ran whatever came back.
+   The access token goes to the keychain account `oauth.<adapter>.access_token` and the
+   refresh token to `oauth.<adapter>.refresh_token` (core.auth.tokenstore); a keychain write
+   that fails is an error, not a completed authorisation. *)
 f=completeauthorise(cfg:$oauthconfig;auth:$authstate;callbackstate:str;code:str):$tokenset!$oautherr{
-  let valid=validatestate(auth.stateparam;callbackstate);
-  let tokens=mut.$tokenset{accesstoken:"";refreshtoken:"";expiresat:0;scopes:""};
-  if(valid){
-    tokens=mt exchangecode(cfg;code;auth.codeverifier;auth.redirecturi) {
-      $ok:t t;
-      $oautherr:e $err($oautherr{adapterid:cfg.adapterid;errorcode:"exchange_failed";errordesc:"code exchange failed"})
-    };
-    store.savetokens(cfg.adapterid;tokens);
-    log.info(str.concat("loke.core.auth.oauth: authorisation complete for ";cfg.adapterid);"auth.oauth";"");
-    <tokens
-  }el{
+  if(!validatestate(auth.stateparam;callbackstate)){
     log.warn(str.concat("loke.core.auth.oauth: state mismatch for ";cfg.adapterid);"auth.oauth";"");
-    <$oautherr{adapterid:cfg.adapterid;errorcode:"state_mismatch";errordesc:"CSRF validation failed state parameter does not match"}
-  }
+    <$err($oautherr{adapterid:cfg.adapterid;errorcode:"state_mismatch";errordesc:"CSRF validation failed state parameter does not match"})
+  }el{};
+  let x=exchange(cfg;code;auth.codeverifier;auth.redirecturi);
+  if(!x.ok){ <$err(x.err) }el{};
+  if(!store.savetokens(cfg.adapterid;x.tokens)){
+    log.warn(str.concat("loke.core.auth.oauth: tokens could not be saved to the keychain for ";cfg.adapterid);"auth.oauth";"");
+    <$err($oautherr{adapterid:cfg.adapterid;errorcode:"keychain_failed";errordesc:"tokens could not be saved"})
+  }el{};
+  log.info(str.concat("loke.core.auth.oauth: authorisation complete for ";cfg.adapterid);"auth.oauth";"");
+  <$ok(x.tokens)
 };
 
 f=getaccesstoken(cfg:$oauthconfig):str{
