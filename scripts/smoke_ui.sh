@@ -170,6 +170,14 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "$ROOT/tests/ui/sameorigin_bg14.json"
   rc=$?
 fi
+# BG1.6: loke's /api/models answers {"models":[…]}, and the pages wanted an array, so no model
+# selector was ever filled. chat, settings and setup must list exactly the stand-in model's
+# models (fake_ollama.py's default list, qwen2.5:7b and llama3:latest, relayed by loke and then
+# moke) after the loke router. Loading the pages sends no prompt anywhere.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "$ROOT/tests/ui/models_bg16.json"
+  rc=$?
+fi
 # LS1.4b: loke's setup wizard saves each entered provider key with its own {"key","value"}
 # POST, checks each answer, and says which keys were saved and which were not. X8.9: this loke
 # would write a provider key to the user's REAL login keychain (a throwaway HOME does not
