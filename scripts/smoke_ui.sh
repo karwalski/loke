@@ -161,6 +161,15 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
     fi
   fi
 fi
+# BG1.4: with window.LOKE_URL '' (moke's own origin answers for loke), the chat, settings,
+# governance, setup and lokehealth pages send every loke request to moke's origin, which relays
+# it, and each page still works; /api/settings is the one route that goes to loke directly, and
+# those requests are answered inside the page (X8.9), never sent. The dashboard's are judged at
+# the end of dashboard_bg11.json above.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "$ROOT/tests/ui/sameorigin_bg14.json"
+  rc=$?
+fi
 # LS1.4b: loke's setup wizard saves each entered provider key with its own {"key","value"}
 # POST, checks each answer, and says which keys were saved and which were not. X8.9: this loke
 # would write a provider key to the user's REAL login keychain (a throwaway HOME does not

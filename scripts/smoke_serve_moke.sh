@@ -201,6 +201,27 @@ api GET  /api/memory    ""                              200 '"ok":true'         
 api POST /api/memory    '{"action":"store"}'            400 'missing required field: content' "storing requires content"
 api POST /api/pipeline  '{}'                            400 'missing required field: prompt' "the pipeline requires a prompt"
 api POST /api/pipeline  '{"prompt":"hello"}'            502 'upstream error'        "and says so when loke is down"
+# BG1.4: a body in loke's own shape (`text`, no `prompt`) is relayed to loke unchanged, not
+# taken as moke's schema-first request; with loke down moke answers its own 502, which says
+# it relayed. GET /api/models is relayed the same way.
+api POST /api/pipeline  '{"text":"hello","mode":"dashboard"}' 502 '"relayed_by":"moke"' "a request in loke's shape is relayed to loke, and says so when loke is down"
+api GET  /api/models    ""                              502 '"relayed_by":"moke"'   "loke's model list is relayed, and says so when loke is down"
+# BG1.4, GA2.6, GA2.7: the relays reach loke with no Origin, which loke allows, so moke makes
+# loke's own refusal first: a foreign Origin, or a Host that is not loopback (DNS rebinding).
+relayhdr() {  # method path body extra-curl-args... -- expected-code must-contain label
+  local m="$1" p="$2" b="$3" args=() out code; shift 3
+  while [ "$1" != "--" ]; do args+=("$1"); shift; done; shift
+  out=$(curl -s -m 20 -X "$m" -H 'Content-Type: application/json' "${args[@]}" ${b:+-d "$b"} -w '\n%{http_code}' "http://127.0.0.1:$PORT$p")
+  code=$(printf '%s' "$out" | tail -1); out=$(printf '%s' "$out" | sed '$d')
+  case "$code|$out" in
+    "$1|"*"$2"*) echo "  ok   $m $p [$code] $3" ;;
+    *) echo "  FAIL $m $p [$code, wanted $1] lacks $2: $(printf '%s' "$out" | head -c 150)" >&2; fail=1 ;;
+  esac
+}
+relayhdr POST /api/pipeline '{"text":"hello"}' -H 'Origin: https://evil.example' -- 403 '"cross_origin_refused":true' "a foreign Origin is refused before anything is relayed"
+relayhdr POST /api/pipeline '{"prompt":"hello"}' -H 'Origin: https://evil.example' -- 403 '"cross_origin_refused":true' "and so is moke's own prompt shape"
+relayhdr GET /api/models "" -H 'Host: rebind.example' -- 403 '"cross_origin_refused":true' "a non-loopback Host is refused on the model list"
+relayhdr POST /api/pipeline '{"text":"hello"}' -H "Origin: http://127.0.0.1:$PORT" -- 502 '"relayed_by":"moke"' "moke's own page origin is relayed"
 api POST /api/stream    '{}'                            400 'missing required field: prompt' "streaming requires a prompt"
 api POST /api/upload    ''                              400 'empty body'            "upload refuses an empty body"
 # MK6.6: ?name= reaches the handler (http.reqparam never saw a query string), and the preview

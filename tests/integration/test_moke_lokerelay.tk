@@ -1,0 +1,107 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.mokelokerelay;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=json:std.json;
+i=process:std.process;
+i=jx:shared.jsonobj;
+i=relay:moke.lokerelay;
+i=pl:page.moke.api.pipeline;
+
+(* BG1.4 — moke's same-origin relay to loke, judged by what ARRIVES at
+   scripts/lib/http_recorder.py standing in for loke, and by what comes back. A page whose
+   window.LOKE_URL is '' sends loke's own request to moke's origin; moke must hand it to loke
+   unchanged and give the page loke's status and body, a refusal included. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_relay_bg14_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=shaped(text:str):bool{
+  let o=mt json.dec(text) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  <pl.islokeshaped(o)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let logp="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";logp;"\(base).port")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  let url="http://127.0.0.1:\(port)";
+  let dead="http://127.0.0.1:59993";
+  if(t.assert(str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+
+  (* ── which bodies are loke's ─────────────────────────────────────────── *)
+  if(t.assert(shaped("{\"text\":\"hi\",\"mode\":\"dashboard\"}");"a body with text and no prompt is loke's shape")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!shaped("{\"prompt\":\"hi\"}");"a body with prompt is moke's own shape")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!shaped("{\"prompt\":\"hi\",\"text\":\"hi\"}");"a body with both is moke's (prompt wins)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!shaped("{}");"an empty body is neither, and takes moke's missing-prompt answer")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a POST is relayed unchanged, and loke's answer comes back ─────────── *)
+  let body="{\"text\":\"bg14 relay\",\"system_prompt\":\"s\",\"mode\":\"dashboard\",\"request_id\":\"dash-1\"}";
+  let r=relay.postto(url;"/api/pipeline";body);
+  if(t.asserteq(str.fromint(r.status);"200";"post: loke's 200 is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(r.body;"{\"response\":\"pipeline-answer\"}";"post: loke's body is answered as it came")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"POST /api/pipeline \(body)");"post: the body arrived at loke byte for byte")){pass=pass+1}el{fail=fail+1};
+  let hdrs=readfile("\(logp).headers");
+  if(t.assert(str.contains(str.lower(hdrs);"content-type: application/json");"post: as JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(str.lower(hdrs);"origin:");"post: with no Origin, which is why moke refuses a foreign one first")){pass=pass+1}el{fail=fail+1};
+
+  (* ── a refusal keeps its status and its reason ──────────────────────────── *)
+  let refused=relay.postto(url;"/api/pipeline";"{\"text\":\"bg14-refuse\"}");
+  if(t.asserteq(str.fromint(refused.status);"403";"refusal: loke's 403 is answered, not a generic 502")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(refused.body;"refused-by-recorder") && str.contains(refused.body;"\"approval_required\":true");"refusal: with loke's reason")){pass=pass+1}el{fail=fail+1};
+
+  (* ── GET ────────────────────────────────────────────────────────────── *)
+  let g=relay.getfrom(url;"/api/tags");
+  if(t.asserteq(str.fromint(g.status);"200";"get: loke's 200 is answered")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(g.body;"\"models\":");"get: with loke's body")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(logp);"GET /api/tags");"get: because the GET arrived")){pass=pass+1}el{fail=fail+1};
+
+  (* ── no answer ──────────────────────────────────────────────────────── *)
+  let d=relay.postto(dead;"/api/pipeline";body);
+  if(t.asserteq(str.fromint(d.status);"502";"nothing listening: 502")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(d.body;"\"relayed_by\":\"moke\"");"nothing listening: moke says it was the relay that failed")){pass=pass+1}el{fail=fail+1};
+  let dg=relay.getfrom(dead;"/api/models");
+  if(t.asserteq(str.fromint(dg.status);"502";"nothing listening, GET: 502")){pass=pass+1}el{fail=fail+1};
+
+  (* ── only this machine ──────────────────────────────────────────────── *)
+  let before=readfile(logp);
+  let off=relay.postto("http://loke.example:\(port)";"/api/pipeline";body);
+  if(t.asserteq(str.fromint(off.status);"502";"a base that is not loopback is not relayed to")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile(logp);before;"and nothing was sent")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(relay.lokebase();"http://127.0.0.1:11430";"the relay's loke is loke's loopback address")){pass=pass+1}el{fail=fail+1};
+
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(logp);
+  file.delete("\(logp).headers");
+  file.delete("\(logp).bodies");
+  file.delete("\(base).port");
+  <fail
+};

@@ -14,7 +14,9 @@
 (function () {
   'use strict';
 
-  var LOKE_URL = window.LOKE_URL || 'http://127.0.0.1:11430';
+  // BG1.4: credentials are loke's settings, which go to loke directly and never through
+  // moke's origin (see base.tkt), so this is loke's own address whatever window.LOKE_URL is.
+  var LOKE_URL = window.LOKE_DIRECT ?? 'http://127.0.0.1:11430';
 
   // ── Auth type definitions ─────────────────────────────────────────────
 

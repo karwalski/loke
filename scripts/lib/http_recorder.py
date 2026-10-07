@@ -92,6 +92,9 @@ is seen to; /proxy-test/big answers 300,000 bytes with no Content-Length, so onl
 that counts as it reads can stop it; /proxy-test/slow waits six seconds before answering;
 /proxy-test/nulredirect answers 302 with a body holding a NUL after a forged
 "@@moke-proxy@@200@@1@@" status line, and /proxy-test/nul a 200 text body with a NUL in it.
+
+BG1.4: a POST to /api/pipeline whose body holds `bg14-refuse` answers 403 with a refusal body
+in loke's shape, in any mode, so moke's relay can be seen to pass a non-2xx through intact.
 """
 import http.server, json, os, re, ssl, sys, time
 
@@ -352,6 +355,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 self._send({"choices": [{"message": {"role": "assistant", "content": "exo-answer"}}]})
         elif p == "/v1/nodes":
             self._send({"nodes": [{"id": "n1", "device": "recorder", "memory_gb": 16.0, "models": ["m"]}]})
+        elif p == "/api/pipeline" and "bg14-refuse" in body:
+            # BG1.4: a refusal in loke's shape, so a relay can be seen to keep the status and
+            # the reason rather than turn them into a generic upstream error.
+            self._send({"ok": False, "error": "refused-by-recorder", "approval_required": True}, 403)
         elif p == "/api/pipeline":
             self._send({"response": "pipeline-answer"})
         elif p == "/api/generate" and MODE in ("echo", "harness"):

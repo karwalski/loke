@@ -8,7 +8,15 @@
 //
 // checks.json is [{"name": "...", "js": "<expression, may be async, returning true>"}],
 // or {"reload": true} to reload the page, or {"key": "Tab"} to press a key for real,
-// or {"name": "...", "navigates": "<expression>"} for an action that loads another page.
+// or {"name": "...", "navigates": "<expression>"} for an action that loads another page,
+// or {"init": "<script>"} (BG1.4), run in every document the run loads, before the page's own
+// scripts (Page.addScriptToEvaluateOnNewDocument); init items are installed before the first
+// navigation, wherever they appear in the file.
+// BG1.4: every request the browser sends is recorded from the DevTools Network domain, and
+// before each `js` check window.__uiRequests holds them all so far, oldest first, as
+// {url, method, type, page}: type is the DevTools resource type (Fetch, XHR, Document, ...)
+// and page the document that sent it. A check can so judge where a page's requests went,
+// including the ones made while it loaded, before any check ran.
 // Each check runs in the live page after load. Anything other than `true` fails it. The
 // DevTools protocol is driven directly over Node's built-in WebSocket, so there is no
 // dependency to install. It exists because the GA3 UI rows had been Done for months
@@ -62,11 +70,17 @@ try {
 
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-  let seq = 0; const pending = new Map(); const events = [];
+  let seq = 0; const pending = new Map(); const events = []; const requests = [];
   ws.onmessage = (m) => {
     const d = JSON.parse(m.data);
     if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
-    else if (d.method) events.push(d.method);
+    else if (d.method) {
+      events.push(d.method);
+      if (d.method === 'Network.requestWillBeSent') {
+        const q = d.params;
+        requests.push({ url: q.request.url, method: q.request.method, type: q.type || '', page: q.documentURL || '' });
+      }
+    }
   };
   const send = (method, params = {}) => new Promise((res) => {
     const id = ++seq; pending.set(id, res); ws.send(JSON.stringify({ id, method, params }));
@@ -74,6 +88,10 @@ try {
 
   await send('Page.enable');
   await send('Runtime.enable');
+  await send('Network.enable');
+  for (const c of checks) {
+    if (c.init) await send('Page.addScriptToEvaluateOnNewDocument', { source: c.init });
+  }
   await send('Page.navigate', { url });
   // X8.11: under heavy load the load event can take longer than the old 20 s wait, and the checks
   // then ran against a blank or half-loaded page and all failed at once. Wait up to 90 s for the
@@ -94,6 +112,7 @@ try {
 
   let failed = 0;
   for (const c of checks) {
+    if (c.init) continue;
     if (c.reload) {
       // A check that changes state the page reads at load (sessionStorage) reloads it,
       // and the checks after it run against the reloaded page.
@@ -126,6 +145,7 @@ try {
       await sleep(100);
       continue;
     }
+    await send('Runtime.evaluate', { expression: `window.__uiRequests = ${JSON.stringify(requests)}; true` });
     const r = await send('Runtime.evaluate', {
       expression: `(async () => { return (${c.js}); })()`,
       awaitPromise: true, returnByValue: true,

@@ -333,6 +333,14 @@ step_checks() {
       || { python3 ./scripts/check_loopback_binds.py packages src >&2; failed=1; }
   fi
 
+  # BG1.4: window.LOKE_URL is '' when moke's own origin answers for loke, and `||` took that
+  # as missing, so every page sent loke's requests cross-origin anyway.
+  if [[ -f ./scripts/check_loke_url.py ]]; then
+    echo "  no moke page reads window.LOKE_URL by truthiness (BG1.4)"
+    python3 ./scripts/check_loke_url.py --check packages/moke >/dev/null \
+      || { python3 ./scripts/check_loke_url.py packages/moke >&2; failed=1; }
+  fi
+
   # F3b.12: the privacy-filter sidecar and mcp-toke both defaulted to 11435, so only one could
   # bind and the privacy-filter layer could post the prompt to mcp-toke. Each default is a
   # literal in its own file; this reads them all and fails on a shared one.
