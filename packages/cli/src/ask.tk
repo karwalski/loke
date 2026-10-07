@@ -15,6 +15,7 @@ i=cfg:shared.config;
 i=ph:core.privacy.placeholder;
 i=ptypes:core.providers.types;
 i=sdb:core.storage.db;
+i=hr:core.audit.hoprecord;
 i=str:std.str;
 
 t=$askopts{
@@ -161,7 +162,19 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
      that reaches a provider from here has been through the privacy filter above — the
      contributor invariant in CLAUDE.md — and issafetoforward is the check that says
      so. *)
+  (* F5.3. The store is opened here, before anything is routed: the run's per-layer metrics
+     are written first (F3b.10), so every audit row on its request id binds them, and every
+     hop that sends below has its disclosure record (core.audit.hoprecord, through
+     core.router.fallback). G1.6: a store that cannot be opened is 0, and every hop is then
+     refused, because neither the kill switch nor the record can be read or written.
+     `loke ask` is a user sending their own prose to a model, so the redact-and-forward
+     selection the record names (NC1.8) is user_choice, selected by the user. *)
+  let store=mt sdb.openstore(config.datadir) { $ok:st 1; $err:e 0 };
+  let facts=hr.factsof(piperun;"cli-ask";"user_choice";"user");
+  hr.recordlayers(store;piperun);
+
   if(pipe.issafetoforward(piperun)){}el{
+    hr.privacyrefused(store;facts);
     out.printerror("blocked: the prompt's sensitivity exceeds what this policy will forward");
     <1
   };
@@ -219,10 +232,9 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
     stream:opts.stream
   };
   (* G1.6. The kill switch is asked before every hop is sent (core.router.fallback), from the
-     same loke.db the server and `loke kill-switch` use. A store that cannot be opened is 0,
-     and every hop is then refused: an unreadable switch is an engaged one. *)
-  let store=mt sdb.openstore(config.datadir) { $ok:st 1; $err:e 0 };
-  let result=fb.dispatchchain(store;"cli-ask";disp.new(disp.getapikeys();config.ollamaurl);chain;routercfg;request;opts.model;cid);
+     same loke.db the server and `loke kill-switch` use, opened above. An unreadable switch is
+     an engaged one. *)
+  let result=fb.dispatchchain(store;"cli-ask";disp.new(disp.getapikeys();config.ollamaurl);chain;routercfg;request;opts.model;facts);
   if(fb.answered(result)){}el{
     let why=mut.result.chainfailures;
     if(str.len(why)==0){ why=disp.dispatcherror(result.chainanswer) }el{};
@@ -246,7 +258,7 @@ f=run(opts:$askopts;config:$lokeconfig):i64{
      input. *)
   out.printline(ph.restore(responsetext;ph.mapfromentities(detected.entities)));
 
-  out.printpipelinestage("Audit";"logged";"interaction recorded to local store");
+  out.printpipelinestage("Audit";"logged";"disclosure and audit rows recorded per hop sent");
 
   log.info("loke ask complete";"cli.ask";cid);
   <0

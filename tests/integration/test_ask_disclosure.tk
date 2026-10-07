@@ -1,0 +1,264 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.askdisclosure;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=ks:core.governance.killswitch;
+i=rtr:core.router.router;
+i=fb:core.router.fallback;
+i=hr:core.audit.hoprecord;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+
+(* F5.3 - `loke ask` writes a disclosure record for every hop that sends, as the browser path
+   does, and none for a hop that does not.
+
+   Driven through the production modules `loke ask` runs (cli.ask): the privacy run
+   (core.privacy.systemprompt.runforward), its facts and per-layer metrics
+   (core.audit.hoprecord), and the chain walk (core.router.fallback.dispatchchain), against
+   scripts/lib/http_recorder.py in `harness` mode standing in for Ollama on a loopback port. One
+   of its models fails (RECORDER_FAIL_MODELS), so a chain can be seen to fall back.
+
+   Judged on loke.db and on what the stand-in received:
+     - a hop that sent has one disclosure row on its own correlation id (the request id, then
+       `<id>-h1`), completed or failed as the hop was, whose bytes_body is the octet count of
+       the body the stand-in received, and its llm_dispatch and outcome audit rows, bound to the
+       row's digest
+     - a hop refused by the kill switch, by the sensitivity gate, or for having no client has
+       NO disclosure row, and is audited (kill_switch_refused, llm_request_refused)
+     - the hash chain verifies over everything written
+     - no planted identifier is in any column of any row of the five tables written *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(hd==0){}el{ process.wait(hd); };
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=openfreshstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-ask-disclosure");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=hop(id:str;p:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:p;
+      contextwindow:8000 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"hand-built hop";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=ollamahop(id:str):$routingdecision{
+  <hop(id;$provider{$ollama:0})
+};
+
+f=chainof(hops:@$routingdecision;sens:$sensitivitylevel):$fallbackchain{
+  <$fallbackchain{chainhops:hops;chainsens:sens;chainnote:""}
+};
+
+(* The request cli.ask builds from the run: the anonymised text and the guardian. *)
+f=requestof(run:$pipelinerun):$completionrequest{
+  let res:$piidetectionresult=run.result;
+  <$completionrequest{
+    modelid:"";
+    messages:@(pt.usermsg(res.anonymised));
+    systemprompt:run.finalsystemprompt;
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=nokeys():$apikeys{
+  <$apikeys{anthropic:"";openai:""}
+};
+
+f=rows(sql:str;params:@str):i64{
+  <sdb.scalari64(sql;params;"n";0-1)
+};
+
+f=disclosurerows(cid:str):i64{
+  <rows("SELECT COUNT() AS n FROM disclosure_log WHERE correlation_id=?";@(cid))
+};
+
+f=staterows(cid:str;state:str):i64{
+  <rows("SELECT COUNT() AS n FROM disclosure_log WHERE correlation_id=? AND state=?";@(cid;state))
+};
+
+f=bodybytes(cid:str):i64{
+  <rows("SELECT bytes_body AS n FROM disclosure_log WHERE correlation_id=?";@(cid))
+};
+
+f=boundrows(cid:str;eventtype:str):i64{
+  <rows("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=? AND disclosure_digest IS NOT NULL AND use_case='cli-ask'";@(cid;eventtype))
+};
+
+f=eventrows(cid:str;eventtype:str):i64{
+  <rows("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype))
+};
+
+f=alldisclosure():i64{
+  <rows("SELECT COUNT() AS n FROM disclosure_log";@())
+};
+
+(* The octets of the /api/chat body the stand-in logged for `model`: its log line is
+   `POST /api/chat <body>`, and a JSON body holds no raw newline. -1 when there is none. *)
+f=receivedbytes(logp:str;model:str):i64{
+  let lines=str.split(readfile(logp);"\n");
+  let n=mut.0-1;
+  let head="POST /api/chat ";
+  let mark="\"model\":\"\(model)\"";
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;head) && str.contains(ln;mark) && str.contains(ln;"LOKE_GUARDIAN_v")){ n=str.len(ln)-str.len(head) }el{}
+  };
+  <n
+};
+
+(* Every column of every row of `table`, as text, joined; then whether `value` is in it. *)
+f=tableholds(table:str;value:str):i64{
+  let cols=mt db.many("SELECT name FROM pragma_table_info(?)";@(table)) {
+    $ok:rs rs;
+    $err:e @()
+  };
+  if(cols.len==0){ <0-1 }el{};
+  let parts=mut.@();
+  lp(let i=0;i<cols.len;i=i+1){
+    let c:str=sdb.rowstr(cols.get(i);"name");
+    parts=parts.push("COALESCE(CAST(\(c) AS TEXT),'')")
+  };
+  let joiner="||'|'||";
+  <rows("SELECT COUNT() AS n FROM \(table) WHERE instr(\(str.join(joiner;parts)),?)>0";@(value))
+};
+
+f=tablerows(table:str):i64{
+  <rows("SELECT COUNT() AS n FROM \(table)";@())
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let email="harness.probe@example.com";
+  let phone="0412 345 678";
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let hex:str=str.randhex(8);
+  let ob="/tmp/loke_askdisc_\(hex)";
+  let logp="\(ob).log";
+  file.delete(logp);
+  file.delete("\(ob).port");
+  let rec=mt process.spawn(@("env";"RECORDER_MODELS=fake:latest,fail:latest";"RECORDER_FAIL_MODELS=fail:latest";"python3";"scripts/lib/http_recorder.py";logp;"\(ob).port";"harness")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(ob).port");
+  if(t.assert(rec!=0 && str.len(port)>0;"the Ollama stand-in came up")){pass=pass+1}el{fail=fail+1};
+  let live=disp.new(nokeys();"http://127.0.0.1:\(port)");
+  let open=rtr.namedconfig("http://127.0.0.1:59995";"best-quality";false;true);
+
+  (* The privacy run loke ask makes, over text holding two identifiers. *)
+  let run=sp.runforward("Please email \(email) or call \(phone) about the March invoice.";"";localonly());
+  let res:$piidetectionresult=run.result;
+  if(t.assert(pipe.issafetoforward(run) && run.totalentities>=(2 as u32);"the run found both identifiers and may be forwarded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(res.anonymised;email) && !str.contains(res.anonymised;phone);"and the text to be sent holds neither")){pass=pass+1}el{fail=fail+1};
+  let facts=hr.factsof(run;"cli-ask";"user_choice";"user");
+  if(t.assert(hr.recordlayers(store;run);"the run's per-layer metrics are recorded on its request id")){pass=pass+1}el{fail=fail+1};
+  let rid=run.requestid;
+  let h1="\(rid)-h1";
+
+  (* ── 1. A chain whose first hop fails and second answers ─────────────────────────── *)
+  let out=fb.dispatchchain(store;"cli-ask";live;chainof(@(ollamahop("fail:latest");ollamahop("fake:latest"));res.sensitivity);open;requestof(run);"";facts);
+  if(t.assert(fb.answered(out) && out.chainattempted.len==2;"the first hop failed and the second answered")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(disclosurerows(rid));"1";"THE FIRST HOP, WHICH SENT, HAS ITS DISCLOSURE ROW on the request id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(staterows(rid;"failed"));"1";"completed as failed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(disclosurerows(h1));"1";"THE SECOND HOP HAS ITS OWN ROW, on <id>-h1")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(staterows(h1;"completed"));"1";"completed")){pass=pass+1}el{fail=fail+1};
+  let sentfail=receivedbytes(logp;"fail:latest");
+  let sentok=receivedbytes(logp;"fake:latest");
+  if(t.assert(sentfail>0 && sentok>0;"the stand-in received both hops' bodies")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(bodybytes(rid));str.fromint(sentfail);"the first row's bytes_body is the octets the stand-in received")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(bodybytes(h1));str.fromint(sentok);"the second row's bytes_body is the octets the stand-in received")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(boundrows(rid;"llm_dispatch")==1 && boundrows(rid;"llm_request_failed")==1;"the failed hop's dispatch and outcome audit rows bind its disclosure row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(boundrows(h1;"llm_dispatch")==1 && boundrows(h1;"llm_request")==1;"the answering hop's dispatch and outcome audit rows bind its disclosure row")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND layer_digest IS NOT NULL";@(rid))>=2;"the request id's audit rows bind the run's per-layer metrics (F3b.10)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(rows("SELECT COUNT() AS n FROM disclosure_log WHERE correlation_id=? AND entity_types LIKE '%email:1%' AND custody='redacted-data' AND fallback_reason='user_choice' AND fallback_selected_by='user'";@(rid)));"1";"the row names the entity types, custody and the user's selection")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 2. Refused hops send nothing and have no disclosure row ──────────────────────── *)
+  let before=alldisclosure();
+  let rest=$sensitivitylevel{$restricted:0};
+  let gated=fb.dispatchchain(store;"cli-ask";live;chainof(@(hop("gemini-test";$provider{$google:0}));rest);open;requestof(run);"";hr.factsof(run;"cli-ask";"user_choice";"user"));
+  let g0=gated.chainattempted.len;
+  if(t.assert(!fb.answered(gated) && g0==0;"a RESTRICTED chain's cloud hop is not tried")){pass=pass+1}el{fail=fail+1};
+  let pubchain=fb.dispatchchain(store;"cli-ask";live;chainof(@(hop("gemini-test";$provider{$google:0}));$sensitivitylevel{$public:0});open;requestof(run);"";facts);
+  if(t.assert(!fb.answered(pubchain);"a hop with no client is not answered")){pass=pass+1}el{fail=fail+1};
+  ks.engageprovider(store;"ollama";"F5.3 test");
+  let killed=fb.dispatchchain(store;"cli-ask";live;chainof(@(ollamahop("fake:latest"));res.sensitivity);open;requestof(run);"";facts);
+  ks.releaseprovider(store;"ollama");
+  if(t.assert(!fb.answered(killed) && killed.chainattempted.len==0;"a hop the kill switch refuses is not tried")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(alldisclosure()-before);"0";"NO DISCLOSURE ROW FOR A REFUSED HOP: gate, no client, kill switch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(eventrows(rid;"llm_request_refused")>=2;"the gate's and the no-client refusals are audited as llm_request_refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(eventrows(rid;"kill_switch_refused"));"1";"the kill switch's refusal is audited as kill_switch_refused")){pass=pass+1}el{fail=fail+1};
+
+  (* ── 3. The chain verifies, and no identifier is in any row ────────────────────────── *)
+  let chain=audit.verifychain(store);
+  if(t.assert(chain.ok;"the audit hash chain verifies over every row written")){pass=pass+1}el{fail=fail+1};
+  let tables=@("disclosure_log";"audit_log";"decision_trace";"metrics_raw";"privacy_layer_metrics");
+  lp(let i=0;i<tables.len;i=i+1){
+    let tb:str=tables.get(i);
+    if(t.assert(tablerows(tb)>0;"\(tb) has rows to search")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(str.fromint(tableholds(tb;email));"0";"NO ROW OF \(tb) HOLDS THE PLANTED EMAIL")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(str.fromint(tableholds(tb;phone));"0";"NO ROW OF \(tb) HOLDS THE PLANTED PHONE NUMBER")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(str.fromint(tableholds(tb;"March invoice"));"0";"no row of \(tb) holds the request's text")){pass=pass+1}el{fail=fail+1}
+  };
+  if(t.assert(tableholds("disclosure_log";rid)>0 && tableholds("audit_log";"llm_dispatch")>0;"CONTROL: the search finds a value that IS in a row")){pass=pass+1}el{fail=fail+1};
+
+  if(rec==0){}el{ process.kill(rec); process.wait(rec); };
+  file.delete(logp);
+  file.delete(str.concat(logp;".headers"));
+  file.delete(str.concat(logp;".bodies"));
+  file.delete("\(ob).port");
+  <fail
+};

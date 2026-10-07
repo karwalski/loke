@@ -14,6 +14,10 @@ i=str:std.str;
 i=t:shared.types;
 i=env:std.env;
 i=pt:core.providers.types;
+i=ollama:core.models.ollama;
+i=tr:core.providers.transport;
+i=reach:shared.reachability;
+i=json:std.json;
 
 t=$apikeys{
   anthropic:str;
@@ -111,6 +115,103 @@ f=trydispatch(d:$dispatcher;req:$completionrequest;provider:$provider):$completi
     $ollama:v trydispatchollama(d;req);
     $local:v trydispatchlocal(d;req)
   }
+};
+
+(* ── F5.3: the dispatch in two steps, for a caller that records what it sends ──────────
+   core.router.fallback reserves a disclosure record immediately before each hop is sent, from
+   the body itself: bytes_body is the octet count of the exact string handed to transport
+   (docs/specifications/disclosure-accounting.md, C1 and A7). trydispatch builds its body
+   inside the provider client, out of the caller's reach, so these split it: requestbody
+   builds the body with the SAME function the provider client sends (ollama.chatbody,
+   pt.anthropicbody, oai.requestbody), sendbody hands that string to the same transport the
+   client uses, and replyof reads the answer with the same parser. A provider with no client
+   has no body: requestbody answers "" and nothing may be sent. *)
+f=islocal(provider:$provider):bool{
+  <mt provider {
+    $anthropic:v false;
+    $openai:v false;
+    $google:v false;
+    $mistral:v false;
+    $openrouter:v false;
+    $ollama:v true;
+    $local:v true
+  }
+};
+
+f=chatoptsof(req:$completionrequest):$chatopts{
+  <$chatopts{model:req.modelid;messages:req.messages;system:req.systemprompt;numgpu:-1}
+};
+
+f=requestbody(req:$completionrequest;provider:$provider):str{
+  <mt provider {
+    $anthropic:v pt.anthropicbody(req);
+    $openai:v oai.requestbody(req);
+    $google:v "";
+    $mistral:v "";
+    $openrouter:v "";
+    $ollama:v ollama.chatbody(chatoptsof(req));
+    $local:v ollama.chatbody(chatoptsof(req))
+  }
+};
+
+(* The host the body goes to, as the disclosure record names it. *)
+f=endpointhost(d:$dispatcher;provider:$provider):str{
+  if(islocal(provider)){ <str.trimprefix(str.trimprefix(d.ollamaurl;"http://");"https://") }el{};
+  <mt provider {
+    $anthropic:v "api.anthropic.com";
+    $openai:v "api.openai.com";
+    $google:v "";
+    $mistral:v "";
+    $openrouter:v "";
+    $ollama:v "";
+    $local:v ""
+  }
+};
+
+(* The raw answer to `body`, "" when nothing came back. Only a body from requestbody may be
+   passed: this sends it as it is, to the endpoint the provider's client sends to. *)
+f=sendbody(d:$dispatcher;provider:$provider;body:str):str{
+  let keys:$apikeys=d.keys;
+  if(islocal(provider)){ <reach.localpost(d.ollamaurl;"/api/chat";body) }el{};
+  <mt provider {
+    $anthropic:v tr.post(tr.anthropicurl();body;tr.anthropicheaders(keys.anthropic));
+    $openai:v tr.post(tr.openaiurl();body;tr.openaiheaders(keys.openai));
+    $google:v "";
+    $mistral:v "";
+    $openrouter:v "";
+    $ollama:v "";
+    $local:v ""
+  }
+};
+
+f=rawi64(raw:str;field:str):i64{
+  <mt json.i64(json.dec(raw);field) {
+    $ok:n n;
+    $err:e 0
+  }
+};
+
+(* The answer read as the provider's client reads it. Nothing back, or a body with no
+   completion text in it, is a failure and never an empty success. Ollama's /api/chat reports
+   prompt_eval_count and eval_count, which its client does not keep; they are read here. *)
+f=replyof(provider:$provider;raw:str;modelid:str):$completionresponse{
+  if(str.len(raw)==0){ <pt.nocompletion("dispatcher: no response from the provider") }el{};
+  if(islocal(provider)){
+    let text=ollama.chatcontent(raw);
+    if(str.len(text)==0){ <pt.nocompletion("dispatcher: no content returned from the local model") }el{};
+    <$completionresponse{content:text;modelid:modelid;inputtokens:rawi64(raw;"prompt_eval_count") as u32;outputtokens:rawi64(raw;"eval_count") as u32;finishreason:"stop";costusd:0.0}
+  }el{};
+  let r=mt provider {
+    $anthropic:v ant.parseplain(raw);
+    $openai:v oai.openaiparseplain(raw);
+    $google:v pt.nocompletion("dispatcher: provider not yet supported: google");
+    $mistral:v pt.nocompletion("dispatcher: provider not yet supported: mistral");
+    $openrouter:v pt.nocompletion("dispatcher: provider not yet supported: openrouter");
+    $ollama:v pt.nocompletion("");
+    $local:v pt.nocompletion("")
+  };
+  if(pt.iscompletion(r) && str.len(r.content)==0){ <pt.nocompletion("dispatcher: the reply carried no completion text") }el{};
+  <r
 };
 
 (* The guardian system prompt, built once and shared by both dispatch-with-guardian forms so

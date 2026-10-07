@@ -1,1 +1,3 @@
 Entry point for the loke CLI. Loads configuration from ~/.loke/config.toml, parses command-line arguments via cli.commands, and dispatches to the appropriate handler for ask, pipeline, queue, models, memory, agents, overnight, doctor, version, and help commands. Returns exit codes to the caller. Exports the main function. Depends on shared.types, shared.config, shared.log, cli.commands, cli.output, cli.health, and std.str.
+
+F3.9/F5.3 (2026-10-08): `loke ask` runs cli.ask.run with the arguments after `ask` (cli.ask.parseopts), handled in main before dispatch because it reads argv. It printed "Pipeline not yet connected" before.

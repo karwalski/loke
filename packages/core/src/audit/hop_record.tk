@@ -1,0 +1,244 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.audit.hoprecord;
+
+i=str:std.str;
+i=t:shared.types;
+i=log:shared.log;
+i=pipe:core.privacy.pipeline;
+i=policy:core.governance.policy;
+i=ptyp:core.privacy.pipelinetypes;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=dl:core.audit.disclosure;
+i=lmx:core.audit.layermetrics;
+i=mc:core.metrics.collector;
+i=tr:core.governance.trace;
+
+(* F5.3 - the per-hop record of a dispatch made by core.router.fallback.dispatchchain (`loke
+   ask`), written the way the browser request path (page.api.pipeline) writes its own, with
+   the same modules and no second mechanism:
+
+     before a hop sends   the disclosure reservation and its `llm_dispatch` audit row, in one
+                          transaction (core.audit.disclosure.reserveaudited, DA1.7, DA1.9). A
+                          hop whose reservation cannot be written is not sent.
+     after it answered    the completion and its `llm_request` audit row, in one transaction
+     or failed            (completeaudited), `llm_request_failed` when nothing usable came
+                          back; then its decision trace (GA5.5) and its metrics_raw row (DA1.3)
+     a refused hop        no disclosure row, because nothing left the process; an audit row,
+                          `kill_switch_refused` for the kill switch and `llm_request_refused`
+                          otherwise, and its decision trace
+
+   Each hop is its own dispatch with its own correlation id, as F5.3a set for the browser: the
+   request id for the first hop and `<id>-h<n>` for hop n (hopid), because one id is reserved
+   once. The audit rows bind the disclosure row's digest (DA1.10) and, on the request id, the
+   run's per-layer metrics (F3b.10, recordlayers, written before any audit row).
+
+   What a row carries is what the browser's carries: entity types and counts, never a value;
+   the sensitivity and risk tier as labels; the body's octet count, never the body. The facts
+   are taken from the privacy run once (factsof) and are the same for every hop.
+
+   Custody is redacted-data with the check not run, as on the browser path (spec C1-C3): that
+   is what this path sends. The fallback selection (NC1.8) is the caller's: `loke ask` is a
+   user typing prose to a model, so it passes user_choice, selected by user. *)
+t=$hopfacts{
+  requestid:str;
+  usecase:str;
+  sensitivity:str;
+  risktier:str;
+  entitytypes:str;
+  entitiestotal:i64;
+  layers:str;
+  fallbackreason:str;
+  fallbackby:str;
+  sessionid:str
+};
+
+(* The risk tier as page.api.pipeline.risklabel writes it. *)
+f=risklabel(tier:$risktier):str{
+  <mt tier {
+    $low:v "low";
+    $medium:v "medium";
+    $high:v "high";
+    $critical:v "critical"
+  }
+};
+
+f=factsof(run:$pipelinerun;usecase:str;fbreason:str;fbby:str):$hopfacts{
+  let res:$piidetectionresult=run.result;
+  <$hopfacts{
+    requestid:run.requestid;
+    usecase:usecase;
+    sensitivity:t.senslabel(res.sensitivity);
+    risktier:risklabel(policy.classifyrisk(res.sensitivity;$risktier{$low:0};0.0));
+    entitytypes:entitysummary(res);
+    entitiestotal:run.totalentities as i64;
+    layers:detectionlayers(run);
+    fallbackreason:fbreason;
+    fallbackby:fbby;
+    sessionid:dl.nosession()
+  }
+};
+
+(* hop i's correlation id. *)
+f=hopid(hf:$hopfacts;i:i64):str{
+  if(i==0){ <hf.requestid }el{};
+  <"\(hf.requestid)-h\(i)"
+};
+
+f=stagelabel(st:$pipelinestage):str{
+  <mt st {
+    $regexscan:v "regex";
+    $nerscan:v "ner";
+    $presidioscan:v "presidio";
+    $dedup:v "dedup";
+    $anonymise:v "anonymise";
+    $guardianinject:v "guardian";
+    $privacyfilterscan:v "privacy_filter"
+  }
+};
+
+f=isdetectionstage(label:str):bool{
+  <str.eq(label;"regex") || str.eq(label;"ner") || str.eq(label;"presidio") || str.eq(label;"privacy_filter")
+};
+
+(* "scanned=regex;skipped=ner,presidio", as page.api.pipeline.detectionlayers writes it. *)
+f=detectionlayers(run:$pipelinerun):str{
+  let scanned=mut.@();
+  let skipped=mut.@();
+  lp(let i=0;i<run.stages.len;i=i+1){
+    let sr:$stageresult=run.stages.get(i);
+    let label=stagelabel(sr.stage);
+    if(isdetectionstage(label)){
+      if(sr.skipped){ skipped=skipped.push(label) }el{ scanned=scanned.push(label) }
+    }el{}
+  };
+  <"scanned=\(str.join(",";scanned));skipped=\(str.join(",";skipped))"
+};
+
+f=containsstr(xs:@str;x:str):bool{
+  let found=mut.false;
+  lp(let i=0;i<xs.len;i=i+1){
+    if(str.eq(xs.get(i);x)){ found=true }el{}
+  };
+  <found
+};
+
+(* Types and counts, in first-seen order: "email:1,credit_card:2", or "none". Never a value. *)
+f=entitysummary(res:$piidetectionresult):str{
+  let all=mut.@();
+  let types=mut.@();
+  lp(let i=0;i<res.entities.len;i=i+1){
+    let e:$piientity=res.entities.get(i);
+    all=all.push(e.entitytype);
+    if(containsstr(types;e.entitytype)){}el{ types=types.push(e.entitytype) }
+  };
+  if(types.len==0){ <"none" }el{};
+  let parts=mut.@();
+  lp(let j=0;j<types.len;j=j+1){
+    let ty:str=types.get(j);
+    let n=mut.0;
+    lp(let k=0;k<all.len;k=k+1){
+      if(str.eq(all.get(k);ty)){ n=n+1 }el{}
+    };
+    parts=parts.push("\(ty):\(n)")
+  };
+  <str.join(",";parts)
+};
+
+f=event(hf:$hopfacts;cid:str;eventtype:str;provider:str;modelid:str;tin:i64;tout:i64;durationms:i64):$auditevent{
+  <$auditevent{
+    eventtype:eventtype;
+    usecase:hf.usecase;
+    modelid:modelid;
+    provider:provider;
+    sensitivity:hf.sensitivity;
+    risktier:hf.risktier;
+    tokensin:tin as u32;
+    tokensout:tout as u32;
+    costusd:0.0;
+    durationms:durationms as u32;
+    correlationid:cid
+  }
+};
+
+(* F3b.10. The run's per-layer metrics, on the request id, before any audit row, so every
+   audit row on that id binds them. Not written is logged and not refused, as on the browser
+   path: the metrics describe the filter, they are not part of it. *)
+f=recordlayers(store:i64;run:$pipelinerun):bool{
+  if(store==0){ <false }el{};
+  let ok=lmx.record(run.requestid;run.layermetrics;run.consensus;run.vetoedby;run.resolved;run.voters;run.routingnotes);
+  if(ok){}el{
+    log.warn("per-layer privacy metrics were not recorded for this request";"audit.hoprecord";run.requestid)
+  };
+  <ok
+};
+
+(* The reservation, immediately before transport. `body` is the exact string about to be sent
+   and `question` the user's text as it appears in it, JSON-escaped, quotes excluded: the two
+   octet counts the record carries (spec 5.3). False means the hop must not be sent. *)
+f=reserve(store:i64;hf:$hopfacts;cid:str;provider:str;providerclass:str;modelid:str;host:str;bodybytes:i64;questionbytes:i64):bool{
+  if(store==0){ <false }el{};
+  <dl.reserveaudited(event(hf;cid;"llm_dispatch";provider;modelid;0;0;0);cid;hf.sessionid;providerclass;"";host;bodybytes;questionbytes;hf.entitytypes;hf.entitiestotal;hf.layers;"redacted-data";"not_run";hf.fallbackreason;hf.fallbackby;store)
+};
+
+(* The decision trace, which stores the decision and never the text (core.governance.trace).
+   The CLI path evaluates no organisation policy, so its policy decision is not_evaluated and
+   there is no approval to record. *)
+f=trace(store:i64;hf:$hopfacts;cid:str;outcome:str;provider:str;modelid:str;durationms:i64;ksstate:str):bool{
+  if(store==0){ <false }el{};
+  let t0=tr.newtrace(cid;cid;"");
+  let t1=mut.t0;
+  if(hf.entitiestotal>0){ t1=tr.recordpii(t0;hf.entitytypes) }el{};
+  <tr.persist(tr.complete(tr.recordrouting(tr.recordpolicy(t1;"not_evaluated";hf.risktier);modelid;provider);durationms as u32);$assessorfields{outcome:outcome;detectionlayers:hf.layers;approvaloutcome:"not_applicable";killswitchstate:ksstate})
+};
+
+f=islocalprovider(provider:str):bool{
+  <str.eq(provider;"ollama") || str.eq(provider;"local")
+};
+
+(* DA1.3 - one metrics_raw row per hop that sent, answered or not. *)
+f=metric(hf:$hopfacts;cid:str;provider:str;modelid:str;tin:i64;tout:i64;cost:f64):bool{
+  let n=hf.entitiestotal;
+  let ok=mc.insert($metricevent{requestid:cid;timestamp:str.fromint(t.nowi64());tokensbefore:tin;tokensafter:tin;tokenssaved:0;tokensout:tout;costbeforeusd:cost;costafterusd:cost;costsavedusd:0.0;piientitiesfound:n;piientitiesblocked:n;routedlocal:islocalprovider(provider);cachehit:false;modelid:modelid;providerid:provider;savingsbystage:"optimiser=none;reason=not_on_this_path"});
+  if(ok){}el{
+    log.warn("metrics row was not written for this dispatch";"audit.hoprecord";cid)
+  };
+  <ok
+};
+
+(* The outcome of a hop that sent: the completion and its audit row in one transaction, then
+   the trace and the metrics row. Returns whether the audit row was written. *)
+f=outcome(store:i64;hf:$hopfacts;cid:str;ok:bool;provider:str;modelid:str;responsebytes:i64;tin:i64;tout:i64;elapsed:i64;cost:f64):bool{
+  if(store==0){ <false }el{};
+  let eventtype=mut."llm_request_failed";
+  if(ok){ eventtype="llm_request" }el{};
+  if(dl.completeaudited(cid;ok;responsebytes;tin;tout;elapsed;store;event(hf;cid;eventtype;provider;modelid;tin;tout;elapsed))){}el{
+    log.warn("disclosure record was not completed with its audit row for this dispatch";"audit.hoprecord";cid)
+  };
+  trace(store;hf;cid;eventtype;provider;modelid;elapsed;"disengaged");
+  metric(hf;cid;provider;modelid;tin;tout;cost);
+  <sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type=?";@(cid;eventtype);"n";0)>0
+};
+
+(* A hop refused before it sent. `code` is why: kill_switch, not_permitted, no_client or
+   unrecorded. Nothing was sent, so there is no disclosure row. *)
+f=refused(store:i64;hf:$hopfacts;cid:str;code:str;provider:str;modelid:str;elapsed:i64):bool{
+  if(store==0){ <false }el{};
+  let eventtype=mut."llm_request_refused";
+  let ksstate=mut."disengaged";
+  if(str.eq(code;"kill_switch")){ eventtype="kill_switch_refused"; ksstate="engaged" }el{};
+  let ok=audit.insertevent(store;event(hf;cid;eventtype;provider;modelid;0;0;elapsed));
+  trace(store;hf;cid;eventtype;provider;modelid;elapsed;ksstate);
+  <ok
+};
+
+(* F3b.10. A run the privacy filter refused is audited as privacy_refused, on the request id,
+   as the browser path audits it. *)
+f=privacyrefused(store:i64;hf:$hopfacts):bool{
+  if(store==0){ <false }el{};
+  let ok=audit.insertevent(store;event(hf;hf.requestid;"privacy_refused";"none";"none";0;0;0));
+  trace(store;hf;hf.requestid;"privacy_refused";"none";"none";0;"disengaged");
+  <ok
+};

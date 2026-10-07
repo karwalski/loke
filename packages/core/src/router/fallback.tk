@@ -11,6 +11,8 @@ i=pt:core.providers.types;
 i=log:shared.log;
 i=str:std.str;
 i=t:shared.types;
+i=jx:shared.jsonobj;
+i=hr:core.audit.hoprecord;
 
 (* F5.3 — dispatching a fallback chain (core.router.router.routechain).
 
@@ -21,9 +23,9 @@ i=t:shared.types;
    was built under the same rule; it is checked again here because this is the line that
    would send, and because a chain is a value a caller could build or alter by hand.
 
-   chainattempted names every hop that was actually sent, as `provider:model`, in order,
-   and nothing else. A refused hop is never in it. That is what a test reads to show that a
-   hop was not tried, without a provider being contacted to find out.
+   chainattempted names the hops tried, as `provider:model`, in order (see F5.3 below for
+   exactly which). A refused hop is never in it. That is what a test reads to show that a hop
+   was not tried, without a provider being contacted to find out.
 
    G1.6, 2026-10-01: the kill switch is asked for EVERY hop, immediately after the gate and
    before the send, with the store and the caller's use case ("cli-ask" for loke ask). The
@@ -35,10 +37,22 @@ i=t:shared.types;
    says so, chainnotice is the line to show, and core.router.degraded.noteanswer records the
    provider's disruption.
 
-   What this does not do: it records no disclosure row. The browser request path
-   (page.api.pipeline) does, per hop, so it walks the same chain itself (F5.3a): it builds
-   it with rtr.routechainpreferinstalled and asks the same gate, rtr.chainhopallowed, before
-   each send. *)
+   F5.3, 2026-10-08: every hop that sends has its disclosure record, as on the browser request
+   path (page.api.pipeline, F5.3a), written by core.audit.hoprecord with the browser's modules.
+   Immediately before transport the body is built (core.providers.dispatcher.requestbody, the
+   function the provider's client sends with), the record is reserved from it with its
+   `llm_dispatch` audit row in one transaction, and only then is that exact string sent
+   (sendbody). The outcome completes the record with its audit row, `llm_request` or
+   `llm_request_failed`. A hop whose record cannot be reserved is not sent. A hop refused by
+   the gate, the kill switch, or for having no client sends nothing and has no disclosure row,
+   only its audit row (`llm_request_refused`, or `kill_switch_refused`). Each hop has its own
+   correlation id, the request id for the first and `<id>-h<n>` for hop n (hr.hopid). The facts
+   every row carries (entity types and counts, layers, sensitivity, the fallback selection) are
+   the privacy run's, taken once by the caller (hr.factsof).
+
+   chainattempted names every hop that passed the gate and the kill switch and was handed to
+   the sender, in order. A refused hop is never in it. A hop with no client, or whose record
+   could not be reserved, is in it and sent nothing; chainfailures says why. *)
 t=$chainoutcome{
   chainanswer:$completionresponse;
   chainattempted:@str;
@@ -67,10 +81,53 @@ f=answered(o:$chainoutcome):bool{
   <disp.isdispatched(o.chainanswer)
 };
 
+(* The octets of the user's text as it appears in the body: its last user message,
+   JSON-escaped, without the two quotes (spec 5.3, bytes_question), as every body here encodes
+   a message's content with jx.escape. *)
+f=questionbytes(req:$completionrequest):i64{
+  let n=mut.0;
+  lp(let i=0;i<req.messages.len;i=i+1){
+    let m:$chatmessage=req.messages.get(i);
+    if(str.eq(m.role;"user")){ n=str.len(jx.escape(m.content))-2 }el{}
+  };
+  <n
+};
+
+(* One hop: build the body, reserve its record, send exactly that body, complete the record.
+   `hcid` is the hop's correlation id. *)
+f=sendhop(store:i64;d:$dispatcher;facts:$hopfacts;hcid:str;req:$completionrequest;p:$provider;pname:str):$completionresponse{
+  let body=disp.requestbody(req;p);
+  if(str.len(body)==0){
+    hr.refused(store;facts;hcid;"no_client";pname;req.modelid;0);
+    <pt.nocompletion("there is no client for provider \(pname), so nothing was sent")
+  }el{};
+  let pclass=mut."cloud";
+  if(disp.islocal(p)){ pclass="local" }el{};
+  let start=t.nowms();
+  if(hr.reserve(store;facts;hcid;pname;pclass;req.modelid;disp.endpointhost(d;p);str.len(body);questionbytes(req))){}el{
+    hr.refused(store;facts;hcid;"unrecorded";pname;req.modelid;0);
+    <pt.nocompletion("the disclosure record could not be written, so the request was not sent")
+  };
+  let raw=disp.sendbody(d;p;body);
+  let r=disp.replyof(p;raw;req.modelid);
+  let ok=disp.isdispatched(r);
+  let tin=mut.0;
+  let tout=mut.0;
+  let cost=mut.0.0;
+  if(ok){ tin=r.inputtokens as i64; tout=r.outputtokens as i64; cost=r.costusd }el{};
+  if(hr.outcome(store;facts;hcid;ok;pname;req.modelid;str.len(raw);tin;tout;t.nowms()-start;cost)){}el{
+    log.warn("the outcome of this hop was not audited";"router.fallback";hcid)
+  };
+  <r
+};
+
 (* overridemodel, when not empty, is a model the user named (`loke ask --model`). It
    replaces the first hop's model id and there is no fallback: the user asked for that
-   model, not for whatever answers. The first hop is still checked before it is sent. *)
-f=dispatchchain(store:i64;usecase:str;d:$dispatcher;chain:$fallbackchain;cfg:$routerconfig;req:$completionrequest;overridemodel:str;cid:str):$chainoutcome{
+   model, not for whatever answers. The first hop is still checked before it is sent.
+   `facts` is the privacy run's, for the hops' records (hr.factsof); its request id is the
+   request's correlation id. *)
+f=dispatchchain(store:i64;usecase:str;d:$dispatcher;chain:$fallbackchain;cfg:$routerconfig;req:$completionrequest;overridemodel:str;facts:$hopfacts):$chainoutcome{
+  let cid=facts.requestid;
   let hops=chain.chainhops;
   let attempted=mut.@();
   if(hops.len==0){
@@ -87,28 +144,32 @@ f=dispatchchain(store:i64;usecase:str;d:$dispatcher;chain:$fallbackchain;cfg:$ro
     let label=hoplabel(hop);
     let spec:$modelspec=hop.model;
     let provider=rtr.providerstr(spec.provider);
-    let blocked=rtr.chainhopallowed(cfg;chain;i as i64) && ks.isblocked(store;provider;usecase);
+    let hcid=hr.hopid(facts;i as i64);
+    let permitted=rtr.chainhopallowed(cfg;chain;i as i64);
+    let blocked=permitted && ks.isblocked(store;provider;usecase);
     if(blocked){
       failures="\(failures)\(label) refused: \(ks.refusalmessage(store;provider;usecase)) ";
-      log.warn("fallback: \(label) is switched off by the kill switch and was not sent";"router.fallback";cid)
+      log.warn("fallback: \(label) is switched off by the kill switch and was not sent";"router.fallback";hcid);
+      hr.refused(store;facts;hcid;"kill_switch";provider;spec.id;0)
     }el{};
-    if(rtr.chainhopallowed(cfg;chain;i as i64) && !blocked){
+    if(permitted && !blocked){
       let modelid=mut.spec.id;
       if(str.len(overridemodel)>0){ modelid=overridemodel }el{};
       attempted=attempted.push(label);
-      let r=disp.trydispatch(d;requestfor(req;modelid);spec.provider);
+      let r=sendhop(store;d;facts;hcid;requestfor(req;modelid);spec.provider;provider);
       if(disp.isdispatched(r)){
         answer=r;
         answeredat=i as i64;
         done=true
       }el{
         failures="\(failures)\(label) failed: \(disp.dispatcherror(r)); ";
-        log.warn("fallback: \(label) failed, trying the next permitted hop";"router.fallback";cid);
+        log.warn("fallback: \(label) failed, trying the next permitted hop";"router.fallback";hcid);
         answer=r
       }
     }el{
       if(!blocked){
-        log.warn("fallback: \(label) is not permitted for this request (sensitivity \(t.senslabel(chain.chainsens))) and was not sent";"router.fallback";cid)
+        log.warn("fallback: \(label) is not permitted for this request (sensitivity \(t.senslabel(chain.chainsens))) and was not sent";"router.fallback";hcid);
+        hr.refused(store;facts;hcid;"not_permitted";provider;spec.id;0)
       }el{}
     }
   };
