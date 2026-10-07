@@ -101,9 +101,15 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
 fi
 # MK20.3: the landing page's flow picker lists every flow in flows.json, a picked flow (not the
 # default) runs to completion across /, /chat and /governance, and the cross-domain narration's
-# claim about the schema panel's lock on crash_id holds in the real page.
+# claim about the schema panel's lock (none on BITRE, crash_id included) holds in the real page.
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/upload" "$ROOT/tests/ui/flows_mk203.json"
+  rc=$?
+fi
+# MK20.3b: the schema panel's PII lock on au.medicare is the declared PII (patient_id included)
+# and no date column, each lock says why, and the panel says the lock is advisory.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/upload" "$ROOT/tests/ui/piilock_mk203b.json"
   rc=$?
 fi
 # MK19.9: the Connections page's Test Connection goes through moke's own /api/proxy and shows

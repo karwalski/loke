@@ -170,7 +170,7 @@ Each detector returns `{type, subtype, confidence, stats}`.
 
 **Schema Panel (Left):**
 - Column cards showing detected type with icon and colour
-- Type-specific summary stats: date range for dates, sum/mean for currency, true/false ratio for booleans, unique count for categoricals, min/max for numerics, PII lock icon for sensitive fields
+- Type-specific summary stats: date range for dates, sum/mean for currency, true/false ratio for booleans, unique count for categoricals, min/max for numerics; PII lock (MK20.3b, `static/js/moke-pii-lock.js`): every column the dataset declares as personal information, plus columns a heuristic suspects (explicit identifier headers, person identifiers such as `patient_id`, person names judged from the values, emails, formatted phone numbers). Dates and bare numeric ids are not read as phone numbers. The lock is advisory; loke's privacy filter still checks every prompt
 - Column type override (click to change)
 - Sensitivity badge
 

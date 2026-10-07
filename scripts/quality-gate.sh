@@ -436,6 +436,13 @@ step_checks() {
       || { echo "  flow tests failed — a walkthrough step could show the wrong instruction" >&2; failed=1; }
   fi
 
+  if [[ -f packages/moke/static/js/tests/test-moke-pii-lock.js ]] && command -v node >/dev/null; then
+    echo "  the schema panel's PII lock holds every declared column and no date or id (MK20.3b)"
+    node packages/moke/static/js/tests/test-moke-pii-lock.js >/dev/null \
+      || { node packages/moke/static/js/tests/test-moke-pii-lock.js >&2
+           echo "  the PII lock dropped a declared column or locked a column it should not" >&2; failed=1; }
+  fi
+
   if [[ -f packages/moke/static/js/tests/test-moke-relationships.js ]] && command -v node >/dev/null; then
     echo "  cross-dataset joins hold against real columns"
     node packages/moke/static/js/tests/test-moke-relationships.js >/dev/null \

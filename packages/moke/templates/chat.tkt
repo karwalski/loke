@@ -79,6 +79,7 @@
   }
   .col-row-main:hover { background: rgba(139,148,158,.05); }
   .col-pii-lock { color: var(--red); font-size: 0.85em; margin-right: 2px; }
+  .schema-lock-note { font-size: 0.72em; color: var(--muted); line-height: 1.5; margin-top: 8px; }
   .col-profile-detail {
     display: none; padding: 4px 0 8px 12px; font-size: 0.76em; color: var(--muted);
     line-height: 1.6; border-left: 2px solid var(--border); margin-left: 4px;
@@ -486,6 +487,7 @@
         <div id="schema-cols">
           <div class="col-row"><span class="col-name muted">Loading schema…</span></div>
         </div>
+        <div class="schema-lock-note" id="schema-lock-note">&#128274; A lock marks a column to look at: every column the dataset declares as personal information (named for redaction), plus any a local heuristic suspects. It is advisory. loke&#8217;s privacy filter still checks every prompt.</div>
       </div>
     </div>
 
@@ -607,6 +609,7 @@
 
 <script src="/static/js/moke-relationships.js"></script>
 <script src="/static/js/moke-savings.js"></script>
+<script src="/static/js/moke-pii-lock.js"></script>
 <script>
 (function() {
   /* ── A3.3 Compliance response scanner (inline for chat page) ── */
@@ -976,9 +979,10 @@
       + '<div style="font-size:0.82em;line-height:1.55;">' + escHtml(r.reason) + '</div>';
   }
 
-  /* ── MK1.5 Data profiler ── */
-  var PII_PATTERN = /_name$|_email$|phone|medicare|dob$|ssn|tfn|card_no|pii_/i;
-
+  /* ── MK1.5 Data profiler ──
+     MK20.3b: which columns are PII is decided in one place, static/js/moke-pii-lock.js:
+     every declared column, plus what its heuristic adds. p.pii is set from that lock
+     once the profile is built (see "Run profiler" below). */
   function profileColumns(headers, rows) {
     var profile = {};
     headers.forEach(function(col) {
@@ -1020,7 +1024,7 @@
           }
         }
       }
-      p.pii = PII_PATTERN.test(col);
+      p.pii = false;
       profile[col] = p;
     });
     return profile;
@@ -1031,14 +1035,10 @@
   // Detection cascade: most specific first, fall back to generic.
   // Each detector returns {type, confidence, subtype?, stats?} or null.
   var TYPE_DETECTORS = [
-    // 1. PII by column name
+    // 1. PII by column name (MK20.3b: the same header rule the lock uses)
     function(h, vals, strs) {
-      var piiNames = {email:1,phone:1,mobile:1,name:1,firstname:1,lastname:1,fullname:1,ssn:1,sin:1,dob:1,dateofbirth:1,birthdate:1,address:1,streetaddress:1,postcode:1,zipcode:1,zip:1,medicare:1,medicarenumber:1,passport:1,passportno:1,license:1,driverlicense:1,taxfilenumber:1,tfn:1,abn:1,acn:1,bsb:1,accountnumber:1,creditcard:1,cardnumber:1,cvv:1,contact:1,contactname:1,contactemail:1,contactphone:1,ipaddress:1,ip:1,socialse:1};
-      var clean = h.toLowerCase().replace(/[^a-z]/g,'');
-      if (piiNames[clean]) {
-        var subtype = /email/i.test(h)?'email':/phone|mobile/i.test(h)?'phone':/name/i.test(h)?'person_name':/address|street|postcode|zip/i.test(h)?'address':/dob|birth/i.test(h)?'dob':/medicare|tfn|abn|ssn|passport|license/i.test(h)?'gov_id':/card|cvv|bsb|account/i.test(h)?'financial':/ip/i.test(h)?'ip_address':'pii';
-        return {type:'pii',subtype:subtype,confidence:0.95};
-      }
+      var reason = MokePiiLock.headerReason(h);
+      if (reason) return {type:'pii',subtype:reason === 'declared_prefix' ? 'pii' : reason,confidence:0.95};
       return null;
     },
     // 2. Email by content
@@ -1048,10 +1048,11 @@
       if (m > vals.length*0.6) return {type:'pii',subtype:'email',confidence:m/vals.length};
       return null;
     },
-    // 3. Phone by content
+    // 3. Phone by content. MK20.3b: the old pattern (any 7 to 18 digits, spaces,
+    // hyphens or brackets) read every ISO date and every bare numeric id or price as a
+    // phone number; MokePiiLock.isPhone wants a phone's formatting.
     function(h, vals, strs) {
-      var re = /^[\+]?[\d\s\-\(\)]{7,18}$/;
-      var m = strs.filter(function(s){return re.test(s.trim())}).length;
+      var m = strs.filter(function(s){return MokePiiLock.isPhone(s)}).length;
       if (m > vals.length*0.6) return {type:'pii',subtype:'phone',confidence:m/vals.length};
       return null;
     },
@@ -1510,7 +1511,7 @@
       // GA3.7 — Sensitivity tooltip
       var piiCols = dataset.pii || [];
       if (piiCols.length === 0 && dataset.headers) {
-        piiCols = dataset.headers.filter(function(h) { return PII_PATTERN.test(h); });
+        piiCols = dataset.headers.filter(function(h) { return MokePiiLock.headerReason(h); });
       }
       sensEl.setAttribute('data-tooltip', sensitivityTooltip(dataset.sensitivity, piiCols));
     }
@@ -1693,8 +1694,13 @@
 
   /* ── Run profiler now that consoleLog is available ── */
   var datasetProfile = {};
+  // MK20.3b: the schema panel's lock. Every declared PII column (the list the request
+  // names for redaction) is locked; the heuristic in moke-pii-lock.js only adds.
+  var piiLock = {};
   if (dataset && dataset.headers) {
+    piiLock = MokePiiLock.lock(dataset.headers, Array.isArray(dataset.rows) ? dataset.rows : [], dataset.pii || []);
     columnProfile = profileColumns(dataset.headers, dataset.rows || null);
+    Object.keys(columnProfile).forEach(function(c) { columnProfile[c].pii = !!piiLock[c]; });
     // MK4.9.1 — Run enhanced profiler for detailed stats
     datasetProfile = profileDataset(dataset.headers, dataset.rows || []);
     var pTypes = Object.keys(columnProfile).map(function(c) {
@@ -1702,7 +1708,7 @@
     });
     consoleLog('Profile', 'Column types detected: ' + pTypes.slice(0, 6).join(', ') + (pTypes.length > 6 ? ' …' : ''), 'stage-profile');
     if (Object.keys(datasetProfile).length > 0) {
-      var piiCols = Object.keys(datasetProfile).filter(function(c) { return datasetProfile[c].isPII; });
+      var piiCols = dataset.headers.filter(function(c) { return piiLock[c]; });
       consoleLog('Profile', 'Auto-profiled ' + Object.keys(datasetProfile).length + ' columns' + (piiCols.length > 0 ? ' · PII flagged: ' + piiCols.join(', ') : ''), 'stage-profile');
     }
     // Re-render schema with expandable profile rows
@@ -1764,7 +1770,8 @@
           else if (dp.cardinality != null) summaryText = dp.cardinality + ' vals';
         }
         var summaryHtml = summaryText ? '<span class="col-type-summary" title="' + escHtml(summaryText) + '">' + escHtml(summaryText) + '</span>' : '';
-        var piiIcon = (p.pii || dp.isPII) ? '<span class="col-pii-lock" title="Potential PII column">&#128274;</span>' : '';
+        var lockReason = piiLock[col];
+        var piiIcon = lockReason ? '<span class="col-pii-lock" data-reason="' + escHtml(lockReason) + '" title="' + escHtml(MokePiiLock.label(lockReason)) + '">&#128274;</span>' : '';
         var detailId = 'col-detail-' + idx;
         _html += '<div class="col-row-wrap">';
         _html += '<div class="col-row-main" onclick="toggleColProfile(\'' + detailId + '\')">' + piiIcon + '<span class="col-type-icon" title="' + dt + '">' + typeIcon + '</span><span class="col-name">' + col + '</span>' + summaryHtml + '<span class="type-chip ' + chipCls + '" title="Click column to see details. Use dropdown to override type.">' + chipLabel + '</span></div>';
