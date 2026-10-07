@@ -263,6 +263,15 @@ step_checks() {
            failed=1; }
   fi
 
+  # F10.8 — loke uses four ooke modules and five functions, each at the pinned signature,
+  # and its templates use only directives and filters the pinned engine implements (an
+  # unknown one renders as nothing, with no error).
+  if [[ -f ./scripts/check_ooke_surface.py ]]; then
+    echo "  loke's ooke surface is the measured one, and its templates are rc.2 templates"
+    python3 ./scripts/check_ooke_surface.py --check >/dev/null \
+      || { python3 ./scripts/check_ooke_surface.py >&2; failed=1; }
+  fi
+
   # F10.15a — one prefix for page modules, derived from the path, so the generated
   # _handlers.tk cannot import two spellings of the same kind of module.
   if [[ -f ./scripts/check_page_module_names.py ]]; then

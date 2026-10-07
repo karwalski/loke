@@ -94,6 +94,22 @@ for r in health models settings savings tabs privacy; do probe GET "/api/$r"; do
 probe POST /api/pipeline '{"text":"smoke test, no personal data","fallback_reason":"user_choice","fallback_selected_by":"user"}'
 for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon; do probe GET "$p"; done
 
+# F10.8: ooke rc.2's template engine ignores a directive it does not know. /tabs and /privacy
+# closed their blocks with `endblock` and `/block`, so each answered 200 with the base layout
+# alone; /installer's `raw` rendered nothing. A status says none of that, so judge the body.
+page() {  # $1 path, $2 substring the body must contain, $3 label
+  local body
+  body=$(curl -s -m 20 "http://127.0.0.1:$PORT$1")
+  if [[ "$body" != *"$2"* ]] || [[ "$body" == *"<title></title>"* ]]; then
+    echo "  FAIL GET $1: $3 (no '$2', or an empty title)" >&2; fail=1
+  else
+    echo "  ok   GET $1: $3"
+  fi
+}
+page /tabs '.tabs-layout' 'renders its content block and title'
+page /privacy '.privacy-hero' 'renders its content block and title'
+page /installer 'data-hardware="{&quot;chip&quot;:' 'hands the measured hardware JSON to the page'
+
 # NC1.7: /api/artifact runs a returned artifact locally. Unlike the probes above, these judge
 # the body, because "it answered" says nothing about whether the value was bound or the
 # column was checked.
