@@ -545,7 +545,11 @@ restored and checked with `cmp`.
   detect (`tests/unit/privacy/test_regex.tk`). Recall is measured above, on the corpus.
 - **One route.** The browser `/api/pipeline` to a local model. The Anthropic route cannot be driven
   through the binary (its endpoint is the real provider); `tests/integration/test_system_prompt_disclosure.tk`
-  drives its own `toanthropicat` against a recorder instead. The CLI paths are not covered. The
+  drives its own `toanthropicat` against a recorder instead. Since F3.9 (2026-10-08) the gate also
+  runs the same matrix and system-prompt cells through `loke ask` over the built loke-cli binary,
+  with its own stand-in, and judges the disclosure rows each run wrote (F5.3). Those are pass/fail
+  assertions, not a published count, and the figures above do not include them. The CLI proxy
+  (`cli.proxy`) is not covered: `loke proxy` is not a command of the binary. The
   no-custody dispatch has carried the guardian since F3.9c, and the harness now runs six no-custody
   cells after the matrix (pass/fail assertions, not a published count); the figures above do not
   include them.

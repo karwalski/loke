@@ -47,21 +47,34 @@
 # After the matrix, one fallback request (F5.3a, scripts/lib/fallback_smoke.py): the stand-in is
 # restarted with the first local choice failing, and the next local hop must answer.
 #
+# Then the CLI path, `loke ask` (F3.9, F5.3), over the BUILT loke-cli binary
+# (build/trees/loke-cli/loke-cli, or LOKE_CLI_BIN): the same template x case matrix and the
+# system-prompt cells, one `loke ask` process each, with a throwaway HOME whose config.toml points
+# providers.ollama_url at its own stand-in on a port the OS hands out. Judged on what that
+# stand-in received, as above, and on what each run wrote to loke.db: one completed disclosure
+# row per hop sent whose bytes_body is the octets received, its two audit rows bound to it; none
+# for a hop the kill switch refused; `loke audit verify` passing; and no raw identifier anywhere
+# in the database file. Then a fallback run with the first model failing: two rows, failed and
+# completed, on <id> and <id>-h1.
+#
 # What it does NOT cover: the Anthropic route (its endpoint is fixed to the real provider, so
 # no stand-in can take its place in the binary; tests/integration/test_system_prompt_disclosure.tk
-# and test_browser_fallback.tk drive the route against a recorder instead), the
-# CLI paths (cli.ask, cli.proxy), and detection recall, which is measured
-# against the corpus in tests/integration/test_detection_recall.tk. Each detector type is
-# exercised with one value the regex layer is known to detect.
+# and test_browser_fallback.tk drive the route against a recorder instead), the CLI proxy
+# (cli.proxy: `loke proxy` is not a command of the binary, so nothing can reach it there), and
+# detection recall, which is measured against the corpus in
+# tests/integration/test_detection_recall.tk. Each detector type is exercised with one value the
+# regex layer is known to detect.
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/packages/browser"
 BIN="${LOKE_BIN:-$SRC/build/loke}"
+CLIBIN="${LOKE_CLI_BIN:-$ROOT/build/trees/loke-cli/loke-cli}"
 PORT="${SMOKE_PORT:-11498}"
 OLLAMA_PORT=11434
 
 [ -x "$BIN" ] || { echo "smoke_privacy_harness: $BIN not built; run scripts/build_loke.sh" >&2; exit 1; }
+[ -x "$CLIBIN" ] || { echo "smoke_privacy_harness: $CLIBIN not built; run scripts/build_trees.sh loke-cli" >&2; exit 1; }
 
 . "$ROOT/scripts/lib/fixedports_lock.sh"
 acquire_fixedports || { echo "smoke_privacy_harness: could not get the fixed-port lock" >&2; exit 1; }
@@ -130,6 +143,40 @@ else
   echo "smoke_privacy_harness: the fallback stand-in never came up" >&2
   rc=1
 fi
+kill "$RECPID" 2>/dev/null; wait "$RECPID" 2>/dev/null
+
+# F3.9 / F5.3: `loke ask` over the built loke-cli. Its stand-in listens on a port the OS hands
+# out, named in the throwaway HOME's config.toml (providers.ollama_url); Presidio's address is a
+# closed loopback port, as on the browser phase where nothing answers it.
+CLIHOME="$WORK/clihome"
+mkdir -p "$CLIHOME/.loke"
+start_cli_recorder() {  # $1 log name, $2 models that fail
+  RECORDER_MODELS="qwen2.5:7b,llama3:latest,gemma3:4b" RECORDER_FAIL_MODELS="$2" \
+    python3 "$ROOT/scripts/lib/http_recorder.py" "$WORK/$1.log" "$WORK/$1.port" harness \
+    >/dev/null 2>&1 & PIDS="$PIDS $!"
+  RECPID=$!
+  for _ in $(seq 1 40); do [ -s "$WORK/$1.port" ] && break; sleep 0.25; done
+  [ -s "$WORK/$1.port" ] || return 1
+  printf '[providers]\nollama_url = "http://127.0.0.1:%s"\n\n[privacy]\npresidio_url = "http://127.0.0.1:59998"\n' \
+    "$(cat "$WORK/$1.port")" > "$CLIHOME/.loke/config.toml"
+}
+if start_cli_recorder cli ""; then
+  python3 "$ROOT/scripts/lib/privacy_harness.py" --templates "$ROOT/packages/core/src/privacy/template.tk" \
+    --cli-bin "$CLIBIN" --cli-home "$CLIHOME" --cli-bodies "$WORK/cli.log.bodies" \
+    ${HARNESS_CLI_REPORT:+--report "$HARNESS_CLI_REPORT"} || rc=1
+else
+  echo "smoke_privacy_harness: the CLI stand-in never came up" >&2
+  rc=1
+fi
+kill "$RECPID" 2>/dev/null; wait "$RECPID" 2>/dev/null
+if start_cli_recorder clifallback "qwen2.5:7b"; then
+  python3 "$ROOT/scripts/lib/privacy_harness.py" --templates "$ROOT/packages/core/src/privacy/template.tk" \
+    --cli-bin "$CLIBIN" --cli-home "$CLIHOME" --cli-fallback-bodies "$WORK/clifallback.log.bodies" || rc=1
+else
+  echo "smoke_privacy_harness: the CLI fallback stand-in never came up" >&2
+  rc=1
+fi
+
 if [ "$rc" -ne 0 ]; then
   echo "smoke_privacy_harness: FAILED (loke log tail follows)" >&2
   tail -5 "$WORK/serve.log" >&2

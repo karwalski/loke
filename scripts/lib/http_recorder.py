@@ -85,6 +85,9 @@ The `harness` mode answers /api/generate as `echo` does, names no task to the in
 classifier, and reports "Jane Citizen" from the NER /api/chat only when a user message of
 the request holds that name (`answer` and `echo` report it whatever the text). F3.9d: only
 the user messages, because core.privacy.ner's own system message names "Jane Citizen".
+An /api/chat request whose body holds the guardian's marker (LOKE_GUARDIAN_v) is a model
+request, as `loke ask` sends it, not the NER layer's: in `harness` mode it is answered with
+"echo: " and its user messages, or with nothing for a model in RECORDER_FAIL_MODELS.
 
 MK19.9: paths under /proxy-test/ answer the cases moke's /api/proxy must handle, in any mode.
 /proxy-test/json answers a small JSON document with a marker; /proxy-test/redirect answers 302
@@ -315,6 +318,18 @@ class H(http.server.BaseHTTPRequestHandler):
             # F3.9: no task named, so the classifier keeps its keyword result, as
             # scripts/lib/fake_ollama.py answers it for smoke_e2e.sh.
             self._send({"model": "fake", "message": {"role": "assistant", "content": ""}, "done": True})
+        elif p == "/api/chat" and MODE == "harness" and "LOKE_GUARDIAN_v" in body:
+            # F3.9 (the CLI paths): `loke ask` sends the model its request on /api/chat, with
+            # the guardian as the system message, which the NER layer's request never holds.
+            # Answered as /api/generate is, with the user messages echoed, so the restored
+            # answer is exact; a model in RECORDER_FAIL_MODELS answers with nothing.
+            if _field(body, "model") in FAIL_MODELS:
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send({"model": "fake", "message": {"role": "assistant", "content": "echo: " + _usertext(body)},
+                            "done": True, "prompt_eval_count": 12, "eval_count": 9})
         elif p == "/api/chat" and MODE == "harness":
             # F3.9: an NER model that reports "Jane Citizen" only when the text holds it, so
             # a case without a name is not credited with one the text does not contain.

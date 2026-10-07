@@ -37,6 +37,14 @@ for byte as core.privacy.guardian.guardianprompt holds it (read from its source)
 caller's system prompt. A guardian word, or another cell, in the question or the caller's system
 prompt is refused (422 sentinel_fail) and nothing reaches the model.
 
+Then the CLI path (F3.9, F5.3), with --cli-bin and no --loke: the same template x case matrix
+and system-prompt cells through `loke ask` over the built loke-cli binary, each a process with
+a throwaway HOME, judged on what its own stand-in received and on the disclosure and audit rows
+it wrote; a refused hop (the kill switch) that writes no disclosure row; `loke audit verify`;
+and no raw identifier anywhere in loke.db. With --cli-fallback-bodies, one request whose first
+hop fails: two disclosure rows, failed and completed. See cli_phase. cli.proxy is not driven:
+`loke proxy` is not a command of the binary (cli.commands has no `proxy`), so it cannot be.
+
 Exit status 0 only when every assertion passes. The guardian check was an expected failure
 (XFAIL, F3.9a) until /api/pipeline sent it; it is a required pass now.
 """
@@ -282,11 +290,242 @@ def record(path, templates, cells, syscells):
                                     "driven by tests/integration/test_system_prompt_disclosure.tk, not here."), path=pathlib.Path(path))
 
 
+
+# ── F3.9 / F5.3: the CLI path, `loke ask`, over the BUILT loke-cli binary ─────────────────
+#
+# Each cell runs `loke ask <text> --system <system>` as a separate process with a throwaway
+# HOME whose config.toml points providers.ollama_url at a recorder in `harness` mode on a port
+# the OS handed out. `loke ask` sends the model its request on Ollama's /api/chat, with the
+# guardian as the system message (the recorder echoes the user messages back for such a
+# request); the NER layer's own /api/chat holds no guardian. Judged, as the browser cells are,
+# on what the stand-in received: no raw identifier in any request but the NER layer's, a
+# placeholder of the detector's type in the user message, the guardian at the start of the
+# system message, and the answer printed restored byte for byte with no placeholder left.
+#
+# And, per cell, on what `loke ask` wrote to loke.db (F5.3): exactly one new disclosure_log row
+# for the one hop that sent, completed, whose bytes_body is the octet count of the body the
+# stand-in received; its llm_dispatch and llm_request audit rows on the same correlation id,
+# each bound to the disclosure row's digest. After the matrix: `loke audit verify` exits 0 (the
+# hash chain and the reconciliation), and no raw identifier, as typed, is anywhere in the
+# database file.
+#
+# RESTRICTED cells are not held on this path: `loke ask` evaluates no organisation policy and has
+# no approval gate (filed as F5.3c). They are routed to a local model and judged as any cell is.
+
+def model_requests(got):
+    return [r for r in got if r[0] == "POST" and r[1] == "/api/chat" and GUARDIAN in r[2]]
+
+
+def ner_or_intent(r):
+    return r[1] == "/api/chat" and GUARDIAN not in r[2]
+
+
+def chat_parts(body):
+    """(system, user) of an Ollama /api/chat body."""
+    try:
+        msgs = json.loads(body).get("messages", [])
+    except ValueError:
+        return "", ""
+    sysm = "\n".join(m.get("content", "") for m in msgs if isinstance(m, dict) and m.get("role") == "system")
+    user = "\n".join(m.get("content", "") for m in msgs if isinstance(m, dict) and m.get("role") == "user")
+    return sysm, user
+
+
+class CliRun:
+    def __init__(self, binary, home):
+        import sqlite3
+        self.binary, self.home = binary, home
+        self.db = home + "/.loke/loke.db"
+        self.sqlite3 = sqlite3
+
+    def run(self, args, timeout=120):
+        import os, subprocess
+        env = dict(os.environ, HOME=self.home)
+        p = subprocess.run([self.binary] + args, env=env, capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+
+    def rows(self, sql, params=()):
+        try:
+            con = self.sqlite3.connect(self.db)
+            try:
+                return con.execute(sql, params).fetchall()
+            finally:
+                con.close()
+        except self.sqlite3.Error:
+            return []
+
+    def count(self, table):
+        r = self.rows("SELECT COUNT(*) FROM %s" % table)
+        return r[0][0] if r else -1
+
+
+def disclosure_checks(T, C, name, before_rowid, sent_bodies, want_states):
+    """The disclosure rows written since before_rowid: one per sent body, in order, each with
+    the state wanted, bytes_body equal to the octets received, and its two audit rows bound."""
+    rows = C.rows("SELECT rowid, correlation_id, state, bytes_body, provider, custody, fallback_reason, fallback_selected_by "
+                  "FROM disclosure_log WHERE rowid>? ORDER BY rowid", (before_rowid,))
+    T.check(len(rows) == len(sent_bodies),
+            "%s: one disclosure row per hop that sent (rows %d, hops sent %d)" % (name, len(rows), len(sent_bodies)))
+    for k, (row, body) in enumerate(zip(rows, sent_bodies)):
+        _, cid, state, nbody, provider, custody, fbr, fbby = row
+        T.check(state == want_states[k], "%s: hop %d's disclosure row is %s (got %s)" % (name, k, want_states[k], state))
+        T.check(nbody == len(body.encode("utf-8")),
+                "%s: hop %d's bytes_body is the octets the stand-in received (%s vs %d)" % (name, k, nbody, len(body.encode("utf-8"))))
+        T.check(provider == "ollama" and custody == "redacted-data" and fbr == "user_choice" and fbby == "user",
+                "%s: hop %d's row names ollama, redacted-data, user_choice by user (got %s %s %s %s)" % (name, k, provider, custody, fbr, fbby))
+        outcome = "llm_request" if want_states[k] == "completed" else "llm_request_failed"
+        aud = C.rows("SELECT event_type, COALESCE(disclosure_digest,''), use_case FROM audit_log WHERE correlation_id=? ORDER BY created_at, rowid", (cid,))
+        kinds = [a[0] for a in aud]
+        T.check(kinds.count("llm_dispatch") == 1 and kinds.count(outcome) == 1,
+                "%s: hop %d has its llm_dispatch and %s audit rows (got %s)" % (name, k, outcome, kinds))
+        T.check(all(a[1] for a in aud if a[0] in ("llm_dispatch", outcome)) and all(a[2] == "cli-ask" for a in aud),
+                "%s: hop %d's audit rows bind the disclosure digest, use case cli-ask" % (name, k))
+    return rows
+
+
+def cli_phase(T, a, templates, every_value):
+    import os
+    C = CliRun(a.cli_bin, a.cli_home)
+    bodies = a.cli_bodies
+    cells, syscells = [], []
+    rowid = lambda: (C.rows("SELECT COALESCE(MAX(rowid),0) FROM disclosure_log") or [[0]])[0][0]
+
+    def one(name, text, sysp, value, ptype, cell, judge_text):
+        before = len(recorded(bodies))
+        brow = rowid()
+        args = ["ask", text] + (["--system", sysp] if sysp else [])
+        rc, out, err = C.run(args)
+        got = recorded(bodies)[before:]
+        before_fail = T.fail
+        if not T.check(rc == 0, "%s: loke ask exited 0 (got %s: %s)" % (name, rc, (err or out)[-200:])):
+            return
+        gens = model_requests(got)
+        if not T.check(len(gens) == 1, "%s: exactly one request reached the model (got %d)" % (name, len(gens))):
+            return
+        body = gens[0][2]
+        msys, muser = chat_parts(body)
+        for r in got:
+            if ner_or_intent(r):
+                continue
+            T.check(not any(leaks(r[2], v) for v in every_value),
+                    "%s: %s %s carries no raw identifier" % (name, r[0], r[1]))
+        T.check(msys.startswith(GUARDIAN), "%s: the guardian is the start of the model's system message" % name)
+        where = muser if judge_text else msys
+        if value:
+            T.check(re.search(r"\[%s_[0-9a-f]+_[0-9]+\]|\[%s_[0-9]+\]" % (ptype, ptype), where) is not None,
+                    "%s: the model was sent a %s placeholder where the value was" % (name, ptype))
+        elif judge_text:
+            T.check(muser == text, "%s: text with no identifier reached the model unchanged" % name)
+        T.check(("echo: " + text) in out, "%s: the answer printed is restored byte for byte" % name)
+        T.check(PLACEHOLDER.search(out) is None, "%s: no placeholder survives into what the user reads" % name)
+        disclosure_checks(T, C, name, brow, [body], ["completed"])
+        cell["guardian"] = msys.startswith(GUARDIAN)
+        cell["dispatched"] = True
+        cell["passed"] = T.fail == before_fail
+
+    for tmpl in templates:
+        for (dtype, value, ptype) in CASES:
+            name = "cli %s x %s" % (tmpl["id"], dtype)
+            sysp, user = render(tmpl, raw_data(tmpl, value))
+            cell = {"template": tmpl["id"], "detector": dtype, "passed": False}
+            one(name, user, sysp, value, ptype, cell, True)
+            cells.append(cell)
+
+    clean = "Summarise the weather report for today."
+    for (dtype, value, ptype) in CASES:
+        if not value:
+            continue
+        name = "cli system_prompt x %s" % dtype
+        cell = {"detector": dtype, "passed": False}
+        one(name, clean, "You are assisting a customer. Their record: %s. Be brief." % value, value, ptype, cell, False)
+        syscells.append(cell)
+
+    # A refused hop (F5.3): with the kill switch on, nothing is sent and no disclosure row is
+    # written; the refusal is audited.
+    rc, out, err = C.run(["kill-switch", "on"])
+    T.check(rc == 0, "cli: loke kill-switch on (got %s %s)" % (rc, (err or out)[-160:]))
+    before, brow = len(recorded(bodies)), rowid()
+    nks = len(C.rows("SELECT id FROM audit_log WHERE event_type='kill_switch_refused'"))
+    rc, out, err = C.run(["ask", "Customer record: harness.probe@example.com. Status open."])
+    got = recorded(bodies)[before:]
+    T.check(rc != 0, "cli kill switch: loke ask refuses (exit %s)" % rc)
+    T.check(len(model_requests(got)) == 0, "cli kill switch: nothing reached the model")
+    T.check(rowid() == brow, "cli kill switch: NO DISCLOSURE ROW FOR A REFUSED HOP")
+    T.check(len(C.rows("SELECT id FROM audit_log WHERE event_type='kill_switch_refused'")) > nks,
+            "cli kill switch: the refused hop is audited as kill_switch_refused")
+    rc, out, err = C.run(["kill-switch", "off"])
+    T.check(rc == 0, "cli: loke kill-switch off")
+
+    # The chain and the record, intact over everything above.
+    rc, out, err = C.run(["audit", "verify"])
+    T.check(rc == 0, "cli: loke audit verify passes over every row written (exit %s: %s)" % (rc, (out + err)[-300:]))
+    raw = b""
+    for suffix in ("", "-wal"):
+        try:
+            with open(C.db + suffix, "rb") as f:
+                raw += f.read()
+        except FileNotFoundError:
+            pass
+    T.check(len(raw) > 0, "cli: loke.db was written")
+    found = [v for v in every_value if v.encode("utf-8") in raw]
+    T.check(not found, "cli: NO RAW IDENTIFIER IS ANYWHERE IN loke.db (found %s)" % found)
+    allrec = recorded(bodies)
+    T.check(not any(leaks(r[2], v) for r in allrec if not ner_or_intent(r) for v in every_value),
+            "cli: across all %d recorded requests, none but the NER layer's carried a raw identifier" % len(allrec))
+    return cells, syscells
+
+
+def cli_fallback(T, a, every_value):
+    """F5.3: the first hop fails (its model answers nothing), the next answers. Two disclosure
+    rows, the first failed and the second completed, on <id> and <id>-h1."""
+    C = CliRun(a.cli_bin, a.cli_home)
+    bodies = a.cli_fallback_bodies
+    brow = (C.rows("SELECT COALESCE(MAX(rowid),0) FROM disclosure_log") or [[0]])[0][0]
+    text = "Customer record, keep it confidential: harness.probe@example.com. Status open."
+    rc, out, err = C.run(["ask", text])
+    got = recorded(bodies)
+    gens = model_requests(got)
+    name = "cli fallback"
+    T.check(rc == 0, "%s: loke ask exited 0 (got %s %s)" % (name, rc, (err or out)[-200:]))
+    T.check(len(gens) == 2, "%s: two hops reached the model (got %d)" % (name, len(gens)))
+    T.check(("echo: " + text) in out and "fallback: answered by" in out, "%s: answered by the second hop, restored" % name)
+    T.check(not any(leaks(r[2], v) for r in gens for v in every_value), "%s: neither hop sent a raw value" % name)
+    rows = disclosure_checks(T, C, name, brow, [g[2] for g in gens], ["failed", "completed"])
+    if len(rows) == 2:
+        T.check(rows[1][1] == rows[0][1] + "-h1", "%s: the second hop's correlation id is the first's with -h1 (%s, %s)" % (name, rows[0][1], rows[1][1]))
+    rc, out, err = C.run(["audit", "verify"])
+    T.check(rc == 0, "%s: loke audit verify passes (exit %s)" % (name, rc))
+
+
+
+def cli_main(T, a, templates, every_value):
+    """The CLI phases only, run by scripts/smoke_privacy_harness.sh after the browser's, each
+    against its own stand-in."""
+    if a.cli_bodies:
+        cells, syscells = cli_phase(T, a, templates, every_value)
+        print("  privacy harness (loke ask, CLI): %d templates x %d detector cases = %d cells, %d passed every "
+              "assertion, guardian reached the model in %d; %d system-prompt cells, %d passed; %d assertions ok, %d failed"
+              % (len(templates), len(CASES), len(cells), sum(1 for c in cells if c["passed"]),
+                 sum(1 for c in cells if c.get("guardian")), len(syscells), sum(1 for c in syscells if c["passed"]),
+                 T.ok, T.fail))
+        if a.report:
+            with open(a.report, "w") as f:
+                json.dump({"path": "cli.ask", "cells": cells, "syscells": syscells, "ok": T.ok, "fail": T.fail,
+                           "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, f, indent=1)
+    if a.cli_fallback_bodies:
+        cli_fallback(T, a, every_value)
+        print("  privacy harness (loke ask fallback): %d assertions ok, %d failed" % (T.ok, T.fail))
+    return 0 if T.fail == 0 else 1
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--loke", required=True)
-    ap.add_argument("--bodies", required=True)
+    ap.add_argument("--loke", help="the loke server: drive POST /api/pipeline")
+    ap.add_argument("--bodies", help="the browser phase's stand-in log (<log>.bodies)")
     ap.add_argument("--templates", required=True)
+    ap.add_argument("--cli-bin", help="the built loke-cli binary: drive `loke ask` (F3.9, F5.3)")
+    ap.add_argument("--cli-home", help="the throwaway HOME whose .loke/config.toml names the CLI stand-in")
+    ap.add_argument("--cli-bodies", help="the CLI stand-in's log: run the CLI matrix")
+    ap.add_argument("--cli-fallback-bodies", help="the CLI stand-in's log, first model failing: run the CLI fallback")
     ap.add_argument("--report")
     ap.add_argument("--record", help="append the counts to this result file (benchmarks.lib.result)")
     a = ap.parse_args()
@@ -300,9 +539,11 @@ def main():
     T.check(regex_types == REGEX_TYPES,
             "the cases cover exactly the regex layer's detector types: layer has %s" % regex_types)
 
+    every_value = [c[1] for c in CASES if c[1]]
+    if not a.loke:
+        return cli_main(T, a, templates, every_value)
     pipeline = a.loke + "/api/pipeline"
     approve = a.loke + "/api/approve"
-    every_value = [c[1] for c in CASES if c[1]]
     cells = []
 
     for tmpl in templates:
