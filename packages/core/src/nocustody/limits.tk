@@ -1,0 +1,157 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.nocustody.limits;
+
+i=str:std.str;
+i=toml:std.toml;
+i=file:std.file;
+i=cfg:shared.config;
+i=t:shared.types;
+
+(* NC1.10 (d). The four limits core.nocustody.bound applies, as config.toml sets them.
+
+   docs/specifications/artifact-contract.md section 8 makes SESSION_CELL_BUDGET and
+   SESSION_PREDICATE_REPEAT_LIMIT configurable, with defaults of 50 000 and 20, and NC1.13 applies
+   the same values across every session in a rolling 24 hours. They are read from config.toml's
+   [nocustody] table:
+
+     [nocustody]
+     session_cell_budget = 50000                 SESSION_CELL_BUDGET
+     session_predicate_repeat_limit = 20         SESSION_PREDICATE_REPEAT_LIMIT
+     installation_cell_budget = 50000            INSTALLATION_CELL_BUDGET
+     installation_predicate_repeat_limit = 20    INSTALLATION_PREDICATE_REPEAT_LIMIT
+
+   THE ONE RULE: config.toml can only TIGHTEN a limit. The bound is a privacy control, and a
+   larger budget releases more of the data to whoever shapes the artifacts, so a value above
+   the contract's default is refused, not clamped and not honoured. The contract says
+   "configurable" and names no direction; raising a limit is not built, and would be a
+   decision recorded against NC1.10, not a setting.
+
+   The installation limits default to the session limits in force, not to the contract's
+   numbers, and may not exceed them. The contract defines each as its session limit "again,
+   across every session", and that is what makes NC1.13's acceptance hold: a probing sequence
+   spread over rotated ids is refused at the same count as one in a single session. An
+   installation limit above a tightened session limit would let a caller that rotates ids
+   take more than one session may, so it is refused too.
+
+   0 is a valid value and the tightest: a cell budget of 0 releases nothing, and a repeat
+   limit of 0 refuses every filtered run.
+
+   FAIL CLOSED, as F3b.16 refuses a set-but-unusable privacy threshold. A key that is set and
+   cannot be used (not a whole number, negative, a float, a boolean, above its ceiling, or in
+   a file that is not TOML), or a config.toml that exists and cannot be read, does not fall
+   back to the default: `error` names the fault, every limit is 0, and core.nocustody.bound
+   refuses every run (limits_unusable) until it is fixed. A MISSING config.toml, or one that
+   does not set these keys, is the contract's defaults.
+
+   NOT DONE: loke.policy.json (core.privacy.orgpolicy, F3b.8) cannot set a maximum for these
+   yet. That module refuses any key it does not know, so the keys must be added to its
+   knownkey first; filed as NC1.14. *)
+
+t=$nclimits{
+  (* Why the configured limits cannot be applied, or empty. When set, every limit is 0. *)
+  error:str;
+  sessioncells:i64;
+  sessionprobes:i64;
+  installcells:i64;
+  installprobes:i64
+};
+
+(* The artifact contract's section 8 defaults, and the ceiling config.toml cannot exceed. *)
+f=defaultsessioncells():i64{
+  <50000
+};
+
+f=defaultsessionprobes():i64{
+  <20
+};
+
+f=sessioncellskey():str{
+  <"nocustody.session_cell_budget"
+};
+
+f=sessionprobeskey():str{
+  <"nocustody.session_predicate_repeat_limit"
+};
+
+f=installcellskey():str{
+  <"nocustody.installation_cell_budget"
+};
+
+f=installprobeskey():str{
+  <"nocustody.installation_predicate_repeat_limit"
+};
+
+f=defaults():$nclimits{
+  <$nclimits{error:"";sessioncells:defaultsessioncells();sessionprobes:defaultsessionprobes();installcells:defaultsessioncells();installprobes:defaultsessionprobes()}
+};
+
+(* Limits that cannot be applied. Every one is 0, so a caller that ignored `error` would
+   still release nothing. *)
+f=unusable(error:str):$nclimits{
+  <$nclimits{error:error;sessioncells:0;sessionprobes:0;installcells:0;installprobes:0}
+};
+
+(* Why the value config.toml sets for key cannot be used, or empty when it is absent or a
+   whole number from 0 to ceiling. `against` names what the ceiling is. doc is 0 when the
+   text is not TOML. *)
+f=valueerror(doc:i64;text:str;key:str;ceiling:i64;against:str):str{
+  if(!cfg.numberset(doc;text;key)){ <"" }el{};
+  if(doc==0){ <"config.toml is not valid TOML, so the \(key) it sets cannot be read" }el{};
+  let v=cfg.tomlnumber(doc;text;key;"");
+  let top=str.fromint(ceiling);
+  if(str.len(v)==0){ <"\(key) is set in a form loke cannot read; write it on its own line under [nocustody], e.g. \(cfg.tomlleaf(key)) = \(top)" }el{};
+  if(str.startswith(v;"-")){ <"\(key) = \(v) is negative; it must be a whole number from 0 to \(top)" }el{};
+  if(!str.isdigit(v)){ <"\(key) = \(v) is not a whole number; it must be from 0 to \(top)" }el{};
+  let n=mt str.toint(v) { $ok:x x; $err:e 0-1 };
+  if(str.len(v)>9 || n>ceiling){ <"\(key) = \(v) is above \(against), \(top): config.toml can only tighten this bound, never loosen it (NC1.10)" }el{};
+  if(n<0){ <"\(key) = \(v) is not a whole number; it must be from 0 to \(top)" }el{};
+  <""
+};
+
+(* The value for key, or fallback when it is not set. Read only once valueerror is empty. *)
+f=valueof(doc:i64;text:str;key:str;fallback:i64):i64{
+  if(!cfg.numberset(doc;text;key)){ <fallback }el{};
+  <mt str.toint(cfg.tomlnumber(doc;text;key;"")) { $ok:x x; $err:e 0 }
+};
+
+f=resolved(doc:i64;text:str):$nclimits{
+  let contract="the artifact contract's default";
+  let ec=valueerror(doc;text;sessioncellskey();defaultsessioncells();contract);
+  if(str.len(ec)>0){ <unusable(ec) }el{};
+  let ep=valueerror(doc;text;sessionprobeskey();defaultsessionprobes();contract);
+  if(str.len(ep)>0){ <unusable(ep) }el{};
+  let scells=valueof(doc;text;sessioncellskey();defaultsessioncells());
+  let sprobes=valueof(doc;text;sessionprobeskey();defaultsessionprobes());
+  let ceil="the session limit in force (rotating sessions must not buy more than one session gets)";
+  let eic=valueerror(doc;text;installcellskey();scells;ceil);
+  if(str.len(eic)>0){ <unusable(eic) }el{};
+  let eip=valueerror(doc;text;installprobeskey();sprobes;ceil);
+  if(str.len(eip)>0){ <unusable(eip) }el{};
+  <$nclimits{error:"";sessioncells:scells;sessionprobes:sprobes;installcells:valueof(doc;text;installcellskey();scells);installprobes:valueof(doc;text;installprobeskey();sprobes)}
+};
+
+(* The limits a config.toml text sets. *)
+f=fromtext(text:str):$nclimits{
+  <mt toml.load(text) {
+    $ok:doc resolved(doc;text);
+    $err:e resolved(0;text)
+  }
+};
+
+(* The limits in force: the user's config.toml, read on every call, so an edit applies to the
+   next run without a restart. *)
+f=current():$nclimits{
+  let path=t.configpath();
+  if(!file.exists(path)){ <defaults() }el{};
+  <mt file.read(path) {
+    $ok:text fromtext(text);
+    $err:e unusable("config.toml exists and could not be read, so the no-custody limits it may set are unknown")
+  }
+};
+
+(* The refusal core.nocustody.bound gives while the limits cannot be applied. *)
+f=reason(l:$nclimits):str{
+  <"the no-custody limits in config.toml cannot be applied, so nothing is released: \(l.error)"
+};

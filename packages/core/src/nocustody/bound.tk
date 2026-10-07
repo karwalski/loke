@@ -11,6 +11,7 @@ i=t:shared.types;
 i=na:core.nocustody.artifact;
 i=nr:core.nocustody.request;
 i=ns:core.nocustody.session;
+i=nl:core.nocustody.limits;
 
 (* NC1.10. A per-session bound on the query-shaped channel.
 
@@ -81,9 +82,13 @@ i=ns:core.nocustody.session;
      only by the cell budget.
    - A binary search on a numeric column. The executor has no range filter today, so an
      equality filter is the only probe; a range operator added later needs its own count.
-   The values are the contract's unmeasured placeholders, not a measured operating point, and
-   they are constants here where the contract says configurable. No benchmark for this
-   channel exists to measure them against. *)
+   The values are the contract's unmeasured placeholders, not a measured operating point. No
+   benchmark for this channel exists to measure them against.
+
+   NC1.10 (d): the four limits are read from config.toml's [nocustody] table on every run
+   (core.nocustody.limits), and config.toml can only make them tighter. A value above the
+   contract's default, or one that cannot be used, refuses every run as limits_unusable,
+   naming the key, until it is fixed. The functions below are the defaults. *)
 
 t=$boundedresult{
   ok:bool;
@@ -98,13 +103,13 @@ t=$boundedresult{
 (* SESSION_CELL_BUDGET, artifact-contract section 8 default. Cells a session may be released
    in total. *)
 f=cellbudget():i64{
-  <50000
+  <nl.defaultsessioncells()
 };
 
 (* SESSION_PREDICATE_REPEAT_LIMIT, artifact-contract section 8 default. Filtered runs a session
    may execute against one filter column; the next is refused as value probing. *)
 f=probelimit():i64{
-  <20
+  <nl.defaultsessionprobes()
 };
 
 (* INSTALLATION_WINDOW, in milliseconds: the rolling window the installation-wide limits sum
@@ -218,46 +223,57 @@ f=run(session:str;a:$artifact;headers:@str;rows:@(@str)):$boundedresult{
   <runat(session;a;headers;rows;t.nowms())
 };
 
-(* Check the session is one loke issued, validate, check the session's ledger and then the
-   installation's window, run, check the result against what is left of both, record, release.
-   `nowms` is a parameter so a test can move the clock; production passes the time. *)
+(* At a given time, under the limits config.toml sets now. *)
 f=runat(session:str;a:$artifact;headers:@str;rows:@(@str);nowms:i64):$boundedresult{
+  <runwith(session;a;headers;rows;nowms;nl.current())
+};
+
+(* Check the session is one loke issued, check the limits can be applied, validate, check the
+   session's ledger and then the installation's window, run, check the result against what is
+   left of both, record, release. `nowms` and the limits are parameters so a test can move the
+   clock and set the limits; production passes the time and config.toml's. *)
+f=runwith(session:str;a:$artifact;headers:@str;rows:@(@str);nowms:i64;lim:$nclimits):$boundedresult{
   if(str.len(session)>maxsessionlen()){ <refused("session_unissued";ns.reason("session_unissued");0;0) };
   let issued=ns.checkat(session;nowms);
   if(str.len(issued)>0){ <refused(issued;ns.reason(issued);0;0) };
+  if(str.len(lim.error)>0){ <refused("limits_unusable";nl.reason(lim);0;0) };
+  let cb=lim.sessioncells;
+  let pl=lim.sessionprobes;
+  let icb=lim.installcells;
+  let ipl=lim.installprobes;
   let invalid=na.validate(a;headers);
   if(str.len(invalid)>0){ <refuse(session;a;"rejected";"invalid";invalid;0;0;nowms) };
   let usedrows=sessionrows(session);
   let usedcells=sessioncells(session);
   let allcells=installcells(nowms);
   if(usedrows<0 || usedcells<0 || allcells<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";0;0) };
-  if(usedcells>=cellbudget()){
-    <refuse(session;a;"refused";"cell_budget";"this session has used its budget of \(str.fromint(cellbudget())) result cells (NC1.10)";usedrows;usedcells;nowms)
+  if(usedcells>=cb){
+    <refuse(session;a;"refused";"cell_budget";"this session has used its budget of \(str.fromint(cb)) result cells (NC1.10)";usedrows;usedcells;nowms)
   };
-  if(allcells>=installcellbudget()){
-    <refuse(session;a;"refused";"installation_cell_budget";"this installation has released its budget of \(str.fromint(installcellbudget())) result cells across all sessions in the last 24 hours (NC1.13); a new session does not reset it";usedrows;usedcells;nowms)
+  if(allcells>=icb){
+    <refuse(session;a;"refused";"installation_cell_budget";"this installation has released its budget of \(str.fromint(icb)) result cells across all sessions in the last 24 hours (NC1.13); a new session does not reset it";usedrows;usedcells;nowms)
   };
   let key=probekey(a);
   if(str.len(key)>0){
     let probes=probecount(session;key);
     let allprobes=installprobecount(key;nowms);
     if(probes<0 || allprobes<0){ <refused("ledger_unavailable";"the session ledger could not be read, so nothing is released";usedrows;usedcells) };
-    if(probes>=probelimit()){
-      <refuse(session;a;"refused";"value_probing";"refused as value probing: this session has already filtered on this column \(str.fromint(probes)) times, the limit is \(str.fromint(probelimit())) (NC1.10)";usedrows;usedcells;nowms)
+    if(probes>=pl){
+      <refuse(session;a;"refused";"value_probing";"refused as value probing: this session has already filtered on this column \(str.fromint(probes)) times, the limit is \(str.fromint(pl)) (NC1.10)";usedrows;usedcells;nowms)
     }el{};
-    if(allprobes>=installprobelimit()){
-      <refuse(session;a;"refused";"cross_session_probing";"refused as value probing across sessions: this column has been filtered on \(str.fromint(allprobes)) times in the last 24 hours across all sessions, the limit is \(str.fromint(installprobelimit())) (NC1.13); a new session does not reset it";usedrows;usedcells;nowms)
+    if(allprobes>=ipl){
+      <refuse(session;a;"refused";"cross_session_probing";"refused as value probing across sessions: this column has been filtered on \(str.fromint(allprobes)) times in the last 24 hours across all sessions, the limit is \(str.fromint(ipl)) (NC1.13); a new session does not reset it";usedrows;usedcells;nowms)
     }el{}
   }el{};
   let result=na.run(a;headers;rows);
   if(result.ok==false){ <refuse(session;a;"rejected";"query_failed";result.err;usedrows;usedcells;nowms) };
   let n=result.labels.len;
   let c=cellsof(a.op;n);
-  if(usedcells+c>cellbudget()){
-    <refuse(session;a;"refused";"cell_budget";"this result has \(str.fromint(c)) cells and the session has \(str.fromint(cellbudget()-usedcells)) left of its \(str.fromint(cellbudget())) (NC1.10); it was computed locally and withheld";usedrows;usedcells;nowms)
+  if(usedcells+c>cb){
+    <refuse(session;a;"refused";"cell_budget";"this result has \(str.fromint(c)) cells and the session has \(str.fromint(cb-usedcells)) left of its \(str.fromint(cb)) (NC1.10); it was computed locally and withheld";usedrows;usedcells;nowms)
   };
-  if(allcells+c>installcellbudget()){
-    <refuse(session;a;"refused";"installation_cell_budget";"this result has \(str.fromint(c)) cells and the installation has \(str.fromint(installcellbudget()-allcells)) left of its \(str.fromint(installcellbudget())) across all sessions in the last 24 hours (NC1.13); it was computed locally and withheld";usedrows;usedcells;nowms)
+  if(allcells+c>icb){
+    <refuse(session;a;"refused";"installation_cell_budget";"this result has \(str.fromint(c)) cells and the installation has \(str.fromint(icb-allcells)) left of its \(str.fromint(icb)) across all sessions in the last 24 hours (NC1.13); it was computed locally and withheld";usedrows;usedcells;nowms)
   };
   if(record(session;a;"executed";"";n;c;nowms)==false){
     <refused("ledger_unavailable";"the release could not be recorded, so it was withheld";usedrows;usedcells)
@@ -274,12 +290,13 @@ f=boundedjson(b:$boundedresult):str{
 
 (* The status for a refusal: 400 for a request that could not be bounded (no session, or one
    loke did not issue or that has expired), 429 for a spent budget or a probing sequence, in
-   one session or across them, 503 when the ledger failed, 422 otherwise. *)
+   one session or across them, 503 when the ledger failed or config.toml's limits cannot be
+   applied (NC1.10 (d)), 422 otherwise. *)
 f=boundedstatus(b:$boundedresult):i64{
   if(b.ok){ <200 };
   if(ns.issessioncode(b.code)){ <400 };
   if(str.eq(b.code;"cell_budget") || str.eq(b.code;"value_probing")){ <429 };
   if(str.eq(b.code;"installation_cell_budget") || str.eq(b.code;"cross_session_probing")){ <429 };
-  if(str.eq(b.code;"ledger_unavailable")){ <503 };
+  if(str.eq(b.code;"ledger_unavailable") || str.eq(b.code;"limits_unusable")){ <503 };
   <422
 };

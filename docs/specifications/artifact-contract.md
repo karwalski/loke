@@ -419,12 +419,12 @@ the executor.
 | `MAX_SERIES_POINTS` | 500 | Label/value series and `distinct` value lists |
 | `MAX_CELLS_PER_ARTIFACT` | 5 000 | Sum over all cards of rows × columns, series points, and distinct values |
 | `MAX_JOIN_DATASETS` | 1 | `opjoin` takes exactly one other dataset |
-| `SESSION_CELL_BUDGET` | Configurable; default 50 000 | Cumulative across a session, per NC1.10 |
-| `SESSION_PREDICATE_REPEAT_LIMIT` | Configurable; default 20 | Distinct `filter_val` values against the same `filter_col` within a session |
+| `SESSION_CELL_BUDGET` | Configurable, tighter only (§8.2); default 50 000 | Cumulative across a session, per NC1.10 |
+| `SESSION_PREDICATE_REPEAT_LIMIT` | Configurable, tighter only (§8.2); default 20 | Distinct `filter_val` values against the same `filter_col` within a session |
 | `SESSION_TTL` | 24 hours | A session id is issued by loke (`POST /api/session`) and accepted until it expires; NC1.13 |
 | `INSTALLATION_WINDOW` | 24 hours, rolling | The window the two installation limits sum over; NC1.13 |
-| `INSTALLATION_CELL_BUDGET` | 50 000 per window | `SESSION_CELL_BUDGET` again, across every session on the installation; NC1.13 |
-| `INSTALLATION_PREDICATE_REPEAT_LIMIT` | 20 per `filter_col` per window | `SESSION_PREDICATE_REPEAT_LIMIT` again, across every session; NC1.13 |
+| `INSTALLATION_CELL_BUDGET` | `SESSION_CELL_BUDGET` per window; configurable, tighter only (§8.2) | `SESSION_CELL_BUDGET` again, across every session on the installation; NC1.13 |
+| `INSTALLATION_PREDICATE_REPEAT_LIMIT` | `SESSION_PREDICATE_REPEAT_LIMIT` per `filter_col` per window; configurable, tighter only (§8.2) | `SESSION_PREDICATE_REPEAT_LIMIT` again, across every session; NC1.13 |
 
 ### 8.1 The budgets are the contract's half of the NC1.10 bound
 
@@ -449,6 +449,49 @@ Being honest about what this achieves:
 Every budget decision — the counter values, the consumption, and every refusal — is recorded as a
 disclosure event (`docs/specifications/disclosure-accounting.md`), because a bound that is not
 recorded cannot be evidenced.
+
+Status: every budget decision is recorded, but in loke's artifact ledger (`nc_artifact_runs`, one row
+per artifact presented: verdict, refusal code, rows and cells released, the predicate fingerprint),
+not yet in `disclosure_log`. A `disclosure_log` row is a dispatch, and no dispatch yet serialises an
+artifact result into an outbound payload (NC1.10 (a), (b)).
+
+### 8.2 Configuring the limits
+
+The four configurable limits are read from the `[nocustody]` table of `~/.loke/config.toml`
+(`core.nocustody.limits`), on every artifact run, so an edit applies to the next run without a
+restart:
+
+| Key | Limit | Default, and the most it may be |
+|---|---|---|
+| `session_cell_budget` | `SESSION_CELL_BUDGET` | 50 000 |
+| `session_predicate_repeat_limit` | `SESSION_PREDICATE_REPEAT_LIMIT` | 20 |
+| `installation_cell_budget` | `INSTALLATION_CELL_BUDGET` | the session cell budget in force |
+| `installation_predicate_repeat_limit` | `INSTALLATION_PREDICATE_REPEAT_LIMIT` | the session repeat limit in force |
+
+```toml
+[nocustody]
+session_cell_budget = 5000
+session_predicate_repeat_limit = 5
+```
+
+- **Tighter only.** These limits are a privacy control: a larger budget releases more of the data to
+  whoever shapes the artifacts. A value is a whole number from 0 to its default; 0 is the tightest
+  (a cell budget of 0 releases nothing, a repeat limit of 0 refuses every filtered run). This
+  contract says "configurable" and names no direction; raising a limit above its default is not
+  built, and doing so would be a decision recorded against NC1.10, not a setting.
+- **The installation limits follow the session limits.** Unset, each is the session limit in force,
+  so tightening a session limit tightens the window too. Set, it may not exceed that session limit:
+  a window budget above one session's would let a caller that rotates session ids take more than
+  one session may, which is what NC1.13 exists to stop.
+- **Fail closed.** A key that is set and cannot be used (above its ceiling, negative, not a whole
+  number, a float or a boolean, or in a file that is not valid TOML), or a `config.toml` that exists
+  and cannot be read, is not replaced by its default. Every artifact run is refused with 503
+  `limits_unusable`, whose reason names the key, until the file is fixed. Nothing is released and
+  nothing is recorded in the ledger. A quoted whole number (`"5000"`) is read as the number.
+- **Not yet:** the organisation policy (`loke.policy.json`, F3b.8) cannot set a ceiling for these
+  limits; `core.privacy.orgpolicy` refuses any key it does not know (NC1.14).
+- The values remain the unmeasured placeholders §8.1 describes. Configuring them changes the rate,
+  not what the rate is known to protect.
 
 ---
 

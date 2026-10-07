@@ -1,0 +1,206 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.limits;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=env:std.env;
+i=sh:shared.types;
+i=sdb:core.storage.db;
+i=na:core.nocustody.artifact;
+i=nb:core.nocustody.bound;
+i=nl:core.nocustody.limits;
+i=ns:core.nocustody.session;
+
+(* NC1.10 (d) — the no-custody limits are configurable, and only tighter.
+
+   Three halves. config.toml's [nocustody] keys are read, and a value that is tighter than the
+   contract's default is the limit in force, enforced by core.nocustody.bound at the new bound,
+   not at the default. A value that is looser, negative, or not a whole number is refused with
+   a reason that names the key, and while it stands every run is refused (limits_unusable),
+   with nothing released and nothing recorded. And the production path, nb.runat, reads the
+   real config.toml: this test writes one under its own HOME, which run_tests.sh makes a
+   throwaway directory under $BUILDDIR (the test refuses to write it anywhere else).
+
+   The store lives under $BUILDDIR, as test_bound.tk's does. *)
+
+f=testdir():str{
+  <str.concat(env.getor("BUILDDIR";"/tmp/loke-tests");"/nocustody-limits")
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* The config.toml is written only under a HOME inside $BUILDDIR, the one run_tests.sh gives
+   each test. Anywhere else (the developer's own HOME) nothing is written. *)
+f=throwawayhome():bool{
+  let home=env.getor("HOME";"");
+  let build=env.getor("BUILDDIR";"");
+  <str.len(build)>0 && str.startswith(home;"\(build)/")
+};
+
+f=writeconfig(body:str):bool{
+  if(!throwawayhome()){ <false }el{};
+  let made=mt file.mkdir(sh.lokedir()) {$ok:v v;$err:e false};
+  <mt file.write(sh.configpath();body) {$ok:v v;$err:e false}
+};
+
+f=headers():@str{
+  <@("region";"category";"amount";"note")
+};
+
+f=rows():@(@str){
+  <@(
+    @("north";"food";"10";"plain");
+    @("north";"rent";"100";"plain");
+    @("south";"food";"5";"PROBE-VALUE-77c1-3");
+    @("south";"food";"7";"plain");
+    @("north";"food";"3";"plain")
+  )
+};
+
+f=art(op:str;column:str;filtercol:str;filterval:str):$artifact{
+  <$artifact{op:op;column:column;groupby:"";agg:"";filtercol:filtercol;filterval:filterval;limit:10}
+};
+
+f=probe(i:i64):$artifact{
+  <art("count";"";"note";"PROBE-VALUE-77c1-\(str.fromint(i))")
+};
+
+(* How many of n probes on `note`, each in session s, run, at time now under lim. *)
+f=probes(s:str;n:i64;now:i64;lim:$nclimits):i64{
+  let ran=mut.0;
+  lp(let i=0;i<n;i=i+1){
+    let p=nb.runwith(s;probe(i);headers();rows();now;lim);
+    if(p.ok){ ran=ran+1 }el{}
+  };
+  <ran
+};
+
+f=t0():i64{
+  <1790000000000
+};
+
+f=ledgerrows():i64{
+  <nb.scalar("SELECT COUNT() AS n FROM nc_artifact_runs";@())
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
+  let h=headers();
+  let r=rows();
+
+  (* ── Reading: absent is the contract's defaults ─────────────────────────────── *)
+  let none=nl.fromtext("");
+  if(t.assert(str.len(none.error)==0 && none.sessioncells==50000 && none.sessionprobes==20 && none.installcells==50000 && none.installprobes==20;"an empty config.toml is the contract's defaults: 50000 cells, 20 repeats, the same across sessions")){pass=pass+1}el{fail=fail+1};
+  let other=nl.fromtext("[privacy]\nconsensus_strategy = \"most-restrictive\"\n");
+  if(t.assert(str.len(other.error)==0 && other.sessioncells==50000 && other.installprobes==20;"so is a config.toml with no [nocustody] table")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Reading: tighter values are the limits ─────────────────────────────────── *)
+  let tight=nl.fromtext("[nocustody]\nsession_cell_budget = 10\nsession_predicate_repeat_limit = 3\n");
+  if(t.assert(str.len(tight.error)==0 && tight.sessioncells==10 && tight.sessionprobes==3;"tighter session values are read: 10 cells, 3 repeats")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(tight.installcells==10 && tight.installprobes==3;"and the installation limits follow them, so rotating ids buys nothing")){pass=pass+1}el{fail=fail+1};
+  let quoted=nl.fromtext("[nocustody]\nsession_cell_budget = \"1000\"\n");
+  if(t.assert(str.len(quoted.error)==0 && quoted.sessioncells==1000;"a quoted whole number is read too")){pass=pass+1}el{fail=fail+1};
+  let inst=nl.fromtext("[nocustody]\ninstallation_cell_budget = 500\ninstallation_predicate_repeat_limit = 2\n");
+  if(t.assert(str.len(inst.error)==0 && inst.sessioncells==50000 && inst.installcells==500 && inst.installprobes==2;"the installation limits can be tightened on their own")){pass=pass+1}el{fail=fail+1};
+  let zero=nl.fromtext("[nocustody]\nsession_predicate_repeat_limit = 0\n");
+  if(t.assert(str.len(zero.error)==0 && zero.sessionprobes==0 && zero.installprobes==0;"0 is the tightest value, and is accepted")){pass=pass+1}el{fail=fail+1};
+  let atdefault=nl.fromtext("[nocustody]\nsession_cell_budget = 50000\nsession_predicate_repeat_limit = 20\n");
+  if(t.assert(str.len(atdefault.error)==0 && atdefault.sessioncells==50000 && atdefault.sessionprobes==20;"the default itself is accepted")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Reading: anything looser or unusable is refused, naming the key ────────── *)
+  let loose=nl.fromtext("[nocustody]\nsession_cell_budget = 50001\n");
+  if(t.assert(str.contains(loose.error;"nocustody.session_cell_budget = 50001 is above") && str.contains(loose.error;"can only tighten");"a looser cell budget is refused, naming the key and why (\(loose.error))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(loose.sessioncells==0 && loose.sessionprobes==0 && loose.installcells==0 && loose.installprobes==0;"and a refused config sets every limit to 0, not to the default")){pass=pass+1}el{fail=fail+1};
+  let looseprobe=nl.fromtext("[nocustody]\nsession_predicate_repeat_limit = 21\n");
+  if(t.assert(str.contains(looseprobe.error;"nocustody.session_predicate_repeat_limit = 21 is above");"a looser repeat limit is refused")){pass=pass+1}el{fail=fail+1};
+  let huge=nl.fromtext("[nocustody]\nsession_cell_budget = \"99999999999999999999\"\n");
+  if(t.assert(str.contains(huge.error;"is above");"a number too long to read is refused as above the default")){pass=pass+1}el{fail=fail+1};
+  let looseinst=nl.fromtext("[nocustody]\nsession_cell_budget = 1000\ninstallation_cell_budget = 2000\n");
+  if(t.assert(str.contains(looseinst.error;"nocustody.installation_cell_budget = 2000 is above the session limit in force");"an installation budget above a tightened session budget is refused")){pass=pass+1}el{fail=fail+1};
+  let looseinstp=nl.fromtext("[nocustody]\ninstallation_predicate_repeat_limit = 25\n");
+  if(t.assert(str.contains(looseinstp.error;"nocustody.installation_predicate_repeat_limit = 25 is above");"an installation repeat limit above the default is refused")){pass=pass+1}el{fail=fail+1};
+  let negative=nl.fromtext("[nocustody]\nsession_cell_budget = -5\n");
+  if(t.assert(str.contains(negative.error;"-5 is negative");"a negative value is refused (\(negative.error))")){pass=pass+1}el{fail=fail+1};
+  let words=nl.fromtext("[nocustody]\nsession_predicate_repeat_limit = \"lots\"\n");
+  if(t.assert(str.contains(words.error;"lots is not a whole number");"a value that is not a number is refused")){pass=pass+1}el{fail=fail+1};
+  let float=nl.fromtext("[nocustody]\nsession_cell_budget = 100.5\n");
+  if(t.assert(str.contains(float.error;"100.5 is not a whole number");"a float is refused")){pass=pass+1}el{fail=fail+1};
+  let boolean=nl.fromtext("[nocustody]\nsession_cell_budget = true\n");
+  if(t.assert(str.len(boolean.error)>0 && boolean.sessioncells==0;"a boolean is refused")){pass=pass+1}el{fail=fail+1};
+  let broken=nl.fromtext("[nocustody\nsession_cell_budget = 10\n");
+  if(t.assert(str.contains(broken.error;"not valid TOML");"a key in a file that is not TOML is refused, not defaulted")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Enforcement: the bound refuses at the configured limit ─────────────────── *)
+  let now=t0();
+  let s1=ns.issueat(now);
+  let ran=probes(s1;3;now;tight);
+  if(t.assert(ran==3;"under a repeat limit of 3, three filters on one column run")){pass=pass+1}el{fail=fail+1};
+  let fourth=nb.runwith(s1;probe(9);h;r;now;tight);
+  if(t.assert(fourth.ok==false && str.eq(fourth.code;"value_probing");"and the fourth is refused as value probing, at the configured bound, not at 20")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(fourth.err;"the limit is 3");"the refusal names the configured limit (\(fourth.err))")){pass=pass+1}el{fail=fail+1};
+  let fourthdefault=nb.runwith(s1;probe(9);h;r;now;nl.defaults());
+  if(t.assert(fourthdefault.ok;"control: the same fourth probe runs under the defaults")){pass=pass+1}el{fail=fail+1};
+
+  (* A count_by over 12 labels, at the artifact's limit of 10, is 20 cells: over a budget of 10,
+     it is withheld. *)
+  let wideh=@("label";"n");
+  let wide=mut.@();
+  lp(let i=0;i<12;i=i+1){ wide=wide.push(@("r\(str.fromint(i))";"1")) };
+  let s2=ns.issueat(now);
+  let big=nb.runwith(s2;art("count_by";"label";"";"");wideh;wide;now;tight);
+  if(t.assert(big.ok==false && str.eq(big.code;"cell_budget") && str.contains(big.err;"left of its 10");"a 20-cell result is withheld under a cell budget of 10 (\(big.err))")){pass=pass+1}el{fail=fail+1};
+  let bigdefault=nb.runwith(s2;art("count_by";"label";"";"");wideh;wide;now;nl.defaults());
+  if(t.assert(bigdefault.ok && bigdefault.labels.len==10 && bigdefault.sessioncells==20;"control: the same result is released under the defaults")){pass=pass+1}el{fail=fail+1};
+
+  (* The installation limit, tightened on its own, is applied across rotated sessions. *)
+  let w1=now+2*nb.installwindowms();
+  let a1=nb.runwith(ns.issueat(w1);probe(1);h;r;w1;inst);
+  let a2=nb.runwith(ns.issueat(w1);probe(2);h;r;w1;inst);
+  let a3=nb.runwith(ns.issueat(w1);probe(3);h;r;w1;inst);
+  if(t.assert(a1.ok && a2.ok;"under an installation repeat limit of 2, two probes in two new sessions run")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(a3.ok==false && str.eq(a3.code;"cross_session_probing") && str.contains(a3.err;"the limit is 2");"and a third, in a third new session, is refused across sessions at 2")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A refused config refuses every run, and records nothing ─────────────────── *)
+  let before=ledgerrows();
+  let s3=ns.issueat(now);
+  let refused=nb.runwith(s3;art("sum";"amount";"";"");h;r;now;loose);
+  if(t.assert(refused.ok==false && str.eq(refused.code;"limits_unusable");"an ordinary run under a looser config.toml is refused as limits_unusable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(refused.err;"nothing is released") && str.contains(refused.err;"nocustody.session_cell_budget");"the refusal says nothing is released, and names the key")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refused.labels.len==0 && refused.values.len==0 && nb.boundedstatus(refused)==503;"it releases nothing, as 503")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nb.boundedjson(refused);"\"refusal\":\"limits_unusable\"");"the answer carries the code")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ledgerrows()==before;"and nothing is written to the ledger")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The production path reads config.toml ──────────────────────────────────── *)
+  if(t.assert(throwawayhome();"this test runs under a throwaway HOME inside BUILDDIR, so writing config.toml is safe")){pass=pass+1}el{fail=fail+1};
+  let w2=now+4*nb.installwindowms();
+  let s4=ns.issueat(w2);
+  if(t.assert(writeconfig("[nocustody]\nsession_predicate_repeat_limit = 2\n");"a config.toml with a repeat limit of 2 is written")){pass=pass+1}el{fail=fail+1};
+  let p1=nb.runat(s4;probe(1);h;r;w2);
+  let p2=nb.runat(s4;probe(2);h;r;w2);
+  let p3=nb.runat(s4;probe(3);h;r;w2);
+  if(t.assert(p1.ok && p2.ok && p3.ok==false && str.eq(p3.code;"value_probing") && str.contains(p3.err;"the limit is 2");"runat applies config.toml's limit: the third probe is refused at 2")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writeconfig("[nocustody]\nsession_predicate_repeat_limit = 30\n");"a looser config.toml is written")){pass=pass+1}el{fail=fail+1};
+  let p4=nb.runat(ns.issueat(w2);art("sum";"amount";"";"");h;r;w2);
+  if(t.assert(p4.ok==false && str.eq(p4.code;"limits_unusable") && str.contains(p4.err;"= 30 is above");"runat refuses every run while config.toml loosens a limit")){pass=pass+1}el{fail=fail+1};
+  file.delete(sh.configpath());
+  let p5=nb.runat(ns.issueat(w2);art("sum";"amount";"";"");h;r;w2);
+  if(t.assert(p5.ok;"with config.toml removed, the defaults apply and the run is released")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

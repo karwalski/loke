@@ -200,6 +200,27 @@ case "${pl##*$'\n'} ${pl%$'\n'*}" in
   *) echo "  FAIL POST /api/pipeline with a caller-chosen session id: $pl" >&2; fail=1 ;;
 esac
 
+# NC1.10 (d): config.toml's [nocustody] limits are read on every run, and may only tighten.
+# Written into the smoke's throwaway HOME, never the real one. A column no check above has
+# filtered (zone), so the installation count starts at 0.
+mkdir -p "$WORK/home/.loke"
+DSZ='"headers":["zone","amount"],"rows":[["east","1"],["west","2"]]'
+printf '[nocustody]\nsession_predicate_repeat_limit = 30\n' > "$WORK/home/.loke/config.toml"
+artifact "a looser repeat limit in config.toml refuses every run" \
+  "{\"session_id\":\"$S3\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DSZ}" \
+  503 '"refusal":"limits_unusable","error":"the no-custody limits in config.toml cannot be applied, so nothing is released: nocustody.session_predicate_repeat_limit = 30 is above'
+printf '[nocustody]\nsession_predicate_repeat_limit = 2\n' > "$WORK/home/.loke/config.toml"
+S4=$(issue_session)
+for g in 1 2; do
+  artifact "probe $g of 2 on zone under a configured limit of 2" \
+    "{\"session_id\":\"$S4\",\"artifact\":{\"op\":\"count\",\"filter_col\":\"zone\",\"filter_val\":\"g$g\"},$DSZ}" \
+    200 '"values":["0"]'
+done
+artifact "probe 3 on zone is refused at the configured limit" \
+  "{\"session_id\":\"$S4\",\"artifact\":{\"op\":\"count\",\"filter_col\":\"zone\",\"filter_val\":\"east\"},$DSZ}" \
+  429 '"refusal":"value_probing","error":"refused as value probing: this session has already filtered on this column 2 times, the limit is 2 (NC1.10)'
+rm -f "$WORK/home/.loke/config.toml"
+
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
