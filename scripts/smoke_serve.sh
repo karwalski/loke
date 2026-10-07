@@ -110,6 +110,11 @@ page /tabs '.tabs-layout' 'renders its content block and title'
 page /privacy '.privacy-hero' 'renders its content block and title'
 page /installer 'data-hardware="{&quot;chip&quot;:' 'hands the measured hardware JSON to the page'
 
+# BG1.2: /sysmon answered 200 with an empty body (the snapshot went to a template that never
+# printed it), and the snapshot itself read 0 MB used and 0% CPU on every machine. Each figure
+# is judged against the machine's own readings; the tolerances are explained in the script.
+python3 "$ROOT/scripts/lib/sysmon_check.py" "http://127.0.0.1:$PORT/sysmon" --loke-parent "$PID" || fail=1
+
 # NC1.7: /api/artifact runs a returned artifact locally. Unlike the probes above, these judge
 # the body, because "it answered" says nothing about whether the value was bound or the
 # column was checked.

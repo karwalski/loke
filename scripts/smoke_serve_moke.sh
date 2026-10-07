@@ -377,6 +377,12 @@ done
 # The shared log is a file that outlives the request, so it keeps no arguments or results.
 api GET /api/mcp/memory "" 200 '"tool_name":"memory.store","args_json":"",' "the memory log does not keep what was stored"
 
+# BG1.2: /sysmon wrote cpu_percent, ram_percent, used_ram_mb and free_ram_mb as the literal 0,
+# and its loke entry as zeros. loke is not running here (asserted by /api/health above), so moke
+# measures the machine itself and must say loke was not measured. Each figure is judged against
+# the machine's own readings; the tolerances are explained in the script.
+python3 "$ROOT/scripts/lib/sysmon_check.py" "http://127.0.0.1:$PORT/sysmon" --loke-null || fail=1
+
 # F10.38: and it still is, so no answer above came from a server that took the port later.
 assert_port_owner smoke_serve_moke "$PORT" "$PID" || fail=1
 

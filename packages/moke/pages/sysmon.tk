@@ -4,105 +4,23 @@
 m=page.moke.sysmon;
 i=http:std.http;
 i=str:std.str;
-i=process:std.process;
+i=reach:shared.reachability;
+i=sysmon:core.monitoring.sysmon;
 
-(* http.res(status;body), not http.res.json. A three-segment stdlib member name is lowered by
-   this toolchain as a call to a BARE global named after its last segment, so it never reaches
-   std.http at all. Measured this session at the pinned commit: http.res.json emits a reference
-   to an undefined `_json` and the link fails; http.res.ok wants `_ok`, http.res.bad wants
-   `_bad`. Worse, http.res.err resolves to libc's err(3) — a program calling
-   http.res.err(400;"missing field") printed the message to stderr through err(3) and EXITED the
-   process with status 144, which is 400 & 0xff — so every 4xx this API returned would have
-   killed the moke server. http.res(status;body) is the two-argument form the migrated browser tree
-   uses throughout; it links and runs. Filed as T-34. *)
+(* BG1.2. This page measured the machine itself, with its own copy of the ps parsing, and
+   wrote cpu_percent, ram_percent, used_ram_mb and free_ram_mb into its answer as the literal
+   0, on every machine: plausible zeros, not dashes. It looked for loke by the name
+   "ooke-toke", which no loke process has, so the loke entry was zeros too. Measured on
+   2026-10-08 against the built server: {"cpu_count":12,"total_ram_mb":16384,"cpu_percent":0,
+   "ram_percent":0,"used_ram_mb":0,"free_ram_mb":0,...,"loke":{"pid":0,"cpu":0.0,"ram_mb":0}}
+   while the machine was 89% busy with 11 GB in use.
 
-
+   Now loke's own /sysmon is the answer when loke gives one, because only loke can name its
+   own process. When loke does not answer, moke measures the machine through the same module,
+   core.monitoring.sysmon, and the loke entry is null: not measured, rather than a process
+   using nothing. *)
 f=get(req:i64):i64{
-  <http.res(200;buildstatsjson())
-};
-
-f=buildstatsjson():str{
-  let ollamacpu=mut."0";
-  let ollamaram=mut."0";
-  let lokecpu=mut."0";
-  let lokeram=mut."0";
-  let totalram=mut."0";
-  let cpucount=mut."0";
-
-  let h=mt process.spawn(@("ps";"-eo";"pid,%cpu,rss,comm")) {
-    $ok:v v;
-    $err:e 0
-  };
-  let out=mt process.stdout(h) {$ok:v v;$err:e ""};
-  process.wait(h);
-  let lines=str.split(out;"\n");
-  lp(let li=0;li<lines.len();li=li+1){
-    let line=lines.get(li);
-    if(str.contains(line;"ollama")){
-      let parts=splitws(line);
-      if(parts.len()>3){ollamacpu=parts.get(1);ollamaram=parts.get(2)}el{}
-    }el{};
-    if(str.contains(line;"ooke-toke")){
-      let parts=splitws(line);
-      if(parts.len()>3){lokecpu=parts.get(1);lokeram=parts.get(2)}el{}
-    }el{}
-  };
-
-  let h2=mt process.spawn(@("sysctl";"-n";"hw.memsize")) {
-    $ok:v v;
-    $err:e 0
-  };
-  let out2=mt process.stdout(h2) {$ok:v v;$err:e "0"};
-  process.wait(h2);
-  (* str.toint, not str.parseint. parseint is one of std.str's untyped `(i64) -> i64` names and
-     is declared to return a plain i64, so matching it with mt leans on the "the word is zero"
-     heuristic rather than on a tag (T-33): a genuine 0 takes the ERROR arm. str.toint is declared
-     str -> i64!ParseErr and discriminates — measured, str.toint("notanumber") takes the error arm
-     and str.toint("1234") the ok arm. *)
-  let mb=mt str.toint(str.trim(out2)) {$ok:v v/1048576;$err:e 0};
-  totalram=str.fromint(mb);
-
-  let h3=mt process.spawn(@("sysctl";"-n";"hw.ncpu")) {
-    $ok:v v;
-    $err:e 0
-  };
-  let out3=mt process.stdout(h3) {$ok:v v;$err:e "0"};
-  process.wait(h3);
-  cpucount=str.trim(out3);
-
-  let ollamarammb=str.fromint(mt str.toint(ollamaram) {$ok:v v/1024;$err:e 0});
-  let lokerammb=str.fromint(mt str.toint(lokeram) {$ok:v v/1024;$err:e 0});
-
-  let j1=str.concat("{\"cpu_count\":";cpucount);
-  let j2="\(j1),\"total_ram_mb\":\(totalram)";
-  let j3=str.concat(j2;",\"cpu_percent\":0,\"ram_percent\":0,\"used_ram_mb\":0,\"free_ram_mb\":0");
-  let j4="\(j3),\"ollama\":{\"pid\":0,\"cpu\":\(ollamacpu)";
-  let j5="\(j4),\"ram_mb\":\(ollamarammb)";
-  let j6="\(j5)},\"loke\":{\"pid\":0,\"cpu\":\(lokecpu)";
-  let j7="\(j6),\"ram_mb\":\(lokerammb)";
-  <str.concat(j7;"},\"slm_active\":false,\"slm_model\":null}")
-};
-
-(* Two faults here, and both were silent.
-
-   `mut.@(str)` is not an empty array of str. `str` in expression position is a bare type name,
-   which gets no diagnostic (T-4), so this is a ONE-element array literal whose element is that
-   name — and the codegen for it is invalid LLVM: measured this session, a program containing
-   `let a=mut.@(str)` fails with "use of undefined value '%str'" out of llc, with no toke
-   diagnostic and no line number. The whole page tree would have failed codegen on this line.
-   `@()` is the empty-array literal.
-
-   And `result.push(x)` discarded its result. push returns a NEW array; it does not mutate in
-   place, and an unknown or unused method result is not checked (T-7, T-24). So splitws returned
-   whatever it started with for every input — which means the `ps` parse above it read cpu and
-   rss out of an empty array, and the sysmon panel reported 0% CPU and 0 MB for both ollama and
-   loke on every poll, on every machine. *)
-f=splitws(s:str):@str{
-  let parts=str.split(s;" ");
-  let result=mut.@();
-  lp(let pi=0;pi<parts.len();pi=pi+1){
-    let p=parts.get(pi);
-    if(str.len(str.trim(p))>0){result=result.push(str.trim(p))}el{}
-  };
-  <result
+  let fromloke=reach.localget("http://127.0.0.1:11430";"/sysmon");
+  if(str.startswith(fromloke;"{\"total_ram_mb\":")){ <http.resjson(200;fromloke) }el{};
+  <http.resjson(200;sysmon.tojson(sysmon.snapshotof(0)))
 };

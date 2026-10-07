@@ -462,9 +462,9 @@ Hierarchical navigation: Wings (Work, Reference, Personal, Learning) â†’ Halls â
 
 ### System Monitor
 
-**File:** `templates/sysmon.tkt`
+**File:** `pages/sysmon.tk` (JSON endpoint, no template)
 
-System health monitoring and diagnostics.
+`GET /sysmon` answers machine figures as JSON: CPU count and busy share, total, used and free RAM, and the Ollama and loke processes (null when not found). It is loke's own `/sysmon` when loke answers, otherwise moke's measurement through `core.monitoring.sysmon` with the loke entry null. No page renders it yet (BG1.2).
 
 ---
 
