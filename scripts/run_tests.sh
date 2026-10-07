@@ -15,6 +15,9 @@ STDLIB=$TOKEDIR/src/stdlib
 # concurrent run rebuilt the first one's archives underneath it — which shows up as a
 # test that fails to link for no reason anybody can reproduce afterwards.
 BUILDDIR="${BUILDDIR:-/tmp/loke-tests}"
+# Exported so a test can tell its throwaway HOME (under $BUILDDIR/home) from a real one
+# (NC1.10's test_limits writes config.toml only there).
+export BUILDDIR
 SCRIPTDIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECTDIR="$(cd "$SCRIPTDIR/.." && pwd)"
 IFACE_DIR="$PROJECTDIR/build/interfaces"
