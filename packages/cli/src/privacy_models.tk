@@ -1,0 +1,166 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=cli.privacymodels;
+
+i=str:std.str;
+i=file:std.file;
+i=out:cli.output;
+i=sh:shared.types;
+i=mr:core.privacy.modelregistry;
+
+(* F3b.7. `loke privacy add-model`, `loke privacy list-models` and `loke privacy
+   remove-model`: the registrations in ~/.loke/privacy-models.json that
+   core.privacy.modelregistry reads and core.privacy.pipeline runs as layers.
+
+       loke privacy add-model <model-id> --url http://127.0.0.1:11436 --label PER=PERSON
+            [--label LOC=LOCATION ...] [--threshold 0.5] [--priority 5] [--disabled]
+
+   A registration is checked as the pipeline checks the file (modelregistry.modelerror) before
+   it is written, so one the pipeline would refuse is never written: a label mapped to a type
+   loke does not know, a url that is not on this machine, a threshold outside 0..1. A file
+   that is already broken is not rewritten; the command names its fault. Registering an id
+   that is registered replaces it. Nothing here contacts the model: the pipeline probes it
+   before it sends it any text. *)
+
+t=$addmodel{
+  model:$registeredmodel;
+  error:str
+};
+
+f=usage():str{
+  <"usage: loke privacy add-model <model-id> --url <http://127.0.0.1:PORT> --label <MODEL_LABEL>=<TYPE> [--label ...] [--threshold <0..1>] [--priority <0..1000>] [--disabled] | loke privacy list-models | loke privacy remove-model <model-id>"
+};
+
+f=refused(why:str):$addmodel{
+  <$addmodel{model:$registeredmodel{id:"";url:"";labels:@();threshold:"0";priority:mr.defaultpriority();enabled:false};error:why}
+};
+
+f=takesvalue(flag:str):bool{
+  <str.eq(flag;"--url") || str.eq(flag;"--label") || str.eq(flag;"--threshold") || str.eq(flag;"--priority")
+};
+
+(* `loke privacy add-model ...` as main receives argv: args[0] is the program, args[3] the
+   model id, and the flags after it in any order. *)
+f=parseadd(args:@str):$addmodel{
+  if(args.len<4){ <refused("add-model needs a model id") }el{};
+  let id=args.get(3);
+  if(str.startswith(id;"--")){ <refused("add-model needs a model id before its flags") }el{};
+  let url=mut."";
+  let labels=mut.@();
+  let threshold=mut."0";
+  let priority=mut.mr.defaultpriority();
+  let enabled=mut.true;
+  let k=mut.4;
+  lp(let n=0;k<args.len;n=n+1){
+    let flag:str=args.get(k);
+    if(str.eq(flag;"--disabled")){
+      enabled=false;
+      k=k+1
+    }el{
+      if(!takesvalue(flag)){ <refused("\(flag) is not an add-model option") }el{};
+      if(k+1>=args.len){ <refused("\(flag) needs a value") }el{};
+      let v:str=args.get(k+1);
+      if(str.eq(flag;"--url")){ url=v }el{};
+      if(str.eq(flag;"--label")){ labels=labels.push(v) }el{};
+      if(str.eq(flag;"--threshold")){ threshold=v }el{};
+      if(str.eq(flag;"--priority")){
+        if(!str.isdigit(v)){ <refused("--priority must be a whole number from 0 to 1000") }el{};
+        priority=mt str.toint(v) { $ok:x x; $err:e 0-1 }
+      }el{};
+      k=k+2
+    }
+  };
+  let m=$registeredmodel{id:id;url:url;labels:labels;threshold:threshold;priority:priority;enabled:enabled};
+  let why=mr.modelerror(m);
+  if(str.len(why)>0){ <refused(why) }el{};
+  <$addmodel{model:m;error:""}
+};
+
+f=save(models:@$registeredmodel):bool{
+  file.mkdir(sh.lokedir());
+  <mt file.write(mr.modelspath();mr.tojson(models)) { $ok:v v; $err:e false }
+};
+
+(* The registrations as they stand; error says why the file cannot be used. *)
+f=current():$modelset{
+  <mr.load(mr.modelspath())
+};
+
+f=add(args:@str):i64{
+  let p=parseadd(args);
+  if(str.len(p.error)>0){
+    out.printerror("loke privacy add-model: \(p.error)");
+    out.printerror(usage());
+    <1
+  }el{};
+  let set=current();
+  if(str.len(set.error)>0){
+    out.printerror("loke privacy add-model: \(set.error); fix or remove it first");
+    <1
+  }el{};
+  if(!save(mr.add(set;p.model))){
+    out.printerror("loke privacy add-model: could not write \(mr.filename())");
+    <1
+  }el{};
+  let layer=mr.layerid(p.model.id);
+  out.printline("registered \(layer): it is a privacy layer from the next request.");
+  out.printline("It is sent text only once its sidecar answers /health as \(p.model.id); start one with LOKE_PF_MODEL=\(p.model.id) python3 packages/privacy-filter/server.py <port>.");
+  <0
+};
+
+f=yesno(b:bool):str{
+  if(b){ <"enabled" }el{};
+  <"disabled"
+};
+
+f=entryline(m:$registeredmodel):str{
+  let layer=mr.layerid(m.id);
+  let labels=str.join(",";m.labels);
+  let pr=str.fromint(m.priority);
+  <"\(layer)  \(m.url)  labels=\(labels)  confidence_threshold=\(m.threshold)  priority=\(pr)  \(yesno(m.enabled))"
+};
+
+f=list():i64{
+  let set=current();
+  if(str.len(set.error)>0){
+    out.printerror("loke privacy list-models: \(set.error)");
+    <1
+  }el{};
+  if(set.models.len==0){
+    out.printline("no registered privacy models");
+    <0
+  }el{};
+  lp(let i=0;i<set.models.len;i=i+1){
+    out.printline(entryline(set.models.get(i)))
+  };
+  <0
+};
+
+f=remove(id:str):i64{
+  let set=current();
+  if(str.len(set.error)>0){
+    out.printerror("loke privacy remove-model: \(set.error); fix or remove it first");
+    <1
+  }el{};
+  if(!mr.has(set;id)){
+    out.printerror("loke privacy remove-model: \(id) is not registered");
+    <1
+  }el{};
+  if(!save(mr.remove(set;id))){
+    out.printerror("loke privacy remove-model: could not write \(mr.filename())");
+    <1
+  }el{};
+  out.printline("removed \(mr.layerid(id))");
+  <0
+};
+
+f=handle(kind:str;args:@str):i64{
+  if(str.eq(kind;"privacymodeladd")){ <add(args) }el{};
+  if(str.eq(kind;"privacymodellist")){ <list() }el{};
+  if(args.len<4){
+    out.printerror(usage());
+    <1
+  }el{};
+  <remove(args.get(3))
+};

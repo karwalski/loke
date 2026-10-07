@@ -50,7 +50,19 @@ _CONFIG = load_models_config()
 
 
 def _primary_model():
-    """The enabled model with the lowest priority number, or a default."""
+    """The model this sidecar serves.
+
+    Story F3b.7: LOKE_PF_MODEL names it, so one sidecar per model can serve a token
+    classifier registered with `loke privacy add-model <id>`: the models.json entry with that
+    id, or else a hub id or local directory loaded as given. Unset, the enabled model with the
+    lowest priority number, or a default.
+    """
+    wanted = os.environ.get("LOKE_PF_MODEL")
+    if wanted:
+        for m in _CONFIG.get("models", []):
+            if m.get("id") == wanted:
+                return m
+        return {"id": wanted, "model_path": wanted}
     enabled = [m for m in _CONFIG.get("models", []) if m.get("enabled")]
     enabled.sort(key=lambda m: m.get("priority", 99))
     return enabled[0] if enabled else {}
@@ -58,6 +70,17 @@ def _primary_model():
 
 _PRIMARY = _primary_model()
 MODEL_PATH = _PRIMARY.get("model_path", "openai/privacy-filter")
+# Story F3b.7: what /health names, and what loke checks before it sends this sidecar any
+# text for a registered model.
+MODEL_ID = _PRIMARY.get("id", "openai-privacy-filter")
+TASK = "token-classification"
+
+# transformers' pipeline loads PyTorch and SafeTensors weights; it does not load an ONNX
+# file, and this sidecar has no ONNX runtime. Say so rather than fail obscurely (F3b.7).
+if str(MODEL_PATH).lower().endswith(".onnx"):
+    print(f"ERROR: {MODEL_PATH} is an ONNX model; this sidecar loads only transformers "
+          "token-classification models (PyTorch or SafeTensors weights).", file=sys.stderr)
+    sys.exit(2)
 
 # Story VM1.2: pin the revision so a measurement can be reproduced.
 MODEL_REVISION = os.environ.get("LOKE_PF_REVISION") or _PRIMARY.get("model_revision") or None
@@ -178,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
                 "elapsed_ms": elapsed,
                 "model": MODEL_PATH,
                 "model_revision": MODEL_REVISION,
-                "layer": "openai-privacy-filter",
+                "layer": MODEL_ID,
                 "threshold": threshold,
                 "suppressed_below_threshold": suppressed,
             }
@@ -274,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "model": "openai/privacy-filter", "layer": "openai-privacy-filter"}).encode())
+            self.wfile.write(json.dumps({"ok": True, "model": MODEL_PATH, "model_id": MODEL_ID, "task": TASK, "layer": MODEL_ID}).encode())
 
         else:
             self.send_response(404)
@@ -309,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "model": "openai/privacy-filter"}).encode())
+            self.wfile.write(json.dumps({"ok": True, "model": MODEL_PATH, "model_id": MODEL_ID, "task": TASK}).encode())
         elif self.path == "/models":
             config = load_models_config()
             self.send_response(200)

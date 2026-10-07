@@ -10,8 +10,9 @@ that reads it. This fails when:
     nothing reads, or one renamed in the code and not in the document); a section key such as
     `privacy.consensus_strategy` is looked for whole, as shared.config passes it to std.toml;
     an array-of-tables header such as `[[privacy.layers]]` by its name, `privacy.layers`;
-  - a key core.privacy.layerconfig, core.privacy.entityrouting or core.privacy.orgpolicy
-    (F3b.8, the keys of loke.policy.json) accepts (their `knownkey`) is
+  - a key core.privacy.layerconfig, core.privacy.entityrouting, core.privacy.orgpolicy
+    (F3b.8, the keys of loke.policy.json) or core.privacy.modelregistry (F3b.7, the keys of
+    privacy-models.json) accepts (their `knownkey`) is
     not in the table, or a strategy core.privacy.consensus knows (`isknown`) is not named in
     the document (a key or strategy added in code and not documented).
 
@@ -73,7 +74,7 @@ def main():
             elif '"%s"' % literal(key) not in p.read_text(encoding="utf-8"):
                 errors.append('%s: documented as read by %s, which has no "%s" literal' % (key, f, literal(key)))
 
-    for mod in ("layer_config.tk", "entity_routing.tk", "org_policy.tk"):
+    for mod in ("layer_config.tk", "entity_routing.tk", "org_policy.tk", "model_registry.tk"):
         body = function_body((PRIV / mod).read_text(encoding="utf-8"), "knownkey")
         keys = re.findall(r'str\.eq\(key;"([^"]+)"\)', body)
         if not keys:

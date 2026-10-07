@@ -1,0 +1,130 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.modelregistry;
+
+i=t:std.test;
+i=str:std.str;
+i=mr:core.privacy.modelregistry;
+i=fr:core.privacy.filterregistry;
+i=op:core.privacy.orgpolicy;
+i=lyc:core.privacy.layerconfig;
+i=er:core.privacy.entityrouting;
+
+(* F3b.7 — core.privacy.modelregistry: the privacy-models.json file `loke privacy add-model`
+   writes, what it refuses, and the registry it gives core.privacy.pipeline. No network: the
+   end-to-end runs are in test_model_registry_pipeline.tk.
+
+   What is judged:
+     - a registration is read back with its id, url, label mapping, threshold and priority;
+     - a label mapped to a type loke does not know is refused, naming the label and type, and
+       so is every other fault (unknown key, non-loopback url, threshold, priority, duplicate);
+     - a missing file is no model; an empty one too;
+     - apply registers each model as a layer model:<id> carrying its mapping, threshold and
+       priority, in priority order, and adds nothing for a broken file;
+     - the label mapping: mapped labels take their loke type, an unmapped one is kept upper-cased;
+     - tojson writes what fromtext reads back;
+     - [[privacy.layers]], [[privacy.entity_routing]] and an organisation policy accept a
+       registered model's id. *)
+
+f=one(labels:str;extra:str):str{
+  <"{\"models\":[{\"id\":\"dslim/bert-base-NER\",\"url\":\"http://127.0.0.1:11436\",\"labels\":[\(labels)]\(extra)}]}"
+};
+
+f=refuses(text:str;fault:str):bool{
+  let s=mr.fromtext(text);
+  let want="registered privacy models privacy-models.json cannot be applied: \(fault)";
+  if(str.eq(s.error;want) && s.models.len==0){ <true }el{};
+  t.asserteq(s.error;want;"the refusal");
+  <false
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let ner="\"PER=PERSON\",\"LOC=LOCATION\"";
+
+  (* ── A registration read back ─────────────────────────────────────────────── *)
+  let s=mr.fromtext(one(ner;",\"confidence_threshold\":0.5,\"priority\":7"));
+  if(t.asserteq(s.error;"";"a well-formed registration is accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(s.models.len==1 && s.present;"with one model")){pass=pass+1}el{fail=fail+1};
+  let m:$registeredmodel=s.models.get(0);
+  if(t.assert(str.eq(m.id;"dslim/bert-base-NER") && str.eq(m.url;"http://127.0.0.1:11436");"its id and url are read")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.join(",";m.labels);"PER=PERSON,LOC=LOCATION";"its label mapping is read in order")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(m.threshold;"0.5") && m.priority==7 && m.enabled;"its threshold, priority and enabled are read")){pass=pass+1}el{fail=fail+1};
+  let d=mr.fromtext(one(ner;"")).models.get(0);
+  if(t.assert(str.eq(d.threshold;"0") && d.priority==5 && d.enabled;"threshold 0, priority 5 and enabled by default")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Refusals ─────────────────────────────────────────────────────────────── *)
+  if(t.assert(refuses(one("\"PER=PERSON\",\"MISC=MISCELLANEOUS\"";"");"model dslim/bert-base-NER: the label mapping MISC=MISCELLANEOUS maps MISC to MISCELLANEOUS, which is not an entity type loke knows; a label must map to a type a built-in layer reports (\(mr.listed(mr.knowntypes())))");"a label mapped to a type loke does not know is refused, naming the label and the type")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one("\"PER=person\"";"");"model dslim/bert-base-NER: the label mapping PER=person maps PER to person, which is not an entity type loke knows; a label must map to a type a built-in layer reports (\(mr.listed(mr.knowntypes())))");"the type must be spelt as loke spells it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one("";"");"model dslim/bert-base-NER: a model needs a label mapping: at least one MODEL_LABEL=TYPE");"no label mapping is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one("\"PER\"";"");"model dslim/bert-base-NER: the label mapping PER is not MODEL_LABEL=TYPE");"a label with no type is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one("\"PER=PERSON\",\"PER=LOCATION\"";"");"model dslim/bert-base-NER: the label PER is mapped twice");"a label mapped twice is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses("{\"models\":[{\"id\":\"x\",\"url\":\"http://10.0.0.5:11436\",\"labels\":[\"PER=PERSON\"]}]}";"model x: the url http://10.0.0.5:11436 is not an http:// address on this machine (127.0.0.1, localhost or [::1]); the text is sent to it in clear");"a url off this machine is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one(ner;",\"confidence_threshold\":1.5");"model dslim/bert-base-NER: confidence_threshold must be a number from 0 to 1");"a threshold above 1 is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one(ner;",\"confidence_threshold\":\"0.5\"");"model dslim/bert-base-NER: confidence_threshold must be a number from 0 to 1");"a quoted threshold is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one(ner;",\"priority\":-1");"model dslim/bert-base-NER: priority must be a whole number from 0 to 1000");"a negative priority is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one(ner;",\"enabled\":\"yes\"");"model dslim/bert-base-NER: enabled must be true or false");"enabled must be a bool")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses(one(ner;",\"mapping\":{}");"mapping is not a model key (id, url, labels, confidence_threshold, priority, enabled)");"an unknown key is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses("{\"models\":[{\"id\":\"a b\",\"url\":\"http://127.0.0.1:1\",\"labels\":[\"PER=PERSON\"]}]}";"the model id a b is not one to 128 letters, digits and . _ - / : @");"an id with a space is refused")){pass=pass+1}el{fail=fail+1};
+  let twice="{\"models\":[{\"id\":\"x\",\"url\":\"http://127.0.0.1:1\",\"labels\":[\"PER=PERSON\"]},{\"id\":\"x\",\"url\":\"http://127.0.0.1:2\",\"labels\":[\"PER=PERSON\"]}]}";
+  if(t.assert(refuses(twice;"the model x is registered twice");"an id registered twice is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses("[]";"it is not a JSON object");"a file that is not an object is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses("{\"models\":[";"it is not valid JSON");"broken JSON is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(refuses("{\"model\":[]}";"model is not a key of the file (models)");"an unknown top-level key is refused")){pass=pass+1}el{fail=fail+1};
+  let missing=mr.load("/tmp/loke_no_such_privacy_models_file.json");
+  if(t.assert(str.len(missing.error)==0 && !missing.present && missing.models.len==0;"a missing file is no registered model, and no error")){pass=pass+1}el{fail=fail+1};
+  let empty=mr.fromtext("{}");
+  if(t.assert(str.len(empty.error)==0 && empty.models.len==0;"an empty object registers nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── As layers ────────────────────────────────────────────────────────────── *)
+  let reg=mr.apply(fr.defaultregistry();s);
+  let id="model:dslim/bert-base-NER";
+  if(t.asserteq(mr.layerid("dslim/bert-base-NER");id;"a model's layer id is model:<id>")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fr.has(reg;id) && reg.count==5;"apply registers the model beside the four layers")){pass=pass+1}el{fail=fail+1};
+  let layer=fr.get(reg;id);
+  if(t.assert(layer.enabled && str.eq(layer.kind;"model") && str.eq(layer.url;"http://127.0.0.1:11436") && layer.priority==7 && layer.threshold==0.5;"as an enabled model layer at its url, with its priority and threshold")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(layer.param;"PER=PERSON,LOC=LOCATION";"carrying its label mapping")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.join(",";fr.typesof(layer));"PERSON,LOCATION";"and reporting the types its mapping names")){pass=pass+1}el{fail=fail+1};
+  let ids=mut.@();
+  lp(let i=0;i<reg.filters.len;i=i+1){ ids=ids.push(reg.filters.get(i).id) };
+  if(t.asserteq(str.join(",";ids);"regex,ner,presidio,openai-privacy-filter,\(id)";"in priority order, after the four built-in layers")){pass=pass+1}el{fail=fail+1};
+  let first=mr.apply(fr.defaultregistry();mr.fromtext(one(ner;",\"priority\":0")));
+  if(t.asserteq(first.filters.get(0).id;id;"a priority of 0 places it first")){pass=pass+1}el{fail=fail+1};
+  let none=mr.apply(fr.defaultregistry();mr.fromtext(one("\"MISC=MISCELLANEOUS\"";"")));
+  if(t.assert(none.count==4 && !fr.has(none;id);"a broken file adds no layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(fr.ismodelid(id) && !fr.ismodelid("model:") && !fr.ismodelid("regex");"only model:<id> is a model layer id")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The label mapping ────────────────────────────────────────────────────── *)
+  if(t.asserteq(mr.typefor(layer.param;"PER");"PERSON";"PER maps to PERSON")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mr.typefor(layer.param;"LOC");"LOCATION";"LOC maps to LOCATION")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mr.typefor(layer.param;"widget");"WIDGET";"an unmapped label is kept, upper-cased: an entity all the same")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(mr.typefor(layer.param;"");"PII";"and a missing label is PII")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The file round trip ──────────────────────────────────────────────────── *)
+  let more=mr.add(s;$registeredmodel{id:"local/m2";url:"http://localhost:11437";labels:@("SECRET=SECRET");threshold:"0";priority:9;enabled:false});
+  let back=mr.fromtext(mr.tojson(more));
+  if(t.assert(str.len(back.error)==0 && back.models.len==2;"tojson writes what fromtext reads back")){pass=pass+1}el{fail=fail+1};
+  let b2:$registeredmodel=back.models.get(1);
+  if(t.assert(str.eq(b2.id;"local/m2") && !b2.enabled && b2.priority==9 && str.eq(str.join(",";b2.labels);"SECRET=SECRET");"field for field")){pass=pass+1}el{fail=fail+1};
+  let replaced=mr.add(back;$registeredmodel{id:"local/m2";url:"http://localhost:11438";labels:@("SECRET=SECRET");threshold:"0";priority:9;enabled:true});
+  if(t.assert(replaced.len==2 && str.eq(replaced.get(1).url;"http://localhost:11438");"registering an id again replaces it in place")){pass=pass+1}el{fail=fail+1};
+  let fewer=mr.remove(back;"local/m2");
+  if(t.assert(fewer.len==1 && str.eq(fewer.get(0).id;"dslim/bert-base-NER");"remove drops only that model")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The other configuration names it ─────────────────────────────────────── *)
+  let lc=lyc.resolve(reg;"[[privacy.layers]]\nid = \"model:dslim/bert-base-NER\"\nmode = \"veto\"\nentity_filter = [\"PERSON\"]\n");
+  if(t.asserteq(lc.error;"";"[[privacy.layers]] can configure a registered model")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(fr.get(lc.registry;id).mode;"veto") && str.eq(fr.get(lc.registry;id).entityfilter;"PERSON");"and its settings are applied")){pass=pass+1}el{fail=fail+1};
+  let lbad=lyc.resolve(reg;"[[privacy.layers]]\nid = \"model:dslim/bert-base-NER\"\nentity_filter = [\"EMAIL_ADDRESS\"]\n");
+  if(t.assert(str.contains(lbad.error;"entity_filter names EMAIL_ADDRESS, which the model:dslim/bert-base-NER layer does not report (it reports PERSON, LOCATION)");"its entity_filter is checked against the types its mapping names")){pass=pass+1}el{fail=fail+1};
+  let rc=er.resolve(reg;"[[privacy.entity_routing]]\nentity_type = \"LOCATION\"\npreferred_layers = [\"model:dslim/bert-base-NER\"]\n");
+  if(t.asserteq(rc.error;"";"a route can prefer a registered model for a type it reports")){pass=pass+1}el{fail=fail+1};
+  let rbad=er.resolve(reg;"[[privacy.entity_routing]]\nentity_type = \"EMAIL_ADDRESS\"\npreferred_layers = [\"model:dslim/bert-base-NER\"]\n");
+  if(t.assert(str.contains(rbad.error;"preferred_layers names model:dslim/bert-base-NER, which does not report EMAIL_ADDRESS");"and not for one it does not")){pass=pass+1}el{fail=fail+1};
+  let ban=op.fromtext("{\"banned_layers\":[\"model:dslim/bert-base-NER\"],\"required_layers\":[\"model:other\"]}");
+  if(t.asserteq(ban.error;"";"an organisation policy can ban or require a registered model by its layer id")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

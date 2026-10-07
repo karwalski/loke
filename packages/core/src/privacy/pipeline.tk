@@ -22,6 +22,7 @@ i=fm:core.privacy.filtermetrics;
 i=vocab:core.privacy.entityvocab;
 i=alert:core.governance.alert;
 i=op:core.privacy.orgpolicy;
+i=mr:core.privacy.modelregistry;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
    detection layers exist, which are enabled, the order they run in and the URL and setting
@@ -164,8 +165,21 @@ f=withorgpolicy(c:$pipelineconfig;p:$orgprivacypolicy):$pipelineconfig{
   <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:c.layererror;routing:c.routing;org:p}
 };
 
+(* F3b.7. The token-classification models registered with `loke privacy add-model`
+   (core.privacy.modelregistry) added to the registry as layers. A registration file that
+   cannot be applied adds none and refuses every run made with the config, naming the fault. *)
+f=withmodels(c:$pipelineconfig;set:$modelset):$pipelineconfig{
+  if(str.len(set.error)>0){
+    log.error("\(set.error), so requests will be refused";"pipeline";"");
+    <$pipelineconfig{layers:c.layers;dryrun:c.dryrun;consensus:c.consensus;consensusthreshold:c.consensusthreshold;layererror:set.error;routing:c.routing;org:c.org}
+  }el{};
+  <withlayers(c;mr.apply(c.layers;set))
+};
+
+(* The registered models are added before [[privacy.layers]] and [[privacy.entity_routing]]
+   are applied, so both can name them. *)
 f=withlokeconfig(c:$pipelineconfig;lc:$lokeconfig):$pipelineconfig{
-  <withroutingconfig(withlayerconfig(withconsensus(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);lc.consensusstrategy;lc.consensusthreshold);lc.sourcetext);lc.sourcetext)
+  <withroutingconfig(withlayerconfig(withconsensus(withmodels(withprivacyfilter(c;lc.usepf;lc.pfurl;lc.pfthreshold);mr.load(mr.modelspath()));lc.consensusstrategy;lc.consensusthreshold);lc.sourcetext);lc.sourcetext)
 };
 
 (* newconfig plus the privacy-filter settings from the user's config.toml, read now. *)
@@ -518,6 +532,42 @@ f=uncoveredjson(r:$pipelinerun):str{
   <lh.typesjson(r.uncovered)
 };
 
+(* F3b.7. A registered model can only ADD to what a run masks. It is a voter like any layer,
+   so a strategy other than most-restrictive could otherwise mask less because of it: one
+   more voter that did not detect a group makes unanimous and majority harder to reach, and
+   under first-match a model with a lower priority than the regex layer would win a group
+   against it. So when a registered model voted, the run's routing and consensus are applied
+   again to the detections of the layers that are not registered models, with only those
+   layers as voters, and everything that would mask is masked as well as what agreed did. Equal
+   values are collapsed afterwards by dedupentities. With no registered model voting, agreed
+   is returned as it is. *)
+f=addonly(routing:$routingconfig;reg:$filterregistry;voters:@str;hits:@$piientity;layers:@str;strategy:str;threshold:str;agreed:@$piientity):@$piientity{
+  let basevoters=mut.@();
+  let models=mut.0;
+  lp(let i=0;i<voters.len;i=i+1){
+    let v:str=voters.get(i);
+    if(fr.ismodelid(v)){ models=models+1 }el{ basevoters=basevoters.push(v) }
+  };
+  if(models==0){ <agreed }el{};
+  let basehits=mut.@($piientity);
+  let baselayers=mut.@();
+  lp(let i=0;i<hits.len && i<layers.len;i=i+1){
+    let l:str=layers.get(i);
+    if(!fr.ismodelid(l)){
+      basehits=basehits.push(hits.get(i));
+      baselayers=baselayers.push(l)
+    }el{}
+  };
+  let baserouted:$routedhits=er.apply(routing;reg;basevoters;basehits;baselayers);
+  let base:$consensusresult=cn.applyranked(baserouted.entities;baserouted.layers;basevoters;strategy;threshold;ranksof(baserouted.entities));
+  let out=mut.agreed;
+  lp(let i=0;i<base.entities.len;i=i+1){
+    let e:$piientity=base.entities.get(i);
+    if(!seenvalue(out;e.value)){ out=out.push(e) }el{}
+  };
+  <out
+};
+
 f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   let requestid=str.randhex(16);
   log.info("pipeline start";"pipeline";requestid);
@@ -585,7 +635,9 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
       degraded=degraded+1;
       log.warn("privacy layer \(layer.id) \(st.state): \(st.reason) -- running degraded";"pipeline";requestid)
     }el{};
-    if(lh.isknown(layer.id)){
+    (* F3b.7. A registered model has no stage of its own; its id, state and counts are in
+       layermetrics. *)
+    if(lh.isknown(layer.id) && !fr.ismodelid(layer.id)){
       stages=stages.push(layerstage(st;tookms))
     }el{}
   };
@@ -618,7 +670,9 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
   (* F3b.4. Overlapping detections are resolved by the configured strategy before dedup;
      the default, most-restrictive, keeps every detection, as this list always was. *)
   let agreed:$consensusresult=cn.applyranked(routed.entities;routed.layers;voters;applied.consensus;applied.consensusthreshold;ranksof(routed.entities));
-  let dedupedraw=dedupentities(agreed.entities);
+  (* F3b.7. A registered model only adds: what the layers that are not registered models would
+     have masked on their own is masked too. *)
+  let dedupedraw=dedupentities(addonly(config.routing;reg;voters;allentities;hitlayers;applied.consensus;applied.consensusthreshold;agreed.entities));
   (* PL1.1 — placeholders are assigned HERE, after dedup and before anonymisation, and
      nowhere else.
 

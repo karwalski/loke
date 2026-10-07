@@ -25,6 +25,10 @@ an array); `silent` answers 200 with an empty body. Both still record. `pfbroken
 answers everything as `answer` does except /detect, which claims two entities it does not
 deliver in readable form.
 
+`tokenmodel` (F3b.7) answers as `answer` does except /health and /detect, which answer as
+packages/privacy-filter/server.py does serving a registered token classifier: see
+TOKEN_SPANS below.
+
 `echo` (GA1.5) answers as `answer` does except in two places, so that the request path can be
 judged by what it sends: /compress keeps every word holding a `[` (a loke placeholder) and
 every other word, as a compressor that respects placeholders would, and /api/generate answers
@@ -133,6 +137,31 @@ def pf_answer(body, path):
         out["anonymised"] = "recorder-anonymised"
         out["mappings"] = [{"placeholder": e["placeholder"], "type": e["type"]} for e in kept]
     return out
+
+# F3b.7: `tokenmodel` stands in for packages/privacy-filter/server.py serving a registered
+# token classifier (LOKE_PF_MODEL). /health names the model (RECORDER_MODEL_ID, default
+# recorder/token-model) and its task; /detect reports, with the model's OWN labels, each of
+# these values the text holds, at its code-point offsets, applying the threshold it is sent
+# as the sidecar does. WIDGET is a label no test's mapping names.
+TOKEN_MODEL_ID = os.environ.get("RECORDER_MODEL_ID", "recorder/token-model")
+TOKEN_SPANS = [("Jane Citizen", "PER", 0.91), ("Brisbane", "LOC", 0.88),
+               ("Zorblax", "WIDGET", 0.7), ("Acme", "ORG", 0.3)]
+
+
+def token_answer(body):
+    try:
+        req = json.loads(body) if body else {}
+    except ValueError:
+        req = {}
+    text = req.get("text", "")
+    thr = req.get("threshold")
+    thr = 0.0 if thr is None else min(max(float(thr), 0.0), 1.0)
+    found = [{"type": label, "value": v, "start": text.find(v), "end": text.find(v) + len(v), "confidence": c}
+             for v, label, c in TOKEN_SPANS if v in text]
+    kept = [e for e in found if thr <= 0.0 or e["confidence"] >= thr]
+    return {"entities": kept, "count": len(kept), "threshold": thr,
+            "suppressed_below_threshold": len(found) - len(kept), "model": TOKEN_MODEL_ID}
+
 
 # The hosted providers' success shapes, trimmed to the fields loke reads (F5.11).
 ANTHROPIC = {"id": "msg_recorder", "type": "message", "role": "assistant", "model": "claude-recorder",
@@ -252,6 +281,11 @@ class H(http.server.BaseHTTPRequestHandler):
             # but whose entities cannot be read. The pipeline must count that layer degraded:
             # entities counted and then lost in parsing are never anonymised.
             self._send({"count": 2, "threshold": 0.0, "suppressed_below_threshold": 0, "entities": "unreadable"})
+        elif MODE == "tokenmodel" and p == "/health":
+            # F3b.7: the sidecar serving a registered token classifier answers as that model.
+            self._send({"ok": True, "model_id": TOKEN_MODEL_ID, "task": "token-classification"})
+        elif MODE == "tokenmodel" and p == "/detect":
+            self._send(token_answer(body))
         elif MODE == "garbage":
             self._send({"error": "recorder in garbage mode", "message": {"role": "assistant", "content": "I could not find any entities."}})
         elif p == "/api/tags":

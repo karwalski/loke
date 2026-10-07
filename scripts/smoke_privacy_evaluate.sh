@@ -78,8 +78,28 @@ check "neither is reported as completing with nothing found" $(! grep -qE "^  (n
 HOME="$WORK/home" "$BIN" privacy evaluate --file "$WORK/labelled.jsonl" >"$WORK/filedown.txt" 2>&1
 check "and in the labelled report they are not scored, not scored zero" $(grep -q "^layer=ner not scored" "$WORK/filedown.txt" && ! grep -q "^layer=ner recall=" "$WORK/filedown.txt"; echo $?)
 
+# F3b.7: a token classifier registered with `loke privacy add-model` is a layer evaluate
+# reports. The recorder's `tokenmodel` mode stands in for the sidecar serving it.
+python3 "$ROOT/scripts/lib/http_recorder.py" "$WORK/tok.log" "$WORK/tok.port" tokenmodel &
+RPID=$!
+for _ in $(seq 1 50); do [ -s "$WORK/tok.port" ] && break; sleep 0.1; done
+TURL="http://127.0.0.1:$(cat "$WORK/tok.port" 2>/dev/null)"
+HOME="$WORK/home" "$BIN" privacy add-model recorder/token-model --url "$TURL" --label MISC=MISCELLANEOUS >"$WORK/addbad.txt" 2>&1; rc=$?
+check "add-model refuses a label mapped to a type loke does not know" $([ "$rc" -eq 1 ] && grep -q "maps MISC to MISCELLANEOUS, which is not an entity type loke knows" "$WORK/addbad.txt" && [ ! -e "$WORK/home/.loke/privacy-models.json" ]; echo $?)
+HOME="$WORK/home" "$BIN" privacy add-model recorder/token-model --url "$TURL" --label PER=PERSON --label LOC=LOCATION --threshold 0.5 >"$WORK/add.txt" 2>&1; rc=$?
+check "add-model registers the model" $([ "$rc" -eq 0 ] && grep -q '"id":"recorder/token-model"' "$WORK/home/.loke/privacy-models.json"; echo $?)
+HOME="$WORK/home" "$BIN" privacy list-models >"$WORK/list.txt" 2>&1
+check "list-models lists it with its mapping" $(grep -q "^model:recorder/token-model  $TURL  labels=PER=PERSON,LOC=LOCATION  confidence_threshold=0.5  priority=5  enabled" "$WORK/list.txt"; echo $?)
+HOME="$WORK/home" "$BIN" privacy evaluate "Jane Citizen from Brisbane, mail jane@example.com" >"$WORK/model.txt" 2>&1; rc=$?
+check "evaluate reports the registered model as a layer with its two detections" $([ "$rc" -eq 0 ] && grep -A1 "^  model:recorder/token-model (detect-and-mask): completed, 2 detections" "$WORK/model.txt" | grep -q "\[PERSON\] 0-12"; echo $?)
+check "the model was probed before it was sent the text" $(head -1 "$WORK/tok.log" | grep -q "^GET /health" && grep -q "^POST /detect" "$WORK/tok.log"; echo $?)
+check "and no value is printed" $(! grep -qiE "jane|citizen|brisbane" "$WORK/model.txt"; echo $?)
+HOME="$WORK/home" "$BIN" privacy remove-model recorder/token-model >/dev/null 2>&1; rc=$?
+HOME="$WORK/home" "$BIN" privacy evaluate "Jane Citizen" >"$WORK/removed.txt" 2>&1
+check "remove-model removes the layer" $([ "$rc" -eq 0 ] && ! grep -q "model:recorder/token-model" "$WORK/removed.txt"; echo $?)
+
 if [ "$FAILS" -ne 0 ]; then
-  for f in up shown file down filedown; do echo "--- $f ---"; cat "$WORK/$f.txt" 2>/dev/null; done
+  for f in up shown file down filedown addbad add list model removed; do echo "--- $f ---"; cat "$WORK/$f.txt" 2>/dev/null; done
   echo "smoke_privacy_evaluate: $FAILS check(s) FAILED"
   exit 1
 fi

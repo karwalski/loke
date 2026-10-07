@@ -12,6 +12,7 @@ i=pf:core.privacy.sidecarclient;
 i=t:shared.types;
 i=lyc:core.privacy.layerconfig;
 i=vocab:core.privacy.entityvocab;
+i=mr:core.privacy.modelregistry;
 
 (* F3b.6. The one health and degradation path every detection layer goes through.
 
@@ -72,7 +73,7 @@ f=status(f:$privacyfilter;available:bool;state:str;reason:str;count:i64):$layers
 };
 
 f=isknown(id:str):bool{
-  <str.eq(id;fr.regexid()) || str.eq(id;fr.nerid()) || str.eq(id;fr.presidioid()) || str.eq(id;fr.privacyfilterid())
+  <str.eq(id;fr.regexid()) || str.eq(id;fr.nerid()) || str.eq(id;fr.presidioid()) || str.eq(id;fr.privacyfilterid()) || fr.ismodelid(id)
 };
 
 (* Whether the layer's own client says it answers. The regex layer is in-process. Each other
@@ -82,6 +83,8 @@ f=answers(f:$privacyfilter):bool{
   if(str.eq(f.id;fr.nerid())){ <ner.isavailable(ner.new(f.url;f.param)) }el{};
   if(str.eq(f.id;fr.presidioid())){ <presidio.isavailable(presidio.new(f.url)) }el{};
   if(str.eq(f.id;fr.privacyfilterid())){ <pf.isavailable(pf.new(f.url;f.param)) }el{};
+  (* F3b.7. A registered model answers only as itself: /health naming its id and task. *)
+  if(fr.ismodelid(f.id)){ <mr.isavailable(f) }el{};
   <false
 };
 
@@ -89,12 +92,14 @@ f=unavailablereason(id:str):str{
   if(str.eq(id;fr.nerid())){ <"Ollama unreachable" }el{};
   if(str.eq(id;fr.presidioid())){ <"Presidio sidecar unreachable" }el{};
   if(str.eq(id;fr.privacyfilterid())){ <"privacy-filter sidecar unreachable" }el{};
+  if(fr.ismodelid(id)){ <"registered model sidecar unreachable, or not serving \(mr.modelid(id)) as a token classifier" }el{};
   <"no detector is implemented for layer \(id)"
 };
 
 f=failedreason(id:str):str{
   if(str.eq(id;fr.nerid())){ <"NER detect_entities returned error" }el{};
   if(str.eq(id;fr.presidioid())){ <"Presidio analyze returned error" }el{};
+  if(fr.ismodelid(id)){ <"registered model detect returned no scan" }el{};
   <"privacy-filter detect returned no scan"
 };
 
@@ -141,6 +146,11 @@ f=scan(f:$privacyfilter;text:str):$layerresult{
     let es:$pfentities=pf.scanentities(pf.new(f.url;f.param);text);
     if(es.ok){ <completed(f;es.hits;es.unplaced) }el{ <failed(f) }
   }el{};
+  (* F3b.7. A registered model, its labels mapped to loke's types. *)
+  if(fr.ismodelid(f.id)){
+    let mh:$modelhits=mr.scan(f;text);
+    if(mh.ok){ <completed(f;mh.hits;mh.unplaced) }el{ <failed(f) }
+  }el{};
   <nohits(status(f;false;"unavailable";unavailablereason(f.id);0))
 };
 
@@ -186,7 +196,7 @@ f=sametype(a:str;b:str):bool{
    detect-only, and its entity_filter does not exclude it. *)
 f=covers(f:$privacyfilter;ty:str):bool{
   if(!lyc.masks(f)){ <false }el{};
-  let types=vocab.layertypes(f.id);
+  let types=fr.typesof(f);
   lp(let i=0;i<types.len;i=i+1){
     let d:str=types.get(i);
     if(sametype(d;ty) && lyc.infilter(f.entityfilter;d)){ <true }el{}
@@ -224,7 +234,7 @@ f=uncoveredtypes(reg:$filterregistry;states:@$layerstatus):@str{
   lp(let i=0;i<reg.filters.len && i<states.len;i=i+1){
     let f:$privacyfilter=reg.filters.get(i);
     if(isdegraded(states.get(i))){
-      let types=vocab.layertypes(f.id);
+      let types=fr.typesof(f);
       lp(let j=0;j<types.len;j=j+1){
         let ty:str=types.get(j);
         if(covers(f;ty) && !listedtype(out;ty) && !coveredbyany(reg;states;ty)){ out=out.push(ty) }el{}

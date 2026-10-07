@@ -34,8 +34,9 @@ than as one silently absent. Test: `tests/unit/privacy/test_filter_registry.tk`,
 `tests/unit/privacy/test_layer_registry_pipeline.tk`.
 
 Each layer's availability check and scan is a branch on its id in `core.privacy.layerhealth` (`probe`,
-`consult`). There is no plug-in interface: adding a fifth layer means changing that module (see
-[What is not built](#what-is-not-built)).
+`consult`). The one way to add a layer without changing code is a token-classification model registered
+with `loke privacy add-model` (F3b.7): it becomes a layer with the id `model:<model-id>` after the four,
+in its priority's place (see [Registered models](#registered-models-loke-privacy-add-model-f3b7)).
 
 ### What `pipeline.run` does, in order
 
@@ -140,13 +141,21 @@ pipeline behaves as described under [Migration](#migration-guide-for-existing-de
 | `max_confidence_threshold` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("max_confidence_threshold 0.9 clamps Presidio's threshold, so its 0.92 detection masks the name", "clamped, it is asked at 0.9 and the name is masked") |
 | `enforced` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy.tk` ("enforced: false is read as false, and the policy applies nothing"); `test_org_policy_pipeline.tk` ("a policy with enforced: false changes nothing") |
 | `description` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy.tk` ("the word enforced in a description does not turn enforcement on") |
+| `id` | `packages/core/src/privacy/model_registry.tk` | `tests/unit/privacy/test_model_registry.tk` ("its id and url are read", "an id with a space is refused", "an id registered twice is refused") |
+| `url` | `packages/core/src/privacy/model_registry.tk` | `test_model_registry.tk` ("a url off this machine is refused"); `tests/unit/privacy/test_model_registry_pipeline.tk` ("a registered model that is down is degraded; the regex layer still masks") |
+| `labels` | `packages/core/src/privacy/model_registry.tk` | `test_model_registry.tk` ("a label mapped to a type loke does not know is refused, naming the label and the type"); `test_model_registry_pipeline.tk` ("the label mapping is applied: PER is masked as PERSON") |
+| `confidence_threshold` | `packages/core/src/privacy/model_registry.tk` | `test_model_registry_pipeline.tk` ("the registration's threshold (0.5) keeps the 0.3 detection out") |
+| `priority` | `packages/core/src/privacy/model_registry.tk` | `test_model_registry.tk` ("a priority of 0 places it first") |
+| `enabled` | `packages/core/src/privacy/model_registry.tk` | `test_model_registry_pipeline.tk` ("a banned model that is registered disabled is not a refusal") |
 <!-- privacy-config-keys:end -->
 
-The last seven keys are not `config.toml` keys: they are the keys of the organisation policy file,
-`~/.loke/loke.policy.json` (below).
+The seven keys from `minimum_layers` to `description` are not `config.toml` keys: they are the keys of the
+organisation policy file, `~/.loke/loke.policy.json` (below). The last six are the keys of each model in
+`~/.loke/privacy-models.json`, which `loke privacy add-model` writes (see
+[Registered models](#registered-models-loke-privacy-add-model-f3b7)).
 
 `scripts/check_privacy_doc_keys.py` (in the quality gate) fails if a key in that table is not a string
-literal in the file named beside it, or if `layer_config.tk`, `entity_routing.tk` or `org_policy.tk` accepts a key, or
+literal in the file named beside it, or if `layer_config.tk`, `entity_routing.tk`, `org_policy.tk` or `model_registry.tk` accepts a key, or
 `consensus.tk` a strategy, that this document does not list. It checks that each key is *read*, not
 what is done with it; the tests named do that.
 
@@ -388,6 +397,73 @@ reports the layers as `config.toml` configures them, not as the policy changes t
 de-duplicated across runs. The CLI proxy, `loke ask` and `mcp-broker` refuse with the policy's reason
 like any other refusal, but write no `org_policy_*` audit row: only `POST /api/pipeline` does.
 
+## Registered models (`loke privacy add-model`, F3b.7)
+
+A HuggingFace-compatible token-classification model can be added as a privacy layer without a code
+change:
+
+    loke privacy add-model dslim/bert-base-NER --url http://127.0.0.1:11436 \
+        --label PER=PERSON --label LOC=LOCATION --label ORG=ORGANIZATION --threshold 0.5 --priority 5
+    LOKE_PF_MODEL=dslim/bert-base-NER python3 packages/privacy-filter/server.py 11436
+    loke privacy list-models
+    loke privacy remove-model dslim/bert-base-NER
+
+`add-model` (`cli.privacymodels`) writes the registration to `~/.loke/privacy-models.json`, whose keys
+are in the table above, and `core.privacy.pipeline.withlokeconfig` registers each model in it as a layer
+`model:<model-id>` (`core.privacy.modelregistry`) **before** `[[privacy.layers]]` and
+`[[privacy.entity_routing]]` are applied, so both can name it. So the registered models reach exactly the
+callers that read `config.toml` (see [Which callers read config.toml](#which-callers-read-configtoml)),
+read when their config is built; `mcp-broker` and the agent executor do not run them. Only
+`withlokeconfig` reading the file is tested; that `/api/pipeline` runs a registered model is not tested.
+The model is served by the existing sidecar, one process per model:
+`LOKE_PF_MODEL` names the `models.json` entry or hub id it loads, and its `/health` names the model and
+its task. Tests: `tests/unit/privacy/test_model_registry.tk`, `tests/unit/privacy/test_model_registry_pipeline.tk`,
+`tests/unit/cli/test_privacy_models.tk`, `scripts/smoke_privacy_evaluate.sh`. The model and its sidecar
+are a recording stand-in in every test (`scripts/lib/http_recorder.py`, mode `tokenmodel`): no model is
+loaded by any test, so how well a real model detects anything is not measured here.
+
+What a registered model is, as a layer:
+
+- **Its detections are masked under the loke type its label mapping gives** (`PER=PERSON`): rated,
+  routed and matched by the presets as the same type from any other layer. A label the mapping does not
+  name is masked all the same, under the label upper-cased. Test: `test_model_registry_pipeline.tk`
+  ("the label mapping is applied: PER is masked as PERSON", "a label the mapping does not name is masked
+  all the same, upper-cased").
+- **A mapping to a type loke does not know is refused.** Each label must map to a type a built-in layer
+  reports (`core.privacy.entityvocab`). `add-model` refuses such a registration and writes nothing; a
+  `privacy-models.json` holding one (or any other fault: an unknown key, a url that is not loopback, a
+  threshold outside 0..1) refuses **every** request, naming the file, the model and the fault, as a
+  malformed `[[privacy.layers]]` does, and nothing is sent to the model. A missing file is no model.
+  Test: `test_model_registry_pipeline.tk` ("a registration mapping a label to a type loke does not know
+  refuses the request", "and nothing is sent to the model"); `test_privacy_models.tk` ("a refused
+  registration exits 1 and writes nothing").
+- **Its threshold** is the layer's `confidence_threshold`: the sidecar is asked for every span
+  (threshold 0) and loke drops those below it. `[[privacy.layers]]` can override it, and the organisation
+  policy's `max_confidence_threshold` clamps it, as for any layer.
+- **It is sent text only after its `/health` has answered as that model** (`ok`, its `model_id`, task
+  `token-classification`), on a loopback address. A sidecar that is down, or answers as another model, is
+  a degraded layer (F3b.6): the run continues with the layers that answered, and a type only it masks is
+  reported uncovered. Test: `test_model_registry_pipeline.tk` ("the model was probed on /health before
+  it was sent any text", "a sidecar answering as another model is a degraded layer, and the run goes on
+  (F3b.6)", "and it is never sent the text").
+- **It only adds.** It votes in consensus like any layer, so under `unanimous`, `majority`,
+  `confidence-weighted` or `first-match` one more voter could otherwise mask less. When a registered model
+  voted, `pipeline.addonly` applies the run's routing and consensus again to the other layers' detections
+  with only those layers as voters, and masks that too. It cannot weaken the regex layer. Test:
+  `test_model_registry_pipeline.tk` ("under unanimous, the email only the regex layer found is still
+  masked"). A route in `[[privacy.entity_routing]]` that prefers the model for a type is the user's own
+  choice, and is applied to the other layers as any route is.
+- **An organisation policy** can name it in `banned_layers` or `required_layers` as `model:<model-id>`,
+  registered or not. Banned while registered enabled, every request is refused and the model is sent
+  nothing. Test: `test_model_registry_pipeline.tk` ("an organisation policy that bans the model refuses a
+  configuration that enables it", "and the banned model is never sent the text", "a policy that requires
+  the model forwards when it scans").
+- **`loke privacy evaluate`** reports it as a layer with its detections. Test:
+  `test_model_registry_pipeline.tk` ("loke privacy evaluate shows the model as a layer, with what it
+  found"); `scripts/smoke_privacy_evaluate.sh`.
+- It has no stage of its own in the pipeline trace; its id, state and counts are in the run's layer
+  metrics (`privacy_layer_metrics`).
+
 ## Fail-closed rules
 
 `pipeline.issafetoforward(run)` is a plain bool (not a result type, because of toke trap T-18 at the time
@@ -562,10 +638,12 @@ request, not that no harm follows. Definitions, and the only figures this projec
 
 ## What is not built
 
-- **Custom model registration (F3b.7).** There is no `loke privacy add-model`, no settings panel and no
-  registration interface. A layer is a branch on its id in `core.privacy.layerhealth`; adding one is a
-  code change. The sidecar reads its own model list from `packages/privacy-filter/models.json`; loke does
-  not.
+- **Parts of custom model registration (F3b.7).** Registration is built (above); not built are: a
+  settings panel; ONNX models (the sidecar refuses a `.onnx` path at start); an Ollama-served model as a
+  registered layer (Ollama serves generative models, not token classifiers; the NER layer is the Ollama
+  layer); a sidecar process serving more than one model (one per model, `LOKE_PF_MODEL`); `add-model`
+  writing the sidecar's own `models.json`; a check of the model's output beyond its `/health` naming the
+  task; and a stage of its own in the pipeline trace (`detection_layers`).
 - **Organisation policy distribution and display (F3b.8).** The policy is enforced (above), but it is
   not distributed by the compliance engine (A3), not protected from the user editing it, and not shown
   on the governance dashboard (G4).
@@ -587,8 +665,9 @@ the code does guarantee is directional:
   mask the union of what every layer that ran found. Test: `test_consensus_pipeline.tk` ("every value any
   single layer masks is masked by the default three-layer run").
 - Settings that can only **add** to that: enabling the privacy-filter sidecar
-  (`privacy.privacy_filter = true`), running Presidio and Ollama so those layers complete, and `veto`
-  mode, which refuses rather than masks.
+  (`privacy.privacy_filter = true`), running Presidio and Ollama so those layers complete, registering a
+  model with `loke privacy add-model` (`pipeline.addonly`), and `veto` mode, which refuses rather than
+  masks.
 - Settings that can **mask less**: any other consensus strategy, a `confidence_threshold`, an
   `entity_filter`, `detect-only`, `enabled = false` on a model layer, and routes.
 

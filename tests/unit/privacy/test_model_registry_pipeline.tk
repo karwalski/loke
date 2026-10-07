@@ -1,0 +1,209 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.modelregistrypipeline;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=sh:shared.types;
+i=cfg:shared.config;
+i=pl:core.privacy.pipeline;
+i=mr:core.privacy.modelregistry;
+i=op:core.privacy.orgpolicy;
+i=cmp:core.privacy.comparison;
+
+(* F3b.7 — a token classifier registered with `loke privacy add-model`, judged by what the
+   production pipeline (core.privacy.pipeline.runforward) masks, refuses and sends.
+
+   scripts/lib/http_recorder.py in its `tokenmodel` mode stands in for
+   packages/privacy-filter/server.py serving the model recorder/token-model: /health names
+   the model and its task, and /detect reports, with the model's own labels, "Jane Citizen"
+   (PER, 0.91), "Brisbane" (LOC, 0.88), "Zorblax" (WIDGET, 0.7) and "Acme" (ORG, 0.3)
+   wherever the text holds them. NER and Presidio are switched off, so the regex layer (the
+   email) and the registered model are the only layers. A loopback port nothing serves (9) is
+   a model that is down. No model is downloaded and nothing leaves the machine.
+
+   What is judged:
+     - the model's detections are masked end to end, under the loke types its label mapping
+       gives (PER is PERSON, LOC is LOCATION), an unmapped label (WIDGET) is masked all the
+       same, and the registration's threshold (0.5) keeps Acme (0.3) out;
+     - the model is sent text only after its /health has answered as that model; one that
+       answers as another model, or is down, is degraded (F3b.6) and sent nothing;
+     - a registration that maps a label to a type loke does not know refuses every request,
+       naming the fault, and nothing is sent to the model;
+     - an organisation policy can ban it (refused, never sent text) and require it;
+     - it only adds: under unanimous and first-match the regex layer's email is still masked;
+     - [[privacy.layers]] can put it in veto mode; ~/.loke/privacy-models.json is read by
+       withlokeconfig;
+     - `loke privacy evaluate` (core.privacy.comparison) shows it as a layer. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_modelreg_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=countof(hay:str;needle:str):i64{
+  if(str.len(needle)==0){ <0 }el{};
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+(* The regex layer only: NER and Presidio switched off, the privacy filter off by default. *)
+f=regexonly():$pipelineconfig{
+  let dead="http://127.0.0.1:9";
+  <pl.withlayer(pl.withlayer(pl.newconfig(dead;dead);"ner";false);"presidio";false)
+};
+
+f=registration(id:str;url:str;labels:str;extra:str):str{
+  <"{\"models\":[{\"id\":\"\(id)\",\"url\":\"\(url)\",\"labels\":[\(labels)],\"confidence_threshold\":0.5\(extra)}]}"
+};
+
+f=withmodel(c:$pipelineconfig;json:str):$pipelineconfig{
+  <pl.withmodels(c;mr.fromtext(json))
+};
+
+f=typeofvalue(r:$pipelinerun;value:str):str{
+  lp(let i=0;i<r.result.entities.len;i=i+1){
+    let e:$piientity=r.result.entities.get(i);
+    if(str.eq(e.value;value)){ <e.entitytype }el{}
+  };
+  <""
+};
+
+f=listed(items:@str;id:str):bool{
+  lp(let i=0;i<items.len;i=i+1){
+    if(str.eq(items.get(i);id)){ <true }el{}
+  };
+  <false
+};
+
+f=voted(r:$pipelinerun;id:str):bool{
+  <listed(r.voters;id)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let base=scratch();
+  let rlog="\(base).log";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";rlog;"\(base).port";"tokenmodel")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(base).port");
+  if(t.assert(rec!=0 && str.len(port)>0;"the recorder came up")){pass=pass+1}el{fail=fail+1};
+  let url="http://127.0.0.1:\(port)";
+  let dead="http://127.0.0.1:9";
+  let layer="model:recorder/token-model";
+  let labels="\"PER=PERSON\",\"LOC=LOCATION\",\"ORG=ORGANIZATION\"";
+  let good=registration("recorder/token-model";url;labels;"");
+
+  let text="Jane Citizen from Brisbane met Zorblax at Acme, mail jane@example.com";
+  let name="Jane Citizen";
+  let city="Brisbane";
+  let odd="Zorblax";
+  let weak="Acme";
+  let email="jane@example.com";
+  let detect="POST /detect";
+
+  (* ── Without a registered model the regex layer finds only the email ─────────── *)
+  let plain=pl.runforward(text;"";regexonly());
+  if(t.assert(pl.issafetoforward(plain) && !str.contains(plain.result.anonymised;email) && str.contains(plain.result.anonymised;name) && str.contains(plain.result.anonymised;city);"without the model the email is masked and the name and city are not")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Registered: masked end to end, through the label mapping ─────────────────── *)
+  let r=pl.runforward(text;"";withmodel(regexonly();good));
+  let anon=r.result.anonymised;
+  if(t.assert(pl.issafetoforward(r);"a run with the registered model is forwardable")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(anon;name) && !str.contains(anon;city);"the model's detections are masked end to end: neither the name nor the city is in the anonymised text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(anon;email);"and the regex layer's email still is")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(typeofvalue(r;name);"PERSON";"the label mapping is applied: PER is masked as PERSON")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(typeofvalue(r;city);"LOCATION";"and LOC as LOCATION")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(anon;odd) && str.eq(typeofvalue(r;odd);"WIDGET");"a label the mapping does not name is masked all the same, upper-cased")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(anon;weak) && str.len(typeofvalue(r;weak))==0;"the registration's threshold (0.5) keeps the 0.3 detection out")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(r.layerscompleted==(2 as u32) && voted(r;layer) && voted(r;"regex");"the model completed and voted beside the regex layer")){pass=pass+1}el{fail=fail+1};
+  let log1=readfile(rlog);
+  let firsthealth=str.indexof(log1;"GET /health");
+  let firstdetect=str.indexof(log1;detect);
+  if(t.assert(firsthealth>=0 && firstdetect>firsthealth;"the model was probed on /health before it was sent any text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(log1;"\"threshold\":0") && countof(log1;detect)==1;"and sent the text once, asking for every span (threshold 0) so loke applies the registration's threshold")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A model that does not answer as itself, or is down, is degraded ───────────── *)
+  let before=countof(readfile(rlog);detect);
+  let other=pl.runforward(text;"";withmodel(regexonly();registration("other/model";url;labels;"")));
+  if(t.assert(pl.issafetoforward(other) && other.layersdegraded==(1 as u32) && other.layerscompleted==(1 as u32);"a sidecar answering as another model is a degraded layer, and the run goes on (F3b.6)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(rlog);detect)==before;"and it is never sent the text")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(other.result.anonymised;name) && listed(other.uncovered;"PERSON");"what only it masks is reported uncovered")){pass=pass+1}el{fail=fail+1};
+  let down=pl.runforward(text;"";withmodel(regexonly();registration("recorder/token-model";dead;labels;"")));
+  if(t.assert(pl.issafetoforward(down) && down.layersdegraded==(1 as u32) && !str.contains(down.result.anonymised;email);"a registered model that is down is degraded; the regex layer still masks")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An unmapped label type refuses every request ────────────────────────────── *)
+  let bad=registration("recorder/token-model";url;"\"PER=PERSON\",\"MISC=MISCELLANEOUS\"";"");
+  let before2=countof(readfile(rlog);detect);
+  let refused=pl.runforward(text;"";withmodel(regexonly();bad));
+  if(t.assert(!pl.issafetoforward(refused);"a registration mapping a label to a type loke does not know refuses the request")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(pl.refusalreason(refused);"registered privacy models privacy-models.json cannot be applied: model recorder/token-model: the label mapping MISC=MISCELLANEOUS maps MISC to MISCELLANEOUS, which is not an entity type loke knows");"naming the file, the model and the mapping")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!pl.issafetoforward(pl.runforward("what is the capital of France";"";withmodel(regexonly();bad)));"even a clean text is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(rlog);detect)==before2;"and nothing is sent to the model")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Organisation policy ──────────────────────────────────────────────────────── *)
+  let before3=countof(readfile(rlog);detect);
+  let banned=pl.runforward(text;"";pl.withorgpolicy(withmodel(regexonly();good);op.fromtext("{\"banned_layers\":[\"model:recorder/token-model\"]}")));
+  if(t.assert(!pl.issafetoforward(banned);"an organisation policy that bans the model refuses a configuration that enables it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(pl.refusalreason(banned);"organisation policy loke.policy.json bans the model:recorder/token-model privacy layer, and this configuration enables it (switch it off in config.toml)";"naming the model's layer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(rlog);detect)==before3;"and the banned model is never sent the text")){pass=pass+1}el{fail=fail+1};
+  let offbanned=pl.runforward(text;"";pl.withorgpolicy(withmodel(regexonly();registration("recorder/token-model";url;labels;",\"enabled\":false"));op.fromtext("{\"banned_layers\":[\"model:recorder/token-model\"]}")));
+  if(t.assert(pl.issafetoforward(offbanned);"a banned model that is registered disabled is not a refusal")){pass=pass+1}el{fail=fail+1};
+  let required=pl.runforward(text;"";pl.withorgpolicy(withmodel(regexonly();good);op.fromtext("{\"required_layers\":[\"model:recorder/token-model\"]}")));
+  if(t.assert(pl.issafetoforward(required) && !str.contains(required.result.anonymised;name);"a policy that requires the model forwards when it scans")){pass=pass+1}el{fail=fail+1};
+  let reqother=pl.runforward(text;"";pl.withorgpolicy(withmodel(regexonly();registration("other/model";url;labels;""));op.fromtext("{\"required_layers\":[\"model:other/model\"]}")));
+  if(t.assert(!pl.issafetoforward(reqother) && str.contains(pl.refusalreason(reqother);"requires the model:other/model privacy layer, and it did not scan this request");"and refuses when it did not scan")){pass=pass+1}el{fail=fail+1};
+
+  (* ── It only adds ─────────────────────────────────────────────────────────────── *)
+  let unan=pl.runforward(text;"";pl.withconsensus(withmodel(regexonly();good);"unanimous";""));
+  if(t.assert(pl.issafetoforward(unan) && !str.contains(unan.result.anonymised;email);"under unanimous, the email only the regex layer found is still masked")){pass=pass+1}el{fail=fail+1};
+  let fm=pl.runforward(text;"";pl.withconsensus(withmodel(regexonly();registration("recorder/token-model";url;labels;",\"priority\":0"));"first-match";""));
+  if(t.assert(pl.issafetoforward(fm) && !str.contains(fm.result.anonymised;email) && !str.contains(fm.result.anonymised;name);"under first-match with the model first, the email and the name are both masked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── config.toml and the registration file ───────────────────────────────────── *)
+  let veto=pl.runforward(text;"";pl.withlayerconfig(withmodel(regexonly();good);"[[privacy.layers]]\nid = \"model:recorder/token-model\"\nmode = \"veto\"\n"));
+  if(t.assert(!pl.issafetoforward(veto) && str.eq(veto.vetoedby;layer);"[[privacy.layers]] can put the model in veto mode")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!file.exists(mr.modelspath());"there is no privacy-models.json in the test's HOME")){pass=pass+1}el{fail=fail+1};
+  file.mkdir(sh.lokedir());
+  let wrote=mt file.write(mr.modelspath();good) { $ok:v v; $err:e false };
+  let fromhome=pl.runforward(text;"";pl.withlokeconfig(regexonly();cfg.fromtext("")));
+  if(t.assert(wrote && pl.issafetoforward(fromhome) && !str.contains(fromhome.result.anonymised;name) && voted(fromhome;layer);"withlokeconfig registers the models in ~/.loke/privacy-models.json")){pass=pass+1}el{fail=fail+1};
+  file.delete(mr.modelspath());
+
+  (* ── loke privacy evaluate ────────────────────────────────────────────────────── *)
+  let c=cmp.compare(text;withmodel(regexonly();good));
+  let lines=str.join("\n";cmp.reportlines(text;c;false));
+  if(t.assert(str.contains(lines;"  model:recorder/token-model (detect-and-mask): completed, 3 detections");"loke privacy evaluate shows the model as a layer, with what it found")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lines;"(1 detection below the layer's threshold or outside its entity filter, not counted)");"and the detection its threshold kept out")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(lines;name) && !str.contains(lines;city);"without printing a value")){pass=pass+1}el{fail=fail+1};
+
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  file.delete(rlog);
+  file.delete("\(rlog).headers");
+  file.delete("\(rlog).bodies");
+  file.delete("\(base).port");
+  <fail
+};

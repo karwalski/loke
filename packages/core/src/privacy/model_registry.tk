@@ -1,0 +1,420 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.privacy.modelregistry;
+
+i=str:std.str;
+i=json:std.json;
+i=file:std.file;
+i=jx:shared.jsonobj;
+i=sh:shared.types;
+i=cfg:shared.config;
+i=reach:shared.reachability;
+i=fr:core.privacy.filterregistry;
+i=vocab:core.privacy.entityvocab;
+i=pf:core.privacy.sidecarclient;
+
+(* F3b.7. Token-classification models registered as privacy layers.
+
+   `loke privacy add-model <model-id>` (cli.privacymodels) records a model here, in
+   privacy-models.json in the user's loke directory (~/.loke/privacy-models.json):
+
+       {"models":[{"id":"dslim/bert-base-NER","url":"http://127.0.0.1:11436",
+                   "labels":["PER=PERSON","LOC=LOCATION"],"confidence_threshold":0.5,
+                   "priority":5,"enabled":true}]}
+
+     id                    the model's id, as the sidecar serving it names it in /health
+     url                   that sidecar: packages/privacy-filter/server.py started with
+                           LOKE_PF_MODEL=<id>, on a loopback address (the text goes in clear)
+     labels                the label mapping: each label the model reports, = the loke entity
+                           type it is (a type core.privacy.entityvocab declares for a layer)
+     confidence_threshold  0 to 1, default 0: the layer's threshold, as [[privacy.layers]]
+                           sets one (core.privacy.layerconfig.accepted applies it)
+     priority              0 to 1000, default 5: the layer's place in the registry, lower first
+     enabled               true or false, default true
+
+   core.privacy.pipeline.withlokeconfig registers every model in the file as a layer whose
+   id is "model:" and the model's id (core.privacy.filterregistry.modelprefix), before
+   [[privacy.layers]] and [[privacy.entity_routing]] are applied, so both can name it, as can
+   an organisation policy's banned_layers and required_layers. core.privacy.layerhealth probes
+   and scans it like any layer: it is sent text only after its /health has answered as the
+   registered model, and a model that is down is a degraded layer (F3b.6).
+
+   FAIL CLOSED. A file that is present and cannot be read, is not a JSON object, has a key
+   this module does not know (or one twice), or registers a model whose label mapping names a
+   type loke does not know, whose url is not loopback, or whose values cannot be used, refuses
+   every request, naming the fault, as a malformed [[privacy.layers]] does: the user believes
+   that model is masking. `loke privacy add-model` refuses the same registration before it is
+   written. A MISSING file is no registered model.
+
+   ONLY ADDS. A label the model reports that its mapping does not name is still masked, under
+   the label upper-cased: an entity with an unfamiliar label is still an entity. And
+   core.privacy.pipeline masks at least what it would mask with no registered model, whatever
+   the consensus strategy (pipeline.addonly). *)
+
+t=$registeredmodel{
+  id:str;
+  url:str;
+  (* "MODEL_LABEL=loke type", in the order given. *)
+  labels:@str;
+  (* As written, "0.5"; "0" when not given. *)
+  threshold:str;
+  priority:i64;
+  enabled:bool
+};
+
+t=$modelset{
+  models:@$registeredmodel;
+  error:str;
+  present:bool
+};
+
+(* What one scan by a registered model gave: its detections with their types mapped, the
+   spans that could not be placed in the text, and how many carried a label the mapping does
+   not name (masked all the same). ok is false when the sidecar did not answer with a scan. *)
+t=$modelhits{
+  ok:bool;
+  hits:@$piientity;
+  unplaced:i64;
+  unmapped:i64
+};
+
+f=filename():str{ <"privacy-models.json" };
+
+f=modelspath():str{ <sh.lokefile(filename()) };
+
+(* How every refusal names the file. Not the full path: it holds the user's home. *)
+f=header():str{ <"registered privacy models \(filename())" };
+
+f=defaultpriority():i64{ <5 };
+f=maxpriority():i64{ <1000 };
+
+(* What the sidecar's /health must say to be taken for a registered model's sidecar. *)
+f=task():str{ <"token-classification" };
+
+f=knownkey(key:str):bool{
+  <str.eq(key;"id") || str.eq(key;"url") || str.eq(key;"labels") || str.eq(key;"confidence_threshold") || str.eq(key;"priority") || str.eq(key;"enabled")
+};
+
+f=none():$modelset{
+  <$modelset{models:@();error:"";present:false}
+};
+
+f=broken(fault:str):$modelset{
+  <$modelset{models:@();error:"\(header()) cannot be applied: \(fault)";present:true}
+};
+
+f=layerid(modelid:str):str{ <"\(fr.modelprefix())\(modelid)" };
+
+f=modelid(layer:str):str{
+  if(!fr.ismodelid(layer)){ <"" }el{};
+  <sh.strslice(layer;str.len(fr.modelprefix()) as i64;str.len(layer) as i64)
+};
+
+(* ── Validation ─────────────────────────────────────────────────────────── *)
+
+(* Letters, digits and . _ - / : @, one to 128 of them: a hub id (dslim/bert-base-NER) or a
+   local name, and nothing that could split a list or a log line. *)
+f=idchar(c:i64):bool{
+  <(c>=48 && c<=57) || (c>=65 && c<=90) || (c>=97 && c<=122) || c==46 || c==95 || c==45 || c==47 || c==58 || c==64
+};
+
+f=isid(id:str):bool{
+  let n=str.len(id) as i64;
+  if(n==0 || n>128){ <false }el{};
+  let good=mut.true;
+  lp(let k=0;k<n;k=k+1){
+    if(!idchar(str.charat(id;k))){ good=false }el{}
+  };
+  <good
+};
+
+(* Every entity type a built-in layer declares (core.privacy.entityvocab): what a label may
+   be mapped to, so a registered model's detection is rated, routed and matched by the presets
+   as the same type from another layer is. *)
+f=knowntypes():@str{
+  let out=mut.@();
+  let ids=vocab.layerids();
+  lp(let l=0;l<ids.len;l=l+1){
+    let types=vocab.layertypes(ids.get(l));
+    lp(let i=0;i<types.len;i=i+1){
+      let ty:str=types.get(i);
+      if(!vocab.contains(out;ty)){ out=out.push(ty) }el{}
+    }
+  };
+  <out
+};
+
+f=isknowntype(ty:str):bool{
+  <vocab.contains(knowntypes();ty)
+};
+
+f=listed(items:@str):str{ <str.join(", ";items) };
+
+f=labelof(pair:str):str{
+  let eq=str.indexof(pair;"=");
+  if(eq<0){ <"" }el{};
+  <sh.strslice(pair;0;eq)
+};
+
+f=typeofpair(pair:str):str{
+  let eq=str.indexof(pair;"=");
+  if(eq<0){ <"" }el{};
+  <sh.strslice(pair;eq+1;str.len(pair) as i64)
+};
+
+(* Why a label mapping cannot be used, or "". *)
+f=labelserror(labels:@str):str{
+  if(labels.len==0){ <"a model needs a label mapping: at least one MODEL_LABEL=TYPE" }el{};
+  let seen=mut.@();
+  lp(let i=0;i<labels.len;i=i+1){
+    let pair:str=labels.get(i);
+    let label=labelof(pair);
+    let ty=typeofpair(pair);
+    if(str.indexof(pair;"=")<1 || str.len(ty)==0){ <"the label mapping \(pair) is not MODEL_LABEL=TYPE" }el{};
+    if(str.contains(pair;",") || str.contains(ty;"=")){ <"the label mapping \(pair) is not MODEL_LABEL=TYPE" }el{};
+    if(!isknowntype(ty)){ <"the label mapping \(pair) maps \(label) to \(ty), which is not an entity type loke knows; a label must map to a type a built-in layer reports (\(listed(knowntypes())))" }el{};
+    if(vocab.contains(seen;label)){ <"the label \(label) is mapped twice" }el{};
+    seen=seen.push(label)
+  };
+  <""
+};
+
+f=urlerror(url:str):str{
+  if(!str.startswith(url;"http://") || !reach.isloopbackurl(url)){ <"the url \(url) is not an http:// address on this machine (127.0.0.1, localhost or [::1]); the text is sent to it in clear" }el{};
+  <""
+};
+
+(* Why a registration cannot be used, or "". *)
+f=modelerror(m:$registeredmodel):str{
+  if(!isid(m.id)){ <"the model id \(m.id) is not one to 128 letters, digits and . _ - / : @" }el{};
+  let ue=urlerror(m.url);
+  if(str.len(ue)>0){ <"model \(m.id): \(ue)" }el{};
+  let le=labelserror(m.labels);
+  if(str.len(le)>0){ <"model \(m.id): \(le)" }el{};
+  if(!cfg.isthreshold(m.threshold)){ <"model \(m.id): confidence_threshold must be a number from 0 to 1" }el{};
+  if(m.priority<0 || m.priority>maxpriority()){ <"model \(m.id): priority must be a whole number from 0 to 1000" }el{};
+  <""
+};
+
+(* ── The file ───────────────────────────────────────────────────────────── *)
+
+f=parses(body:str):bool{
+  <mt json.dec(body) { $ok:v true; $jsonerr:e false }
+};
+
+f=readable(path:str):bool{
+  <mt file.read(path) { $ok:v true; $err:e false }
+};
+
+(* One element of "models", or why it cannot be one. *)
+f=entryfault(e:$json):str{
+  if(!str.startswith(e.raw;"{")){ <"each element of models must be an object" }el{};
+  let keys=jx.keys(e);
+  let seen=mut.@();
+  lp(let i=0;i<keys.len;i=i+1){
+    let k:str=keys.get(i);
+    if(!knownkey(k)){ <"\(k) is not a model key (id, url, labels, confidence_threshold, priority, enabled)" }el{};
+    if(vocab.contains(seen;k)){ <"\(k) is given twice in one model" }el{};
+    seen=seen.push(k)
+  };
+  if(!str.startswith(jx.rawvalue(e;"id");"\"")){ <"a model has no id" }el{};
+  let id=jx.strvalue(e;"id";"");
+  if(!str.startswith(jx.rawvalue(e;"url");"\"")){ <"model \(id) has no url" }el{};
+  let raw=jx.rawvalue(e;"labels");
+  let n=mt json.arr(e;"labels") { $ok:a a.len as i64; $jsonerr:x 0-1 };
+  if(!str.startswith(raw;"[") || n<0 || (jx.strelems(e;"labels").len as i64)!=n){ <"model \(id): labels must be an array of MODEL_LABEL=TYPE strings" }el{};
+  if(jx.has(e;"confidence_threshold") && str.len(jx.numtext(e;"confidence_threshold";""))==0){ <"model \(id): confidence_threshold must be a number from 0 to 1" }el{};
+  if(jx.has(e;"priority") && !str.isdigit(jx.rawvalue(e;"priority"))){ <"model \(id): priority must be a whole number from 0 to 1000" }el{};
+  if(jx.has(e;"enabled")){
+    let en=jx.rawvalue(e;"enabled");
+    if(!str.eq(en;"true") && !str.eq(en;"false")){ <"model \(id): enabled must be true or false" }el{}
+  }el{};
+  <""
+};
+
+f=entryof(e:$json):$registeredmodel{
+  let priority=mut.defaultpriority();
+  if(jx.has(e;"priority")){ priority=mt str.toint(jx.rawvalue(e;"priority")) { $ok:x x; $err:bad 0-1 } }el{};
+  <$registeredmodel{
+    id:jx.strvalue(e;"id";"");
+    url:jx.strvalue(e;"url";"");
+    labels:jx.strelems(e;"labels");
+    threshold:jx.numtext(e;"confidence_threshold";"0");
+    priority:priority;
+    enabled:!str.eq(jx.rawvalue(e;"enabled");"false")
+  }
+};
+
+(* A privacy-models.json text. Anything that cannot be applied refuses every request. *)
+f=fromtext(text:str):$modelset{
+  let body=str.trim(text);
+  if(!str.startswith(body;"{")){ <broken("it is not a JSON object") }el{};
+  if(!parses(body)){ <broken("it is not valid JSON") }el{};
+  let o=mt json.dec(body) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  let keys=jx.keys(o);
+  lp(let i=0;i<keys.len;i=i+1){
+    let k:str=keys.get(i);
+    if(!str.eq(k;"models")){ <broken("\(k) is not a key of the file (models)") }el{}
+  };
+  if(keys.len>1){ <broken("models is given twice") }el{};
+  if(!jx.has(o;"models")){ <$modelset{models:@();error:"";present:true} }el{};
+  if(!str.startswith(jx.rawvalue(o;"models");"[")){ <broken("models must be an array") }el{};
+  let els=mt json.arr(o;"models") { $ok:a a; $jsonerr:e @() };
+  let models=mut.@();
+  let ids=mut.@();
+  lp(let i=0;i<els.len;i=i+1){
+    let e:$json=els.get(i);
+    let ef=entryfault(e);
+    if(str.len(ef)>0){ <broken(ef) }el{};
+    let m=entryof(e);
+    let me=modelerror(m);
+    if(str.len(me)>0){ <broken(me) }el{};
+    if(vocab.contains(ids;m.id)){ <broken("the model \(m.id) is registered twice") }el{};
+    ids=ids.push(m.id);
+    models=models.push(m)
+  };
+  <$modelset{models:models;error:"";present:true}
+};
+
+(* The registrations at path: none() when there is no file. *)
+f=load(path:str):$modelset{
+  if(!file.exists(path)){ <none() }el{};
+  if(!readable(path)){ <broken("the file cannot be read") }el{};
+  <fromtext(mt file.read(path) { $ok:v v; $err:e "" })
+};
+
+f=quotedlabel(pair:str):str{ <jx.escape(pair) };
+
+f=entryjson(m:$registeredmodel):str{
+  let labels=str.join(",";m.labels.map(&quotedlabel));
+  let enabled=mut."false";
+  if(m.enabled){ enabled="true" }el{};
+  <"{\"id\":\(jx.escape(m.id)),\"url\":\(jx.escape(m.url)),\"labels\":[\(labels)],\"confidence_threshold\":\(m.threshold),\"priority\":\(str.fromint(m.priority)),\"enabled\":\(enabled)}"
+};
+
+(* The file text for a set of registrations: what fromtext reads back. *)
+f=entrysep():str{ <",\n  " };
+
+f=entries(models:@$registeredmodel):str{
+  <str.join(entrysep();models.map(&entryjson))
+};
+
+f=tojson(models:@$registeredmodel):str{
+  <"{\"models\":[\n  \(entries(models))\n]}\n"
+};
+
+f=has(set:$modelset;id:str):bool{
+  lp(let i=0;i<set.models.len;i=i+1){
+    if(str.eq(set.models.get(i).id;id)){ <true }el{}
+  };
+  <false
+};
+
+(* The set with m registered: in place of a registration with its id, else last. *)
+f=add(set:$modelset;m:$registeredmodel):@$registeredmodel{
+  let out=mut.@();
+  let placed=mut.false;
+  lp(let i=0;i<set.models.len;i=i+1){
+    let o:$registeredmodel=set.models.get(i);
+    if(str.eq(o.id;m.id)){
+      out=out.push(m);
+      placed=true
+    }el{ out=out.push(o) }
+  };
+  if(!placed){ out=out.push(m) }el{};
+  <out
+};
+
+f=remove(set:$modelset;id:str):@$registeredmodel{
+  let out=mut.@();
+  lp(let i=0;i<set.models.len;i=i+1){
+    let o:$registeredmodel=set.models.get(i);
+    if(!str.eq(o.id;id)){ out=out.push(o) }el{}
+  };
+  <out
+};
+
+(* ── As layers ──────────────────────────────────────────────────────────── *)
+
+(* The loke types a mapping names, each once, comma separated. *)
+f=typestext(labels:@str):str{
+  let out=mut.@();
+  lp(let i=0;i<labels.len;i=i+1){
+    let ty=typeofpair(labels.get(i));
+    if(!vocab.contains(out;ty)){ out=out.push(ty) }el{}
+  };
+  <str.join(",";out)
+};
+
+f=asnumber(s:str):f64{
+  <mt str.tof64(s) { $ok:x x; $err:e 0.0 }
+};
+
+f=tofilter(m:$registeredmodel):$privacyfilter{
+  <$privacyfilter{
+    id:layerid(m.id);name:"Registered model \(m.id)";kind:fr.modelkind();
+    entitytypes:typestext(m.labels);
+    confidence:0.0;enabled:m.enabled;url:m.url;param:str.join(",";m.labels);
+    priority:m.priority;mode:fr.detectandmask();threshold:asnumber(m.threshold);entityfilter:""
+  }
+};
+
+(* The registry with every registered model added and sorted by priority. A set with an
+   error adds nothing; the caller refuses to run with it. *)
+f=apply(reg:$filterregistry;set:$modelset):$filterregistry{
+  if(str.len(set.error)>0 || set.models.len==0){ <reg }el{};
+  let out=mut.reg;
+  lp(let i=0;i<set.models.len;i=i+1){
+    out=fr.register(out;tofilter(set.models.get(i)))
+  };
+  <fr.sortbypriority(out)
+};
+
+(* The loke type label maps to in a layer's mapping (its param), or "". *)
+f=mapped(mapping:str;label:str):str{
+  if(str.len(mapping)==0){ <"" }el{};
+  let pairs=str.split(mapping;",");
+  lp(let i=0;i<pairs.len;i=i+1){
+    let pair:str=pairs.get(i);
+    if(str.eq(labelof(pair);label)){ <typeofpair(pair) }el{}
+  };
+  <""
+};
+
+(* The type a detection labelled label is given: its mapping, else the label upper-cased
+   (PII when the model gave none). Never dropped. *)
+f=typefor(mapping:str;label:str):str{
+  let ty=mapped(mapping;label);
+  if(str.len(ty)>0){ <ty }el{};
+  if(str.len(label)==0){ <"PII" }el{};
+  <str.toupper(label)
+};
+
+(* Whether the sidecar at the layer's url answers /health as the registered model, a token
+   classifier. Nothing else is sent to it until this is true (core.privacy.layerhealth.consult
+   probes before it scans). *)
+f=isavailable(f:$privacyfilter):bool{
+  if(!reach.isloopbackurl(f.url)){ <false }el{};
+  let body=reach.localget(f.url;"/health");
+  if(!str.startswith(str.trim(body);"{")){ <false }el{};
+  <mt json.dec(body) {
+    $ok:o str.eq(jx.rawvalue(o;"ok");"true") && str.eq(jx.strvalue(o;"model_id";"");modelid(f.id)) && str.eq(jx.strvalue(o;"task";"");task());
+    $jsonerr:e false
+  }
+};
+
+(* One /detect by the registered model, its labels mapped. The sidecar is sent threshold 0, so
+   it reports every span and the layer's own threshold (layerconfig.accepted) decides. *)
+f=scan(f:$privacyfilter;text:str):$modelhits{
+  let es:$pfentities=pf.scanlabels(pf.new(f.url;"0");text);
+  if(!es.ok){ <$modelhits{ok:false;hits:@();unplaced:0;unmapped:0} }el{};
+  let hits=mut.@($piientity);
+  let unmapped=mut.0;
+  lp(let i=0;i<es.hits.len;i=i+1){
+    let h:$piientity=es.hits.get(i);
+    if(str.len(mapped(f.param;h.entitytype))==0){ unmapped=unmapped+1 }el{};
+    hits=hits.push($piientity{entitytype:typefor(f.param;h.entitytype);value:h.value;start:h.start;end:h.end;confidence:h.confidence;placeholder:h.placeholder})
+  };
+  <$modelhits{ok:true;hits:hits;unplaced:es.unplaced;unmapped:unmapped}
+};
