@@ -264,6 +264,37 @@ else
   echo "  FAIL sqlite3 is not installed, so the policy rows cannot be checked" >&2; fail=1
 fi
 
+# LS1.4a: POST /api/settings merges one key into ~/.loke/settings.json. It wrote {key:value}
+# over the whole file, so saving one setting lost every other. Judged on the response body
+# and on the file the server wrote. No API key is posted: the keychain the server would write
+# to is the user's, whatever HOME is.
+SETF="$WORK/home/.loke/settings.json"
+mkdir -p "$WORK/home/.loke"
+printf '%s' '{"port":11430,"theme":"dark"}' > "$SETF"
+setting() {  # $1 label, $2 body, $3 expected status, $4 substring the body must contain
+  local out code body
+  out=$(curl -s -m 20 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
+          -d "$2" "http://127.0.0.1:$PORT/api/settings")
+  code=${out##*$'\n'}; body=${out%$'\n'*}
+  if [ "$code" != "$3" ] || [[ "$body" != *"$4"* ]] || [[ "$body" == *secretvalue* ]]; then
+    echo "  FAIL POST /api/settings ($1): got [$code] $body, expected [$3] containing $4 and no secret" >&2
+    fail=1
+  else
+    echo "  ok   POST /api/settings ($1) [$code]"
+  fi
+}
+setting "key A is saved" '{"key":"locale","value":"en-AU"}' 200 '{"ok":true}'
+setting "key B is saved" '{"key":"default_model","value":"llama3.2:3b"}' 200 '{"ok":true}'
+setting "a body that is not JSON is refused" 'not json' 400 'needs a string key'
+setting "a secret-looking key is refused, not echoed" '{"key":"mistral_api_key","value":"sk-smoke-secretvalue"}' 400 'not stored in the settings file'
+if python3 -c 'import json,sys
+t=open(sys.argv[1]).read(); d=json.loads(t)
+sys.exit(0 if d=={"port":11430,"theme":"dark","locale":"en-AU","default_model":"llama3.2:3b"} and "secretvalue" not in t else 1)' "$SETF"; then
+  echo "  ok   settings.json holds keys A and B and the two settings it started with, and no secret"
+else
+  echo "  FAIL settings.json after the posts: $(cat "$SETF")" >&2; fail=1
+fi
+
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed

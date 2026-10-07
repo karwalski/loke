@@ -11,6 +11,13 @@ i=std:std;
 i=kc:core.storage.keychain;
 i=org:shared.origin;
 
+(* LS1.4a. What respond answers: the POST handler's status and body, built without a
+   request so that they can be tested. *)
+t=$settingsreply{
+  status:i64;
+  body:str
+};
+
 (* Derived from the home directory, not hardcoded. This read
    a literal absolute path under one developer's home directory — so on any
    other account the settings file was never found, every read fell through to "{}",
@@ -30,42 +37,71 @@ f=maskkey(key:str):str{
   <str.concat(str.slice(key;0;4);"****")
 };
 
-(* remove an API key field from the JSON settings file *)
-f=removekeyfromjson(field:str):bool{
-  let content=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
-  let parsed=json.dec(content);
-  let ak=json.str(parsed;"anthropic_api_key");
-  let ok=json.str(parsed;"openai_api_key");
-  let port=json.str(parsed;"port");
-  let ollamaurl=json.str(parsed;"ollama_url");
-  (* rebuild JSON without the specified field *)
-  let out=mut."{";
-  let needcomma=mut.false;
-  if(!str.eq(field;"anthropic_api_key")){
-    if(str.len(ak)>0){
-      out="\(out)\"anthropic_api_key\":\(jx.escape(ak))";
-      needcomma=true
-    }el{}
-  }el{};
-  if(!str.eq(field;"openai_api_key")){
-    if(str.len(ok)>0){
-      if(needcomma){out=str.concat(out;",")}el{};
-      out="\(out)\"openai_api_key\":\(jx.escape(ok))";
-      needcomma=true
-    }el{}
-  }el{};
-  if(str.len(port)>0){
-    if(needcomma){out=str.concat(out;",")}el{};
-    out="\(out)\"port\":\(port)";
-    needcomma=true
-  }el{};
-  if(str.len(ollamaurl)>0){
-    if(needcomma){out=str.concat(out;",")}el{};
-    out="\(out)\"ollama_url\":\(jx.escape(ollamaurl))"
-  }el{};
-  out=str.concat(out;"}");
-  <mt file.write(settingspath();out) {$ok:v true; $err:e false}
+(* LS1.4a. The settings file's text with `field` taken out and every other entry kept,
+   each value exactly as it was written: a number stays a number, a nested object stays
+   whole. Returned open, as "{k:v,k:v" with no closing brace, so that a caller can add an
+   entry or close it. "" when the text is not a JSON object, so that a caller can refuse to
+   write rather than replace a file it could not read. Empty text is the empty object.
+
+   removekeyfromjson used to rebuild the file from the four fields it knew by name (the two
+   API keys, port and ollama_url), so saving an API key also discarded every other setting. *)
+f=withoutkey(existing:str;field:str):str{
+  let trimmed:str=str.trim(existing);
+  let text=if(str.len(trimmed)==0){"{}"}el{trimmed};
+  if(!str.startswith(text;"{")){ <"" }el{};
+  <mt json.dec(text) {
+    $ok:o entriesexcept(o;field);
+    $jsonerr:e ""
+  }
 };
+
+f=entriesexcept(o:$json;field:str):str{
+  let ks=jx.keys(o);
+  let out=mut."{";
+  lp(let i=0;i<ks.len;i=i+1){
+    let k:str=ks.get(i);
+    if(!str.eq(k;field)){
+      if(!str.eq(out;"{")){ out=str.concat(out;",") }el{};
+      out="\(out)\(jx.escape(k)):\(jx.rawvalue(o;k))"
+    }el{}
+  };
+  <out
+};
+
+(* LS1.4a. Read-modify-write: the settings text with `key` set to the string `value` and
+   every other entry kept. "" when the existing text is not a JSON object. *)
+f=mergesetting(existing:str;key:str;value:str):str{
+  let entries=withoutkey(existing;key);
+  if(str.len(entries)==0){ <"" }el{};
+  let pair="\(jx.escape(key)):\(jx.escape(value))";
+  if(str.eq(entries;"{")){ <"{\(pair)}" }el{};
+  <"\(entries),\(pair)}"
+};
+
+(* The settings file's text: "{}" when there is no file, "" when there is one and it cannot
+   be read. A read error is not taken for an empty file, because the write that follows
+   would then replace settings this process merely failed to read. *)
+f=currentsettings():str{
+  if(!file.exists(settingspath())){ <"{}" }el{};
+  <mt file.read(settingspath()) {$ok:v v; $err:e ""}
+};
+
+(* Remove an API key field from the JSON settings file, keeping every other entry. A file
+   that cannot be read, or is not a JSON object, is left as it is. *)
+f=removekeyfromjson(field:str):bool{
+  let entries=withoutkey(currentsettings();field);
+  if(str.len(entries)==0){ <false }el{};
+  <mt file.write(settingspath();str.concat(entries;"}")) {$ok:v true; $err:e false}
+};
+
+(* LS1.4a. Whether `key` looks like a credential. Only the two provider keys have a home,
+   the OS keychain (GA2.1); any other key that looks like a secret is refused rather than
+   written to the settings file in plain text. *)
+f=issecretkey(key:str):bool{
+  let k:str=str.lower(key);
+  <str.endswith(k;"_api_key") || str.endswith(k;"apikey") || str.contains(k;"secret") || str.contains(k;"token") || str.contains(k;"password") || str.contains(k;"credential")
+};
+
 
 (* The body is built without a request so it can be tested. The masking is the part
    worth asserting: a settings endpoint that returned a key in full would be a
@@ -99,28 +135,76 @@ f=get(req:i64):i64{
   <http.res(200;settingsjson())
 };
 
+f=reply(status:i64;body:str):$settingsreply{
+  <$settingsreply{status:status;body:body}
+};
+
+f=refusal(status:i64;message:str):$settingsreply{
+  <reply(status;"{\"ok\":false,\"error\":\(jx.escape(message))}")
+};
+
+(* An API key goes to the OS keychain and is then taken out of the settings file (the
+   migration path). If the keychain refuses it, the file is not touched and the caller is
+   told so, rather than answered ok with the key stored nowhere. *)
+f=savekey(service:str;field:str;value:str):$settingsreply{
+  if(!kc.setapikey(service;value)){
+    <refusal(500;"the key could not be stored in the OS keychain")
+  }el{};
+  removekeyfromjson(field);
+  <reply(200;"{\"ok\":true}")
+};
+
+(* LS1.4a. The body is {"key":"...","value":"..."}, both strings. A non-secret setting is
+   merged into the settings file (read it, change one key, write it back), so every other
+   setting survives; it used to be written as {key:value} over the whole file. A body of any
+   other shape is refused before the file is read. No response echoes a value.
+
+   Concurrency. The server is a pool of pre-forked workers, std.file has no typed rename
+   (file.rename is an untyped ABI name), so the write is not atomic and two POSTs are not
+   serialised. Two concurrent POSTs of different keys can both read the old file, and the
+   later write then loses the earlier key: a lost update. A POST that reads the file while
+   another is half-way through writing it finds no JSON object and is refused with 500
+   without writing. Before LS1.4a every POST lost every other key, so no interleaving is
+   worse than it was. *)
+f=respond(rawbody:str):$settingsreply{
+  let pbody=mt json.dec(rawbody) {$ok:o o; $jsonerr:e jx.emptyobj()};
+  let key=jx.strvalue(pbody;"key";"");
+  if(str.len(key)==0){
+    <refusal(400;"a setting needs a string key")
+  }el{};
+  if(!str.startswith(jx.rawvalue(pbody;"value");"\"")){
+    <refusal(400;"a setting needs a string value")
+  }el{};
+  let value=jx.strvalue(pbody;"value";"");
+  (* store API keys in OS keychain, not in JSON *)
+  if(str.eq(key;"anthropic_api_key")){
+    <savekey("anthropic";"anthropic_api_key";value)
+  }el{};
+  if(str.eq(key;"openai_api_key")){
+    <savekey("openai";"openai_api_key";value)
+  }el{};
+  if(issecretkey(key)){
+    <refusal(400;"secrets are not stored in the settings file: only anthropic_api_key and openai_api_key are accepted, and they go to the OS keychain")
+  }el{};
+  (* non-secret settings still go to JSON, merged into what is there *)
+  let existing=currentsettings();
+  if(str.len(existing)==0){
+    <refusal(500;"the settings file could not be read; it was not changed")
+  }el{};
+  let merged=mergesetting(existing;key;value);
+  if(str.len(merged)==0){
+    <refusal(500;"the settings file is not a JSON object; it was not changed")
+  }el{};
+  file.mkdir(str.concat(std.homedir();"/.loke"));
+  <mt file.write(settingspath();merged) {
+    $ok:v reply(200;"{\"ok\":true}");
+    $err:e refusal(500;"the settings file could not be written")
+  }
+};
+
 f=post(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
-  let rawbody=mt http.body(req) {$ok:v v; $err:e ""};
-  let pbody=json.dec(rawbody);
-  let key=json.str(pbody;"key");
-  let value=json.str(pbody;"value");
-  (* store API keys in OS keychain, not in JSON *)
-  if(str.eq(key;"anthropic_api_key")){
-    kc.setapikey("anthropic";value);
-    removekeyfromjson("anthropic_api_key");
-    <http.res(200;"{\"ok\":true}")
-  }el{};
-  if(str.eq(key;"openai_api_key")){
-    kc.setapikey("openai";value);
-    removekeyfromjson("openai_api_key");
-    <http.res(200;"{\"ok\":true}")
-  }el{};
-  (* non-secret settings still go to JSON *)
-  let existing=mt file.read(settingspath()) {$ok:v v; $err:e "{}"};
-  let eparsed=json.dec(existing);
-  let out="{\(jx.escape(key)):\(jx.escape(value))}";
-  mt file.write(settingspath();out) {$ok:v v; $err:e ""};
-  <http.res(200;"{\"ok\":true}")
+  let r=respond(mt http.body(req) {$ok:v v; $err:e ""});
+  <http.res(r.status;r.body)
 };

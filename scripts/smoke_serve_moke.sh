@@ -176,6 +176,27 @@ api POST /api/datasets  '{}'                            400 'missing required fi
 api POST /api/datasets  '{"id":"au_datasets_medicare"}' 404 'dataset not found' "an id the manifest does not name is a 404"
 api POST /api/feedback  '{"rating":"meh"}'              400 'thumbs_up or thumbs_down' "accepts only thumbs_up or thumbs_down"
 api POST /api/feedback  '{"rating":"thumbs_down"}'      200 '"rating":"thumbs_down"' "and records a valid rating"
+# LS1.4a: and it is stored, in loke's feedback store (loke.db under moke's HOME), not just
+# answered: the row the answer names is in the table with what was posted.
+FBOUT=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' \
+  -d '{"rating":"thumbs_up","feature_area":"chat_response","request_id":"req-smoke-ls14a","model_id":"llama3.2:3b","dataset":"it_platform","comment":"smoke comment"}' \
+  "http://127.0.0.1:$PORT/api/feedback")
+FBID=$(printf '%s' "$FBOUT" | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin); print(d["id"] if d.get("ok") and d.get("stored") else "")
+except Exception: print("")')
+if [ -z "$FBID" ]; then
+  echo "  FAIL POST /api/feedback did not answer a stored id: $(printf '%s' "$FBOUT" | head -c 150)" >&2; fail=1
+elif ! command -v sqlite3 >/dev/null; then
+  echo "  FAIL sqlite3 is not installed, so the stored feedback row cannot be checked" >&2; fail=1
+else
+  FBROW=$(sqlite3 "$WORK/home/.loke/loke.db" "SELECT rating||'|'||feature_area||'|'||request_id||'|'||model_id||'|'||use_case||'|'||comment FROM feedback WHERE id='$FBID'" 2>&1)
+  if [ "$FBROW" = "thumbs_up|Chat response|req-smoke-ls14a|llama3.2:3b|it_platform|smoke comment" ]; then
+    echo "  ok   POST /api/feedback stored row $FBID with what was posted"
+  else
+    echo "  FAIL feedback row $FBID: [$FBROW]" >&2; fail=1
+  fi
+fi
 api GET  /api/memory    ""                              200 '"ok":true'             "memory API answers"
 api POST /api/memory    '{"action":"store"}'            400 'missing required field: content' "storing requires content"
 api POST /api/pipeline  '{}'                            400 'missing required field: prompt' "the pipeline requires a prompt"
@@ -189,6 +210,15 @@ api POST '/api/upload?name=sales_q3.csv' $'region,amount\nnorth,10\n' 200 '"prev
 # MK6.9: the name is percent-decoded (moke.query.value); it was stored as sent.
 api POST '/api/upload?name=sales%20q3%2B.csv' $'region,amount\nnorth,10\n' 200 '"filename":"sales q3+.csv"' "a percent-encoded ?name= is decoded"
 api POST /api/routing   '{"prompt":"hello"}'            200 '"routing":{'           "routing explains a decision"
+# LS1.4a: prompt, sensitivity and tolerance reach the answer; they were read and dropped, and
+# every answer said data_analysis on the interactive tier.
+api POST /api/routing   '{"prompt":"hello"}'            200 '"intent":"chat"'       "a greeting is classified as chat"
+api POST /api/routing   '{"prompt":"please summarise this report"}' 200 '"intent":"summarisation"' "a different prompt gives a different intent"
+api POST /api/routing   '{"prompt":"hello","tolerance":"patient"}' 200 '"tier":"considered"' "a patient tolerance gives the considered tier"
+api POST /api/routing   '{"prompt":"hello","tolerance":"patient"}' 200 '"latency_tolerance":"patient"' "and reports the tolerance asked for"
+api POST /api/routing   '{"prompt":"my password is hunter2"}' 200 '"sensitivity":"RESTRICTED"' "a prompt naming a password raises the sensitivity"
+api POST /api/routing   '{"prompt":"hello","tolerance":"whenever"}' 400 'tolerance must be' "an unknown tolerance is refused, not ignored"
+api POST /api/routing   '{"prompt":"hello","sensitivity":"TOPSECRET"}' 400 'sensitivity must be' "an unknown sensitivity is refused"
 # GA1.5c: the cost it answered was priced over a fixed 500 tokens in and 200 out, whatever the
 # prompt. No token is counted before dispatch, so it must say the cost is not measured.
 api POST /api/routing   '{"prompt":"hello"}'            200 '"cost":{"measured":false,"reason":"not measured' "and says its cost is not measured, not priced over invented tokens"

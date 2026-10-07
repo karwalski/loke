@@ -1,0 +1,140 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.browser.settingsmerge;
+i=t:std.test;
+i=str:std.str;
+i=json:std.json;
+i=file:std.file;
+i=std:std;
+i=jx:shared.jsonobj;
+i=kcs:std.keychain;
+i=set:page.api.settings;
+
+(* LS1.4a. POST /api/settings wrote {key:value} over the whole settings file, so saving one
+   setting discarded every other one, and saving an API key rebuilt the file from four named
+   fields and discarded the rest. These assertions drive page.api.settings.respond, the body
+   of the POST handler, against the settings file under this test's throwaway HOME.
+
+   Every keychain call goes to a throwaway keychain file selected with std.keychain.use
+   before the first one (X8.7), never the user's login keychain. *)
+
+f=makekeychain():str{
+  let hex:str=str.randhex(8);
+  let p="\(std.homedir())/loke-test-settingsmerge-\(hex).keychain-db";
+  if(kcs.create(p;"loke-throwaway")){ <p }el{};
+  <""
+};
+
+f=readsettings():str{
+  <mt file.read(set.settingspath()) {$ok:v v; $err:e ""}
+};
+
+f=field(text:str;key:str):str{
+  <mt json.dec(text) {
+    $ok:o jx.strvalue(o;key;"");
+    $jsonerr:e ""
+  }
+};
+
+f=raw(text:str;key:str):str{
+  <mt json.dec(text) {
+    $ok:o jx.rawvalue(o;key);
+    $jsonerr:e ""
+  }
+};
+
+f=occurrences(text:str;needle:str):i64{
+  <(str.split(text;needle).len as i64)-1
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let kcpath=makekeychain();
+  if(str.len(kcpath)==0){
+    t.assert(false;"a throwaway keychain could be created; nothing else runs without one");
+    <1
+  }el{};
+  if(kcs.use(kcpath)){}el{
+    t.assert(false;"the throwaway keychain could be selected; nothing else runs without it");
+    kcs.destroy(kcpath);
+    <1
+  };
+
+  (* A settings file with settings this endpoint never names, a number and a nested object. *)
+  file.mkdir(str.concat(std.homedir();"/.loke"));
+  let seed="{\"port\":11430,\"ollama_url\":\"http://127.0.0.1:11434\",\"theme\":\"dark\",\"limits\":{\"daily\":5}}";
+  if(t.assert(mt file.write(set.settingspath();seed) {$ok:v true; $err:e false};"the seed settings file is written")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Key A, then key B: both present, and nothing unrelated lost ─────────────── *)
+  let ra=set.respond("{\"key\":\"locale\",\"value\":\"en-AU\"}");
+  if(t.assert(ra.status==200;"posting key A is accepted")){pass=pass+1}el{fail=fail+1};
+  let rb=set.respond("{\"key\":\"default_model\",\"value\":\"llama3.2:3b\"}");
+  if(t.assert(rb.status==200;"posting key B is accepted")){pass=pass+1}el{fail=fail+1};
+  let afterab=readsettings();
+  if(t.asserteq(field(afterab;"locale");"en-AU";"key A survives posting key B")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(afterab;"default_model");"llama3.2:3b";"key B is present")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(afterab;"theme");"dark";"an unrelated string setting survives both posts")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(raw(afterab;"port");"11430";"a number setting survives, still a number")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(afterab;"ollama_url");"http://127.0.0.1:11434";"ollama_url survives")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(raw(afterab;"limits");"\"daily\":5");"a nested object setting survives whole")){pass=pass+1}el{fail=fail+1};
+
+  (* Posting A again replaces it rather than adding a second "locale". *)
+  let ra2=set.respond("{\"key\":\"locale\",\"value\":\"en-GB\"}");
+  if(t.assert(ra2.status==200;"re-posting key A is accepted")){pass=pass+1}el{fail=fail+1};
+  let afterre=readsettings();
+  if(t.asserteq(field(afterre;"locale");"en-GB";"re-posting key A replaces its value")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(afterre;"\"locale\"")==1;"and the file holds one locale, not two")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(afterre;"default_model");"llama3.2:3b";"key B survives re-posting key A")){pass=pass+1}el{fail=fail+1};
+
+  (* A value with a quote and a newline round-trips and leaves the file valid JSON. *)
+  let rq=set.respond("{\"key\":\"signature\",\"value\":\"say \\\"hi\\\"\\nbye\"}");
+  if(t.assert(rq.status==200;"a value with a quote and a newline is accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(readsettings();"theme");"dark";"and the file still parses afterwards")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A malformed body is refused without touching the file ──────────────────── *)
+  let before=readsettings();
+  let bad1=set.respond("this is not json");
+  if(t.assert(bad1.status==400;"a body that is not JSON is refused")){pass=pass+1}el{fail=fail+1};
+  let bad2=set.respond("{\"value\":\"orphan\"}");
+  if(t.assert(bad2.status==400;"a body with no key is refused")){pass=pass+1}el{fail=fail+1};
+  let bad3=set.respond("{\"key\":\"locale\"}");
+  if(t.assert(bad3.status==400;"a body with no value is refused")){pass=pass+1}el{fail=fail+1};
+  let bad4=set.respond("{\"key\":\"locale\",\"value\":42}");
+  if(t.assert(bad4.status==400;"a value that is not a string is refused")){pass=pass+1}el{fail=fail+1};
+  let bad5=set.respond("");
+  if(t.assert(bad5.status==400;"an empty body is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readsettings();before;"the settings file is byte-for-byte unchanged after five refused bodies")){pass=pass+1}el{fail=fail+1};
+
+  (* ── No secret in the file or the response ──────────────────────────────────── *)
+  let rs=set.respond("{\"key\":\"mistral_api_key\",\"value\":\"sk-w93-mistral-secretvalue\"}");
+  if(t.assert(rs.status==400;"a secret-looking key other than the two keychain ones is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(rs.body;"secretvalue");"and its value is not echoed")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readsettings();before;"and the file is unchanged")){pass=pass+1}el{fail=fail+1};
+
+  let rk=set.respond("{\"key\":\"anthropic_api_key\",\"value\":\"sk-ant-w93-supersecretvalue\"}");
+  if(t.assert(rk.status==200;"an anthropic key is accepted, for the keychain")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(rk.body;"supersecret");"the response does not echo the key")){pass=pass+1}el{fail=fail+1};
+  let afterkey=readsettings();
+  if(t.assert(!str.contains(afterkey;"supersecret");"the key is not in the settings file")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(afterkey;"theme");"dark";"saving an API key keeps the unrelated settings (removekeyfromjson used to drop them)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(afterkey;"locale");"en-GB";"and keeps a setting saved through this endpoint")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(set.keyfordisplay("anthropic";"anthropic_api_key");"****");"the key is in the (throwaway) keychain, shown masked")){pass=pass+1}el{fail=fail+1};
+
+  (* A file that is not a JSON object is not replaced. *)
+  file.write(set.settingspath();"not json at all");
+  let rn=set.respond("{\"key\":\"locale\",\"value\":\"en-AU\"}");
+  if(t.assert(rn.status==500;"a settings file that is not JSON is refused with 500")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readsettings();"not json at all";"and is left as it was")){pass=pass+1}el{fail=fail+1};
+
+  (* No file at all is the empty object: the first save creates it. *)
+  file.delete(set.settingspath());
+  let rf=set.respond("{\"key\":\"locale\",\"value\":\"en-AU\"}");
+  if(t.assert(rf.status==200;"with no settings file, a save is accepted")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(field(readsettings();"locale");"en-AU";"and creates the file with the one setting")){pass=pass+1}el{fail=fail+1};
+
+  kcs.destroy(kcpath);
+  <fail
+};

@@ -8,6 +8,7 @@ i=json:std.json;
 i=str:std.str;
 i=routing:moke.routingexplainer;
 i=tiers:moke.tiervisualiser;
+i=rq:moke.routingrequest;
 i=time:std.time;
 i=jx:shared.jsonobj;
 
@@ -56,6 +57,20 @@ f=post(req:i64):i64{
     $jsonerr:e "llama3.2:3b"
   };
 
+  (* LS1.4a. `prompt`, `sensitivity` and `tolerance` now reach the answer, through loke's
+     router modules (moke.routingrequest): the intent is classifyfast's on the prompt, the
+     sensitivity is the caller's level raised by the prompt's content, and the tier follows
+     the tolerance. They were read and dropped: the intent was data_analysis / 0.85 for every
+     prompt and the tier interactive for every tolerance. A tolerance or sensitivity the
+     router does not know is refused with 400 rather than quietly treated as the default. *)
+  if(!rq.toleranceknown(tolerance)){
+    <http.res(400;"{\"ok\":false,\"error\":\"tolerance must be instant, patient or background\"}")
+  }el{};
+  if(!rq.sensitivityknown(sensitivity)){
+    <http.res(400;"{\"ok\":false,\"error\":\"sensitivity must be PUBLIC, INTERNAL, CONFIDENTIAL or RESTRICTED\"}")
+  }el{};
+  let ri=rq.inputs(prompt;sensitivity;tolerance);
+
   (* str.concat throughout, not `+`. Every one of the six `+` joins in this function was an
      E4031: one side is a declared str and the other is a call whose return type the checker
      cannot resolve, and `+` demands both sides agree. ADR-0004 says str.concat or interpolation.
@@ -63,21 +78,18 @@ f=post(req:i64):i64{
      `std` module interface and no tk_std_nowms_w symbol in the runtime — measured, std.nowms()
      type-checks and then fails to LINK — while str.fromint64 is one of std.str's untyped
      `(i64) -> i64` names and str.fromint is declared (i64) -> str. *)
-  let reason="local-only (sensitivity: \(sensitivity), tier: interactive) => \(modelid)";
+  let reason="\(ri.sensitivityrouting) (sensitivity: \(ri.sensitivity), tier: \(ri.tier)) => \(modelid)";
   let decision=mut.routing.newdecision(str.concat("req-";str.fromint(time.nowms())));
-  decision=routing.withintent(decision;"data_analysis";0.85;"keyword");
-  decision=routing.withsensitivity(decision;sensitivity;"prefer-local");
-  decision=routing.withselection(decision;modelid;"ollama";true;"interactive";reason;0.0);
+  decision=routing.withintent(decision;ri.intent;ri.confidence;ri.method);
+  decision=routing.withsensitivity(decision;ri.sensitivity;ri.sensitivityrouting);
+  decision=routing.withtolerance(decision;ri.tolerance);
+  decision=routing.withselection(decision;modelid;"ollama";true;ri.tier;reason;0.0);
 
-  (* NOT FIXED, and it should be: the decision this endpoint returns does not depend on the
-     request. `prompt` and `tolerance` are read out of the body above and then never used —
-     the intent is hard-coded to data_analysis / 0.85 / "keyword", the tier to "interactive",
-     and the hardware summary to an Apple M-series string, for every caller on every machine.
-     Only `sensitivity` and `model_id` reach the answer. So the routing explanation the demo UI
-     presents as computed is a constant with two fields substituted in. Fixing it needs an intent
-     classifier and a tier decision, and moke.routingexplainer exposes neither — it is a builder
-     of decision records, not a router — so the fix belongs with moke/src, not here. *)
-  let tiervisual=tiers.buildvisual("interactive";"Apple M-series  16GB+ unified memory");
+  (* NOT FIXED: the model is the caller's model_id and the provider is always local ollama,
+     because choosing one needs core.router.router.routerequest and a model registry, which
+     moke does not hold; and the hardware summary is a fixed Apple M-series string, not a
+     measurement of this machine. *)
+  let tiervisual=tiers.buildvisual(ri.tier;"Apple M-series  16GB+ unified memory");
 
   (* GA1.5c: `cost` was moke.costcomparison over a fixed 500 tokens in and 200 out, whatever
      the prompt, with the whole cloud price counted as saved for a local run. No token is
