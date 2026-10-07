@@ -50,7 +50,11 @@ cp "$LOKE_BIN" "$WORK/lk/loke"
 cp "$MOKE_BIN" "$WORK/mk/moke"
 
 SEEN="$WORK/model_saw.log"; : > "$SEEN"
-python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
+# BG1.1: a prompt carrying the dashboard's Phase 1 or refine instruction is answered with a DDL
+# (tests/ui/dashboard_bg11_replies.json); every other prompt still gets the echo the GA3 checks
+# expect.
+FAKE_OLLAMA_REPLIES="$ROOT/tests/ui/dashboard_bg11_replies.json" \
+  python3 "$ROOT/scripts/lib/fake_ollama.py" "$SEEN" >/dev/null 2>&1 & PIDS="$PIDS $!"
 ( cd "$WORK/lk" && HOME="$WORK/lk/home" exec "$WORK/lk/loke" > "$WORK/lk.log" 2>&1 ) & PIDS="$PIDS $!"
 # MK19.9: an empty proxy allowlist, whatever the caller's environment holds, so /api/proxy
 # can fetch nothing and no check below can reach a real host.
@@ -139,6 +143,23 @@ fi
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/dashboard" "$ROOT/tests/ui/layerhealth_f3b6.json"
   rc=$?
+fi
+# BG1.1 / BG1.3: the dashboard's three phases against the whole stack. Phase 1 goes through
+# loke to the stand-in model, which answers a fenced DDL carrying an invented figure and an
+# invented series; the page must take loke's answer as a dashboard, compute every value from the
+# loaded rows (Phase 2), plot only what it computed (Phase 3), and do it again for a refinement.
+# Then the stand-in's own log must show both prompts reached it, so no stub in the page answered.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/upload" "$ROOT/tests/ui/dashboard_bg11.json"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    if grep -qxF 'Design a dashboard as a JSON DDL object' "$SEEN.bymarker" 2>/dev/null \
+       && grep -qxF 'Refine this dashboard specification' "$SEEN.bymarker"; then
+      echo "  ok   the stand-in model answered the dashboard's Phase 1 and refine prompts itself"
+    else
+      echo "  FAIL the dashboard's prompts never reached the stand-in model: $(cat "$SEEN.bymarker" 2>/dev/null)" >&2; rc=1
+    fi
+  fi
 fi
 # LS1.4b: loke's setup wizard saves each entered provider key with its own {"key","value"}
 # POST, checks each answer, and says which keys were saved and which were not. X8.9: this loke

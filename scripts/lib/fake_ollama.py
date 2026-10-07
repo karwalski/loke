@@ -16,6 +16,10 @@ FAKE_OLLAMA_DIGESTS ("name=digest,name=digest") gives a listed model its own dig
 FAKE_OLLAMA_DELAYS_MS ("0,40,5") delays the Nth logged completion by the Nth entry, cycling,
 so repeated benchmark runs time differently and their interval is not a single point
 (smoke_benchmark.sh, VM1.3).
+FAKE_OLLAMA_REPLIES names a JSON file of {"marker": "reply"}: a forwarded prompt containing a
+marker is answered with that reply instead of the echo (smoke_ui.sh gives moke's dashboard its
+DDL this way, BG1.1, while every other prompt still gets the echo its checks expect). Each
+answer by marker is appended to <log>.bymarker as the marker matched.
 
 MK6.13: it decodes every POST body as Ollama does. Ollama's decoder (Go's encoding/json)
 refuses a raw control character inside a string, answering 400 {"error":"invalid character
@@ -34,6 +38,7 @@ PORT=int(os.environ.get("FAKE_OLLAMA_PORT","11434"))
 SEPS=(",",":") if os.environ.get("FAKE_OLLAMA_COMPACT")=="1" else None
 DIGESTS=dict(kv.split("=",1) for kv in os.environ.get("FAKE_OLLAMA_DIGESTS","").split(",") if "=" in kv)
 MULTILINE=os.environ.get("FAKE_OLLAMA_MULTILINE")=="1"
+REPLIES=json.load(open(os.environ["FAKE_OLLAMA_REPLIES"])) if os.environ.get("FAKE_OLLAMA_REPLIES") else {}
 DELAYS=[int(x) for x in os.environ.get("FAKE_OLLAMA_DELAYS_MS","").split(",") if x.strip()]
 SERVED=[0]
 SERVEDLOCK=threading.Lock()
@@ -75,7 +80,10 @@ class H(http.server.BaseHTTPRequestHandler):
         import re
         ph=re.findall(r'\[[A-Z_]+_[0-9a-f]+_[0-9]+\]',body)
         reply=REPLY if REPLY is not None else "Summary: the user asked to contact "+(ph[0] if ph else "nobody")+"."
-        if MULTILINE: reply="Summary:\n\tthe user asked to contact \""+(ph[0] if ph else "nobody")+"\"."
+        hit=[m for m in REPLIES if m in body]
+        if hit:
+            reply=REPLIES[hit[0]]; open(LOG+'.bymarker','a').write(hit[0]+'\n')
+        elif MULTILINE: reply="Summary:\n\tthe user asked to contact \""+(ph[0] if ph else "nobody")+"\"."
         if self.path.startswith('/api/chat'): self._send({"model":"llama3","message":{"role":"assistant","content":reply},"done":True,"prompt_eval_count":12,"eval_count":9})
         else: self._send({"model":"llama3","response":reply,"done":True,"prompt_eval_count":12,"eval_count":9})
 http.server.ThreadingHTTPServer(('127.0.0.1',PORT),H).serve_forever()
