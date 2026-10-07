@@ -1852,6 +1852,19 @@ headers say, a header value cannot contain a `"`, and the Host header omits the 
 local callers post through `shared.reachability.localpost`; the hosted ones stay where they
 are until T-58 is resolved (VM1.6g).
 
+**Re-measured 2026-10-08 at toke v3.1.0 (`86c432da`), loke VM1.6g, locally against a TLS recorder
+with a throwaway CA.** The four-argument client-first call is E4026 and the two-argument
+`http.get(url;@(http.header(...)))` is E4031 (`http.header` wants a `req`, and `http.get` is
+route registration). **But the THREE-argument client-first call,
+`http.postheaders(http.client(url);body;@(@(name;value)))`, still compiles** (the `httpclient`
+is accepted where the declared parameter is `str`) and sends nothing: no TLS handshake reaches
+the server, trusted certificate or not, and the call answers `$err`. No loke source uses it
+(checked by grep, 2026-10-08); putting it back in `core.providers.transport.post` is VM1.6g's
+mutant and fails `tests/integration/test_hosted_tls.tk` by name. The URL-first typed call
+arrives: a caller's `content-type` REPLACES the default (one Content-Type line arrives), and the
+Host header still omits the port. **The ask (new):** reject an `httpclient` where a `str` URL is
+declared, as the four-argument form already is.
+
 ## T-49 — `net.listen(port)` segfaults
 
 Measured 2026-09-25: `let fd=net.listen(59433);` in a test binary crashes (SIGSEGV).
@@ -2156,6 +2169,15 @@ they are (VM1.6g, F5.11).
 **The ask:** verify the peer by default (`SSL_VERIFY_PEER`, the system trust store, and
 `SSL_set1_host` for the name), fail closed when verification fails, and let a caller opt out
 only explicitly.
+
+**Lifted at toke v3.1.0 (B0), measured by loke 2026-10-01 (F5.11) and, per call site, 2026-10-08
+(VM1.6g).** `http.postheaders`, `http.geturl` and `http.clientget` each refused a self-signed
+certificate (`TLSV1_ALERT_UNKNOWN_CA`) and a trusted certificate for another name
+(`SSLV3_ALERT_BAD_CERTIFICATE`), with no request line reaching the server, and sent only once
+the test CA was trusted through `SSL_CERT_FILE`. `tests/integration/test_https_verify.tk` and
+`test_hosted_tls.tk`. Still open, and not a verification gap: there is no header-carrying GET
+(`http.geturl` and `http.clientget` send only `Host` and `Connection`), so a GET that needs a
+`User-Agent` or an `Authorization` (GitHub's API needs the first) cannot be written.
 
 ## T-59 — a capability grant cannot be scoped, and anyone who launches the binary can widen it
 

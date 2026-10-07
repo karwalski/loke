@@ -1,0 +1,412 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.hostedtls;
+
+i=t:std.test;
+i=io:std.io;
+i=str:std.str;
+i=file:std.file;
+i=args:std.args;
+i=std:std;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=ks:core.governance.killswitch;
+i=ant:core.providers.anthropic;
+i=oai:core.providers.openai;
+i=pt:core.providers.types;
+i=oauth:loke.core.auth.oauth;
+i=refresh:loke.core.auth.refresh;
+i=rep:core.feedback.report;
+i=fbp:core.feedback.pipeline;
+i=h:page.api.pipeline;
+
+(* VM1.6g. Every hosted call site, judged over TLS by what a stand-in on loopback received.
+
+   The sites VM1.6f left waiting were written in two forms measured to send nothing: the
+   two-argument `http.get(url;@(http.header(...)))`, a route registration (T-57), and the
+   client-first `http.postheaders(http.client(url);...)` (T-48). toke 3.1.0 rejects both at
+   compile time (E4031, E4026), so F10.39 moved every site to a form that compiles, and F5.11
+   put the providers on core.providers.transport, which sends https to any host because the
+   client now verifies the certificate and its name (T-58 lifted). What no test showed until
+   this one is each SITE doing that: test_https_verify.tk measures transport.post with a fixed
+   body, and test_hosted_requests.tk measures the sites over plain http.
+
+   So each site is driven here, through its production function, at scripts/lib/
+   http_recorder.py serving TLS on 127.0.0.1 with certificates scripts/lib/tls_fixture.sh
+   makes for this run:
+     - the browser pipeline's Anthropic hop (page.api.pipeline.walkchain, as toanthropic calls
+       it), from text the privacy filter has run over;
+     - core.providers.anthropic and openai.completeplainat, given the request loke ask builds:
+       the anonymised text and the final system prompt;
+     - core.auth.oauth.exchangecode and core.auth.refresh.dorefresh, at a loopback token
+       endpoint;
+     - core.feedback.report.submittogithubat and core.feedback.pipeline.submitbatchat.
+   For each: from a certificate the test CA signed, with the CA trusted, the request arrives
+   with its headers over a completed handshake; from a self-signed certificate nothing
+   arrives. The provider sites are also judged on WHAT arrived: placeholders, and no
+   identifier from the text or the system prompt. The kill switch is engaged once over TLS,
+   and nothing arrives.
+
+   The trusted cases need SSL_CERT_FILE in the calling process, and loke's binaries are not
+   granted env.write, so each runs in a child: this binary again, through env(1), with the
+   site's name and the stand-in's URL. The child exits 0 only when the site reports the
+   stand-in's answer. As in test_https_verify.tk, env(1) is a system binary, so the child runs
+   without the real-HOME guard's library; it keeps the throwaway HOME. No request leaves the
+   machine, no key is real, and nothing reads or writes a keychain: core.auth.oauth.revoke reads
+   its token from the keychain, so it is not driven here (it is the same call as
+   exchangecode). Nothing in production reads SSL_CERT_FILE from loke's configuration, and the
+   test CA lives in this run's scratch directory only. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_hostedtls_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitfile(p:str):str{
+  let v=mut."";
+  lp(let k=0;k<150 && str.len(v)==0;k=k+1){
+    v=readfile(p);
+    if(str.len(v)==0){ pause() }el{}
+  };
+  <v
+};
+
+f=waitcontains(p:str;needle:str):bool{
+  let seen=mut.false;
+  lp(let k=0;k<50 && seen==false;k=k+1){
+    seen=str.contains(readfile(p);needle);
+    if(seen==false){ pause() }el{}
+  };
+  <seen
+};
+
+(* The text and system prompt every provider site starts from. Each identifier must be
+   replaced before anything is sent; none may reach a stand-in. *)
+f=usertext():str{
+  <"Please write to user.probe@example.com about the invoice."
+};
+
+f=systext():str{
+  <"You are helping caller.probe@example.com, ABN 51 824 753 556."
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=routeto(id:str;prov:$provider):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:prov;
+      contextwindow:32768 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"test";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=openfreshstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-hosted-tls");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) { $ok:s 1; $err:e 0 }
+};
+
+(* The request loke ask builds after the scan (packages/cli/src/ask.tk): the anonymised text
+   as the user message and the final system prompt. *)
+f=askrequest(run:$pipelinerun;modelid:str):$completionrequest{
+  let res:$piidetectionresult=run.result;
+  <$completionrequest{
+    modelid:modelid;
+    messages:@(pt.usermsg(res.anonymised));
+    systemprompt:run.finalsystemprompt;
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+(* ── The children: one site each ─────────────────────────────────────────────────── *)
+
+(* The browser pipeline's Anthropic hop, as toanthropic sends it. 0 when the stand-in's text
+   came back and the dispatch has its disclosure row; 2 when it answered with no row; 1 when
+   nothing came back. With `killed`, the provider is switched off first, and 0 means the hop
+   was refused by the kill switch. *)
+f=childpipeline(url:str;killed:bool):i64{
+  let store=openfreshstore();
+  if(store==0){ <3 }el{};
+  if(killed){ ks.engageprovider(store;"anthropic";"VM1.6g test") }el{};
+  let run=sp.runforward(usertext();systext();localonly());
+  let route=routeto("claude-probe-model";$provider{$anthropic:0});
+  let reply=h.walkchain(store;run;h.onehop(run.result;route);h.routercfg(store);h.optimisefor(run;"";20);h.privacyfields(run);sh.nowms();h.decide(run);"user_choice";"user";dl.nosession();h.ollamabase();url;"sk-ant-tls-test-key-000000");
+  if(killed){
+    if(str.contains(reply;"kill_switch")){ <0 }el{ <1 }
+  }el{};
+  if(str.contains(reply;"answered-by-recorder")){}el{ <1 };
+  if(dl.sentbytes(run.requestid)>0){ <0 }el{ <2 }
+};
+
+f=childanthropic(url:str):i64{
+  let run=sp.runforward(usertext();systext();localonly());
+  let r:$completionresponse=ant.completeplainat(ant.new("sk-ant-tls-test-key-000000");askrequest(run;"claude-probe-model");url);
+  if(pt.iscompletion(r) && str.eq(r.content;"answered-by-recorder")){ <0 }el{ <1 }
+};
+
+f=childopenai(url:str):i64{
+  let run=sp.runforward(usertext();systext();localonly());
+  let r:$completionresponse=oai.completeplainat(oai.new("sk-oai-tls-test-key-000000");askrequest(run;"gpt-probe-model");url);
+  if(pt.iscompletion(r) && str.eq(r.content;"answered-by-recorder")){ <0 }el{ <1 }
+};
+
+f=oauthcfg(tokenurl:str):$oauthconfig{
+  <$oauthconfig{adapterid:"tls-test";clientid:"client-tls-test";authoriseurl:"";tokenurl:tokenurl;scopes:"read";revokeurl:"";callbackport:0}
+};
+
+f=childoauth(url:str):i64{
+  let tok=mt oauth.exchangecode(oauthcfg(url);"code-tls-test";"verifier-tls-test";"http://localhost:8739/callback") {
+    $ok:ts ts.accesstoken;
+    $oautherr:e ""
+  };
+  if(str.eq(tok;"recorder-access-token")){ <0 }el{};
+  if(str.eq(tok;"recorder-refresh-token")){ <4 }el{};
+  <1
+};
+
+f=childrefresh(url:str):i64{
+  let r=refresh.dorefresh(url;"client-tls-test";"refresh-tls-test");
+  if(r.ok && str.eq(r.accesstoken;"recorder-access-token")){ <0 }el{ <1 }
+};
+
+f=issue():$issuereport{
+  <$issuereport{id:"r1";reporttype:"bug";description:"the tls probe report";stepstoreproduce:"";expected:"";version:"0";platform:"test";createdat:0}
+};
+
+f=ghcfg():$githubconfig{
+  <$githubconfig{owner:"o";repo:"r";token:"gh-tls-test-token"}
+};
+
+f=batch():$submissionbatch{
+  <$submissionbatch{entriescount:2;thumbsup:1;thumbsdown:1;topareas:@("tls");periodlabel:"tls-probe"}
+};
+
+f=childreport(url:str):i64{
+  if(rep.submittogithubat(issue();url;"gh-tls-test-token")){ <0 }el{ <1 }
+};
+
+f=childbatch(url:str):i64{
+  let r=fbp.submitbatchat(ghcfg();batch();url);
+  if(r.ok && str.eq(r.issueurl;"https://recorder.invalid/issues/1")){ <0 }el{};
+  if(r.ok && str.len(r.issueurl)==0){ <5 }el{};
+  <1
+};
+
+f=child(site:str;url:str):i64{
+  if(site=="pipeline"){ <childpipeline(url;false) }el{};
+  if(site=="pipeline-killed"){ <childpipeline(url;true) }el{};
+  if(site=="anthropic"){ <childanthropic(url) }el{};
+  if(site=="openai"){ <childopenai(url) }el{};
+  if(site=="oauth"){ <childoauth(url) }el{};
+  if(site=="refresh"){ <childrefresh(url) }el{};
+  if(site=="report"){ <childreport(url) }el{};
+  if(site=="batch"){ <childbatch(url) }el{};
+  <9
+};
+
+(* Run this binary as a child for `site`, trusting the test CA, and answer its exit status,
+   or -1 when it could not be started. *)
+f=runsite(self:str;ca:str;site:str;url:str):i64{
+  let certenv="SSL_CERT_FILE=\(ca)";
+  let h=mt process.spawn(@("env";"-u";"SSL_CERT_DIR";certenv;self;"--site";site;url)) { $ok:h h; $err:e 0 };
+  if(h==0){ <0-1 }el{};
+  <process.wait(h) as i64
+};
+
+(* The last logged request whose line starts with `prefix` (e.g. "POST /v1/messages "),
+   body only, or "". *)
+f=lastbody(logp:str;prefix:str):str{
+  let lines=str.split(readfile(logp);"\n");
+  let found=mut."";
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;prefix)){ found=str.trimprefix(ln;prefix) }el{}
+  };
+  <found
+};
+
+f=countlines(logp:str;prefix:str):i64{
+  let lines=str.split(readfile(logp);"\n");
+  let n=mut.0;
+  lp(let i=0;i<lines.len;i=i+1){
+    let ln:str=lines.get(i);
+    if(str.startswith(ln;prefix)){ n=n+1 }el{}
+  };
+  <n
+};
+
+(* The header block the recorder logged for the last request whose request line is `line`. *)
+f=lastheaders(hp:str;line:str):str{
+  let blocks=str.split(readfile(hp);"\n\n");
+  let found=mut."";
+  lp(let i=0;i<blocks.len;i=i+1){
+    let b:str=blocks.get(i);
+    if(str.startswith(str.trimprefix(b;"\n");line)){ found=b }el{}
+  };
+  <found
+};
+
+f=countof(s:str;needle:str):i64{
+  <(str.split(s;needle).len as i64)-1
+};
+
+f=recorderargv(base:str;name:str;certs:str):@str{
+  <@("python3";"scripts/lib/http_recorder.py";"\(base).\(name).log";"\(base).\(name).port";"answer";"\(certs)/\(name).pem";"\(certs)/\(name).key")
+};
+
+f=noidentifier(s:str):bool{
+  <!str.contains(s;"user.probe@example.com") && !str.contains(s;"caller.probe@example.com") && !str.contains(s;"51 824 753 556")
+};
+
+f=main():i64{
+  let mode=mt args.get(1 as u64) { $ok:v v; $err:e "" };
+  if(mode=="--site"){
+    let site=mt args.get(2 as u64) { $ok:v v; $err:e "" };
+    <child(site;mt args.get(3 as u64) { $ok:v v; $err:e "" })
+  }el{};
+  let self=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let certs="\(base).certs";
+  let gen=mt process.spawn(@("sh";"scripts/lib/tls_fixture.sh";certs)) { $ok:h h; $err:e 0 };
+  if(gen!=0){ process.wait(gen); }el{};
+  if(t.assert(str.len(waitfile("\(certs)/done"))>0 && str.len(readfile("\(certs)/ca.pem"))>0;"the throwaway CA and certificates were generated")){pass=pass+1}el{fail=fail+1};
+  let ca="\(certs)/ca.pem";
+
+  let grec=mt process.spawn(recorderargv(base;"good";certs)) { $ok:h h; $err:e 0 };
+  let srec=mt process.spawn(recorderargv(base;"self";certs)) { $ok:h h; $err:e 0 };
+  let gport=waitfile("\(base).good.port");
+  let sport=waitfile("\(base).self.port");
+  if(t.assert(str.len(gport)>0 && str.len(sport)>0;"two TLS stand-ins came up")){pass=pass+1}el{fail=fail+1};
+  let good="https://127.0.0.1:\(gport)";
+  let bad="https://127.0.0.1:\(sport)";
+  let glog="\(base).good.log";
+  let ghdr="\(base).good.log.headers";
+  let slog="\(base).self.log";
+
+  (* ── The browser pipeline's Anthropic hop ─────────────────────────────────────── *)
+  let cp=runsite(self;ca;"pipeline";"\(good)/v1/messages");
+  if(t.assert(cp==0;"pipeline: the Anthropic hop answered over verified TLS, with its disclosure row")){pass=pass+1}el{fail=fail+1};
+  let pbody=lastbody(glog;"POST /v1/messages ");
+  if(t.assert(str.len(pbody)>0;"pipeline: the POST /v1/messages arrived at the stand-in")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(noidentifier(pbody);"pipeline: no identifier from the text or the system prompt arrived")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pbody;"Please write to [EMAIL_") && str.contains(pbody;"about the invoice.");"pipeline: the text arrived anonymised, the rest of it as written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pbody;"You are helping [EMAIL_") && str.contains(pbody;"ABN [AU_ABN_");"pipeline: and the system prompt anonymised")){pass=pass+1}el{fail=fail+1};
+  let ph=lastheaders(ghdr;"POST /v1/messages");
+  if(t.assert(str.contains(ph;"x-api-key: sk-ant-tls-test-key-000000") && str.contains(ph;"anthropic-version: 2023-06-01");"pipeline: with the Anthropic headers")){pass=pass+1}el{fail=fail+1};
+  let pn=countlines(glog;"POST /v1/messages ");
+
+  (* The kill switch, over the same verified connection: nothing is sent. *)
+  let ck=runsite(self;ca;"pipeline-killed";"\(good)/v1/messages");
+  if(t.assert(ck==0;"pipeline: with the provider switched off, the hop is refused by the kill switch")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countlines(glog;"POST /v1/messages ")==pn;"pipeline: and nothing arrived")){pass=pass+1}el{fail=fail+1};
+
+  (* ── core.providers.anthropic and openai ────────────────────────────────────── *)
+  let ca1=runsite(self;ca;"anthropic";"\(good)/v1/messages");
+  if(t.assert(ca1==0;"anthropic: completeplainat answered with the stand-in's text over verified TLS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countlines(glog;"POST /v1/messages ")==pn+1;"anthropic: its POST arrived")){pass=pass+1}el{fail=fail+1};
+  let abody=lastbody(glog;"POST /v1/messages ");
+  if(t.assert(noidentifier(abody) && str.contains(abody;"Please write to [EMAIL_") && str.contains(abody;"\"model\":\"claude-probe-model\"");"anthropic: the body carried the anonymised text and no identifier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lastheaders(ghdr;"POST /v1/messages");"x-api-key: sk-ant-tls-test-key-000000");"anthropic: with its x-api-key")){pass=pass+1}el{fail=fail+1};
+
+  let co=runsite(self;ca;"openai";"\(good)/v1/chat/completions");
+  if(t.assert(co==0;"openai: completeplainat answered with the stand-in's text over verified TLS")){pass=pass+1}el{fail=fail+1};
+  let obody=lastbody(glog;"POST /v1/chat/completions ");
+  if(t.assert(str.len(obody)>0 && noidentifier(obody) && str.contains(obody;"Please write to [EMAIL_") && str.contains(obody;"You are helping [EMAIL_");"openai: the body carried the anonymised text and system prompt, and no identifier")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lastheaders(ghdr;"POST /v1/chat/completions");"authorization: Bearer sk-oai-tls-test-key-000000");"openai: with its bearer key")){pass=pass+1}el{fail=fail+1};
+
+  (* ── OAuth token exchange and refresh ───────────────────────────────────────── *)
+  let cx=runsite(self;ca;"oauth";"\(good)/oauth/token");
+  (* DEFECT, VM1.6i: exchangecode answers $ok, but its tokenset's access token holds the
+     REFRESH token the endpoint sent (measured here). The send is right; the reading of the
+     answer is not. When it is fixed, this child exits 0 and the assertion must be turned
+     round to cx==0. *)
+  if(t.assert(cx==4;"DEFECT VM1.6i: exchangecode answered over verified TLS, but reports the refresh token as the access token")){pass=pass+1}el{fail=fail+1};
+  let xbody=lastbody(glog;"POST /oauth/token ");
+  if(t.assert(str.contains(xbody;"grant_type=authorization_code&code=code-tls-test") && str.contains(xbody;"code_verifier=verifier-tls-test");"oauth: the form-encoded token request arrived")){pass=pass+1}el{fail=fail+1};
+  let xh=lastheaders(ghdr;"POST /oauth/token");
+  if(t.assert(str.contains(xh;"application/x-www-form-urlencoded") && countof(str.lower(xh);"content-type:")==1;"oauth: with exactly one Content-Type, the form one")){pass=pass+1}el{fail=fail+1};
+
+  let cr=runsite(self;ca;"refresh";"\(good)/oauth/token");
+  if(t.assert(cr==0;"refresh: dorefresh read the stand-in's new token over verified TLS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lastbody(glog;"POST /oauth/token ");"grant_type=refresh_token&refresh_token=refresh-tls-test");"refresh: the refresh request arrived")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Feedback to the GitHub issues API ──────────────────────────────────────── *)
+  let cf=runsite(self;ca;"report";"\(good)/repos/o/r/issues");
+  if(t.assert(cf==0;"report: submittogithubat was answered 201 over verified TLS")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lastbody(glog;"POST /repos/o/r/issues ");"the tls probe report");"report: the issue arrived")){pass=pass+1}el{fail=fail+1};
+  let fh=lastheaders(ghdr;"POST /repos/o/r/issues");
+  if(t.assert(str.contains(fh;"authorization: token gh-tls-test-token") && str.contains(fh;"accept: application/vnd.github+json");"report: with its authorization and accept headers")){pass=pass+1}el{fail=fail+1};
+  let cb=runsite(self;ca;"batch";"\(good)/repos/o/r/issues");
+  (* DEFECT, VM1.6i: submitbatchat reports success but reads no issue URL from GitHub's 201
+     answer (and it reports success whatever the status). Turn round to cb==0 when fixed. *)
+  if(t.assert(cb==5;"DEFECT VM1.6i: submitbatchat answered over verified TLS, but read no issue URL from the 201")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lastbody(glog;"POST /repos/o/r/issues ");"Feedback: tls-probe");"batch: the batch issue arrived")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(str.contains(readfile("\(glog).tls");"handshake ok");"every arrival above came over a completed TLS handshake")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An untrusted certificate: every site refuses, and nothing arrives ──────── *)
+  if(t.assert(runsite(self;ca;"pipeline";"\(bad)/v1/messages")!=0;"pipeline: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runsite(self;ca;"anthropic";"\(bad)/v1/messages")!=0;"anthropic: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runsite(self;ca;"openai";"\(bad)/v1/chat/completions")!=0;"openai: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runsite(self;ca;"oauth";"\(bad)/oauth/token")!=0;"oauth: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runsite(self;ca;"refresh";"\(bad)/oauth/token")!=0;"refresh: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runsite(self;ca;"report";"\(bad)/repos/o/r/issues")!=0;"report: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(runsite(self;ca;"batch";"\(bad)/repos/o/r/issues")!=0;"batch: a self-signed certificate is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(waitcontains("\(slog).tls";"handshake failed");"the untrusted stand-in saw failed handshakes")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile(slog);"";"and received no request from any site")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(readfile("\(slog).headers");"tls-test");"so no key, token or code reached it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── What stays refused (F10.41): a token endpoint or issues URL off this machine ─
+     192.0.2.1 is TEST-NET-1 (RFC 5737), never routed, so even a broken rule reaches nobody. *)
+  let offx=mt oauth.exchangecode(oauthcfg("https://192.0.2.1/oauth/token");"c";"v";"http://localhost:8739/callback") {
+    $ok:ts false;
+    $oautherr:e true
+  };
+  if(t.assert(offx;"oauth: a token endpoint off this machine is still refused (F10.41)")){pass=pass+1}el{fail=fail+1};
+  let offr=refresh.dorefresh("https://192.0.2.1/oauth/token";"c";"r");
+  if(t.assert(offr.ok==false;"refresh: so is a refresh off this machine")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rep.submittogithubat(issue();"https://192.0.2.1/repos/o/r/issues";"t")==false;"report: and an issues URL off this machine")){pass=pass+1}el{fail=fail+1};
+  let offb=fbp.submitbatchat(ghcfg();batch();"https://192.0.2.1/repos/o/r/issues");
+  if(t.assert(offb.ok==false;"batch: likewise")){pass=pass+1}el{fail=fail+1};
+
+  if(grec!=0){ process.kill(grec); process.wait(grec); }el{};
+  if(srec!=0){ process.kill(srec); process.wait(srec); }el{};
+  let rm=mt process.spawn(@("sh";"-c";"rm -rf \"$0\".*";base)) { $ok:h h; $err:e 0 };
+  if(rm!=0){ process.wait(rm); }el{};
+  io.println("test_hosted_tls: \(pass) passed, \(fail) failed");
+  <fail
+};

@@ -14,7 +14,9 @@ It answers in the shape of the local sidecars loke talks to, enough for a client
 Ollama (/api/tags, /api/ps, /api/version, /api/chat, /api/generate, /api/pull, /api/delete),
 Presidio (/health, /analyze), the privacy-filter sidecar (/detect, /anonymise, AD1.4), LLMLingua (/health, /compress), and since VM1.6f an MCP server
 (/mcp), Exo (/v1/health, /v1/nodes, /v1/chat/completions), Ollama's /api/show and loke's own
-/api/pipeline, and since VM1.6h a policy document (/policy.json); any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
+/api/pipeline, and since VM1.6h a policy document (/policy.json), and since VM1.6g an OAuth
+token endpoint (/oauth/token, /oauth/revoke) and GitHub's create-issue path
+(/repos/<owner>/<repo>/issues, answered 201); any other path answers `{}`, which is what a webhook test needs. The replies are fixed and
 compact (no spaces after `:`), as Ollama's are, because shared.jsonobj's nested lookup
 matches `"key":` exactly.
 
@@ -171,6 +173,12 @@ OPENAI = {"id": "chatcmpl-recorder", "object": "chat.completion", "model": "gpt-
           "choices": [{"index": 0, "message": {"role": "assistant", "content": "answered-by-recorder"}}],
           "usage": {"prompt_tokens": 13, "completion_tokens": 5}}
 
+# VM1.6g: an OAuth token endpoint's answer and GitHub's created issue, trimmed to the fields
+# core.auth and core.feedback read.
+OAUTH = {"access_token": "recorder-access-token", "refresh_token": "recorder-refresh-token",
+         "expires_in": 3600, "token_type": "Bearer"}
+GITHUB_ISSUE = {"html_url": "https://recorder.invalid/issues/1", "number": 1}
+
 # A policy set in the shape core.policy.loader reads from a file or a URL (VM1.6h).
 POLICY = {"name": "recorder-policy", "regulations": [{"name": "recorder-reg", "jurisdiction": "AU", "version": "1",
           "rules": [{"id": "r1", "description": "no secrets", "action": "block", "severity": "high"}]}]}
@@ -226,9 +234,9 @@ class H(http.server.BaseHTTPRequestHandler):
             f.write(json.dumps([self.command, self.path, body]) + "\n")
         return body
 
-    def _send(self, obj):
+    def _send(self, obj, code=200):
         b = json.dumps(obj, separators=SEPS).encode()
-        self.send_response(200)
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
@@ -373,6 +381,12 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(pf_answer(body, p))
         elif p == "/v1/messages":
             self._send(ANTHROPIC)
+        elif p in ("/oauth/token", "/oauth/revoke"):
+            # VM1.6g: an OAuth token endpoint, as core.auth.oauth and refresh read it.
+            self._send(OAUTH)
+        elif p.startswith("/repos/") and p.endswith("/issues"):
+            # VM1.6g: GitHub's create-issue answer (201), as core.feedback reads it.
+            self._send(GITHUB_ISSUE, 201)
         elif p == "/policy.json":
             # core.policy.loader.loadurl's enterprise policy document (VM1.6h).
             self._send(POLICY)
