@@ -68,19 +68,28 @@ AFFECTED = {
     "replaceall",
 }
 
-IMPORT = re.compile(r"\bi=(\w+):std\.str;")
-NAMES = "|".join(sorted(AFFECTED))
+# LS1.2 (W90, 2026-10-08): std.db's rowstr returns an untyped i64 at toke 3.1.0 too; an
+# unannotated `let v=db.rowstr(...)` interpolated as `\(v)` printed 4302537808, not the cell.
+AFFECTED_BY_MODULE = {"std.str": AFFECTED, "std.db": {"rowstr"}}
 
 
 def scan(raw: str) -> list[tuple[int, str]]:
+    hits = []
+    for module, names in AFFECTED_BY_MODULE.items():
+        hits.extend(scanmodule(raw, module, names))
+    return sorted(hits)
+
+
+def scanmodule(raw: str, module: str, affected: set) -> list[tuple[int, str]]:
     incomment = comment_mask(raw)
-    aliases = set(IMPORT.findall(raw))
+    aliases = set(re.findall(r"\bi=(\w+):" + re.escape(module) + r";", raw))
     if not aliases:
         return []
+    names = "|".join(sorted(affected))
     alias = "|".join(re.escape(a) for a in sorted(aliases))
-    direct = re.compile(r"\\\((?:" + alias + r")\.(" + NAMES + r")\(")
+    direct = re.compile(r"\\\((?:" + alias + r")\.(" + names + r")\(")
     # An unannotated binding takes the declared i64 type. `let x:str=` does not.
-    bound = re.compile(r"\blet\s+(\w+)\s*=\s*(?:mut\.)?(?:" + alias + r")\.(" + NAMES + r")\(")
+    bound = re.compile(r"\blet\s+(\w+)\s*=\s*(?:mut\.)?(?:" + alias + r")\.(" + names + r")\(")
 
     hits = []
 
@@ -89,7 +98,7 @@ def scan(raw: str) -> list[tuple[int, str]]:
 
     for m in direct.finditer(raw):
         if not incomment[m.start()]:
-            hits.append((line(m.start()), f"\\({m.group(0)[2:]}...) interpolates str.{m.group(1)}"
+            hits.append((line(m.start()), f"\\({m.group(0)[2:]}...) interpolates {module}.{m.group(1)}"
                                           f" — prints an ADDRESS, not the string"))
 
     for m in bound.finditer(raw):
@@ -104,12 +113,12 @@ def scan(raw: str) -> list[tuple[int, str]]:
             pos = m.end() + u.start()
             if not incomment[pos]:
                 hits.append((line(pos), f"\\({name}) where {name} is an unannotated "
-                                        f"str.{fn} result (line {line(m.start())}) — prints an ADDRESS, "
+                                        f"{module}.{fn} result (line {line(m.start())}) — prints an ADDRESS, "
                                         f"not the string"))
     # LS1.1s / T-46: an ANNOTATED binding of an affected name, used as an array-literal
     # element, is compiled as a spread of it and dropped (or crashes).
     annotated = re.compile(r"\blet\s+(\w+)\s*:\s*str\s*=\s*(?:mut\.)?(?:" + alias + r")\.("
-                           + NAMES + r")\(")
+                           + names + r")\(")
     literal = re.compile(r"@\(([^()]*(?:\([^()]*\)[^()]*)*)\)")
     for m in annotated.finditer(raw):
         if incomment[m.start()]:
