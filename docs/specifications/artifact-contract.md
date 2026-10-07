@@ -488,8 +488,26 @@ session_predicate_repeat_limit = 5
   and cannot be read, is not replaced by its default. Every artifact run is refused with 503
   `limits_unusable`, whose reason names the key, until the file is fixed. Nothing is released and
   nothing is recorded in the ledger. A quoted whole number (`"5000"`) is read as the number.
-- **Not yet:** the organisation policy (`loke.policy.json`, F3b.8) cannot set a ceiling for these
-  limits; `core.privacy.orgpolicy` refuses any key it does not know (NC1.14).
+- **The organisation policy can set a ceiling (NC1.14).** `~/.loke/loke.policy.json` (F3b.8) may set
+  `max_session_cell_budget`, `max_session_predicate_repeat_limit`, `max_installation_cell_budget` and
+  `max_installation_predicate_repeat_limit`, each a whole number from 0 to the default above. The
+  limit in force is the **lowest** of the default, `config.toml` and the policy. An unset
+  `config.toml` key takes the policy's ceiling (an installation limit, the lower of its own ceiling
+  and the session limit in force), and that is an override. A policy ceiling above the default is
+  malformed: the policy file is refused (as for any F3b.8 fault), and so is every artifact run.
+  **A `config.toml` value above a policy ceiling is refused, not clamped**: every artifact run is
+  refused with 503 `org_policy_violation`, whose reason names the `config.toml` key and value and the
+  policy key and ceiling. F3b.8 clamps `max_confidence_threshold` instead; these limits are not
+  clamped because this module already refuses a value above the default rather than clamping it, and
+  a ceiling is treated the same whoever sets it, so `config.toml` never names one budget while
+  another is enforced. A policy file that cannot be applied for any reason refuses every artifact
+  run as `org_policy_violation` too (its ceilings are unknown). A missing policy file, one with
+  `enforced: false`, or one that sets none of these keys leaves the limits exactly as `config.toml`
+  sets them. A refusal raises a `privacy_org_policy` governance alert at `critical`, and a run a
+  ceiling lowered a limit for one at `warn`; each writes a row to `nc_artifact_runs` (verdict
+  `refused`, code `org_policy_violation`, or verdict `org_policy_override`) with no op, fingerprint,
+  probe key or released cells. Tests: `tests/unit/nocustody/test_policy_limits.tk`; over HTTP,
+  `scripts/smoke_serve.sh`.
 - The values remain the unmeasured placeholders §8.1 describes. Configuring them changes the rate,
   not what the rate is known to protect.
 

@@ -45,12 +45,55 @@ i=t:shared.types;
    refuses every run (limits_unusable) until it is fixed. A MISSING config.toml, or one that
    does not set these keys, is the contract's defaults.
 
-   NOT DONE: loke.policy.json (core.privacy.orgpolicy, F3b.8) cannot set a maximum for these
-   yet. That module refuses any key it does not know, so the keys must be added to its
-   knownkey first; filed as NC1.14. *)
+   NC1.14. The organisation policy (loke.policy.json, core.privacy.orgpolicy, F3b.8) may set a
+   ceiling of its own for each limit: max_session_cell_budget,
+   max_session_predicate_repeat_limit, max_installation_cell_budget and
+   max_installation_predicate_repeat_limit. core.privacy.orgpolicy reads and validates them
+   (each a whole number from 0 to the contract's default, so a policy, too, can only tighten)
+   and hands them here as an $ncceilings; this module does not read the policy file itself,
+   because core.privacy.orgpolicy imports it. The limit in force is the LOWEST of the
+   contract's default, config.toml's value and the policy's ceiling:
+
+     - config.toml unset: the policy's ceiling (or the default when the policy sets none), and
+       each such lowering is a note the caller surfaces as an override;
+     - config.toml at or below the ceiling: config.toml's value, nothing overridden;
+     - config.toml ABOVE the ceiling: REFUSED, not clamped. Code org_policy_violation, every
+       limit 0, and the reason names both the config.toml key and value and the policy key and
+       ceiling. This is not how F3b.8's max_confidence_threshold works, which lowers a
+       threshold and notes it. The difference is deliberate: this module already refuses a
+       config.toml value above the contract's default rather than clamping it (NC1.10), and a
+       ceiling is a ceiling whoever sets it, so a value above the policy's is handled the same
+       way. A clamp would leave config.toml saying one number while another is enforced; a
+       threshold only moves which detections count, while a budget is the number of releases
+       the user wrote down, so a mismatch is a configuration to fix, not a value to adjust.
+
+   The installation ceilings follow the session limits in force here too: with only
+   max_session_cell_budget = 500 set, an unset installation_cell_budget is 500, and a
+   config.toml installation_cell_budget = 1000 is refused as above it.
+
+   A policy that cannot be applied (any fault core.privacy.orgpolicy finds in the file, not
+   only in these keys) refuses every run as org_policy_violation: its ceilings are unknown,
+   and F3b.8 fails closed. A missing policy file, one with enforced: false, or one that sets
+   none of these keys is noceilings(), and the limits are exactly NC1.10's. *)
 
 t=$nclimits{
   (* Why the configured limits cannot be applied, or empty. When set, every limit is 0. *)
+  error:str;
+  (* The refusal code while error is set: limits_unusable for config.toml's fault,
+     org_policy_violation for the organisation policy's. Empty otherwise. *)
+  code:str;
+  (* NC1.14: each limit the organisation policy lowered below what config.toml alone gives,
+     as setting names and numbers only. Empty when it lowered none. *)
+  notes:@str;
+  sessioncells:i64;
+  sessionprobes:i64;
+  installcells:i64;
+  installprobes:i64
+};
+
+(* NC1.14. The organisation policy's ceilings, as core.privacy.orgpolicy read them: -1 where the
+   policy sets none. error is set when the policy file cannot be applied at all. *)
+t=$ncceilings{
   error:str;
   sessioncells:i64;
   sessionprobes:i64;
@@ -84,14 +127,49 @@ f=installprobeskey():str{
 };
 
 f=defaults():$nclimits{
-  <$nclimits{error:"";sessioncells:defaultsessioncells();sessionprobes:defaultsessionprobes();installcells:defaultsessioncells();installprobes:defaultsessionprobes()}
+  <$nclimits{error:"";code:"";notes:@();sessioncells:defaultsessioncells();sessionprobes:defaultsessionprobes();installcells:defaultsessioncells();installprobes:defaultsessionprobes()}
 };
 
 (* Limits that cannot be applied. Every one is 0, so a caller that ignored `error` would
    still release nothing. *)
 f=unusable(error:str):$nclimits{
-  <$nclimits{error:error;sessioncells:0;sessionprobes:0;installcells:0;installprobes:0}
+  <$nclimits{error:error;code:unusablecode();notes:@();sessioncells:0;sessionprobes:0;installcells:0;installprobes:0}
 };
+
+f=unusablecode():str{ <"limits_unusable" };
+
+f=policycode():str{ <"org_policy_violation" };
+
+(* As unusable, for a fault of the organisation policy's. *)
+f=policyrefused(error:str):$nclimits{
+  <$nclimits{error:error;code:policycode();notes:@();sessioncells:0;sessionprobes:0;installcells:0;installprobes:0}
+};
+
+(* NC1.14. No organisation policy, or one that sets no ceiling. *)
+f=noceilings():$ncceilings{
+  <$ncceilings{error:"";sessioncells:0-1;sessionprobes:0-1;installcells:0-1;installprobes:0-1}
+};
+
+(* Ceilings a policy sets, -1 for each it does not. *)
+f=ceilings(sessioncells:i64;sessionprobes:i64;installcells:i64;installprobes:i64):$ncceilings{
+  <$ncceilings{error:"";sessioncells:sessioncells;sessionprobes:sessionprobes;installcells:installcells;installprobes:installprobes}
+};
+
+f=brokenceilings(error:str):$ncceilings{
+  <$ncceilings{error:error;sessioncells:0;sessionprobes:0;installcells:0;installprobes:0}
+};
+
+(* The policy keys, named as F3b.8 names its max_confidence_threshold. *)
+f=policysessioncellskey():str{ <"max_session_cell_budget" };
+
+f=policysessionprobeskey():str{ <"max_session_predicate_repeat_limit" };
+
+f=policyinstallcellskey():str{ <"max_installation_cell_budget" };
+
+f=policyinstallprobeskey():str{ <"max_installation_predicate_repeat_limit" };
+
+(* How a refusal or note names the policy, as core.privacy.orgpolicy.header does. *)
+f=policyname():str{ <"organisation policy loke.policy.json" };
 
 (* Why the value config.toml sets for key cannot be used, or empty when it is absent or a
    whole number from 0 to ceiling. `against` names what the ceiling is. doc is 0 when the
@@ -129,29 +207,102 @@ f=resolved(doc:i64;text:str):$nclimits{
   if(str.len(eic)>0){ <unusable(eic) }el{};
   let eip=valueerror(doc;text;installprobeskey();sprobes;ceil);
   if(str.len(eip)>0){ <unusable(eip) }el{};
-  <$nclimits{error:"";sessioncells:scells;sessionprobes:sprobes;installcells:valueof(doc;text;installcellskey();scells);installprobes:valueof(doc;text;installprobeskey();sprobes)}
+  <$nclimits{error:"";code:"";notes:@();sessioncells:scells;sessionprobes:sprobes;installcells:valueof(doc;text;installcellskey();scells);installprobes:valueof(doc;text;installprobeskey();sprobes)}
+};
+
+(* The lower of two limits, where -1 is no limit. *)
+f=lower(a:i64;b:i64):i64{
+  if(a<0){ <b }el{};
+  if(b<0 || a<=b){ <a }el{};
+  <b
+};
+
+(* Why config.toml's value for key, already known to be a usable whole number, is above the
+   policy's ceiling, or "". policykey is the policy key that sets the ceiling. *)
+f=aboveceiling(doc:i64;text:str;key:str;ceiling:i64;policykey:str):str{
+  if(ceiling<0 || !cfg.numberset(doc;text;key)){ <"" }el{};
+  let v=valueof(doc;text;key;0);
+  if(v<=ceiling){ <"" }el{};
+  <"\(key) = \(str.fromint(v)) in config.toml is above the ceiling of \(str.fromint(ceiling)) that \(policyname()) sets (\(policykey)): config.toml cannot loosen a ceiling the policy sets; lower it or remove it (NC1.14)"
+};
+
+(* The policy key whose ceiling binds an installation limit: its own, or the session one when
+   that is lower. *)
+f=bindingkey(own:i64;ownkey:str;session:i64;sessionkey:str):str{
+  if(own<0 || (session>=0 && session<own)){ <sessionkey }el{};
+  <ownkey
+};
+
+f=lowered(notes:@str;key:str;was:i64;now:i64;policykey:str):@str{
+  if(now>=was){ <notes }el{};
+  <notes.push("\(key) is lowered from \(str.fromint(was)) to \(str.fromint(now)) by \(policykey)")
+};
+
+(* NC1.14. config.toml's limits under the organisation policy's ceilings c: the lowest of the
+   default, config.toml and the policy, with a note for each limit the policy lowered, or a
+   refusal when config.toml sets a value above a ceiling or the policy cannot be applied. *)
+f=resolvedunder(doc:i64;text:str;c:$ncceilings):$nclimits{
+  if(str.len(c.error)>0){ <policyrefused(c.error) }el{};
+  let base=resolved(doc;text);
+  if(str.len(base.error)>0){ <base }el{};
+  let sck=policysessioncellskey();
+  let spk=policysessionprobeskey();
+  let ec=aboveceiling(doc;text;sessioncellskey();c.sessioncells;sck);
+  if(str.len(ec)>0){ <policyrefused(ec) }el{};
+  let ep=aboveceiling(doc;text;sessionprobeskey();c.sessionprobes;spk);
+  if(str.len(ep)>0){ <policyrefused(ep) }el{};
+  let scells=lower(c.sessioncells;base.sessioncells);
+  let sprobes=lower(c.sessionprobes;base.sessionprobes);
+  let icap=lower(c.installcells;scells);
+  let ipcap=lower(c.installprobes;sprobes);
+  let ick=bindingkey(c.installcells;policyinstallcellskey();c.sessioncells;sck);
+  let ipk=bindingkey(c.installprobes;policyinstallprobeskey();c.sessionprobes;spk);
+  let eic=aboveceiling(doc;text;installcellskey();icap;ick);
+  if(str.len(eic)>0){ <policyrefused(eic) }el{};
+  let eip=aboveceiling(doc;text;installprobeskey();ipcap;ipk);
+  if(str.len(eip)>0){ <policyrefused(eip) }el{};
+  let icells=lower(icap;base.installcells);
+  let iprobes=lower(ipcap;base.installprobes);
+  <$nclimits{error:"";code:"";notes:lowered(lowered(lowered(lowered(@();sessioncellskey();base.sessioncells;scells;sck);sessionprobeskey();base.sessionprobes;sprobes;spk);installcellskey();base.installcells;icells;ick);installprobeskey();base.installprobes;iprobes;ipk);sessioncells:scells;sessionprobes:sprobes;installcells:icells;installprobes:iprobes}
 };
 
 (* The limits a config.toml text sets. *)
 f=fromtext(text:str):$nclimits{
+  <fromtextunder(text;noceilings())
+};
+
+(* NC1.14. The limits a config.toml text sets under the policy's ceilings c. *)
+f=fromtextunder(text:str;c:$ncceilings):$nclimits{
   <mt toml.load(text) {
-    $ok:doc resolved(doc;text);
-    $err:e resolved(0;text)
+    $ok:doc resolvedunder(doc;text;c);
+    $err:e resolvedunder(0;text;c)
   }
 };
 
 (* The limits in force: the user's config.toml, read on every call, so an edit applies to the
-   next run without a restart. *)
+   next run without a restart. With no organisation policy; core.nocustody.bound.inforce adds it. *)
 f=current():$nclimits{
+  <currentunder(noceilings())
+};
+
+(* NC1.14. As current, under the organisation policy's ceilings c. A missing config.toml is the
+   defaults, under the ceilings. *)
+f=currentunder(c:$ncceilings):$nclimits{
   let path=t.configpath();
-  if(!file.exists(path)){ <defaults() }el{};
+  if(!file.exists(path)){ <fromtextunder("";c) }el{};
   <mt file.read(path) {
-    $ok:text fromtext(text);
+    $ok:text fromtextunder(text;c);
     $err:e unusable("config.toml exists and could not be read, so the no-custody limits it may set are unknown")
   }
 };
 
+(* The policy's notes, for an alert. Setting names and numbers only. *)
+f=notestext(l:$nclimits):str{
+  <str.join("; ";l.notes)
+};
+
 (* The refusal core.nocustody.bound gives while the limits cannot be applied. *)
 f=reason(l:$nclimits):str{
+  if(str.eq(l.code;policycode())){ <"the no-custody limits cannot be applied under the organisation policy, so nothing is released: \(l.error)" }el{};
   <"the no-custody limits in config.toml cannot be applied, so nothing is released: \(l.error)"
 };

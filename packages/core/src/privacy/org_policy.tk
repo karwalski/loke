@@ -11,6 +11,7 @@ i=cfg:shared.config;
 i=fr:core.privacy.filterregistry;
 i=cn:core.privacy.consensus;
 i=lh:core.privacy.layerhealth;
+i=nl:core.nocustody.limits;
 
 (* F3b.8. An organisation's privacy policy, applied OVER the user's config.toml on every run of
    core.privacy.pipeline.
@@ -29,6 +30,12 @@ i=lh:core.privacy.layerhealth;
      max_confidence_threshold  0 to 1: a layer's confidence_threshold, the privacy-filter
                                threshold and, for confidence-weighted, consensus_threshold
                                above it are lowered (clamped) to it
+     max_session_cell_budget, max_session_predicate_repeat_limit,
+     max_installation_cell_budget, max_installation_predicate_repeat_limit
+                               NC1.14: whole numbers from 0 to the artifact contract's default
+                               (50000 cells, 20 repeats): ceilings on config.toml's [nocustody]
+                               limits (core.nocustody.limits), applied by core.nocustody.bound,
+                               not by the pipeline. A config.toml value above one is refused
      enforced                  true or false; true when absent. false leaves config.toml alone
      description               ignored
 
@@ -66,7 +73,12 @@ t=$orgprivacypolicy{
   (* After apply: each setting of config.toml the policy overrode, and the consensus strategy
      it raised (empty when none was). Setting names and policy values only, never text. *)
   notes:@str;
-  raisedfrom:str
+  raisedfrom:str;
+  (* NC1.14. The no-custody ceilings, -1 where the policy sets none. *)
+  maxsessioncells:i64;
+  maxsessionprobes:i64;
+  maxinstallcells:i64;
+  maxinstallprobes:i64
 };
 
 (* A policy applied to one run's registry and consensus settings. *)
@@ -87,20 +99,20 @@ f=header():str{
 };
 
 f=notloaded():$orgprivacypolicy{
-  <$orgprivacypolicy{loaded:false;present:false;enforced:false;error:"";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:""}
+  <$orgprivacypolicy{loaded:false;present:false;enforced:false;error:"";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:"";maxsessioncells:0-1;maxsessionprobes:0-1;maxinstallcells:0-1;maxinstallprobes:0-1}
 };
 
 (* No policy file: nothing is changed. *)
 f=absent():$orgprivacypolicy{
-  <$orgprivacypolicy{loaded:true;present:false;enforced:false;error:"";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:""}
+  <$orgprivacypolicy{loaded:true;present:false;enforced:false;error:"";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:"";maxsessioncells:0-1;maxsessionprobes:0-1;maxinstallcells:0-1;maxinstallprobes:0-1}
 };
 
 f=broken(fault:str):$orgprivacypolicy{
-  <$orgprivacypolicy{loaded:true;present:true;enforced:true;error:"\(header()) cannot be applied: \(fault)";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:""}
+  <$orgprivacypolicy{loaded:true;present:true;enforced:true;error:"\(header()) cannot be applied: \(fault)";minimumlayers:0;requiredlayers:@();lockedconsensus:"";bannedlayers:@();maxthreshold:"";notes:@();raisedfrom:"";maxsessioncells:0-1;maxsessionprobes:0-1;maxinstallcells:0-1;maxinstallprobes:0-1}
 };
 
 f=knownkey(key:str):bool{
-  <str.eq(key;"minimum_layers") || str.eq(key;"required_layers") || str.eq(key;"locked_consensus") || str.eq(key;"banned_layers") || str.eq(key;"max_confidence_threshold") || str.eq(key;"enforced") || str.eq(key;"description")
+  <str.eq(key;"minimum_layers") || str.eq(key;"required_layers") || str.eq(key;"locked_consensus") || str.eq(key;"banned_layers") || str.eq(key;"max_confidence_threshold") || str.eq(key;"max_session_cell_budget") || str.eq(key;"max_session_predicate_repeat_limit") || str.eq(key;"max_installation_cell_budget") || str.eq(key;"max_installation_predicate_repeat_limit") || str.eq(key;"enforced") || str.eq(key;"description")
 };
 
 f=layerids():@str{
@@ -151,6 +163,25 @@ f=layerlisterror(o:$json;key:str):str{
   <""
 };
 
+(* NC1.14. Why the no-custody ceiling at key cannot be used, or "": a whole number from 0 to the
+   contract's default, top. A policy, like config.toml, can only tighten the bound. *)
+f=ceilingerror(o:$json;key:str;top:i64):str{
+  if(!jx.has(o;key)){ <"" }el{};
+  let raw=jx.rawvalue(o;key);
+  let most=count(top);
+  if(!str.isdigit(raw)){ <"\(key) must be a whole number from 0 to \(most)" }el{};
+  let n=mt str.toint(raw) { $ok:x x; $err:e 0-1 };
+  if(str.len(raw)>9 || n>top){ <"\(key) = \(raw) is above the artifact contract's default, \(most): a policy can only tighten this bound, never loosen it (NC1.14)" }el{};
+  if(n<0){ <"\(key) must be a whole number from 0 to \(most)" }el{};
+  <""
+};
+
+(* The ceiling at key, or -1 when the policy sets none. Read only once ceilingerror is empty. *)
+f=ceilingof(o:$json;key:str):i64{
+  if(!jx.has(o;key)){ <0-1 }el{};
+  <mt str.toint(jx.rawvalue(o;key)) { $ok:x x; $err:e 0 }
+};
+
 (* Why a parsed policy object cannot be applied, or "". *)
 f=fault(o:$json):str{
   let keys=jx.keys(o);
@@ -191,7 +222,15 @@ f=fault(o:$json):str{
   if(jx.has(o;"max_confidence_threshold")){
     if(!cfg.isthreshold(jx.rawvalue(o;"max_confidence_threshold"))){ <"max_confidence_threshold must be a number from 0 to 1" }el{}
   }el{};
-  <""
+  let cells=nl.defaultsessioncells();
+  let probes=nl.defaultsessionprobes();
+  let e1=ceilingerror(o;"max_session_cell_budget";cells);
+  if(str.len(e1)>0){ <e1 }el{};
+  let e2=ceilingerror(o;"max_session_predicate_repeat_limit";probes);
+  if(str.len(e2)>0){ <e2 }el{};
+  let e3=ceilingerror(o;"max_installation_cell_budget";cells);
+  if(str.len(e3)>0){ <e3 }el{};
+  <ceilingerror(o;"max_installation_predicate_repeat_limit";probes)
 };
 
 (* A policy file's text. Anything that cannot be applied refuses every request. *)
@@ -206,7 +245,7 @@ f=fromtext(text:str):$orgprivacypolicy{
   let locked=jx.strvalue(o;"locked_consensus";"");
   let maxt=mut."";
   if(jx.has(o;"max_confidence_threshold")){ maxt=jx.rawvalue(o;"max_confidence_threshold") }el{};
-  <$orgprivacypolicy{loaded:true;present:true;enforced:!str.eq(jx.rawvalue(o;"enforced");"false");error:"";minimumlayers:minimum;requiredlayers:jx.strelems(o;"required_layers");lockedconsensus:locked;bannedlayers:jx.strelems(o;"banned_layers");maxthreshold:maxt;notes:@();raisedfrom:""}
+  <$orgprivacypolicy{loaded:true;present:true;enforced:!str.eq(jx.rawvalue(o;"enforced");"false");error:"";minimumlayers:minimum;requiredlayers:jx.strelems(o;"required_layers");lockedconsensus:locked;bannedlayers:jx.strelems(o;"banned_layers");maxthreshold:maxt;notes:@();raisedfrom:"";maxsessioncells:ceilingof(o;"max_session_cell_budget");maxsessionprobes:ceilingof(o;"max_session_predicate_repeat_limit");maxinstallcells:ceilingof(o;"max_installation_cell_budget");maxinstallprobes:ceilingof(o;"max_installation_predicate_repeat_limit")}
 };
 
 (* The policy at path: absent() when there is no file, broken when it cannot be read. *)
@@ -231,7 +270,17 @@ f=asnumber(s:str):f64{
 };
 
 f=withresult(p:$orgprivacypolicy;error:str;notes:@str;raisedfrom:str):$orgprivacypolicy{
-  <$orgprivacypolicy{loaded:p.loaded;present:p.present;enforced:p.enforced;error:error;minimumlayers:p.minimumlayers;requiredlayers:p.requiredlayers;lockedconsensus:p.lockedconsensus;bannedlayers:p.bannedlayers;maxthreshold:p.maxthreshold;notes:notes;raisedfrom:raisedfrom}
+  <$orgprivacypolicy{loaded:p.loaded;present:p.present;enforced:p.enforced;error:error;minimumlayers:p.minimumlayers;requiredlayers:p.requiredlayers;lockedconsensus:p.lockedconsensus;bannedlayers:p.bannedlayers;maxthreshold:p.maxthreshold;notes:notes;raisedfrom:raisedfrom;maxsessioncells:p.maxsessioncells;maxsessionprobes:p.maxsessionprobes;maxinstallcells:p.maxinstallcells;maxinstallprobes:p.maxinstallprobes}
+};
+
+(* NC1.14. The ceilings this policy sets on the no-custody limits, for core.nocustody.limits.
+   No file, or enforced: false, sets none. A file that cannot be applied refuses: its ceilings
+   are unknown, so core.nocustody.bound releases nothing, as the pipeline refuses every request. *)
+f=nocustodyceilings(p:$orgprivacypolicy):$ncceilings{
+  if(!p.present){ <nl.noceilings() }el{};
+  if(str.len(p.error)>0){ <nl.brokenceilings(p.error) }el{};
+  if(!p.enforced){ <nl.noceilings() }el{};
+  <nl.ceilings(p.maxsessioncells;p.maxsessionprobes;p.maxinstallcells;p.maxinstallprobes)
 };
 
 (* The policy over one run's registry and consensus settings. With no policy, or one that is

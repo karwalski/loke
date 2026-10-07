@@ -1,0 +1,270 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.nocustody.policylimits;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=env:std.env;
+i=sh:shared.types;
+i=log:shared.log;
+i=sdb:core.storage.db;
+i=na:core.nocustody.artifact;
+i=nb:core.nocustody.bound;
+i=nl:core.nocustody.limits;
+i=ns:core.nocustody.session;
+i=op:core.privacy.orgpolicy;
+
+(* NC1.14 — the organisation policy (loke.policy.json, F3b.8) sets ceilings on the no-custody
+   limits NC1.10 made configurable.
+
+   Four parts. The policy keys are read by core.privacy.orgpolicy and a value above the
+   contract's default, or one that is not a whole number, refuses the file (fail closed). The
+   limit in force is the lowest of the default, config.toml and the policy, and a config.toml
+   value above a ceiling is refused naming both, not clamped. core.nocustody.bound enforces a
+   policy ceiling at the ceiling. And the production path, nb.runat, reads both files from the
+   throwaway HOME run_tests.sh gives this test, surfaces each refusal and override as a
+   governance alert in loke.log and a row in nc_artifact_runs, and with no policy file behaves
+   exactly as NC1.10's config.toml alone.
+
+   The store lives under $BUILDDIR, as test_limits.tk's does. *)
+
+f=testdir():str{
+  let build=env.getor("BUILDDIR";"/tmp/loke-tests");
+  <"\(build)/nocustody-policy-limits"
+};
+
+f=openfreshstore():i64{
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete("\(dir)/loke.db");
+  file.delete("\(dir)/loke.db-wal");
+  file.delete("\(dir)/loke.db-shm");
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+(* Files are written only under a HOME inside $BUILDDIR, the one run_tests.sh gives each test. *)
+f=throwawayhome():bool{
+  let home=env.getor("HOME";"");
+  let build=env.getor("BUILDDIR";"");
+  <str.len(build)>0 && str.startswith(home;"\(build)/")
+};
+
+f=writehome(path:str;body:str):bool{
+  if(!throwawayhome()){ <false }el{};
+  let made=mt file.mkdir(sh.lokedir()) {$ok:v v;$err:e false};
+  <mt file.write(path;body) {$ok:v v;$err:e false}
+};
+
+f=writeconfig(body:str):bool{ <writehome(sh.configpath();body) };
+
+f=writepolicy(body:str):bool{ <writehome(op.policypath();body) };
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+f=headers():@str{
+  <@("region";"category";"amount";"note")
+};
+
+f=rows():@(@str){
+  <@(
+    @("north";"food";"10";"plain");
+    @("north";"rent";"100";"plain");
+    @("south";"food";"5";"POLICY-PROBE-5e1a-3");
+    @("south";"food";"7";"plain");
+    @("north";"food";"3";"plain")
+  )
+};
+
+f=art(o:str;column:str;filtercol:str;filterval:str):$artifact{
+  <$artifact{op:o;column:column;groupby:"";agg:"";filtercol:filtercol;filterval:filterval;limit:10}
+};
+
+f=probe(col:str;i:i64):$artifact{
+  <art("count";"";col;"POLICY-PROBE-5e1a-\(str.fromint(i))")
+};
+
+(* The limits under a policy text and a config.toml text. *)
+f=withpolicy(policy:str;config:str):$nclimits{
+  <nl.fromtextunder(config;op.nocustodyceilings(op.fromtext(policy)))
+};
+
+f=same(a:$nclimits;b:$nclimits):bool{
+  <str.eq(a.error;b.error) && str.eq(a.code;b.code) && a.notes.len==b.notes.len && a.sessioncells==b.sessioncells && a.sessionprobes==b.sessionprobes && a.installcells==b.installcells && a.installprobes==b.installprobes
+};
+
+f=t0():i64{
+  <1795000000000
+};
+
+f=policyrows(verdict:str;code:str):i64{
+  <nb.scalar("SELECT COUNT() AS n FROM nc_artifact_runs WHERE verdict=? AND COALESCE(refusal_code,'')=? AND op='' AND rows_released=0 AND cells_released=0";@(verdict;code))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let opened=openfreshstore();
+  if(t.assert(opened==1;"the test store opens and its migrations run")){pass=pass+1}el{fail=fail+1};
+  let h=headers();
+  let r=rows();
+
+  (* ── The policy keys, read and validated by core.privacy.orgpolicy ──────────── *)
+  let p=op.fromtext("{\"max_session_cell_budget\":500,\"max_session_predicate_repeat_limit\":3,\"max_installation_cell_budget\":400,\"max_installation_predicate_repeat_limit\":2}");
+  if(t.assert(str.len(p.error)==0 && p.maxsessioncells==500 && p.maxsessionprobes==3 && p.maxinstallcells==400 && p.maxinstallprobes==2;"the four ceilings are read from loke.policy.json (\(p.error))")){pass=pass+1}el{fail=fail+1};
+  let atdefault=op.fromtext("{\"max_session_cell_budget\":50000,\"max_session_predicate_repeat_limit\":20}");
+  if(t.assert(str.len(atdefault.error)==0 && atdefault.maxsessioncells==50000;"a ceiling at the contract's default is accepted")){pass=pass+1}el{fail=fail+1};
+  let zero=op.fromtext("{\"max_session_predicate_repeat_limit\":0}");
+  if(t.assert(str.len(zero.error)==0 && zero.maxsessionprobes==0 && zero.maxsessioncells<0;"0 is accepted, and an unset ceiling is none (-1)")){pass=pass+1}el{fail=fail+1};
+
+  let loose=op.fromtext("{\"max_session_cell_budget\":50001}");
+  if(t.assert(str.contains(loose.error;"organisation policy loke.policy.json cannot be applied: max_session_cell_budget = 50001 is above the artifact contract's default, 50000: a policy can only tighten this bound");"a policy ceiling above the contract's default is refused, naming the key (\(loose.error))")){pass=pass+1}el{fail=fail+1};
+  let looseprobe=op.fromtext("{\"max_session_predicate_repeat_limit\":21}");
+  if(t.assert(str.contains(looseprobe.error;"max_session_predicate_repeat_limit = 21 is above the artifact contract's default, 20");"so is a repeat-limit ceiling of 21")){pass=pass+1}el{fail=fail+1};
+  let looseinst=op.fromtext("{\"max_installation_cell_budget\":60000}");
+  if(t.assert(str.contains(looseinst.error;"max_installation_cell_budget = 60000 is above");"and an installation ceiling above the default")){pass=pass+1}el{fail=fail+1};
+  let looseinstp=op.fromtext("{\"max_installation_predicate_repeat_limit\":99999999999}");
+  if(t.assert(str.contains(looseinstp.error;"max_installation_predicate_repeat_limit = 99999999999 is above");"and a number too long to read")){pass=pass+1}el{fail=fail+1};
+  let neg=op.fromtext("{\"max_session_cell_budget\":-1}");
+  if(t.assert(str.contains(neg.error;"max_session_cell_budget must be a whole number from 0 to 50000");"a negative ceiling is refused")){pass=pass+1}el{fail=fail+1};
+  let quoted=op.fromtext("{\"max_session_cell_budget\":\"500\"}");
+  if(t.assert(str.contains(quoted.error;"max_session_cell_budget must be a whole number");"a ceiling written as a string is refused, as minimum_layers is")){pass=pass+1}el{fail=fail+1};
+  let frac=op.fromtext("{\"max_session_predicate_repeat_limit\":2.5}");
+  if(t.assert(str.contains(frac.error;"max_session_predicate_repeat_limit must be a whole number from 0 to 20");"a fractional ceiling is refused")){pass=pass+1}el{fail=fail+1};
+  let misspelt=op.fromtext("{\"max_session_cell_budgets\":500}");
+  if(t.assert(str.contains(misspelt.error;"max_session_cell_budgets is not a policy key");"a misspelt ceiling key is still refused as unknown")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The ceilings core.nocustody.limits is handed ───────────────────────────── *)
+  let none=op.nocustodyceilings(op.absent());
+  if(t.assert(str.len(none.error)==0 && none.sessioncells<0 && none.sessionprobes<0 && none.installcells<0 && none.installprobes<0;"no policy file sets no ceiling")){pass=pass+1}el{fail=fail+1};
+  let off=op.nocustodyceilings(op.fromtext("{\"enforced\":false,\"max_session_cell_budget\":10}"));
+  if(t.assert(str.len(off.error)==0 && off.sessioncells<0;"enforced: false sets none either, as F3b.8 leaves config.toml alone")){pass=pass+1}el{fail=fail+1};
+  let broke=op.nocustodyceilings(op.fromtext("{\"minimum_layers\":9}"));
+  if(t.assert(str.contains(broke.error;"cannot be applied: minimum_layers");"a policy file that cannot be applied for any key hands on its fault")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Resolution: the lowest of default, config.toml and the policy ──────────── *)
+  let pol="{\"max_session_cell_budget\":500,\"max_session_predicate_repeat_limit\":3}";
+  let unset=withpolicy(pol;"");
+  let sepj=" | ";
+  if(t.assert(str.len(unset.error)==0 && unset.sessioncells==500 && unset.sessionprobes==3;"config.toml unset: the policy's ceilings are the limits")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unset.installcells==500 && unset.installprobes==3;"and the installation limits follow them")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(unset.notes.len==4 && str.eq(unset.notes.get(0);"nocustody.session_cell_budget is lowered from 50000 to 500 by max_session_cell_budget");"each limit the policy lowered is a note (\(str.join(sepj;unset.notes)))")){pass=pass+1}el{fail=fail+1};
+  let below=withpolicy(pol;"[nocustody]\nsession_cell_budget = 100\nsession_predicate_repeat_limit = 2\n");
+  if(t.assert(str.len(below.error)==0 && below.sessioncells==100 && below.sessionprobes==2 && below.notes.len==0;"config.toml below the ceiling: config.toml's values, nothing overridden")){pass=pass+1}el{fail=fail+1};
+  let at=withpolicy(pol;"[nocustody]\nsession_cell_budget = 500\n");
+  if(t.assert(str.len(at.error)==0 && at.sessioncells==500 && at.sessionprobes==3 && at.notes.len==2;"config.toml at the ceiling is accepted; the unset probe limits are lowered and noted")){pass=pass+1}el{fail=fail+1};
+
+  let above=withpolicy(pol;"[nocustody]\nsession_predicate_repeat_limit = 10\n");
+  if(t.assert(str.eq(above.code;"org_policy_violation") && str.contains(above.error;"nocustody.session_predicate_repeat_limit = 10 in config.toml is above the ceiling of 3 that organisation policy loke.policy.json sets (max_session_predicate_repeat_limit)");"config.toml above the policy's ceiling is refused, naming both keys and values (\(above.error))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(above.sessioncells==0 && above.sessionprobes==0 && above.installcells==0 && above.installprobes==0;"not clamped: every limit is 0")){pass=pass+1}el{fail=fail+1};
+  let aboveinst=withpolicy("{\"max_session_cell_budget\":500}";"[nocustody]\ninstallation_cell_budget = 1000\n");
+  if(t.assert(str.eq(aboveinst.code;"org_policy_violation") && str.contains(aboveinst.error;"nocustody.installation_cell_budget = 1000 in config.toml is above the ceiling of 500") && str.contains(aboveinst.error;"(max_session_cell_budget)");"an installation budget above a policy-lowered session ceiling is refused, naming the binding key")){pass=pass+1}el{fail=fail+1};
+  let instown=withpolicy("{\"max_installation_predicate_repeat_limit\":4}";"[nocustody]\ninstallation_predicate_repeat_limit = 5\n");
+  if(t.assert(str.contains(instown.error;"(max_installation_predicate_repeat_limit)");"and one above its own installation ceiling")){pass=pass+1}el{fail=fail+1};
+  let instonly=withpolicy("{\"max_installation_cell_budget\":700}";"");
+  if(t.assert(str.len(instonly.error)==0 && instonly.sessioncells==50000 && instonly.installcells==700 && instonly.notes.len==1;"an installation ceiling alone lowers only the installation limit")){pass=pass+1}el{fail=fail+1};
+  let cfgfirst=withpolicy(pol;"[nocustody]\nsession_cell_budget = 60000\n");
+  if(t.assert(str.eq(cfgfirst.code;"limits_unusable") && str.contains(cfgfirst.error;"is above the artifact contract's default");"a config.toml value above the default is still NC1.10's limits_unusable")){pass=pass+1}el{fail=fail+1};
+  let broken=withpolicy("{\"max_session_cell_budget\":99999}";"");
+  if(t.assert(str.eq(broken.code;"org_policy_violation") && broken.sessioncells==0 && str.contains(nl.reason(broken);"under the organisation policy, so nothing is released");"a malformed policy refuses the limits (fail closed)")){pass=pass+1}el{fail=fail+1};
+
+  (* ── No policy: NC1.10's behaviour exactly ──────────────────────────────────── *)
+  let configs=@("";"[privacy]\nconsensus_strategy = \"most-restrictive\"\n";"[nocustody]\nsession_cell_budget = 10\nsession_predicate_repeat_limit = 3\n";"[nocustody]\ninstallation_cell_budget = 500\n";"[nocustody]\nsession_cell_budget = 50001\n";"[nocustody]\nsession_cell_budget = -5\n";"[nocustody\n");
+  let agree=mut.0;
+  lp(let k=0;k<configs.len;k=k+1){
+    let c:str=configs.get(k);
+    let nc=nl.fromtext(c);
+    if(same(nl.fromtextunder(c;op.nocustodyceilings(op.absent()));nc) && same(withpolicy("{}";c);nc) && same(withpolicy("{\"enforced\":false,\"max_session_cell_budget\":1}";c);nc)){ agree=agree+1 }el{}
+  };
+  if(t.assert(agree==configs.len as i64;"for seven config.toml texts, no policy, {}, and enforced: false give exactly config.toml's limits")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Enforcement by core.nocustody.bound, at the ceiling ────────────────────── *)
+  let now=t0();
+  let lim=withpolicy(pol;"[nocustody]\nsession_predicate_repeat_limit = 20\n");
+  if(t.assert(str.eq(lim.code;"org_policy_violation");"control: config.toml's 20 is above the policy's 3")){pass=pass+1}el{fail=fail+1};
+  let s1=ns.issueat(now);
+  let ran=mut.0;
+  lp(let i=0;i<3;i=i+1){
+    if(nb.runwith(s1;probe("note";i);h;r;now;unset).ok){ ran=ran+1 }el{}
+  };
+  let fourth=nb.runwith(s1;probe("note";9);h;r;now;unset);
+  if(t.assert(ran==3 && fourth.ok==false && str.eq(fourth.code;"value_probing") && str.contains(fourth.err;"the limit is 3");"under a policy ceiling of 3, three probes run and the fourth is refused at 3 (\(fourth.err))")){pass=pass+1}el{fail=fail+1};
+  let fourthfree=nb.runwith(s1;probe("note";9);h;r;now;nl.fromtext(""));
+  if(t.assert(fourthfree.ok;"control: the same probe runs without the policy")){pass=pass+1}el{fail=fail+1};
+  let wideh=@("label";"n");
+  let wide=mut.@();
+  lp(let i=0;i<12;i=i+1){ wide=wide.push(@("r\(str.fromint(i))";"1")) };
+  let tiny=withpolicy("{\"max_session_cell_budget\":10}";"");
+  let big=nb.runwith(ns.issueat(now);art("count_by";"label";"";"");wideh;wide;now;tiny);
+  if(t.assert(big.ok==false && str.eq(big.code;"cell_budget") && str.contains(big.err;"left of its 10");"a 20-cell result is withheld under a policy cell ceiling of 10")){pass=pass+1}el{fail=fail+1};
+  let refusedrun=nb.runwith(ns.issueat(now);art("sum";"amount";"";"");h;r;now;above);
+  if(t.assert(refusedrun.ok==false && str.eq(refusedrun.code;"org_policy_violation") && nb.boundedstatus(refusedrun)==503 && refusedrun.values.len==0;"config.toml above the ceiling refuses an ordinary run, 503, nothing released")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nb.boundedjson(refusedrun);"\"refusal\":\"org_policy_violation\"") && str.contains(refusedrun.err;"max_session_predicate_repeat_limit");"the answer carries the code and names the policy key")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The production path: both files, alerts and ledger rows ────────────────── *)
+  if(t.assert(throwawayhome();"this test runs under a throwaway HOME inside BUILDDIR, so writing loke.policy.json is safe")){pass=pass+1}el{fail=fail+1};
+  let logp=log.logpath();
+  let alertline="governance alert: privacy organisation policy: ";
+  let w=now+2*nb.installwindowms();
+
+  file.delete(op.policypath());
+  file.delete(sh.configpath());
+  let nopolicy=nb.inforce();
+  if(t.assert(same(nopolicy;nl.current()) && nopolicy.notes.len==0;"no policy file, no config.toml: inforce is NC1.10's current")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(writeconfig("[nocustody]\nsession_predicate_repeat_limit = 2\n");"a config.toml with a repeat limit of 2 is written")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(same(nb.inforce();nl.current());"no policy file, with config.toml: inforce is NC1.10's current")){pass=pass+1}el{fail=fail+1};
+  let alerts0=countof(readfile(logp);alertline);
+  let rows0=nb.scalar("SELECT COUNT() AS n FROM nc_artifact_runs";@());
+  let s2=ns.issueat(w);
+  let q1=nb.runat(s2;probe("category";1);h;r;w);
+  let q2=nb.runat(s2;probe("category";2);h;r;w);
+  let q3=nb.runat(s2;probe("category";3);h;r;w);
+  if(t.assert(q1.ok && q2.ok && q3.ok==false && str.contains(q3.err;"the limit is 2");"with no policy file, runat refuses the third probe at config.toml's 2, as NC1.10 does")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(countof(readfile(logp);alertline)==alerts0 && nb.scalar("SELECT COUNT() AS n FROM nc_artifact_runs";@())==rows0+3;"and raises no policy alert and writes no policy row: one ledger row per run")){pass=pass+1}el{fail=fail+1};
+
+  file.delete(sh.configpath());
+  if(t.assert(writepolicy("{\"max_session_predicate_repeat_limit\":1}");"a policy with a repeat-limit ceiling of 1 is written")){pass=pass+1}el{fail=fail+1};
+  let s3=ns.issueat(w);
+  let o1=nb.runat(s3;probe("region";1);h;r;w);
+  let o2=nb.runat(s3;probe("region";2);h;r;w);
+  if(t.assert(o1.ok && o2.ok==false && str.eq(o2.code;"value_probing") && str.contains(o2.err;"the limit is 1");"runat applies the policy's ceiling: the second probe is refused at 1")){pass=pass+1}el{fail=fail+1};
+  let log1=readfile(logp);
+  if(t.assert(countof(log1;alertline)==alerts0+2 && str.contains(log1;"\(alertline)organisation policy loke.policy.json overrode the no-custody limits in config.toml: nocustody.session_predicate_repeat_limit is lowered from 20 to 1 by max_session_predicate_repeat_limit");"each run the ceiling lowered raises a warn alert naming the setting")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(policyrows("org_policy_override";"")==2;"and writes an org_policy_override row to the artifact ledger, releasing nothing")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(writeconfig("[nocustody]\nsession_predicate_repeat_limit = 5\n");"a config.toml above the policy's ceiling is written")){pass=pass+1}el{fail=fail+1};
+  let v=nb.runat(ns.issueat(w);art("sum";"amount";"";"");h;r;w);
+  if(t.assert(v.ok==false && str.eq(v.code;"org_policy_violation") && str.contains(v.err;"nocustody.session_predicate_repeat_limit = 5 in config.toml is above the ceiling of 1");"runat refuses every run while config.toml is above the policy's ceiling (\(v.err))")){pass=pass+1}el{fail=fail+1};
+  let log2=readfile(logp);
+  if(t.assert(countof(log2;alertline)==alerts0+3 && str.contains(log2;"the artifact run is refused");"the refusal raises a critical alert")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(policyrows("refused";"org_policy_violation")==1;"and writes a refused org_policy_violation row")){pass=pass+1}el{fail=fail+1};
+
+  file.delete(sh.configpath());
+  if(t.assert(writepolicy("{\"max_session_cell_budget\":60000}");"a looser policy is written")){pass=pass+1}el{fail=fail+1};
+  let looserun=nb.runat(ns.issueat(w);art("sum";"amount";"";"");h;r;w);
+  if(t.assert(looserun.ok==false && str.eq(looserun.code;"org_policy_violation") && str.contains(looserun.err;"max_session_cell_budget = 60000 is above the artifact contract's default");"runat refuses every run under a policy looser than the contract")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(policyrows("refused";"org_policy_violation")==2;"and records it")){pass=pass+1}el{fail=fail+1};
+
+  let unissued=nb.runat("smoke-unissued";art("sum";"amount";"";"");h;r;w);
+  if(t.assert(str.eq(unissued.code;"session_unissued") && policyrows("refused";"org_policy_violation")==2;"a session loke did not issue is refused as before, and no policy row is written for it")){pass=pass+1}el{fail=fail+1};
+
+  file.delete(op.policypath());
+  let back=nb.runat(ns.issueat(w);art("sum";"amount";"";"");h;r;w);
+  if(t.assert(back.ok;"with the policy file removed, the run is released again")){pass=pass+1}el{fail=fail+1};
+
+  let logall=readfile(logp);
+  if(t.assert(!str.contains(logall;"POLICY-PROBE-5e1a");"loke.log holds no filter value")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

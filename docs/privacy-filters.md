@@ -139,6 +139,10 @@ pipeline behaves as described under [Migration](#migration-guide-for-existing-de
 | `locked_consensus` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("the policy raises it to most-restrictive: the name, the card and the email are masked"); `scripts/smoke_e2e.sh` |
 | `banned_layers` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("a banned layer the configuration enables refuses the run, naming it", "config.toml cannot re-enable it: still refused, still sent nothing") |
 | `max_confidence_threshold` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy_pipeline.tk` ("max_confidence_threshold 0.9 clamps Presidio's threshold, so its 0.92 detection masks the name", "clamped, it is asked at 0.9 and the name is masked") |
+| `max_session_cell_budget` | `packages/core/src/privacy/org_policy.tk` | `tests/unit/nocustody/test_policy_limits.tk` ("config.toml unset: the policy's ceilings are the limits", "a 20-cell result is withheld under a policy cell ceiling of 10", "a policy ceiling above the contract's default is refused, naming the key"); `scripts/smoke_serve.sh` |
+| `max_session_predicate_repeat_limit` | `packages/core/src/privacy/org_policy.tk` | `test_policy_limits.tk` ("under a policy ceiling of 3, three probes run and the fourth is refused at 3", "config.toml above the policy's ceiling is refused, naming both keys and values"); `scripts/smoke_serve.sh` |
+| `max_installation_cell_budget` | `packages/core/src/privacy/org_policy.tk` | `test_policy_limits.tk` ("an installation ceiling alone lowers only the installation limit", "and an installation ceiling above the default") |
+| `max_installation_predicate_repeat_limit` | `packages/core/src/privacy/org_policy.tk` | `test_policy_limits.tk` ("and one above its own installation ceiling", "and a number too long to read") |
 | `enforced` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy.tk` ("enforced: false is read as false, and the policy applies nothing"); `test_org_policy_pipeline.tk` ("a policy with enforced: false changes nothing") |
 | `description` | `packages/core/src/privacy/org_policy.tk` | `test_org_policy.tk` ("the word enforced in a description does not turn enforcement on") |
 | `id` | `packages/core/src/privacy/model_registry.tk` | `tests/unit/privacy/test_model_registry.tk` ("its id and url are read", "an id with a space is refused", "an id registered twice is refused") |
@@ -361,6 +365,7 @@ masks at least what the configuration masks, or stops a layer being sent text:
 | `banned_layers` | The layer is switched off before the run, so it is sent nothing. If `config.toml` (or the default, for `ner` and `presidio`) enables it, **every request is refused** until it is switched off in `[[privacy.layers]]`: dropping it quietly would mask less than the configuration asks for. `config.toml` cannot re-enable it. `regex` cannot be banned. | `organisation policy loke.policy.json bans the <id> privacy layer, and this configuration enables it (switch it off in config.toml)` |
 | `locked_consensus` | Only `most-restrictive`, a floor: a configured strategy that is anything else is raised to it, never silently. The other strategies are not ordered by strictness, so locking one could mask less than the user's own choice; a policy naming one is refused as malformed. | note `privacy.consensus_strategy <s> is raised to most-restrictive` |
 | `max_confidence_threshold` | 0 to 1. **Clamped, not refused**: an enabled layer's `confidence_threshold`, a set `privacy.privacy_filter_threshold` (with the sidecar on) and, under `confidence-weighted`, `privacy.consensus_threshold` above it are lowered to it, so more is accepted and masked. A lower threshold is never raised. The privacy-filter sidecar's own default, used when `privacy_filter_threshold` is unset, is not checked. | note `the <id> layer's confidence_threshold is lowered to <max>` (and the two `privacy.` forms) |
+| `max_session_cell_budget`, `max_session_predicate_repeat_limit`, `max_installation_cell_budget`, `max_installation_predicate_repeat_limit` | NC1.14. Ceilings on the no-custody limits `config.toml`'s `[nocustody]` table sets (`docs/specifications/artifact-contract.md` §8.2), applied by `core.nocustody.bound` to every artifact run, not by the privacy pipeline. Each is a whole number from 0 to the contract's default (50 000 cells, 20 repeats); a ceiling above it is malformed and refuses the file. The limit in force is the lowest of the default, `config.toml` and the policy; an unset `config.toml` key takes the ceiling (an override). **A `config.toml` value above a ceiling is refused, not clamped** (unlike `max_confidence_threshold`): `core.nocustody.limits` already refuses a value above the contract's default rather than clamping it (NC1.10), and a ceiling is treated the same whoever sets it, so `config.toml` never says one budget while another is enforced. Every artifact run is then refused 503 `org_policy_violation`. | `nocustody.<key> = <n> in config.toml is above the ceiling of <m> that organisation policy loke.policy.json sets (<policy key>): ...`; note `nocustody.<key> is lowered from <n> to <m> by <policy key>` |
 | `enforced` | `false` leaves `config.toml` alone (the file must still be valid). Absent means `true`. | |
 | `description` | Ignored. | |
 
@@ -383,7 +388,13 @@ naming each override. Both name layers, settings and policy values, never text. 
 /api/pipeline` a refused request is audited as `org_policy_violation` as well as `privacy_refused`, and an
 overridden one as `org_policy_override`; the reply's `consensus` object carries `configured_strategy` and
 `raised_by` when the floor raised the strategy, and `org_policy_overrides` lists the overrides. With no
-policy, none of these appears. Measured by `scripts/smoke_e2e.sh` against the built binary:
+policy, none of these appears. For the no-custody ceilings (NC1.14), `POST /api/artifact` surfaces the
+same way: a refusal raises the same `privacy_org_policy` alert at `critical` (`...; the artifact run is
+refused`) and a run whose limits a ceiling lowered one at `warn` (`organisation policy loke.policy.json
+overrode the no-custody limits in config.toml: <notes>`), and each writes a row to the artifact ledger
+that route writes, `nc_artifact_runs`: verdict `refused` with code `org_policy_violation`, or verdict
+`org_policy_override`, with no op, fingerprint or probe key and nothing released (`test_policy_limits.tk`,
+`scripts/smoke_serve.sh`). Measured by `scripts/smoke_e2e.sh` against the built binary:
 
 ```
 organisation policy loke.policy.json requires the openai-privacy-filter privacy layer, and it did not scan this request: privacy-filter sidecar unreachable

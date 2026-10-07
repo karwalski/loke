@@ -221,6 +221,49 @@ artifact "probe 3 on zone is refused at the configured limit" \
   429 '"refusal":"value_probing","error":"refused as value probing: this session has already filtered on this column 2 times, the limit is 2 (NC1.10)'
 rm -f "$WORK/home/.loke/config.toml"
 
+# NC1.14: loke.policy.json can set a ceiling on those limits, read on every run. A ceiling is
+# enforced at the ceiling, a config.toml value above it and a policy looser than the contract are
+# refused (503 org_policy_violation), and each is a governance alert in loke.log and a row in
+# nc_artifact_runs. A fresh column (area), so no count above carries over.
+POL="$WORK/home/.loke/loke.policy.json"
+DSA='"headers":["area","amount"],"rows":[["up","1"],["down","2"]]'
+printf '{"max_session_predicate_repeat_limit":1}' > "$POL"
+S5=$(issue_session)
+artifact "probe 1 on area under a policy ceiling of 1" \
+  "{\"session_id\":\"$S5\",\"artifact\":{\"op\":\"count\",\"filter_col\":\"area\",\"filter_val\":\"g1\"},$DSA}" \
+  200 '"values":["0"]'
+artifact "probe 2 on area is refused at the policy's ceiling" \
+  "{\"session_id\":\"$S5\",\"artifact\":{\"op\":\"count\",\"filter_col\":\"area\",\"filter_val\":\"up\"},$DSA}" \
+  429 '"refusal":"value_probing","error":"refused as value probing: this session has already filtered on this column 1 times, the limit is 1 (NC1.10)'
+printf '[nocustody]\nsession_predicate_repeat_limit = 5\n' > "$WORK/home/.loke/config.toml"
+artifact "config.toml above the policy's ceiling refuses every run" \
+  "{\"session_id\":\"$S5\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DSA}" \
+  503 '"refusal":"org_policy_violation","error":"the no-custody limits cannot be applied under the organisation policy, so nothing is released: nocustody.session_predicate_repeat_limit = 5 in config.toml is above the ceiling of 1 that organisation policy loke.policy.json sets (max_session_predicate_repeat_limit)'
+rm -f "$WORK/home/.loke/config.toml"
+printf '{"max_session_cell_budget":60000}' > "$POL"
+artifact "a policy looser than the contract refuses every run" \
+  "{\"session_id\":\"$S5\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DSA}" \
+  503 '"refusal":"org_policy_violation","error":"the no-custody limits cannot be applied under the organisation policy, so nothing is released: organisation policy loke.policy.json cannot be applied: max_session_cell_budget = 60000 is above the artifact contract'"'"'s default, 50000'
+rm -f "$POL"
+artifact "with the policy removed, the same run is released" \
+  "{\"session_id\":\"$S5\",\"artifact\":{\"op\":\"sum\",\"column\":\"amount\"},$DSA}" \
+  200 '"values":["3.0"]'
+LOG="$WORK/home/.loke/loke.log"
+for want in 'governance alert: privacy organisation policy: organisation policy loke.policy.json overrode the no-custody limits in config.toml: nocustody.session_predicate_repeat_limit is lowered from 20 to 1 by max_session_predicate_repeat_limit' \
+            'governance alert: privacy organisation policy: nocustody.session_predicate_repeat_limit = 5 in config.toml is above the ceiling of 1' \
+            'governance alert: privacy organisation policy: organisation policy loke.policy.json cannot be applied: max_session_cell_budget = 60000'; do
+  if grep -qF "$want" "$LOG" 2>/dev/null; then echo "  ok   loke.log has: ${want:0:90}..."
+  else echo "  FAIL loke.log lacks the alert: $want" >&2; fail=1; fi
+done
+if command -v sqlite3 >/dev/null; then
+  got=$(sqlite3 "$WORK/home/.loke/loke.db" "SELECT verdict||':'||COALESCE(refusal_code,'') FROM nc_artifact_runs WHERE session_id='$S5' AND op='' ORDER BY run_id" 2>&1 | tr '\n' ' ')
+  if [ "$got" = "org_policy_override: org_policy_override: refused:org_policy_violation refused:org_policy_violation " ]; then
+    echo "  ok   nc_artifact_runs has the two override rows and the two org_policy_violation rows"
+  else echo "  FAIL nc_artifact_runs policy rows for the session: [$got]" >&2; fail=1; fi
+else
+  echo "  FAIL sqlite3 is not installed, so the policy rows cannot be checked" >&2; fail=1
+fi
+
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed

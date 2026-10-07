@@ -12,6 +12,8 @@ i=na:core.nocustody.artifact;
 i=nr:core.nocustody.request;
 i=ns:core.nocustody.session;
 i=nl:core.nocustody.limits;
+i=op:core.privacy.orgpolicy;
+i=alert:core.governance.alert;
 
 (* NC1.10. A per-session bound on the query-shaped channel.
 
@@ -88,7 +90,17 @@ i=nl:core.nocustody.limits;
    NC1.10 (d): the four limits are read from config.toml's [nocustody] table on every run
    (core.nocustody.limits), and config.toml can only make them tighter. A value above the
    contract's default, or one that cannot be used, refuses every run as limits_unusable,
-   naming the key, until it is fixed. The functions below are the defaults. *)
+   naming the key, until it is fixed. The functions below are the defaults.
+
+   NC1.14: the organisation policy (loke.policy.json, F3b.8) may set a ceiling on each of the
+   four; the limit in force is the lowest of the default, config.toml and the policy, and
+   runat reads both files on every run (inforce). A config.toml value above a policy ceiling,
+   or a policy file that cannot be applied, refuses every run as org_policy_violation (503),
+   naming both keys; it is not clamped (core.nocustody.limits says why). Surfaced as F3b.8
+   surfaces the pipeline's: a governance alert (kind privacy_org_policy) for each refusal and
+   each run the policy's ceiling lowered a limit for, and a row in this ledger, the one
+   POST /api/artifact writes, with verdict refused and code org_policy_violation, or verdict
+   org_policy_override. Setting names and numbers only: never a value, label or filter. *)
 
 t=$boundedresult{
   ok:bool;
@@ -223,9 +235,49 @@ f=run(session:str;a:$artifact;headers:@str;rows:@(@str)):$boundedresult{
   <runat(session;a;headers;rows;t.nowms())
 };
 
-(* At a given time, under the limits config.toml sets now. *)
+(* NC1.14. The limits in force now: config.toml under the organisation policy's ceilings, both
+   files read on this call. *)
+f=inforce():$nclimits{
+  <nl.currentunder(op.nocustodyceilings(op.load(op.policypath())))
+};
+
+(* At a given time, under the limits config.toml and the organisation policy set now. *)
 f=runat(session:str;a:$artifact;headers:@str;rows:@(@str);nowms:i64):$boundedresult{
-  <runwith(session;a;headers;rows;nowms;nl.current())
+  let lim=inforce();
+  let out=runwith(session;a;headers;rows;nowms;lim);
+  surfacepolicy(session;lim;out;nowms);
+  <out
+};
+
+f=policyalertkind():str{ <"privacy_org_policy" };
+
+f=policyalert(severity:str;msg:str):bool{
+  <alert.send(alert.defaultconfig();alert.makealert(policyalertkind();severity;"privacy organisation policy: \(msg)"))
+};
+
+(* A ledger row for what the organisation policy did to a run: no op, no fingerprint, no probe
+   key, nothing released. So the trail shows which artifact runs the policy acted on. *)
+f=recordpolicy(session:str;verdict:str;code:str;nowms:i64):bool{
+  <mt db.exec("INSERT INTO nc_artifact_runs (session_id, op, predicate_fingerprint, probe_key, verdict, refusal_code, rows_released, cells_released, occurred_ms) VALUES (?, '', '', NULL, ?, NULLIF(?,''), 0, 0, CAST(? AS INTEGER))";@(session;verdict;code;str.fromint(nowms))) {
+    $ok:n true;
+    $err:e false
+  }
+};
+
+f=overrideverdict():str{ <"org_policy_override" };
+
+(* NC1.14. F3b.8's surfacing, for an artifact run: a refusal by the policy is a critical alert
+   and a refused row; a run whose limits the policy lowered is a warn alert and an override row.
+   Nothing for a run refused before the limits were looked at (no session loke issued). *)
+f=surfacepolicy(session:str;lim:$nclimits;out:$boundedresult;nowms:i64):bool{
+  if(ns.issessioncode(out.code)){ <false }el{};
+  if(str.eq(out.code;nl.policycode())){
+    policyalert("critical";"\(lim.error); the artifact run is refused");
+    <recordpolicy(session;"refused";nl.policycode();nowms)
+  }el{};
+  if(lim.notes.len==0){ <false }el{};
+  policyalert("warn";"\(nl.policyname()) overrode the no-custody limits in config.toml: \(nl.notestext(lim))");
+  <recordpolicy(session;overrideverdict();"";nowms)
 };
 
 (* Check the session is one loke issued, check the limits can be applied, validate, check the
@@ -236,7 +288,7 @@ f=runwith(session:str;a:$artifact;headers:@str;rows:@(@str);nowms:i64;lim:$nclim
   if(str.len(session)>maxsessionlen()){ <refused("session_unissued";ns.reason("session_unissued");0;0) };
   let issued=ns.checkat(session;nowms);
   if(str.len(issued)>0){ <refused(issued;ns.reason(issued);0;0) };
-  if(str.len(lim.error)>0){ <refused("limits_unusable";nl.reason(lim);0;0) };
+  if(str.len(lim.error)>0){ <refused(lim.code;nl.reason(lim);0;0) };
   let cb=lim.sessioncells;
   let pl=lim.sessionprobes;
   let icb=lim.installcells;
@@ -291,12 +343,12 @@ f=boundedjson(b:$boundedresult):str{
 (* The status for a refusal: 400 for a request that could not be bounded (no session, or one
    loke did not issue or that has expired), 429 for a spent budget or a probing sequence, in
    one session or across them, 503 when the ledger failed or config.toml's limits cannot be
-   applied (NC1.10 (d)), 422 otherwise. *)
+   applied (NC1.10 (d)) or the organisation policy refuses them (NC1.14), 422 otherwise. *)
 f=boundedstatus(b:$boundedresult):i64{
   if(b.ok){ <200 };
   if(ns.issessioncode(b.code)){ <400 };
   if(str.eq(b.code;"cell_budget") || str.eq(b.code;"value_probing")){ <429 };
   if(str.eq(b.code;"installation_cell_budget") || str.eq(b.code;"cross_session_probing")){ <429 };
-  if(str.eq(b.code;"ledger_unavailable") || str.eq(b.code;"limits_unusable")){ <503 };
+  if(str.eq(b.code;"ledger_unavailable") || str.eq(b.code;"limits_unusable") || str.eq(b.code;nl.policycode())){ <503 };
   <422
 };
