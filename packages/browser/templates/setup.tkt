@@ -30,6 +30,10 @@
   .preset-card h3 { margin: 0 0 4px; font-size: 1em; }
   .preset-card p { margin: 0; font-size: 0.85em; color: var(--muted); }
   .test-bubble { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 12px; font-size: 0.9em; }
+  .keys-status { font-size: 0.9em; margin-top: 8px; white-space: pre-line; }
+  .keys-status:empty { display: none; }
+  .keys-status.failed { color: var(--amber); }
+  .keys-status.saved { color: var(--green); margin-bottom: 16px; }
   .test-bubble .label { font-size: 0.75em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
 </style>
 
@@ -85,6 +89,7 @@
     <div class="step-sub">Add API keys for cloud LLMs. loke only calls them for complex tasks — and only after anonymising your message. Keys are stored in your OS keychain.</div>
     <div class="field"><label>Anthropic API Key (Claude)</label><input type="text" id="anthropic-key" placeholder="sk-ant-..." autocomplete="off" spellcheck="false"></div>
     <div class="field"><label>OpenAI API Key (GPT)</label><input type="text" id="openai-key" placeholder="sk-..." autocomplete="off" spellcheck="false"></div>
+    <div class="keys-status" id="keys-status" role="status" aria-live="polite"></div>
     <div class="btn-row">
       <button class="btn btn-secondary" onclick="goStep(3)">← Back</button>
       <button class="btn btn-primary" onclick="saveKeys()">Save & Next →</button>
@@ -95,6 +100,7 @@
   <div class="step-panel" id="step-5">
     <div class="step-title">Privacy Preset</div>
     <div class="step-sub">Choose how cautious loke should be by default. You can change this anytime.</div>
+    <div class="keys-status" id="keys-saved" role="status" aria-live="polite"></div>
     <div class="preset-card selected" id="preset-strict" onclick="selectPreset('strict')">
       <h3>🔒 Strict</h3>
       <p>Anonymise aggressively. Require approval before sending to cloud. Best for sensitive work.</p>
@@ -164,15 +170,59 @@ async function checkOllama() {
   } catch(e) { el.innerHTML = '<div style="color:var(--muted)">Could not check Ollama status</div>'; }
 }
 
+// LS1.4b. /api/settings takes one setting per POST, {"key":string,"value":string}, and puts
+// the two provider keys in the OS keychain. This used to send both keys in one body of
+// another shape, which the endpoint has never read, and moved on whatever the answer was, so
+// the user was not told that neither key had been saved. Each entered key is now sent on its
+// own, one after the other (the endpoint does not serialise concurrent writes), and each
+// answer is checked. No message repeats a key, and a saved key is cleared from its field.
+const PROVIDER_KEYS = [
+  {field: 'anthropic-key', key: 'anthropic_api_key', label: 'Anthropic'},
+  {field: 'openai-key', key: 'openai_api_key', label: 'OpenAI'},
+];
+
+// Why a save failed, in words that cannot contain the key: the endpoint's own error, unless
+// it repeats the value, else the status.
+async function keyFailure(r, value) {
+  let why = '';
+  try { const d = await r.json(); if (d && typeof d.error === 'string') why = d.error; } catch(e) {}
+  if (!why || why.includes(value)) why = 'loke answered ' + r.status;
+  return why;
+}
+
 async function saveKeys() {
-  const ak = document.getElementById('anthropic-key').value.trim();
-  const ok = document.getElementById('openai-key').value.trim();
-  if (ak || ok) {
+  const status = document.getElementById('keys-status');
+  const savedNote = document.getElementById('keys-saved');
+  status.textContent = ''; status.className = 'keys-status';
+  savedNote.textContent = ''; savedNote.className = 'keys-status';
+  const saved = [], failed = [];
+  for (const p of PROVIDER_KEYS) {
+    const input = document.getElementById(p.field);
+    const value = input.value.trim();
+    if (!value) continue;
     try {
-      await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({anthropic_api_key:ak,openai_api_key:ok}) });
-    } catch(e) {}
+      const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key:p.key, value:value}) });
+      let ok = false;
+      if (r.ok) { try { const d = await r.json(); ok = !!(d && d.ok === true); } catch(e) {} }
+      if (ok) { saved.push(p.label); input.value = ''; }
+      else failed.push(p.label + ' key was not saved: ' + (r.ok ? 'loke did not confirm that it was stored' : await keyFailure(r, value)));
+    } catch(e) {
+      failed.push(p.label + ' key was not saved: loke could not be reached');
+    }
   }
+  if (failed.length) {
+    const lines = saved.map(l => l + ' key saved to the OS keychain.').concat(failed);
+    lines.push('Setup has not moved on. Enter the key again and retry, or clear the field to skip it.');
+    status.textContent = lines.join('\n');
+    status.className = 'keys-status failed';
+    return false;
+  }
+  savedNote.textContent = saved.length
+    ? saved.join(' and ') + (saved.length > 1 ? ' keys' : ' key') + ' saved to the OS keychain.'
+    : 'No API keys were entered, so none were saved.';
+  savedNote.className = 'keys-status saved';
   goStep(5);
+  return true;
 }
 
 function selectPreset(p) {

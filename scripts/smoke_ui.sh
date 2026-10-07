@@ -66,7 +66,7 @@ done
 # connection-error page and every GA3 check ran against that: "showWarning is not defined",
 # "setViewMode is not defined", null elements. So wait for the pages themselves to answer 200,
 # for up to a minute, and fail naming the one that did not rather than judge an error page.
-for url in http://127.0.0.1:11432/chat http://127.0.0.1:11430/savings http://127.0.0.1:11430/chat; do
+for url in http://127.0.0.1:11432/chat http://127.0.0.1:11430/savings http://127.0.0.1:11430/chat http://127.0.0.1:11430/setup; do
   up=0
   for _ in $(seq 1 120); do
     [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$url")" = "200" ] && { up=1; break; }
@@ -132,6 +132,15 @@ fi
 # when loke does not answer.
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/dashboard" "$ROOT/tests/ui/layerhealth_f3b6.json"
+  rc=$?
+fi
+# LS1.4b: loke's setup wizard saves each entered provider key with its own {"key","value"}
+# POST, checks each answer, and says which keys were saved and which were not. X8.9: this loke
+# would write a provider key to the user's REAL login keychain (a throwaway HOME does not
+# isolate it), so the checks replace fetch in the page first and answer every /api/settings
+# and every non-GET request themselves; none of them reaches this server.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/setup" "$ROOT/tests/ui/setup_ls14b.json"
   rc=$?
 fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
