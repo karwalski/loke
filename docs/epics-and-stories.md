@@ -1118,8 +1118,8 @@ hand-edit produced a set of numbers that disagreed with them.*
 | DEMO LAYER — moke: DATASETS AND PERSONAL USE | 3 | 40 | 22 | 2 | — | — | — | — | — | 16 |
 | AUDIT-DRIVEN GAPS | 5 | 47 | 44 | — | 2 | 1 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 41 | 35 | 1 | — | — | — | — | — | 5 |
-| VERIFICATION PROGRAMME | 14 | 162 | 133 | 8 | — | 7 | — | — | — | 14 |
-| **Total** | **88** | **801** | **687** | **24** | **6** | **35** | — | **1** | — | **48** |
+| VERIFICATION PROGRAMME | 14 | 162 | 134 | 8 | — | 7 | — | — | — | 13 |
+| **Total** | **88** | **801** | **688** | **24** | **6** | **35** | — | **1** | — | **47** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1213,7 +1213,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | LS1 | 1 | 34 | 29 | 3 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **801** | **687** | **24** | **6** | **35** | — | **1** | — | **48** |
+| **Total** | **88** | **801** | **688** | **24** | **6** | **35** | — | **1** | — | **47** |
 
 Rows parsed: **801**, across **88** epics and **16** level-1 headings.
 
