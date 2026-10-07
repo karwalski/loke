@@ -398,6 +398,66 @@ done
 # The shared log is a file that outlives the request, so it keeps no arguments or results.
 api GET /api/mcp/memory "" 200 '"tool_name":"memory.store","args_json":"",' "the memory log does not keep what was stored"
 
+# BG1.5, GA2.6, GA2.7: every moke API route, and every route that reaches loke (/sysmon,
+# /lokehealth), makes loke's own refusal first. moke reaches loke with no Origin, which loke
+# allows, so without it a foreign page could drive loke through moke, and a rebound page could
+# read what moke relays. Each route: a foreign Origin is 403, a rebinding Host is 403, and a
+# request from moke's own page origin still reaches the handler, judged by what it answered.
+# (POST /api/proxy makes its own stricter check, asserted above.) These run after the MK6.6
+# counts, because the same-origin requests run their handlers.
+guarded() {  # method path body same-origin-code same-origin-must-contain
+  local m="$1" p="$2" b="$3" want="$4" must="$5" label out code
+  for label in "a foreign Origin is refused|-H|Origin: https://evil.example|403|\"cross_origin_refused\":true" \
+               "a rebinding Host is refused|-H|Host: rebind.example|403|\"cross_origin_refused\":true" \
+               "moke's own page origin still reaches the handler|-H|Origin: http://127.0.0.1:$PORT|$want|$must"; do
+    IFS='|' read -r what flag hdr code_want body_want <<< "$label"
+    out=$(curl -s -m 20 -X "$m" -H 'Content-Type: application/json' "$flag" "$hdr" ${b:+-d "$b"} -w '\n%{http_code}' "http://127.0.0.1:$PORT$p")
+    code=$(printf '%s' "$out" | tail -1); out=$(printf '%s' "$out" | sed '$d')
+    case "$code|$out" in
+      "$code_want|"*"$body_want"*) echo "  ok   BG1.5 $m $p: $what [$code]" ;;
+      *) echo "  FAIL BG1.5 $m $p: $what [$code, wanted $code_want with $body_want]: $(printf '%s' "$out" | head -c 150)" >&2; fail=1 ;;
+    esac
+  done
+}
+guarded POST /api/stream       '{}'                 400 'missing required field: prompt'
+guarded POST /api/ml/propose   '{}'                 400 'at least one of'
+guarded POST /api/ml/run       '{}'                 400 'missing required field: kind'
+guarded POST /api/session      '{}'                 502 'issued no session'
+guarded GET  /api/health       ''                   503 '"loke":"unreachable"'
+guarded GET  /api/models       ''                   502 '"relayed_by":"moke"'
+guarded POST /api/pipeline     '{"text":"hello"}'   502 '"relayed_by":"moke"'
+guarded GET  /api/pipeline     ''                   200 'moke pipeline API ready'
+guarded GET  /api/agents       ''                   200 '"agents":['
+guarded GET  '/api/agents/diary?agent_id=nosuchagent' '' 404 'agent not found: nosuchagent'
+guarded POST /api/agents/scan  '{"dataset_id":"bg15","headers":["a"],"rows_json":"[[\"1\"]]"}' 200 '"datasets_scanned":1,'
+guarded POST /api/agents/schema '{}'                400 'old_csv and new_csv are required'
+guarded POST /api/datasets     '{}'                 400 'missing required field: id'
+guarded POST /api/feedback     '{"rating":"meh"}'   400 'thumbs_up or thumbs_down'
+guarded GET  /api/memory       ''                   200 '"ok":true'
+guarded POST /api/memory       '{"action":"store"}' 400 'missing required field: content'
+guarded GET  /api/mcp/tools    ''                   200 '"name":"anonymise"'
+guarded POST /api/mcp/invoke   '{}'                 400 'tool_name is required'
+guarded GET  /api/mcp/broker   ''                   200 '"name":"loke-memory"'
+guarded GET  /api/mcp/memory   ''                   200 '"available_tools":["memory.search"'
+guarded POST /api/mcp/memory   '{}'                 400 'tool_name is required'
+guarded GET  /api/presets      ''                   200 '"enforced_on_request_path":false'
+guarded POST /api/routing      '{"prompt":"hello"}' 200 '"routing":{'
+guarded POST /api/upload       'a,b'                422 '"error":"no data"'
+guarded GET  /sysmon           ''                   200 '"total_ram_mb":'
+guarded GET  /lokehealth       ''                   200 'document.body.textContent = JSON.stringify(result)'
+# And a refused request does nothing: a valid rating sent from a foreign page stores no row.
+if command -v sqlite3 >/dev/null; then
+  before=$(sqlite3 "$WORK/home/.loke/loke.db" "SELECT count(*) FROM feedback" 2>&1)
+  curl -s -o /dev/null -m 20 -X POST -H 'Content-Type: application/json' -H 'Origin: https://evil.example' \
+    -d '{"rating":"thumbs_up","comment":"bg15 refused"}' "http://127.0.0.1:$PORT/api/feedback"
+  after=$(sqlite3 "$WORK/home/.loke/loke.db" "SELECT count(*) FROM feedback" 2>&1)
+  if [ "$before" = "$after" ] && [ -n "$before" ]; then
+    echo "  ok   BG1.5 a refused POST /api/feedback stored no row ($before before and after)"
+  else
+    echo "  FAIL BG1.5 a refused POST /api/feedback changed the feedback table: [$before] -> [$after]" >&2; fail=1
+  fi
+fi
+
 # BG1.2: /sysmon wrote cpu_percent, ram_percent, used_ram_mb and free_ram_mb as the literal 0,
 # and its loke entry as zeros. loke is not running here (asserted by /api/health above), so moke
 # measures the machine itself and must say loke was not measured. Each figure is judged against

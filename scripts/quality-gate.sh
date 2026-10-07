@@ -341,6 +341,14 @@ step_checks() {
       || { python3 ./scripts/check_loke_url.py packages/moke >&2; failed=1; }
   fi
 
+  # BG1.5: moke reaches loke with no Origin, which loke allows, so a moke route that forwards
+  # without loke's own refusal first lets any page drive loke through moke.
+  if [[ -f ./scripts/check_moke_origin.py ]]; then
+    echo "  every moke API route, and every moke route that reaches loke, refuses a foreign page first (BG1.5)"
+    python3 ./scripts/check_moke_origin.py --check packages/moke >/dev/null \
+      || { python3 ./scripts/check_moke_origin.py packages/moke >&2; failed=1; }
+  fi
+
   # F3b.12: the privacy-filter sidecar and mcp-toke both defaulted to 11435, so only one could
   # bind and the privacy-filter layer could post the prompt to mcp-toke. Each default is a
   # literal in its own file; this reads them all and fails on a shared one.
