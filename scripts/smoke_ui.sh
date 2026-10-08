@@ -88,13 +88,15 @@ rc=0
 # They run before the chat checks, whose requests record rows of their own.
 LKDB="$WORK/lk/home/.loke/loke.db"
 if [ -z "${UI_CHECKS:-}" ]; then
-  # One request first, alone, so loke creates and migrates its database before the page sends
-  # two at once: concurrent first opens of a fresh loke.db fail their migrations (F10.51).
-  first=$(curl -s -m 20 http://127.0.0.1:11430/api/layermetrics)
-  case "$first" in
-    '{"measured":true,"recorded":false,'*) echo "  ok   loke's /api/layermetrics, asked first, says nothing is recorded" ;;
-    *) echo "smoke_ui: FAILED — loke's first /api/layermetrics answered: $first" >&2; exit 1 ;;
-  esac
+  # No lone request first. The page asks loke twice at once (its own fetch and the check's),
+  # and when loke.db does not exist yet that is a concurrent first open of a fresh database,
+  # which failed its migrations before F10.51 serialised them. Whether it was fresh is said,
+  # not assumed; tests/unit/storage/test_migrate_concurrent.tk is the check that always is.
+  if [ -f "$LKDB" ]; then
+    echo "  note loke.db existed before the governance page's first request"
+  else
+    echo "  note loke.db did not exist before the governance page's first request (a concurrent first open)"
+  fi
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/governance" "$ROOT/tests/ui/layermetrics_f3b10_empty.json"
   rc=$?
   if [ "$rc" -eq 0 ]; then

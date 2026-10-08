@@ -380,42 +380,93 @@ f=openstore(datadir:str):$store!$lokeerr{
   }
 };
 
+(* F10.51 - concurrent first opens. Every page request opens the store, and the server is a
+   pool of forked workers, so on a fresh loke.db several processes ran the migrations at
+   once. Each read "version N is not recorded", each applied N, and the loser either failed
+   the migration itself (a duplicate column) or failed to record it (the PRIMARY KEY on
+   schema_migrations.version). Measured against the built server on a fresh HOME: of three
+   simultaneous requests, two answered 503 in five trials of five, logging "migration applied
+   but could not be recorded" and "N migration(s) are not applied".
+
+   Serialised in SQLite itself, under the write lock, and nowhere else. A lock file would
+   need a lock primitive toke does not offer and leaves a stale file behind a killed process;
+   migrating once at server start covers the server but not the CLI, moke's relay, the tests
+   or erase.tk's rebuild, which open the same file from other processes. SQLite's lock is the
+   one every process opening loke.db already shares, and the OS releases it when its holder
+   dies.
+
+   The fast path takes no lock and writes nothing: one COUNT over schema_migrations, and if
+   every version is recorded the open is done. That is the case for every request but the
+   first, and it replaces the single-row SELECT per migration, twice over, that this function
+   and openstore used to run on every request. Only a store with something pending goes on to
+   applymigrations. *)
 f=runmigrations(conn:$dbconn):i64!$lokeerr{
-  let createsql="CREATE TABLE IF NOT EXISTS schema_migrations (
-  version INTEGER PRIMARY KEY,
-  applied_at TEXT NOT NULL,
-  description TEXT NOT NULL
-)";
-  let created=mt db.exec(createsql;@()) {
-    $ok:v true;
-    $err:e false
-  };
-  if(!created){
-    log.error("db: could not create schema_migrations; no migration was applied";"db";"system");
-    <$err($storageerr("failed to create schema_migrations table"))
+  let all=m.allmigrations();
+  if(pendingmigrations(all)==0){ <$ok(0) }el{};
+  let failedat=applymigrations(all);
+  if(failedat==migrationlockfailed()){
+    <$err($storageerr("the database write lock could not be taken to migrate"))
   }el{};
-  let failedat=applymigrations(m.allmigrations());
+  if(failedat==migrationcommitfailed()){
+    <$err($storageerr("the migrations could not be committed"))
+  }el{};
   if(failedat>0){
     <$err($storageerr(str.concat("migration failed at version ";str.fromi64(failedat))))
   }el{};
   <$ok(1)
 };
 
-(* Applies each migration not yet recorded, in order, and answers the version that FAILED,
-   or 0 when every one applied.
+(* applymigrations' answers that are not a version. *)
+f=migrationlockfailed():i64{ <0-1 };
+f=migrationcommitfailed():i64{ <0-2 };
 
-   What this replaced. Each `mt db.exec(...) { $ok:v 1; $err:e $err(...) }` was a
-   STATEMENT, so its value, the error included, was thrown away. A migration whose SQL
-   failed was then inserted into schema_migrations as applied, so it was never retried,
-   and every later migration ran against a schema missing its predecessor. Nothing
-   reported any of it.
+f=migsqlok(sql:str):bool{
+  <mt db.exec(sql;@()) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* Applies each migration not yet recorded, in order, and answers the version that FAILED,
+   0 when every one applied, migrationlockfailed() when the write lock could not be taken,
+   or migrationcommitfailed() when the commit did not succeed.
+
+   F10.51: the whole run is ONE transaction under BEGIN IMMEDIATE. IMMEDIATE takes the write
+   lock before the first read, so a second process waits (busy_timeout, which openstore sets
+   to busytimeoutms()) instead of reading the same "not yet applied" answer and racing to
+   apply it. The applied set is read again INSIDE the lock, so a process that waited finds
+   the first one's work committed and applies nothing. schema_migrations is created inside
+   the lock too.
+
+   A migration and its record commit together or not at all. If any statement fails, the
+   run is rolled back, so nothing it applied stays behind unrecorded and nothing is recorded
+   that is not applied: the store is left as the run found it, the open fails (503 at the
+   page handlers), and the next open tries again. A failure to take the lock or to commit is
+   the same: rolled back, logged at ERROR, and the open fails.
+
+   Before that, each `mt db.exec(...) { $ok:v 1; $err:e $err(...) }` here was a STATEMENT,
+   so its value, the error included, was thrown away. A migration whose SQL failed was then
+   inserted into schema_migrations as applied, so it was never retried, and every later
+   migration ran against a schema missing its predecessor.
 
    It stops at the first failure. Later migrations may depend on the failed one, and a
-   recorded version has to mean "applied". It logs at ERROR, naming the migration.
-   runmigrations does return $err, but its only caller matches on a !$lokeerr result,
-   which T-18 reads as $ok whatever it holds (LS1.1j). So the log line and
-   pendingmigrations() are what actually make a failure visible today. *)
+   recorded version has to mean "applied". It logs at ERROR, naming the migration. *)
 f=applymigrations(migrations:@$migration):i64{
+  if(migsqlok("BEGIN IMMEDIATE")){}el{
+    log.error("db: the write lock could not be taken to apply migrations, so none was applied and the store is not opened";"db";"system");
+    <migrationlockfailed()
+  };
+  let createsql="CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL,
+  description TEXT NOT NULL
+)";
+  if(migsqlok(createsql)){}el{
+    migsqlok("ROLLBACK");
+    log.error("db: could not create schema_migrations; no migration was applied";"db";"system");
+    <migrationlockfailed()
+  };
+  let applied=mut.0;
   lp(let mi=0;mi<migrations.len;mi=mi+1){
     let mg=migrations.get(mi);
     let verstr=str.fromint(mg.version);
@@ -424,40 +475,50 @@ f=applymigrations(migrations:@$migration):i64{
       $err:v false
     };
     if(!exists){
-      let ran=mt db.exec(mg.sql;@()) {
-        $ok:v true;
-        $err:e false
-      };
-      if(!ran){
-        log.error(str.concat("db: migration FAILED and was not recorded, so later migrations were not attempted: ";mg.description);"db";"system");
+      if(migsqlok(mg.sql)){}el{
+        migsqlok("ROLLBACK");
+        log.error(str.concat("db: migration FAILED, so this run was rolled back and later migrations were not attempted: ";mg.description);"db";"system");
         <mg.version as i64
-      }el{};
+      };
       (* An ISO-8601 stamp, not the literal "now()". See GA5.1. *)
       let recorded=mt db.exec("INSERT INTO schema_migrations (version,applied_at,description) VALUES (?,?,?)";@(verstr;str.nowiso8601();mg.description)) {
         $ok:v true;
         $err:e false
       };
       if(!recorded){
-        log.error(str.concat("db: migration applied but could not be recorded: ";mg.description);"db";"system");
+        migsqlok("ROLLBACK");
+        log.error(str.concat("db: a migration could not be recorded, so this run was rolled back: ";mg.description);"db";"system");
         <mg.version as i64
       }el{};
+      applied=applied+1;
     }el{};
   };
+  if(migsqlok("COMMIT")){}el{
+    migsqlok("ROLLBACK");
+    log.error("db: the migrations could not be committed, so none was applied and the store is not opened";"db";"system");
+    <migrationcommitfailed()
+  };
+  if(applied>0){
+    log.info("db: applied \(applied) migration(s) under the write lock";"db";"system")
+  }el{};
   <0
 };
 
-(* How many of the given migrations are not recorded as applied. openstore logs it,
-   because T-18 hides runmigrations' own $err (see applymigrations). *)
+(* How many of the given migrations are not recorded as applied, in ONE query: all of them
+   when schema_migrations does not exist yet. It is runmigrations' fast path (F10.51), and
+   openstore and erase.tk ask it after a run. *)
 f=pendingmigrations(migrations:@$migration):i64{
-  let pending=mut.0;
+  if(migrations.len==0){ <0 }el{};
+  let inlist=mut."";
   lp(let mi=0;mi<migrations.len;mi=mi+1){
-    let exists=mt db.one(str.concat("SELECT version FROM schema_migrations WHERE version=";str.fromint(migrations.get(mi).version));@()) {
-      $ok:v true;
-      $err:v false
-    };
-    if(!exists){ pending=pending+1 }el{};
+    let v=str.fromint(migrations.get(mi).version);
+    if(mi==0){ inlist=v }el{ inlist="\(inlist),\(v)" };
   };
-  <pending
+  let present=mt db.one("SELECT COUNT(DISTINCT version) AS n FROM schema_migrations WHERE version IN (\(inlist))";@()) {
+    $ok:r rowi64(r;"n");
+    $err:e 0
+  };
+  <(migrations.len as i64)-present
 };
 
 f=closestore(store:$store):i64{

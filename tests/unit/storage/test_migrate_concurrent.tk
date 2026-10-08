@@ -1,0 +1,172 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.storage.testmigrateconcurrent;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=io:std.io;
+i=args:std.args;
+i=process:std.process;
+i=sdb:core.storage.db;
+i=mg:core.storage.migrations;
+
+(* F10.51 - concurrent first opens of a fresh loke.db.
+
+   The server is a pool of forked workers and every page request opens the store, so the
+   first requests after install race to migrate one new file. Measured before the fix
+   against the built server: of three simultaneous requests, two answered 503 in each of
+   five trials, logging "migration applied but could not be recorded".
+
+   This test does what the workers do, from separate processes. It runs itself as a child
+   (`<binary> child <dir>`), and a child does nothing but core.storage.db.openstore on a data
+   directory and exit 0 if the store opened. Each round starts CHILDREN children at once on
+   a directory that does not exist yet, then judges the result from outside the product,
+   with the sqlite3 CLI and the log, so that the parent's own connection never migrates the
+   file and cannot mask a child's failure:
+
+     - every child opened the store;
+     - schema_migrations holds exactly one row per migration, and the newest version;
+     - the children's "applied N migration(s)" lines sum to the number of migrations, so
+       each migration ran exactly once across all of them;
+     - no migration failure, unrecorded migration, incomplete schema, lock or commit
+       failure was logged.
+
+   The audit hash chain is not touched: no migration writes an audit row. *)
+
+f=children():i64{ <8 };
+f=rounds():i64{ <3 };
+
+f=child(dir:str):i64{
+  <mt sdb.openstore(dir) {
+    $ok:s 0;
+    $err:e 7
+  }
+};
+
+(* stdout of argv, trimmed; "" when it could not be started. stdout is read before wait. *)
+f=runout(argv:@str):str{
+  <mt process.spawn(argv) {
+    $ok:h runread(h);
+    $err:e ""
+  }
+};
+
+f=runread(h:i64):str{
+  let out=mt process.stdout(h) {$ok:s s;$err:e ""};
+  process.wait(h);
+  <str.trim(out)
+};
+
+f=lastversion():i64{
+  let all=mg.allmigrations();
+  let top=mut.0;
+  lp(let i=0;i<all.len;i=i+1){
+    let v=all.get(i).version as i64;
+    if(v>top){ top=v }el{};
+  };
+  <top
+};
+
+f=main():i64{
+  let mode=mt args.get(1 as u64) { $ok:v v; $err:e "" };
+  if(str.eq(mode;"child")){
+    let cdir=mt args.get(2 as u64) { $ok:v v; $err:e "" };
+    <child(cdir)
+  }el{};
+
+  let pass=mut.0;
+  let fail=mut.0;
+  let me=mt args.get(0 as u64) { $ok:v v; $err:e "" };
+  let total=mg.allmigrations().len as i64;
+  let top=lastversion();
+  let parent=str.concat(std.homedir();"/.loke/test-migrate-concurrent");
+  file.mkdir(parent);
+  let logpath=str.concat(std.homedir();"/.loke/loke.log");
+  let spawnall="ok=0; pids=''; i=0; while [ $i -lt $2 ]; do $0 child $1 & pids=\"$pids $!\"; i=$((i+1)); done; for p in $pids; do wait $p && ok=$((ok+1)); done; echo $ok";
+  let summary="SELECT COUNT()||' '||COUNT(DISTINCT version)||' '||MAX(version) FROM schema_migrations";
+  let expectedsummary="\(total) \(total) \(top)";
+  let n=children();
+
+  let lastdir=mut."";
+  lp(let r=0;r<rounds();r=r+1){
+    let dir=str.concat(parent;str.concat("/r";str.randhex(6)));
+    lastdir=dir;
+    if(t.assert(!file.exists(str.concat(dir;"/loke.db"));"round \(r): the data directory starts absent")){pass=pass+1}el{fail=fail+1};
+    let opened=runout(@("/bin/sh";"-c";spawnall;me;dir;"\(n)"));
+    if(t.asserteq(opened;"\(n)";"round \(r): every one of the concurrent first opens succeeded")){pass=pass+1}el{fail=fail+1};
+    let got=runout(@("sqlite3";str.concat(dir;"/loke.db");summary));
+    io.println("round \(r): \(opened) of \(n) opened; schema_migrations rows, distinct, newest: \(got) (expected \(expectedsummary))");
+    if(t.asserteq(got;expectedsummary;"round \(r): schema_migrations holds exactly one row per migration, up to the newest version")){pass=pass+1}el{fail=fail+1};
+  };
+
+  (* Each round applies every migration once, so across all rounds the children's lines sum
+     to rounds x migrations. A migration applied twice adds to the sum; one never applied
+     subtracts. *)
+  let appliedsum=runout(@("/bin/sh";"-c";"grep -o 'applied [0-9][0-9]* migration(s) under the write lock' $0 | awk '{s+=$2} END {print s+0}'";logpath));
+  let expectedsum=rounds()*total;
+  if(t.asserteq(appliedsum;"\(expectedsum)";"each migration ran exactly once across the concurrent opens")){pass=pass+1}el{fail=fail+1};
+  let faults=runout(@("/bin/sh";"-c";"grep -c -e 'migration FAILED' -e 'could not be recorded' -e 'are not applied' -e 'write lock could not be taken' -e 'could not be committed' -e 'could not be opened' $0";logpath));
+  io.println("migrations applied, summed over every child: \(appliedsum) (expected \(expectedsum)); failures logged: \(faults)");
+  if(t.asserteq(faults;"0";"and no migration, record, lock or commit failure was logged")){pass=pass+1}el{fail=fail+1};
+
+  (* The write lock is held by another process, the sqlite3 CLI under BEGIN IMMEDIATE, until
+     this test touches <db>.release<tag> (or two minutes pass), and <db>.released<tag> appears
+     once it is let go. The release is this test's to give, not a timer's: on a loaded
+     machine a fixed hold could run out before a child even reached the lock, and the check
+     would pass whatever the code did (measured 2026-10-27: with the fast path removed, an
+     8 s hold let the reopen below through). waitheld returns once the lock is held, and
+     answers the exit status of one more attempt to take it, which must not be 0. *)
+  let holdscript="( ( echo 'BEGIN IMMEDIATE;'; i=0; while [ ! -f $0.release$1 ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done; echo 'COMMIT;' ) | sqlite3 -cmd '.timeout 30000' $0; touch $0.released$1 ) > /dev/null 2>&1 &";
+  let waitheld="i=0; while sqlite3 $0 'BEGIN IMMEDIATE;' > /dev/null 2>&1 && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; sqlite3 $0 'BEGIN IMMEDIATE;' > /dev/null 2>&1; echo $?";
+  let waitreleased="touch $0.release$1; while [ ! -f $0.released$1 ]; do sleep 0.2; done";
+
+  (* An already-migrated store takes no lock to open. While another process holds the write
+     lock, an open that took it would wait out the busy timeout and fail; one on the fast path
+     only reads, which the held lock allows, and succeeds with the lock still held. *)
+  let db=str.concat(lastdir;"/loke.db");
+  runout(@("/bin/sh";"-c";holdscript;db;"1"));
+  let control=runout(@("/bin/sh";"-c";waitheld;db));
+  if(t.assert(!str.eq(control;"0");"control: while the other process holds it, the write lock cannot be taken")){pass=pass+1}el{fail=fail+1};
+  let reopened=runout(@("/bin/sh";"-c";"$0 child $1; echo $?";me;lastdir));
+  let released=file.exists(str.concat(db;".released1"));
+  let releasedsaid=mut."no";
+  if(released){ releasedsaid="yes" }el{};
+  io.println("reopen of a migrated store under a held write lock: exit \(reopened), lock already released: \(releasedsaid)");
+  if(t.asserteq(reopened;"0";"an already-migrated store opens while another process holds the write lock")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!released;"and it did so without waiting for the lock to be released")){pass=pass+1}el{fail=fail+1};
+  runout(@("/bin/sh";"-c";waitreleased;db;"1"));
+
+  (* An upgrade: a store one migration behind, opened at once by several processes while
+     another holds the write lock. On a fresh file the run's first statement creates
+     schema_migrations, a write, so even a deferred BEGIN waits for the lock there and the
+     rounds above cannot tell it from IMMEDIATE. Here schema_migrations exists, so a deferred
+     run starts by reading and only then asks for the write lock; SQLite answers that upgrade
+     SQLITE_BUSY at once, without the busy timeout, and the open fails. Under BEGIN IMMEDIATE
+     every child waits for the lock, one applies the missing migration and the rest find it
+     recorded. The lock is let go 4 s after the children start, inside the 5 s busy timeout.
+     Migration 42 is an index, so dropping it and its record puts the store exactly one
+     migration behind. *)
+  let behind=runout(@("sqlite3";db;"DROP INDEX idx_privacy_layer_metrics_created; DELETE FROM schema_migrations WHERE version=42; SELECT COUNT() FROM schema_migrations;"));
+  let behindwant="\(total-1)";
+  if(t.asserteq(behind;behindwant;"upgrade: the store starts one migration behind")){pass=pass+1}el{fail=fail+1};
+  runout(@("/bin/sh";"-c";holdscript;db;"2"));
+  let held=runout(@("/bin/sh";"-c";waitheld;db));
+  if(t.assert(!str.eq(held;"0");"upgrade control: the write lock is held when the children start")){pass=pass+1}el{fail=fail+1};
+  let spawnheld="ok=0; pids=''; i=0; while [ $i -lt $2 ]; do $0 child $1 & pids=\"$pids $!\"; i=$((i+1)); done; sleep 4; touch $1/loke.db.release2; for p in $pids; do wait $p && ok=$((ok+1)); done; echo $ok";
+  let upgraded=runout(@("/bin/sh";"-c";spawnheld;me;lastdir;"4"));
+  let upgot=runout(@("sqlite3";db;summary));
+  let onces=runout(@("/bin/sh";"-c";"grep -c 'applied 1 migration(s) under the write lock' $0";logpath));
+  io.println("upgrade under a held write lock: \(upgraded) of 4 opened; schema_migrations: \(upgot); runs that applied the missing one: \(onces)");
+  if(t.asserteq(upgraded;"4";"upgrade: every concurrent open of a store one migration behind succeeded")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(upgot;expectedsummary;"upgrade: the missing migration is recorded once, and the store is complete")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(onces;"1";"upgrade: exactly one of the children applied it")){pass=pass+1}el{fail=fail+1};
+  runout(@("/bin/sh";"-c";waitreleased;db;"2"));
+
+  let rm=mt process.spawn(@("rm";"-rf";parent)) { $ok:h h; $err:e 0 };
+  if(rm!=0){ process.wait(rm); }el{};
+  io.println("test_migrate_concurrent: \(pass) passed, \(fail) failed");
+  <fail
+};
