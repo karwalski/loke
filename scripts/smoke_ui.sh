@@ -70,7 +70,7 @@ done
 # connection-error page and every GA3 check ran against that: "showWarning is not defined",
 # "setViewMode is not defined", null elements. So wait for the pages themselves to answer 200,
 # for up to a minute, and fail naming the one that did not rather than judge an error page.
-for url in http://127.0.0.1:11432/chat http://127.0.0.1:11430/savings http://127.0.0.1:11430/chat http://127.0.0.1:11430/setup; do
+for url in http://127.0.0.1:11432/chat http://127.0.0.1:11430/savings http://127.0.0.1:11430/chat http://127.0.0.1:11430/setup http://127.0.0.1:11432/governance http://127.0.0.1:11430/evaluate; do
   up=0
   for _ in $(seq 1 120); do
     [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$url")" = "200" ] && { up=1; break; }
@@ -80,8 +80,46 @@ for url in http://127.0.0.1:11432/chat http://127.0.0.1:11430/savings http://127
 done
 
 
-node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "${UI_CHECKS:-$ROOT/tests/ui/chat_ga3.json}"
-rc=$?
+rc=0
+# F3b.10: the governance page's privacy layer metrics, first, while loke has recorded no request
+# (nothing above sends one): it must say "No requests recorded" and show no figure. Then the
+# rows of tests/ui/layermetrics_f3b10_seed.sql are written straight into the throwaway loke's
+# database, and the page must show exactly their aggregates, computed by loke from those rows.
+# They run before the chat checks, whose requests record rows of their own.
+LKDB="$WORK/lk/home/.loke/loke.db"
+if [ -z "${UI_CHECKS:-}" ]; then
+  # One request first, alone, so loke creates and migrates its database before the page sends
+  # two at once: concurrent first opens of a fresh loke.db fail their migrations (F10.51).
+  first=$(curl -s -m 20 http://127.0.0.1:11430/api/layermetrics)
+  case "$first" in
+    '{"measured":true,"recorded":false,'*) echo "  ok   loke's /api/layermetrics, asked first, says nothing is recorded" ;;
+    *) echo "smoke_ui: FAILED — loke's first /api/layermetrics answered: $first" >&2; exit 1 ;;
+  esac
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/governance" "$ROOT/tests/ui/layermetrics_f3b10_empty.json"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    if ! command -v sqlite3 >/dev/null; then
+      echo "smoke_ui: FAILED — sqlite3 is not installed, so the F3b.10 rows cannot be seeded" >&2; rc=1
+    elif [ "$(sqlite3 "$LKDB" "SELECT COUNT(*) FROM privacy_layer_metrics" 2>&1)" != "0" ]; then
+      echo "smoke_ui: FAILED — loke's privacy_layer_metrics was not empty before seeding: $(sqlite3 "$LKDB" "SELECT COUNT(*) FROM privacy_layer_metrics" 2>&1)" >&2; rc=1
+    elif ! sqlite3 "$LKDB" < "$ROOT/tests/ui/layermetrics_f3b10_seed.sql"; then
+      echo "smoke_ui: FAILED — the F3b.10 rows could not be written to $LKDB" >&2; rc=1
+    else
+      node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/governance" "$ROOT/tests/ui/layermetrics_f3b10.json"
+      rc=$?
+    fi
+  fi
+fi
+# F3b.9: loke's layer comparison panel, against the layers loke serves here (regex in process,
+# NER on the stand-in Ollama, Presidio not running, so unavailable).
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/evaluate" "$ROOT/tests/ui/evaluate_f3b9.json"
+  rc=$?
+fi
+if [ "$rc" -eq 0 ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "${UI_CHECKS:-$ROOT/tests/ui/chat_ga3.json}"
+  rc=$?
+fi
 # GA1.5c: moke's savings ledger and view, judged against loke's own reply to a real request.
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/chat" "$ROOT/tests/ui/savings_ga15c.json"

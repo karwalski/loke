@@ -1,0 +1,163 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.browser.evaluatehandler;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=json:std.json;
+i=process:std.process;
+i=pl:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=cmp:core.privacy.comparison;
+i=h:page.api.evaluate;
+
+(* F3b.9 — POST /api/evaluate, the browser's `loke privacy evaluate`, through the body its
+   post() answers with (h.evaluatejson; T-16: a handler taking req:i64 cannot be called from
+   a test). The origin guard is judged over real HTTP by scripts/smoke_serve.sh.
+
+   scripts/lib/http_recorder.py stands in for the detection layers (NER on /api/chat,
+   Presidio on /analyze), as in test_privacy_comparison: both report "Jane Citizen" (NER by
+   value, Presidio at 0-12) and the regex layer finds the email at 34-50. A SECOND recorder
+   stands in for the local model provider: it is the Ollama base the pipeline config names,
+   which is where page.api.pipeline sends a local model request, with the NER layer switched
+   off so no detection layer may call it. Whatever reaches it was sent by something other
+   than a detection layer. This checks:
+     - the reply's shape: every layer, its state, its detections as type, placeholder,
+       spans and confidence, the consensus decisions and summary, valid JSON;
+     - no detected value anywhere in the reply;
+     - an unavailable layer has detections null, never 0;
+     - the stand-in provider receives nothing, from the route or from compare, while the
+       detection layer's recorder did receive the scan (so the check is not vacuous);
+     - with NER on, every /api/chat the layers' recorder saw is an NER detection request. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_evaluate_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=recorder(base:str):i64{
+  <mt process.spawn(@("python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port")) { $ok:h h; $err:e 0 }
+};
+
+(* The part of the reply that describes one layer: from its id to its hits. *)
+f=layerseg(j:str;id:str):str{
+  let key="{\"id\":\"\(id)\"";
+  let at=str.indexof(j;key);
+  if(at<0){ <"" }el{};
+  let rest=str.slice(j;at;str.len(j));
+  let end=str.indexof(rest;"\"hits\"");
+  if(end<0){ <rest }el{};
+  <str.slice(rest;0;end)
+};
+
+f=validjson(j:str):bool{
+  <mt json.dec(j) { $ok:o true; $jsonerr:e false }
+};
+
+(* True when every line of a recorder log that is a POST to /api/chat carries the NER
+   layer's system prompt, and no line is a model or hosted-provider path. *)
+f=onlydetection(log:str):bool{
+  let lines=str.split(log;"\n");
+  let ok=mut.true;
+  lp(let i=0;i<lines.len;i=i+1){
+    let l:str=lines.get(i);
+    if(str.startswith(l;"POST /api/chat") && !str.contains(l;"named entity recognition")){ ok=false }el{};
+    if(str.contains(l;" /api/generate") || str.contains(l;" /v1/")){ ok=false }el{}
+  };
+  <ok
+};
+
+f=novalue(j:str):bool{
+  <!str.contains(j;"Jane") && !str.contains(j;"Citizen") && !str.contains(j;"jane@") && !str.contains(j;"example.com")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let lbase=scratch();
+  let pbase=scratch();
+  let lrec=recorder(lbase);
+  let prec=recorder(pbase);
+  let lport=waitport("\(lbase).port");
+  let pport=waitport("\(pbase).port");
+  if(t.assert(lrec!=0 && prec!=0 && str.len(lport)>0 && str.len(pport)>0;"both recorders came up")){pass=pass+1}el{fail=fail+1};
+  let layers="http://127.0.0.1:\(lport)";
+  let provider="http://127.0.0.1:\(pport)";
+  (* Nothing listens on port 1. *)
+  let dead="http://127.0.0.1:1";
+
+  let text="Jane Citizen called Tuesday, mail jane@example.com";
+
+  (* ── Shape ────────────────────────────────────────────────────────────────── *)
+  let all=pl.newconfig(layers;layers);
+  let j=h.evaluatejson(text;all);
+  if(t.assert(validjson(j);"the reply is valid JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(j;"{\"ok\":true,\"evaluated\":true,\"values_shown\":false,\"text_bytes\":50,\"completed_layers\":3,");"ok, evaluated, values not shown, 50 bytes, three layers completed")){pass=pass+1}el{fail=fail+1};
+  let rx=layerseg(j;fr.regexid());
+  let nr=layerseg(j;fr.nerid());
+  let pr=layerseg(j;fr.presidioid());
+  if(t.assert(str.contains(rx;"\"state\":\"completed\"") && str.contains(rx;"\"completed\":true") && str.contains(rx;"\"detections\":1");"regex completed with one detection (\(rx))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"type\":\"email\",\"placeholder\":\"[email]\",\"spans\":[{\"start\":34,\"end\":50}],\"confidence\":");"the regex hit is its type, placeholder and span 34-50")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(nr;"\"detections\":1") && str.contains(pr;"\"detections\":1");"NER and Presidio completed with one detection each")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"{\"type\":\"PERSON\",\"placeholder\":\"[PERSON]\",\"spans\":[{\"start\":0,\"end\":12}]");"NER's value-only hit is placed at 0-12, as the CLI places it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"consensus\":{\"strategy\":\"most-restrictive\"") && str.contains(j;"\"voters\":[\"regex\",\"ner\",\"presidio\"]");"the consensus strategy and its voters")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"reported_by\":\"regex\",\"found_by\":[\"regex\"]") && str.contains(j;"\"missed_by\":[\"ner\",\"presidio\"],\"action\":\"mask\"");"the email's decision: reported by regex, missed by NER and Presidio, masked")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"summary\":{\"detections\":3,");"three decisions in the summary")){pass=pass+1}el{fail=fail+1};
+
+  (* ── No value ─────────────────────────────────────────────────────────────── *)
+  if(t.assert(novalue(j);"no detected value (the name, the email or any part of them) is in the reply")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Unavailable is not empty ─────────────────────────────────────────────── *)
+  let jd=h.evaluatejson(text;pl.newconfig(dead;layers));
+  let pd=layerseg(jd;fr.presidioid());
+  if(t.assert(str.contains(pd;"\"state\":\"unavailable\"") && str.contains(pd;"\"completed\":false") && str.contains(pd;"\"detections\":null");"Presidio down is unavailable with detections null (\(pd))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(pd;"\"detections\":0") && str.contains(jd;"\"voters\":[\"regex\",\"ner\"]");"never 0, and it does not vote")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(validjson(jd) && novalue(jd);"that reply is valid JSON with no value either")){pass=pass+1}el{fail=fail+1};
+  let none=pl.withlayer(pl.newconfig(dead;dead);fr.regexid();false);
+  let jn=h.evaluatejson(text;none);
+  if(t.assert(str.startswith(jn;"{\"ok\":true,\"evaluated\":false,") && str.contains(jn;"\"completed_layers\":0");"with no layer up nothing is evaluated, and the reply says so")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The stand-in provider receives nothing ───────────────────────────────── *)
+  let lbefore=readfile("\(lbase).log");
+  let nonerprov=pl.withlayer(pl.newconfig(layers;provider);fr.nerid();false);
+  let jp=h.evaluatejson(text;nonerprov);
+  let viacmp=cmp.compare(text;nonerprov);
+  let plog=readfile("\(pbase).log");
+  let lafter=readfile("\(lbase).log");
+  if(t.assert(str.len(plog)==0;"THE STAND-IN PROVIDER RECEIVED NOTHING from the route or from compare (log: \(plog))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(lafter)>str.len(lbefore) && str.contains(str.slice(lafter;str.len(lbefore);str.len(lafter));"POST /analyze");"while the detection layer's recorder did receive the scan")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(layerseg(jp;fr.nerid());"\"state\":\"disabled\"") && cmp.evaluated(viacmp);"with NER switched off, and regex and Presidio evaluated")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(onlydetection(lafter);"every /api/chat the layers' recorder saw was an NER detection request; no model or provider path")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The request body ────────────────────────────────────────────────────── *)
+  if(t.asserteq(h.textfrom("{\"text\":\"a\\nb\"}");"a\nb";"the text field is decoded")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(h.textfrom("{}"))==0 && str.len(h.textfrom("not json"))==0 && str.len(h.textfrom("{\"text\":3}"))==0;"no text from a body without a string text field")){pass=pass+1}el{fail=fail+1};
+
+  if(lrec!=0){ process.kill(lrec); process.wait(lrec); }el{};
+  if(prec!=0){ process.kill(prec); process.wait(prec); }el{};
+  file.delete("\(lbase).log");
+  file.delete("\(pbase).log");
+  <fail
+};

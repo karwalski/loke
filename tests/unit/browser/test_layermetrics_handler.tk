@@ -1,0 +1,100 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.browser.layermetricshandler;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=json:std.json;
+i=sdb:core.storage.db;
+i=lmx:core.audit.layermetrics;
+(* For $layermetric and $resolvedentity, types only. *)
+i=fm:core.privacy.filtermetrics;
+i=cn:core.privacy.consensus;
+i=h:page.api.layermetrics;
+
+(* F3b.10 — GET /api/layermetrics, which moke's governance page shows, through metricsjson,
+   the body get() answers with (T-16). Rows are written by core.audit.layermetrics.record,
+   the writer the request path uses, and the body must be the aggregates of exactly those
+   rows: no figure with no rows, and figures that change when a row is added. *)
+
+f=storedir():str{
+  <str.concat(std.homedir();"/.loke/test-layermetrics-handler")
+};
+
+f=openfresh():i64{
+  let dir=storedir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=today():str{
+  <mt db.many("SELECT strftime('%Y-%m-%d','now') AS d";@()) {
+    $ok:rs db.rowstr(rs.get(0);"d");
+    $err:e ""
+  }
+};
+
+f=lrow(layer:str;det:i64;acc:i64):$layermetric{
+  <$layermetric{layerid:layer;entitytype:"";state:"completed";mode:"detect-and-mask";durationms:1;detections:det;accepted:acc;routed:acc;confminmilli:900;confmaxmilli:950;confsummilli:900*det}
+};
+
+f=trow(layer:str;ty:str;det:i64;acc:i64):$layermetric{
+  <$layermetric{layerid:layer;entitytype:ty;state:"completed";mode:"detect-and-mask";durationms:0;detections:det;accepted:acc;routed:acc;confminmilli:900;confmaxmilli:950;confsummilli:900*det}
+};
+
+f=resolved(ty:str;layers:str):$resolvedentity{
+  <$resolvedentity{entitytype:ty;value:"";start:0;end:4;finalconfidence:0.9;detectinglayers:layers;action:"mask"}
+};
+
+f=validjson(j:str):bool{
+  <mt json.dec(j) { $ok:o true; $jsonerr:e false }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=openfresh();
+  if(t.assert(store!=0;"a store opens")){pass=pass+1}el{fail=fail+1};
+
+  (* ── No rows: no figure ───────────────────────────────────────────────────── *)
+  let empty=h.metricsjson();
+  if(t.asserteq(empty;"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[]}";"with no request recorded the body says recorded false, with no agreement figure and no rows")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Two requests ─────────────────────────────────────────────────────────── *)
+  let voters=@("regex";"ner");
+  let ma=@(lrow("regex";2;2);trow("regex";"email";2;2);lrow("ner";1;1);trow("ner";"PERSON";1;1));
+  let ra=@(resolved("email";"regex=0.95,ner=0.80");resolved("email";"regex=0.95"));
+  if(t.assert(lmx.record("lm-a";ma;"most-restrictive";"";ra;voters;@());"request A's metrics are recorded")){pass=pass+1}el{fail=fail+1};
+  let mb=@(lrow("regex";1;1);trow("regex";"email";1;1);lrow("ner";0;0));
+  let rb=@(resolved("email";"regex=0.90"));
+  if(t.assert(lmx.record("lm-b";mb;"most-restrictive";"";rb;voters;@());"request B's metrics are recorded")){pass=pass+1}el{fail=fail+1};
+
+  let d=today();
+  let j=h.metricsjson();
+  if(t.assert(validjson(j);"the body is valid JSON")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(j;"{\"measured\":true,\"recorded\":true,\"period\":\"all\",\"requests\":2,");"two requests recorded (\(j))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"{\"day\":\"\(d)\",\"layer\":\"ner\",\"requests\":2,\"detections\":1,\"accepted\":1}");"by layer per day: NER was in two requests and found one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"{\"day\":\"\(d)\",\"layer\":\"regex\",\"requests\":2,\"detections\":3,\"accepted\":3}");"by layer per day: regex was in two requests and found three")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"\"agreement\":{\"runs\":2,\"resolved\":3,\"agreed\":1,\"rate\":\"33.3%\"}");"agreement: one of three resolved detections found by both voters, 33.3%")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j;"{\"layer\":\"ner\",\"type\":\"PERSON\",\"detections\":1,\"accepted\":1}") && str.contains(j;"{\"layer\":\"regex\",\"type\":\"email\",\"detections\":3,\"accepted\":3}");"by layer and entity type")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A third request changes every figure it touches ─────────────────────── *)
+  let mc=@(lrow("regex";1;1);trow("regex";"email";1;1);lrow("ner";1;1);trow("ner";"PERSON";1;1));
+  let rc=@(resolved("email";"regex=0.95,ner=0.85"));
+  if(t.assert(lmx.record("lm-c";mc;"most-restrictive";"";rc;voters;@());"request C's metrics are recorded")){pass=pass+1}el{fail=fail+1};
+  let j3=h.metricsjson();
+  if(t.assert(str.contains(j3;"\"requests\":3,") && str.contains(j3;"\"layer\":\"regex\",\"requests\":3,\"detections\":4,\"accepted\":4}") && str.contains(j3;"\"agreement\":{\"runs\":3,\"resolved\":4,\"agreed\":2,\"rate\":\"50.0%\"}");"the figures follow the rows: three requests, regex four, agreement two of four")){pass=pass+1}el{fail=fail+1};
+
+  file.delete(str.concat(storedir();"/loke.db"));
+  <fail
+};

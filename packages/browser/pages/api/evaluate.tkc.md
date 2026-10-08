@@ -1,0 +1,1 @@
+Layer comparison API (F3b.9). Exports post, which runs core.privacy.comparison.compare on the posted text over the served detection layers and answers per-layer types, spans, confidences and placeholders, never a detected value; evaluatejson and textfrom are the testable bodies. Origin-guarded.

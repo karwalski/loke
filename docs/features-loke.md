@@ -99,9 +99,9 @@ to original values.
 > also has an off-by-one: the loop bound at `placeholder.tk:46` is `i>len` where valid indices end at
 > `len-1`, so it reads one index past the end of the entry array (**PL1.2**).
 
-**Evaluation Mode** (`core/privacy/evaluation.tk`): Measures layer quality against labelled datasets — precision, recall, F1 score per layer. Invoked by `loke privacy evaluate --file <labelled.jsonl>` (F3b.9); there is no UI panel.
+**Evaluation Mode** (`core/privacy/evaluation.tk`): Measures layer quality against labelled datasets — precision, recall, F1 score per layer. Invoked by `loke privacy evaluate --file <labelled.jsonl>` (F3b.9). loke's `/evaluate` page shows each layer's detections on a sample text side by side (`POST /api/evaluate`), without values; it does not score a labelled file.
 
-**Metrics** (`core/privacy/filter_metrics.tk`): Records, for each request, every layer's detection and accepted counts, counts and confidences by entity type, and measured time, with the consensus outcome; returned by `/api/pipeline` and bound into the audit hash chain (F3b.10). No dashboard or MCP surface shows them yet.
+**Metrics** (`core/privacy/filter_metrics.tk`): Records, for each request, every layer's detection and accepted counts, counts and confidences by entity type, and measured time, with the consensus outcome; returned by `/api/pipeline` and bound into the audit hash chain (F3b.10). moke's governance page shows their aggregates (detections by layer per day and by entity type, agreement rate between layers) from `GET /api/layermetrics`; no latency percentiles, and no MCP surface.
 
 ---
 

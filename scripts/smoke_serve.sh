@@ -90,9 +90,9 @@ probe() {  # $1 method, $2 path, $3 optional body
   fi
 }
 
-for r in health models settings savings tabs privacy; do probe GET "/api/$r"; done
+for r in health models settings savings tabs privacy layermetrics; do probe GET "/api/$r"; done
 probe POST /api/pipeline '{"text":"smoke test, no personal data","fallback_reason":"user_choice","fallback_selected_by":"user"}'
-for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon; do probe GET "$p"; done
+for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon /evaluate; do probe GET "$p"; done
 
 # F10.8: ooke rc.2's template engine ignores a directive it does not know. /tabs and /privacy
 # closed their blocks with `endblock` and `/block`, so each answered 200 with the base layout
@@ -109,6 +109,7 @@ page() {  # $1 path, $2 substring the body must contain, $3 label
 page /tabs '.tabs-layout' 'renders its content block and title'
 page /privacy '.privacy-hero' 'renders its content block and title'
 page /installer 'data-hardware="{&quot;chip&quot;:' 'hands the measured hardware JSON to the page'
+page /evaluate 'id="ev-layers"' 'renders the layer comparison panel (F3b.9)'
 
 # BG1.2: /sysmon answered 200 with an empty body (the snapshot went to a template that never
 # printed it), and the snapshot itself read 0 MB used and 0% CPU on every machine. Each figure
@@ -300,6 +301,13 @@ else
   echo "  FAIL settings.json after the posts: $(cat "$SETF")" >&2; fail=1
 fi
 
+# F3b.9: POST /api/evaluate runs every configured detection layer on a text, side by side,
+# and answers types, spans, confidences and placeholders, never a value. Here regex scans and
+# the sidecars are not running, so they must read unavailable with detections null, never 0.
+python3 "$ROOT/scripts/lib/evaluate_check.py" evaluate "http://127.0.0.1:$PORT" || fail=1
+# F3b.10: GET /api/layermetrics, judged against the database file itself.
+python3 "$ROOT/scripts/lib/evaluate_check.py" layermetrics "http://127.0.0.1:$PORT" "$WORK/home/.loke/loke.db" || fail=1
+
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
@@ -317,13 +325,13 @@ xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
     echo "  ok   POST $1 from $2 [$code]"
   fi
 }
-for r in pipeline settings approve privacy savings tabs artifact; do
+for r in pipeline settings approve privacy savings tabs artifact evaluate; do
   xorigin "/api/$r" "https://evil.example" refused
 done
 xorigin /api/pipeline "http://127.0.0.1:$PORT" allowed
 
 # GA2.7: a DNS-rebound page reads GET routes as same-origin; its Host still names it.
-for r in settings health; do
+for r in settings health layermetrics; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Host: rebind.example:$PORT" \
            "http://127.0.0.1:$PORT/api/$r")
   if [ "$code" != 403 ]; then
@@ -333,6 +341,14 @@ for r in settings health; do
     echo "  ok   GET /api/$r with Host rebind.example [$code]"
   fi
 done
+
+# F3b.10: GET /api/layermetrics reads loke's state, so a foreign Origin is refused too.
+code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Origin: https://evil.example" "http://127.0.0.1:$PORT/api/layermetrics")
+if [ "$code" != 403 ]; then
+  echo "  FAIL GET /api/layermetrics from https://evil.example: got [$code], must be refused (GA2.6)" >&2; fail=1
+else
+  echo "  ok   GET /api/layermetrics from https://evil.example [$code]"
+fi
 
 # F10.38: and it still is, so no answer above came from a server that took the port later.
 assert_port_owner smoke_serve "$PORT" "$PID" || fail=1

@@ -1,0 +1,146 @@
+<!-- Copyright 2026 loke contributors -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+{! layout("base") !}
+{! block("title") !}loke — compare privacy layers{! end !}
+{! block("content") !}
+
+<style>
+  .ev-input { width: 100%; min-height: 110px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-family: inherit; font-size: 0.92em; }
+  .ev-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .ev-btn { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 7px 16px; font-size: 0.9em; cursor: pointer; }
+  .ev-status { font-size: 0.85em; color: var(--muted); }
+  .ev-status.error { color: var(--red); }
+  .ev-table { width: 100%; border-collapse: collapse; font-size: 0.86em; }
+  .ev-table th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .ev-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .ev-state.completed { color: var(--green); }
+  .ev-state.unavailable, .ev-state.failed { color: var(--amber); }
+  .ev-state.disabled { color: var(--muted); }
+  .ev-hit { display: block; font-family: monospace; font-size: 0.92em; }
+  .ev-note { font-size: 0.8em; color: var(--muted); margin-top: 8px; }
+  .ev-disagree { color: var(--amber); }
+</style>
+
+<div class="card">
+  <h2>Compare privacy layers</h2>
+  <p class="ev-note">Runs a sample text through every configured detection layer, the same layers a request is filtered with, and shows what each one found. The text goes to the local detection layers only, never to a model or provider, and nothing is recorded. Detected values are not shown: each detection is its type, its byte span and its confidence, as <code>loke privacy evaluate</code> prints them.</p>
+  <textarea id="ev-text" class="ev-input" aria-label="Sample text to compare the layers on"></textarea>
+  <div class="ev-actions">
+    <button class="ev-btn" id="ev-run" onclick="runEvaluate()">Compare</button>
+    <span class="ev-status" id="ev-status" aria-live="polite"></span>
+  </div>
+</div>
+
+<div class="card" id="ev-result" hidden>
+  <h2>Layers, in registry order</h2>
+  <p class="ev-note" id="ev-layer-error" hidden></p>
+  <table class="ev-table" aria-label="Each layer's result">
+    <thead><tr><th>Layer</th><th>Mode</th><th>State</th><th>Detections</th><th>Found</th></tr></thead>
+    <tbody id="ev-layers"></tbody>
+  </table>
+  <h2 style="margin-top:20px">Consensus</h2>
+  <p class="ev-note" id="ev-consensus-head"></p>
+  <table class="ev-table" aria-label="The consensus decision on each detection">
+    <thead><tr><th>Detection</th><th>Reported by</th><th>Found by</th><th>Agreement</th><th>Action</th></tr></thead>
+    <tbody id="ev-decisions"></tbody>
+  </table>
+  <p class="ev-note" id="ev-summary"></p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  function el(tag, text, cls) {
+    var e = document.createElement(tag);
+    if (text !== undefined) e.textContent = String(text);
+    if (cls) e.className = cls;
+    return e;
+  }
+  function spansText(spans) {
+    if (!spans || !spans.length) return '(not located in the text)';
+    return spans.map(function (s) { return s.start + '-' + s.end; }).join(',');
+  }
+  // F3b.9: a layer that did not scan says so, and shows no count. Only a completed layer
+  // has a number, and 0 then means it scanned and found nothing.
+  function layerRow(l) {
+    var tr = el('tr');
+    tr.dataset.layer = l.id;
+    tr.dataset.state = l.state;
+    tr.appendChild(el('td', l.id));
+    tr.appendChild(el('td', l.mode));
+    tr.appendChild(el('td', l.state, 'ev-state ' + l.state));
+    var found = el('td');
+    if (!l.completed) {
+      tr.appendChild(el('td', 'did not scan', 'ev-count'));
+      found.appendChild(el('span', l.state === 'disabled'
+        ? 'disabled: not consulted'
+        : l.reason + '. The layer did not scan this text; that is not the same as finding nothing.'));
+    } else {
+      tr.appendChild(el('td', String(l.detections), 'ev-count'));
+      l.hits.forEach(function (h) {
+        found.appendChild(el('span', h.placeholder + ' ' + spansText(h.spans) + ' confidence ' + Number(h.confidence).toFixed(2), 'ev-hit'));
+      });
+      if (l.below_threshold > 0) found.appendChild(el('span', l.below_threshold + ' below the layer\'s threshold or outside its entity filter, not counted', 'ev-note'));
+      if (!l.masks) found.appendChild(el('span', 'detect-only: reported, not masked, does not vote', 'ev-note'));
+      if (l.vetoed) found.appendChild(el('span', 'veto: the pipeline would refuse this text', 'ev-note'));
+      if (l.unplaced > 0) found.appendChild(el('span', l.unplaced + ' could not be placed exactly, so the pipeline would refuse this text', 'ev-note'));
+      if (!l.hits.length) found.appendChild(el('span', 'scanned, found nothing'));
+    }
+    tr.appendChild(found);
+    return tr;
+  }
+  function decisionRow(d) {
+    var tr = el('tr');
+    tr.appendChild(el('td', d.placeholder + ' ' + spansText(d.spans), 'ev-hit'));
+    tr.appendChild(el('td', d.reported_by));
+    tr.appendChild(el('td', d.confidences));
+    tr.appendChild(d.missed_by.length
+      ? el('td', 'DISAGREEMENT, not found by ' + d.missed_by.join(','), 'ev-disagree')
+      : el('td', 'agreed by every voter'));
+    tr.appendChild(el('td', d.action));
+    return tr;
+  }
+  window.renderEvaluation = function (d) {
+    var body = document.getElementById('ev-layers');
+    body.textContent = '';
+    d.layers.forEach(function (l) { body.appendChild(layerRow(l)); });
+    var le = document.getElementById('ev-layer-error');
+    le.hidden = !d.layer_error;
+    le.textContent = d.layer_error || '';
+    var c = d.consensus;
+    document.getElementById('ev-consensus-head').textContent = c.strategy + ' (' + c.strategy_name + '); voters: ' +
+      (c.voters.length ? c.voters.join(',') : 'none, so the pipeline would refuse this text');
+    var dec = document.getElementById('ev-decisions');
+    dec.textContent = '';
+    c.decisions.forEach(function (x) { dec.appendChild(decisionRow(x)); });
+    var s = c.summary;
+    document.getElementById('ev-summary').textContent = s.detections + ' detection(s), ' + s.overlaps + ' found by more than one layer, ' +
+      s.disagreements + ' not found by every voter; ' + s.masked + ' would be masked, ' + s.passed + ' passed.';
+    document.getElementById('ev-result').hidden = false;
+    var st = document.getElementById('ev-status');
+    st.className = 'ev-status';
+    st.textContent = d.evaluated ? (d.completed_layers + ' layer(s) scanned the text') : 'No layer scanned this text, or the layer config is refused: nothing was evaluated.';
+  };
+  window.runEvaluate = async function () {
+    var st = document.getElementById('ev-status');
+    st.className = 'ev-status';
+    st.textContent = 'Running each layer...';
+    try {
+      var r = await fetch('/api/evaluate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: document.getElementById('ev-text').value }) });
+      var d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      window.renderEvaluation(d);
+      return d;
+    } catch (e) {
+      st.className = 'ev-status error';
+      st.textContent = 'Not evaluated: ' + e.message;
+      document.getElementById('ev-result').hidden = true;
+      return null;
+    }
+  };
+})();
+</script>
+
+{! end !}

@@ -1,0 +1,1 @@
+Per-layer privacy metrics API (F3b.10). Exports get, which answers the aggregates of privacy_layer_metrics (by layer per day, agreement rate, by entity type) through core.audit.layermetrics, or recorded false when no request has recorded any; metricsjson is the testable body. Origin-guarded.

@@ -425,6 +425,7 @@ guarded POST /api/ml/run       '{}'                 400 'missing required field:
 guarded POST /api/session      '{}'                 502 'issued no session'
 guarded GET  /api/health       ''                   503 '"loke":"unreachable"'
 guarded GET  /api/models       ''                   502 '"relayed_by":"moke"'
+guarded GET  /api/layermetrics ''                  502 '"relayed_by":"moke"'
 guarded POST /api/pipeline     '{"text":"hello"}'   502 '"relayed_by":"moke"'
 guarded GET  /api/pipeline     ''                   200 'moke pipeline API ready'
 guarded GET  /api/agents       ''                   200 '"agents":['

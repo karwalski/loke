@@ -1,0 +1,1 @@
+Layer comparison page (F3b.9). Exports a get handler that renders evaluate.tkt, which posts a sample text to /api/evaluate and shows each detection layer's result side by side. Depends on std.http and ooke.template.

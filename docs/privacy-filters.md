@@ -590,8 +590,20 @@ Tests: `tests/unit/privacy/test_privacy_comparison.tk`, `tests/unit/privacy/test
 (`pipeline.run` and `compare` must make the same decisions under eight configs),
 `tests/unit/cli/test_commands.tk`, `scripts/smoke_privacy_evaluate.sh` (the built CLI, in the gate).
 
-Not built: the UI panel, and the `[{text, entities}]` JSON-array import the F3b.9 row names. No figure
-from it is published; published figures are only in [metrics-baseline.md](metrics-baseline.md).
+**In the browser:** loke's `/evaluate` page posts a text to `POST /api/evaluate`
+(`packages/browser/pages/api/evaluate.tk`), which runs `compare` over `pipeline.served()` (the layers
+`/api/pipeline` filters with) and answers per layer its state, reason and each detection as type,
+placeholder (`[TYPE]`), byte spans and confidence, then the consensus decisions and summary. It never
+returns a detected value (there is no `--show-values` equivalent). A layer that did not scan has
+`"detections":null`, never 0, and the page shows "did not scan". The text goes only to the detection
+layers; nothing routes, dispatches or records. Origin-guarded (GA2.6, GA2.7). Tests:
+`tests/unit/browser/test_evaluate_handler.tk` (a stand-in for the local model provider receives nothing),
+`scripts/smoke_serve.sh` (`scripts/lib/evaluate_check.py`, over HTTP, and a foreign Origin refused),
+`tests/ui/evaluate_f3b9.json` in `scripts/smoke_ui.sh`.
+
+Not built: the `[{text, entities}]` JSON-array import the F3b.9 row names, and labelled-file scoring in
+the browser. No figure from it is published; published figures are only in
+[metrics-baseline.md](metrics-baseline.md).
 
 ## Audit metrics (F3b.10)
 
@@ -620,11 +632,18 @@ Where it goes:
   value or its sha256"); `scripts/smoke_e2e.sh` (rows bound, no planted value or its sha256 in the
   database).
 - `core.audit.layermetrics` aggregates the rows: detections by layer per UTC day, by entity type, and
-  the agreement rate between layers over runs with two or more voters. Test: `test_layer_metrics_audit.tk`.
-  **Nothing calls these aggregates**: no dashboard, no CLI, no MCP tool. The CLI and the other callers
-  do not write metrics rows; only `/api/pipeline` does.
+  the agreement rate between layers over runs with two or more voters, and the number of requests
+  recorded. Test: `test_layer_metrics_audit.tk`.
+- `GET /api/layermetrics` (`packages/browser/pages/api/layermetrics.tk`, origin-guarded) answers those
+  aggregates over all recorded time, or `"recorded":false` with no figure when no request has recorded
+  metrics. moke relays it (`packages/moke/pages/api/layermetrics.tk`) to the governance page's "Privacy
+  Layer Metrics" section, which shows the request count, the agreement rate, detections by layer per
+  day and by layer and entity type, and "No requests recorded" for an empty table. Tests:
+  `tests/unit/browser/test_layermetrics_handler.tk`, `scripts/smoke_serve.sh` (judged against the
+  database file), `tests/ui/layermetrics_f3b10_empty.json` and `tests/ui/layermetrics_f3b10.json` (rows
+  seeded from `tests/ui/layermetrics_f3b10_seed.sql`) in `scripts/smoke_ui.sh`.
 
-Not built: a dashboard, latency percentiles, and exposure through MCP.
+Not built: latency percentiles, a time-window selector (every figure is all-time), and exposure through MCP.
 
 ## What a disclosure measure cannot capture (EM1.5)
 

@@ -1,0 +1,76 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=page.api.layermetrics;
+
+i=http:std.http;
+i=str:std.str;
+i=std:std;
+i=org:shared.origin;
+i=jx:shared.jsonobj;
+i=dbmod:core.storage.db;
+i=lmx:core.audit.layermetrics;
+
+(* F3b.10. GET /api/layermetrics: the per-layer privacy metrics loke has recorded, as
+   aggregates over the privacy_layer_metrics rows, computed by core.audit.layermetrics
+   (bylayerday, agreementsince, bytype, requestssince) and never estimated. Every figure is
+   over all recorded time.
+
+   "recorded":false, with no figure, when no request has recorded metrics, so an empty table
+   reads as "no requests recorded" and never as a row of zeros. The agreement rate is the
+   module's own text: "n/a" when no run had two or more voting layers.
+
+   The rows hold layer ids, entity type labels, counts and confidences, never a detected
+   value (core.audit.layermetrics), so nothing here can carry one. moke's governance page
+   shows this body through moke's relay of the same path. Origin-guarded (GA2.6, GA2.7). *)
+
+f=openstore():i64{
+  <mt dbmod.openstore(str.concat(std.homedir();"/.loke")) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=commas(items:@str):str{
+  <str.join(",";items)
+};
+
+f=dayjson(d:$layerday):str{
+  <"{\"day\":\(jx.escape(d.day)),\"layer\":\(jx.escape(d.layerid)),\"requests\":\(d.requests),\"detections\":\(d.detections),\"accepted\":\(d.accepted)}"
+};
+
+f=daysjson(days:@$layerday):str{
+  <"[\(commas(days.map(&dayjson)))]"
+};
+
+f=typejson(c:$typecount):str{
+  <"{\"layer\":\(jx.escape(c.layerid)),\"type\":\(jx.escape(c.entitytype)),\"detections\":\(c.detections),\"accepted\":\(c.accepted)}"
+};
+
+f=typesjson(types:@$typecount):str{
+  <"[\(commas(types.map(&typejson)))]"
+};
+
+f=agreementjson(a:$agreement):str{
+  <"{\"runs\":\(a.runs),\"resolved\":\(a.resolved),\"agreed\":\(a.agreed),\"rate\":\(jx.escape(a.ratetext))}"
+};
+
+(* The body, from the open store's rows. *)
+f=metricsjson():str{
+  let n=lmx.requestssince(0);
+  if(n<=0){
+    <"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[]}"
+  }el{};
+  <"{\"measured\":true,\"recorded\":true,\"period\":\"all\",\"requests\":\(n),\"by_layer_day\":\(daysjson(lmx.bylayerday(0))),\"agreement\":\(agreementjson(lmx.agreementsince(0))),\"by_type\":\(typesjson(lmx.bytype(0)))}"
+};
+
+f=unavailablejson():str{
+  <"{\"measured\":false,\"error\":\"the local store could not be opened, so nothing can be read\"}"
+};
+
+f=get(req:i64):i64{
+  (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
+  if(org.requestrefused(req)){ <org.refuse() }el{};
+  if(openstore()==0){ <http.res(503;unavailablejson()) }el{};
+  <http.res(200;metricsjson())
+};

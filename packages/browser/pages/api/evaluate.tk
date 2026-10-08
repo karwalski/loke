@@ -1,0 +1,164 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=page.api.evaluate;
+
+i=http:std.http;
+i=str:std.str;
+i=json:std.json;
+i=jx:shared.jsonobj;
+i=sh:shared.types;
+i=org:shared.origin;
+i=pipe:core.privacy.pipeline;
+i=cmp:core.privacy.comparison;
+i=cn:core.privacy.consensus;
+i=ev:core.privacy.evaluation;
+i=er:core.privacy.entityrouting;
+
+(* F3b.9. POST /api/evaluate {"text":"..."}: `loke privacy evaluate` for the browser. Every
+   configured detection layer runs on the text side by side, through
+   core.privacy.comparison.compare, the function the CLI prints, and the reply gives each
+   layer's own result and the consensus decision over them.
+
+   WHERE THE TEXT GOES. Only to the detection layers of core.privacy.pipeline.served, the
+   layers /api/pipeline filters with and /api/health reports on: regex in process, and the
+   local NER (Ollama) and Presidio sidecars, each through core.privacy.layerhealth.consult.
+   compare makes no other call: it consults each layer, then applies entity routing and
+   consensus in process. Nothing here routes, dispatches or opens the store, so no provider
+   is reached, cloud or local, and nothing is recorded. tests/unit/browser/
+   test_evaluate_handler.tk stands a recorder in for the local model provider and checks it
+   receives nothing.
+
+   NO DETECTED VALUE IS RETURNED. Each detection is its type, its placeholder ([TYPE], as
+   the CLI prints it without --show-values), its byte spans and its confidence. There is no
+   way to ask for values here: the CLI's --show-values is for a person at their own
+   terminal, and a reply body can be read by whatever made the request.
+
+   UNAVAILABLE IS NOT EMPTY. A layer that did not complete a scan has "completed":false and
+   "detections":null, never 0, with its state and reason.
+
+   Origin-guarded (GA2.6, GA2.7) like every other route that reads loke's state: the reply
+   says which layers are running and how they are configured. *)
+
+(* The largest text accepted, in bytes. A sample to compare layers on, not a document. *)
+f=maxbytes():i64{ <65536 };
+
+(* The "text" field of a request body, decoded; "" when absent or not a string. *)
+f=textfrom(body:str):str{
+  let o=mt json.dec(body) { $ok:o o; $jsonerr:e jx.emptyobj() };
+  <jx.strvalue(o;"text";"")
+};
+
+(* Items joined with commas: a string literal does not lex inside an interpolation. *)
+f=commas(items:@str):str{
+  <str.join(",";items)
+};
+
+f=placeholder(entitytype:str):str{
+  <"[\(entitytype)]"
+};
+
+f=spanjson(s:$labelspan):str{
+  <"{\"start\":\(ev.numtext(s.start)),\"end\":\(ev.numtext(s.end))}"
+};
+
+f=spansjson(spans:@$labelspan):str{
+  <"[\(commas(spans.map(&spanjson)))]"
+};
+
+f=quoted(s:str):str{
+  <jx.escape(s)
+};
+
+f=strsjson(items:@str):str{
+  <"[\(commas(items.map(&quoted)))]"
+};
+
+f=booltext(b:bool):str{
+  if(b){ <"true" }el{};
+  <"false"
+};
+
+(* One detection: type, placeholder, spans, confidence. The value is not read. *)
+f=hitjson(text:str;e:$piientity):str{
+  <"{\"type\":\(jx.escape(e.entitytype)),\"placeholder\":\(jx.escape(placeholder(e.entitytype))),\"spans\":\(spansjson(cmp.spansof(text;e))),\"confidence\":\(cmp.conftext(e.confidence))}"
+};
+
+f=layerjson(text:str;v:$layerview):str{
+  let head="{\"id\":\(jx.escape(v.id)),\"mode\":\(jx.escape(v.mode)),\"state\":\(jx.escape(v.state)),\"reason\":\(jx.escape(v.reason)),\"completed\":\(booltext(v.completed)),\"masks\":\(booltext(v.masks))";
+  if(!v.completed){
+    <"\(head),\"vetoed\":false,\"detections\":null,\"below_threshold\":null,\"unplaced\":null,\"hits\":[]}"
+  }el{};
+  let hits=mut.@();
+  lp(let i=0;i<v.hits.len;i=i+1){
+    hits=hits.push(hitjson(text;v.hits.get(i)))
+  };
+  let n=v.hits.len as i64;
+  <"\(head),\"vetoed\":\(booltext(v.vetoed)),\"detections\":\(ev.numtext(n)),\"below_threshold\":\(ev.numtext(v.rawcount-n)),\"unplaced\":\(ev.numtext(v.unplaced)),\"hits\":[\(commas(hits))]}"
+};
+
+(* One consensus decision. found_by is the decision's own "layer=confidence" list. *)
+(* What a decision masks, as spans, located as the CLI locates it (cmp.resolvedline). *)
+f=decisionspans(text:str;r:$resolvedentity):@$labelspan{
+  <cmp.spansof(text;$piientity{entitytype:r.entitytype;value:r.value;start:r.start as u32;end:r.end as u32;confidence:r.finalconfidence;placeholder:""})
+};
+
+f=decisionjson(text:str;r:$resolvedentity;from:str;voters:@str):str{
+  <"{\"type\":\(jx.escape(r.entitytype)),\"placeholder\":\(jx.escape(placeholder(r.entitytype))),\"spans\":\(spansjson(decisionspans(text;r))),\"reported_by\":\(jx.escape(from)),\"found_by\":\(strsjson(cmp.foundby(r))),\"confidences\":\(jx.escape(r.detectinglayers)),\"missed_by\":\(strsjson(cmp.missedby(r;voters))),\"action\":\(jx.escape(r.action))}"
+};
+
+(* Each route ([[privacy.entity_routing]]) and what it accepts this run, in words. *)
+f=routesjson(c:$comparison):str{
+  let out=mut."";
+  lp(let k=0;k<c.routing.routes.len;k=k+1){
+    if(k>0){ out="\(out)," }el{};
+    out="\(out){\"type\":\(jx.escape(c.routing.routes.get(k).entitytype)),\"accepts\":\(jx.escape(c.routedesc.get(k)))}"
+  };
+  <"[\(out)]"
+};
+
+f=summaryjson(total:i64;overlaps:i64;disagree:i64;masked:i64):str{
+  <"{\"detections\":\(ev.numtext(total)),\"overlaps\":\(ev.numtext(overlaps)),\"disagreements\":\(ev.numtext(disagree)),\"masked\":\(ev.numtext(masked)),\"passed\":\(ev.numtext(total-masked))}"
+};
+
+f=consensusjson(text:str;c:$comparison):str{
+  let decisions=mut.@();
+  let masked=mut.0;
+  let disagree=mut.0;
+  let overlaps=mut.0;
+  lp(let i=0;i<c.resolved.len;i=i+1){
+    let r:$resolvedentity=c.resolved.get(i);
+    decisions=decisions.push(decisionjson(text;r;c.resolvedlayer.get(i);c.voters));
+    if(str.eq(r.action;"mask")){ masked=masked+1 }el{};
+    if(cmp.missedby(r;c.voters).len>0){ disagree=disagree+1 }el{};
+    if(cmp.foundby(r).len>1){ overlaps=overlaps+1 }el{}
+  };
+  <"{\"strategy\":\(jx.escape(c.strategy)),\"strategy_name\":\(jx.escape(cn.strategyname(c.strategy))),\"voters\":\(strsjson(c.voters)),\"decisions\":[\(commas(decisions))],\"summary\":\(summaryjson(c.resolved.len as i64;overlaps;disagree;masked))}"
+};
+
+(* The reply for one text under one pipeline config. post() passes pipe.served(); a test
+   passes a config whose layers are recorders. *)
+f=evaluatejson(text:str;config:$pipelineconfig):str{
+  let c=cmp.compare(text;config);
+  let layers=mut.@();
+  lp(let i=0;i<c.layers.len;i=i+1){
+    layers=layers.push(layerjson(text;c.layers.get(i)))
+  };
+  let lerr=mut."";
+  if(str.len(c.layererror)>0){ lerr=cmp.errortext(c) }el{};
+  <"{\"ok\":true,\"evaluated\":\(booltext(cmp.evaluated(c))),\"values_shown\":false,\"text_bytes\":\(ev.numtext(str.len(text) as i64)),\"completed_layers\":\(ev.numtext(cmp.completedcount(c))),\"layer_error\":\(jx.escape(lerr)),\"layers\":[\(commas(layers))],\"routing\":\(routesjson(c)),\"consensus\":\(consensusjson(text;c))}"
+};
+
+f=errorjson(msg:str):str{
+  <"{\"ok\":false,\"error\":\(jx.escape(msg))}"
+};
+
+f=post(req:i64):i64{
+  (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
+  if(org.requestrefused(req)){ <org.refuse() }el{};
+  let body=mt http.body(req) {$ok:v v; $err:e ""};
+  let text=textfrom(body);
+  if(str.len(text)==0){ <http.res(400;errorjson("a non-empty text field is required")) }el{};
+  if((str.len(text) as i64)>maxbytes()){ <http.res(413;errorjson("the text is longer than 65536 bytes")) }el{};
+  <http.res(200;evaluatejson(text;pipe.served()))
+};
