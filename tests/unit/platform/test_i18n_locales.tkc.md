@@ -1,0 +1,1 @@
+Tests `core.i18n.locales` (F10.12-T1) directly: both tables carry their own code and all 33 entries (the legacy pushes left them empty), en-US has every en-AU key, the en-AU/en-US spelling difference, a key in neither table, and the order of `codes()` with en-AU first as the translator's default. Depends on `std.test`, `std.str`, `core.i18n.locales`, `core.i18n.translator`.
