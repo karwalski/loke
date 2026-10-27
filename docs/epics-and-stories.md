@@ -1120,7 +1120,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | AUDIT-DRIVEN GAPS | 5 | 47 | 44 | — | 2 | 1 | — | — | — | — |
 | NO-CUSTODY ARCHITECTURE | 4 | 41 | 35 | 1 | — | — | — | — | — | 5 |
 | VERIFICATION PROGRAMME | 14 | 162 | 134 | 8 | — | 7 | — | — | — | 13 |
-| **Total** | **88** | **804** | **691** | **25** | **6** | **34** | — | **1** | — | **47** |
+| **Total** | **88** | **804** | **692** | **25** | **6** | **34** | — | **1** | — | **46** |
 
 **By epic — every epic in the document, so none can be absent**
 
@@ -1214,7 +1214,7 @@ hand-edit produced a set of numbers that disagreed with them.*
 | BG1 | 1 | 6 | 6 | — | — | — | — | — | — | — |
 | LS1 | 1 | 34 | 29 | 3 | — | — | — | — | — | 2 |
 | RV1 | 1 | 10 | 10 | — | — | — | — | — | — | — |
-| **Total** | **88** | **804** | **691** | **25** | **6** | **34** | — | **1** | — | **47** |
+| **Total** | **88** | **804** | **692** | **25** | **6** | **34** | — | **1** | — | **46** |
 
 Rows parsed: **804**, across **88** epics and **16** level-1 headings.
 
