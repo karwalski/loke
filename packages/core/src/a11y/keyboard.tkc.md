@@ -1,0 +1,1 @@
+JavaScript for keyboard navigation: Escape closes open overlays, arrow keys move within listbox and menu widgets, and empty links are labelled with their href. Ported from src/platform/a11y/keyboard.tk (F10.12-T2). Exports keyboardjs. Depends on std.str.

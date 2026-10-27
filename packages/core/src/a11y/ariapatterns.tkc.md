@@ -1,0 +1,1 @@
+WAI-ARIA attribute strings for dialogs, alert dialogs, tabs, tab panels, tab lists, menus, toolbars, switches, tooltips, status, progress bars and comboboxes, ported from src/platform/a11y/aria-patterns.tk (F10.12-T2). Every caller-supplied value is escaped by attrvalue before it is quoted into an attribute. Exports attrvalue, boolattr and the *attrs builders. Depends on std.str.

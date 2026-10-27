@@ -72,6 +72,7 @@ ENFORCED = [
     "tests/e2e",
     "tests/unit/mcp_broker",
     "tests/unit/platform",
+    "tests/unit/a11y",
     "tests/unit/audit",
     "tests/unit/companion",
     "tests/unit/feedback",

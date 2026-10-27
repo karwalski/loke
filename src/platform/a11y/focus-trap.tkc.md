@@ -1,1 +1,0 @@
-Generates JavaScript for a focus trap implementation that constrains keyboard focus within a container element, supports escape-to-deactivate, inert sibling management, and focus restoration. Depends on std.str.

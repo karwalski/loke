@@ -1,0 +1,1 @@
+The skip-to-main-content link: HTML with id skip-to-main, CSS that keeps it off-screen until focused, and JavaScript that moves focus to #main-content. Ported from src/platform/a11y/skip-link.tk (F10.12-T2). Exports skiplinkhtml, skiplinkcss and skiplinkjs. Depends on std.str.

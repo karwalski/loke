@@ -1,0 +1,1 @@
+Text direction and layout helpers: isrtl and dir read the primary language subtag rather than returning ltr for every locale, langattr and dirattr build the attributes, and expansionfor gives the internationalisation spec's expected expansion by source length (expandtolerance keeps the legacy 1.4). Ported from src/platform/i18n/layout.tk (F10.12-T2). Depends on std.str.

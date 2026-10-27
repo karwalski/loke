@@ -1,0 +1,163 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.a11y.testing;
+
+i=str:std.str;
+i=t:std.time;
+i=jx:shared.jsonobj;
+
+(* Ported from src/platform/a11y/testing.tk (F10.12-T2). A static check of an HTML string
+   for three violations, with a JSON form of the result. It is not axe-core
+   (docs/specifications/accessibility-platform.md section 7.1) and does not claim to be: it
+   reads markup as text, sees no CSS and runs no script.
+
+   The legacy checker could not find more than one of anything, and missed some outright:
+
+     * each rule walked the document with an `if` where a loop was meant, so it examined
+       the FIRST <img>, the first <input> and the first role="" only;
+     * it tested `found>0`, so a tag at offset 0 was never examined;
+     * `violations.push(v)` discarded its result (T-24), so the violation list was always
+       empty, `passed` was always true and `assertnoviolations` passed every page;
+     * the input rule accepted any <label> anywhere on the page as labelling every input;
+     * the JSON wrote url and descriptions unescaped, and `checkedat` was always 0.
+
+   The rules now examine every tag. An input is labelled when it carries aria-label or
+   aria-labelledby, when a <label for> names its id, or when it sits inside a <label>
+   (section 2.3); hidden, submit, reset, button and image inputs need no label. *)
+
+t=$a11yviolation{
+  rule:str;
+  element:str;
+  description:str;
+  severity:str
+};
+
+t=$a11yresult{
+  url:str;
+  violations:@$a11yviolation;
+  passed:bool;
+  checkedat:i64
+};
+
+(* The text of a tag after its `<`, up to its `>`, with whitespace folded to spaces. *)
+f=tagtext(piece:str):str{
+  <str.replace(str.replace(str.replace(uptoclose(piece);"\n";" ");"\t";" ");"\r";" ")
+};
+
+f=uptoclose(piece:str):str{
+  let close=str.indexof(piece;">");
+  if(close<0){ <piece }el{};
+  <str.slice(piece;0;close)
+};
+
+(* True when the tag is element `name`: `img`, but not `imgx`. *)
+f=istag(tag:str;name:str):bool{
+  let lower=str.lower(tag);
+  if(str.eq(lower;name)){ <true }el{};
+  <str.startswith(lower;"\(name) ") || str.startswith(lower;"\(name)/")
+};
+
+f=hasattr(tag:str;name:str):bool{
+  let lower=str.lower(tag);
+  <str.contains(lower;" \(name)=") || str.contains(lower;" \(name) ") || str.endswith(lower;" \(name)") || str.contains(lower;" \(name)/")
+};
+
+(* The double-quoted value of attribute `name`, or "". *)
+f=attrof(tag:str;name:str):str{
+  let lower=str.lower(tag);
+  let key=" \(name)=\"";
+  let at=str.indexof(lower;key);
+  if(at<0){ <"" }el{};
+  let rest=str.slice(tag;at+(str.len(key) as i64);str.len(tag) as i64);
+  let end=str.indexof(rest;"\"");
+  if(end<0){ <"" }el{};
+  <str.slice(rest;0;end)
+};
+
+f=needsnolabel(tag:str):bool{
+  let ty=str.lower(attrof(tag;"type"));
+  <str.eq(ty;"hidden") || str.eq(ty;"submit") || str.eq(ty;"reset") || str.eq(ty;"button") || str.eq(ty;"image")
+};
+
+f=violation(rule:str;element:str;description:str;severity:str):$a11yviolation{
+  <$a11yviolation{rule:rule;element:element;description:description;severity:severity}
+};
+
+(* Every id that a <label for="…"> names. *)
+f=labelledids(pieces:@str):@str{
+  let ids=mut.@();
+  lp(let i=0;i<pieces.len;i=i+1){
+    let tag=tagtext(pieces.get(i));
+    if(istag(tag;"label")){
+      let target=attrof(tag;"for");
+      if(str.len(target)>0){ ids=ids.push(target) }el{}
+    }el{}
+  };
+  <ids
+};
+
+f=contains(xs:@str;x:str):bool{
+  lp(let i=0;i<xs.len;i=i+1){
+    if(str.eq(xs.get(i);x)){ <true }el{}
+  };
+  <false
+};
+
+f=inputlabelled(tag:str;inlabel:bool;forids:@str):bool{
+  if(inlabel || needsnolabel(tag)){ <true }el{};
+  if(hasattr(tag;"aria-label") || hasattr(tag;"aria-labelledby")){ <true }el{};
+  let id=attrof(tag;"id");
+  <str.len(id)>0 && contains(forids;id)
+};
+
+f=checkhtml(html:str;url:str):$a11yresult{
+  let pieces=str.split(html;"<");
+  let forids=labelledids(pieces);
+  let violations=mut.@();
+  let inlabel=mut.false;
+  (* Piece 0 is the text before the first `<`, which is not a tag. *)
+  lp(let i=1;i<pieces.len;i=i+1){
+    let tag=tagtext(pieces.get(i));
+    if(istag(tag;"label")){ inlabel=true }el{};
+    if(istag(tag;"/label")){ inlabel=false }el{};
+    if(istag(tag;"img") && !hasattr(tag;"alt")){
+      violations=violations.push(violation("img-alt";"<img>";"Image element is missing an alt attribute";"critical"))
+    }el{};
+    if(istag(tag;"input") && !inputlabelled(tag;inlabel;forids)){
+      violations=violations.push(violation("input-label";"<input>";"Input element has no associated label";"serious"))
+    }el{};
+    let lower=str.lower(tag);
+    if(str.contains(lower;" role=\"\"") || str.contains(lower;" role=''")){
+      violations=violations.push(violation("role-value";"[role]";"role attribute has an empty value";"moderate"))
+    }el{}
+  };
+  <$a11yresult{url:url;violations:violations;passed:violations.len==0;checkedat:t.nowms()}
+};
+
+f=violationtojson(v:$a11yviolation):str{
+  <"{\"rule\":\(jx.escape(v.rule)),\"element\":\(jx.escape(v.element)),\"description\":\(jx.escape(v.description)),\"severity\":\(jx.escape(v.severity))}"
+};
+
+(* The comma before every list element but the first. *)
+f=separator(i:i64):str{
+  if(i>0){ <"," }el{};
+  <""
+};
+
+f=jsonbool(b:bool):str{
+  if(b){ <"true" }el{};
+  <"false"
+};
+
+f=resulttojson(r:$a11yresult):str{
+  let list=mut."";
+  lp(let i=0;i<r.violations.len;i=i+1){
+    list="\(list)\(separator(i))\(violationtojson(r.violations.get(i)))"
+  };
+  <"{\"url\":\(jx.escape(r.url)),\"violations\":[\(list)],\"passed\":\(jsonbool(r.passed))}"
+};
+
+f=assertnoviolations(result:$a11yresult):bool{
+  <result.violations.len==0
+};

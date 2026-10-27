@@ -1,0 +1,1 @@
+The polite and assertive ARIA live regions, the loke_announce clear-then-set JavaScript function, and the sr-only CSS class. Ported from src/platform/a11y/live_regions.tk (F10.12-T2). Exports liveregionhtml, announcejs and sronlycss. Depends on std.str.

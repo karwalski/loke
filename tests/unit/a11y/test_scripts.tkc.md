@@ -1,0 +1,1 @@
+Tests the JavaScript the a11y modules emit (F10.12-T2): no toke array literal or else in any script, and the comparisons the legacy copies wrote as assignments are now comparisons in `core.a11y.announcements`, `core.a11y.focustrap` and `core.a11y.rovingtabindex`. Depends on `std.test`, `std.str` and seven core.a11y modules.

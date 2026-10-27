@@ -1,0 +1,1 @@
+Tests the a11y markup builders (F10.12-T2): attribute escaping in `core.a11y.ariapatterns`, the ARIA strings, `core.a11y.semantic` nav, form field and button, the skip link id shared by `core.a11y.skiplink` and `core.a11y.focus`, and the live region ids `core.a11y.liveregions` announces into. Depends on `std.test`, `std.str` and those five modules.

@@ -1,0 +1,1 @@
+JavaScript for a simple focus trap and release, focus save and restore, focus on route change, and the skip link's click handler; skiplinkhtml delegates to core.a11y.skiplink so the link carries the id the handler looks for. Ported from src/platform/a11y/focus.tk (F10.12-T2). Depends on std.str and core.a11y.skiplink.

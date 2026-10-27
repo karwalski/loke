@@ -1,0 +1,1 @@
+JavaScript for pipeline-stage, violation, toast (batched) and streaming (throttled) announcements over loke_announce. Ported from src/platform/a11y/announcements.tk (F10.12-T2), with the two migration defects in the emitted JavaScript repaired (@() for [] and = for ===). Exports announcementsjs. Depends on std.str.

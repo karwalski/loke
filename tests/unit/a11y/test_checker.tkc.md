@@ -1,0 +1,1 @@
+Tests `core.a11y.testing` (F10.12-T2): clean markup passes, every alt-less image is found including one at offset 0, every unlabelled input (label for, enclosing label, aria-label and hidden all count as labelled), every empty role, and the escaped JSON form. Depends on `std.test`, `std.str`, `core.a11y.testing`.

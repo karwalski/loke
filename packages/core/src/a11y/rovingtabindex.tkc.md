@@ -1,0 +1,1 @@
+JavaScript for a roving tabindex over a widget group with horizontal, vertical or both orientations, optional wrapping, and Home/End. Ported from src/platform/a11y/roving-tabindex.tk (F10.12-T2), with its = comparisons restored to === (every item had been given tabindex -1). Exports rovingtabindexjs. Depends on std.str.

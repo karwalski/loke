@@ -1,0 +1,1 @@
+Tests `core.a11y.colour` (F10.12-T2): the WCAG 2.1 contrast ratio against reference pairs (21:1, 1:1, #767676 and #777777 on white), the AA thresholds for normal and large text, that an unparseable colour gives 0.0 and fails, and the motion and focus-visible CSS. Depends on `std.test`, `std.str`, `core.a11y.colour`.
