@@ -1,0 +1,1 @@
+Settings UI API for the [[privacy.layers]] entries of config.toml (F3b.2). GET returns the configured layers with the organisation policy floor; POST rewrites only the layer entries after checking them through the pipeline composition, the regex rule and the policy floor. Bodies come from core.privacy.layerview.

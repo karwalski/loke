@@ -1,0 +1,173 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.layerview;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=sh:shared.types;
+i=fr:core.privacy.filterregistry;
+i=op:core.privacy.orgpolicy;
+i=pipe:core.privacy.pipeline;
+i=lv:core.privacy.layerview;
+
+(* F3b.2 (b) and F3b.8 (3). core.privacy.layerview, the bodies of POST and GET
+   /api/privacylayers and of /api/health's privacy_layers, driven against config.toml and
+   loke.policy.json in this test's own HOME (run_tests.sh gives each test a throwaway one).
+   What is saved is read back through core.privacy.pipeline.served, the composition the server
+   runs a request with, so the assertions are about what the pipeline would do, not about the
+   text alone. *)
+
+f=writefile(path:str;text:str):bool{
+  file.mkdir(sh.lokedir());
+  <mt file.write(path;text) { $ok:v v; $err:e false }
+};
+
+f=readfile(path:str):str{
+  <mt file.read(path) { $ok:v v; $err:e "" }
+};
+
+f=setconfig(text:str):bool{ <writefile(sh.configpath();text) };
+f=config():str{ <readfile(sh.configpath()) };
+f=setpolicy(text:str):bool{ <writefile(op.policypath();text) };
+f=nopolicy():bool{ <mt file.delete(op.policypath()) { $ok:v v; $err:e false } };
+
+f=layer(id:str;enabled:str;priority:str;mode:str;threshold:str;filter:str):str{
+  <"{\"id\":\"\(id)\",\"enabled\":\(enabled),\"priority\":\(priority),\"mode\":\"\(mode)\",\"confidence_threshold\":\(threshold),\"entity_filter\":[\(filter)]}"
+};
+
+f=body(items:@str):str{
+  let inner=str.join(",";items);
+  <"{\"layers\":[\(inner)]}"
+};
+
+f=save(items:@str):$layerreply{ <lv.savelayers(body(items)) };
+
+f=filter(id:str):$privacyfilter{ <fr.get(pipe.served().layers;id) };
+
+(* The served registry's ids in run order. *)
+f=order():str{
+  let reg=pipe.served().layers;
+  let ids=mut.@();
+  lp(let i=0;i<reg.filters.len;i=i+1){ ids=ids.push(reg.filters.get(i).id) };
+  <str.join(",";ids)
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  (* ── withentries keeps every other line ───────────────────────────────── *)
+  let before="[server]\nport = 11430\n\n[privacy]\nconsensus_strategy = \"unanimous\"\n\n[[privacy.layers]]\nid = \"ner\"\npriority = 9\n# routing follows\n\n[[privacy.entity_routing]]\nentity_type = \"PERSON\"\nlayers = [\"ner\"]\n";
+  let after=lv.withentries(before;"[[privacy.layers]]\nid = \"presidio\"\n");
+  if(t.asserteq(after;"[server]\nport = 11430\n\n[privacy]\nconsensus_strategy = \"unanimous\"\n\n# routing follows\n\n[[privacy.entity_routing]]\nentity_type = \"PERSON\"\nlayers = [\"ner\"]\n\n[[privacy.layers]]\nid = \"presidio\"\n";"withentries drops the old entry, keeps every other line in place and the comment that introduces the next table, and appends the new entries")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(lv.withentries("";"[[privacy.layers]]\nid = \"ner\"\n");"[[privacy.layers]]\nid = \"ner\"\n";"an empty file gets the entries alone")){pass=pass+1}el{fail=fail+1};
+
+  (* ── A save, read back through the pipeline ───────────────────────────── *)
+  let start="[server]\nport = 11430\n\n[privacy]\nconsensus_strategy = \"most-restrictive\"\n# keep me\n\n[[privacy.layers]]\nid = \"ner\"\npriority = 9\n";
+  setconfig(start);
+  let ok=save(@(layer("regex";"true";"1";"veto";"0";"");layer("presidio";"true";"0";"veto";"0.5";"\"PERSON\"");layer("ner";"false";"2";"detect-and-mask";"0";"")));
+  if(t.asserteq(str.fromint(ok.status);"200";"a valid set of layers is saved (\(ok.body))")){pass=pass+1}el{fail=fail+1};
+  let saved=config();
+  if(t.assert(str.startswith(saved;"[server]\nport = 11430\n\n[privacy]\nconsensus_strategy = \"most-restrictive\"\n# keep me\n");"every other setting in config.toml is kept, in place (LS1.4a)")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(saved;"priority = 9");"the old [[privacy.layers]] entry is gone")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(order();"presidio,regex,ner,openai-privacy-filter";"the pipeline runs the saved priorities: presidio (0) before regex (1)")){pass=pass+1}el{fail=fail+1};
+  let pr=filter("presidio");
+  if(t.assert(str.eq(pr.mode;"veto") && pr.threshold==0.5 && str.eq(pr.entityfilter;"PERSON");"presidio runs as saved: veto, threshold 0.5, PERSON only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!filter("ner").enabled;"the switched-off NER layer is off in the pipeline")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(filter("regex").mode;"veto");"regex may be set to veto: it masks no less")){pass=pass+1}el{fail=fail+1};
+  let shown=lv.editorjson();
+  if(t.assert(str.contains(shown;"{\"id\":\"presidio\",\"name\":\"Presidio Analyser\",\"enabled\":true,\"priority\":0,\"mode\":\"veto\",\"confidence_threshold\":0.5,\"entity_filter\":[\"PERSON\"]");"GET shows presidio as saved (\(shown))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(shown;"{\"id\":\"ner\",\"name\":\"NLP NER Detector\",\"enabled\":false,");"and NER switched off")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(shown;"\"regex_locked\":true") && str.contains(shown;"\"error\":\"\"");"the regex layer is shown locked, and the config has no error")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The regex layer cannot be turned down ─────────────────────────────── *)
+  let kept=config();
+  let off=save(@(layer("regex";"false";"1";"detect-and-mask";"0";"")));
+  if(t.assert(off.status==400 && str.contains(off.body;"enabled = false is not applied to the regex layer");"switching regex off is refused, naming the rule (\(off.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(off.body;"open decision (F3b.2)");"and saying it is an open decision")){pass=pass+1}el{fail=fail+1};
+  let only=save(@(layer("regex";"true";"1";"detect-only";"0";"")));
+  if(t.assert(only.status==400 && str.contains(only.body;"mode = detect-only is not applied to the regex layer");"setting regex detect-only is refused")){pass=pass+1}el{fail=fail+1};
+  let rth=save(@(layer("regex";"true";"1";"detect-and-mask";"0.4";"")));
+  if(t.assert(rth.status==400 && str.contains(rth.body;"confidence_threshold is not applied to the regex layer");"a regex threshold is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(config();kept;"and none of them changed config.toml")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Malformed posts change nothing ────────────────────────────────────── *)
+  let unknown=save(@(layer("spacy";"true";"1";"detect-and-mask";"0";"")));
+  if(t.assert(unknown.status==400 && str.contains(unknown.body;"no layer has the id spacy");"an unknown layer is refused")){pass=pass+1}el{fail=fail+1};
+  let inject=lv.savelayers("{\"layers\":[{\"id\":\"ner\\\"\\nenabled = false\",\"enabled\":true,\"priority\":1,\"mode\":\"veto\",\"confidence_threshold\":0,\"entity_filter\":[]}]}");
+  if(t.asserteq(str.fromint(inject.status);"400";"an id that would write a line of its own is refused (\(inject.body))")){pass=pass+1}el{fail=fail+1};
+  let badtype=save(@(layer("ner";"true";"2";"detect-and-mask";"0";"\"PASSPORT_SCAN\"")));
+  if(t.assert(badtype.status==400 && str.contains(badtype.body;"privacy.layers in config.toml cannot be applied");"an entity type the layer does not report is refused as the pipeline would refuse it (\(badtype.body))")){pass=pass+1}el{fail=fail+1};
+  let badmode=save(@(layer("ner";"true";"2";"mask-sometimes";"0";"")));
+  if(t.assert(badmode.status==400 && str.contains(badmode.body;"mode must be");"an unknown mode is refused")){pass=pass+1}el{fail=fail+1};
+  let high=save(@(layer("ner";"true";"2";"detect-and-mask";"1.5";"")));
+  if(t.assert(high.status==400 && str.contains(high.body;"confidence_threshold");"a threshold above 1 is refused")){pass=pass+1}el{fail=fail+1};
+  let twice=save(@(layer("ner";"true";"2";"detect-and-mask";"0";"");layer("ner";"false";"2";"detect-and-mask";"0";"")));
+  if(t.assert(twice.status==400 && str.contains(twice.body;"given twice");"a layer given twice is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lv.savelayers("not json").status==400;"a body that is not {\"layers\":[...]} is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(config();kept;"and none of them changed config.toml")){pass=pass+1}el{fail=fail+1};
+
+  (* ── The organisation policy's floor ────────────────────────────────────── *)
+  setpolicy("{\"required_layers\":[\"presidio\"]}");
+  let req=save(@(layer("presidio";"false";"3";"detect-and-mask";"0";"")));
+  if(t.assert(req.status==409 && str.contains(req.body;"requires the presidio privacy layer, so it cannot be switched off");"a required layer cannot be switched off (\(req.body))")){pass=pass+1}el{fail=fail+1};
+  let reqonly=save(@(layer("presidio";"true";"3";"detect-only";"0";"")));
+  if(t.assert(reqonly.status==409 && str.contains(reqonly.body;"to mask, so it cannot be set detect-only");"nor set detect-only")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lv.editorjson();"\"id\":\"presidio\"") && str.contains(lv.editorjson();"\"policy_required\":true");"GET marks the required layer")){pass=pass+1}el{fail=fail+1};
+  setpolicy("{\"banned_layers\":[\"openai-privacy-filter\"]}");
+  let ban=save(@(layer("openai-privacy-filter";"true";"4";"detect-and-mask";"0";"")));
+  if(t.assert(ban.status==409 && str.contains(ban.body;"bans the openai-privacy-filter privacy layer, so it cannot be enabled");"a banned layer cannot be enabled (\(ban.body))")){pass=pass+1}el{fail=fail+1};
+  setpolicy("{\"max_confidence_threshold\":0.6}");
+  let above=save(@(layer("ner";"true";"2";"detect-and-mask";"0.8";"")));
+  if(t.assert(above.status==409 && str.contains(above.body;"max_confidence_threshold 0.6, so the ner layer's confidence_threshold cannot be above it");"a threshold above the policy's ceiling is refused (\(above.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(config();kept;"no refused save changed config.toml")){pass=pass+1}el{fail=fail+1};
+  let below=save(@(layer("ner";"true";"2";"detect-and-mask";"0.6";"")));
+  if(t.asserteq(str.fromint(below.status);"200";"one at the ceiling is saved")){pass=pass+1}el{fail=fail+1};
+  setpolicy("{\"minimum_layers\":3}");
+  let few=save(@(layer("ner";"false";"2";"detect-and-mask";"0";"");layer("presidio";"false";"3";"detect-and-mask";"0";"")));
+  if(t.assert(few.status==409 && str.contains(few.body;"requires at least 3 privacy layers to mask each request, and this configuration enables 1");"fewer masking layers than minimum_layers is refused (\(few.body))")){pass=pass+1}el{fail=fail+1};
+  setpolicy("{\"banned_layers\":[\"ner\"],\"enforced\":false}");
+  let notenforced=save(@(layer("ner";"true";"2";"detect-and-mask";"0";"")));
+  if(t.asserteq(str.fromint(notenforced.status);"200";"a policy that is not enforced sets no floor")){pass=pass+1}el{fail=fail+1};
+  let kept2=config();
+  setpolicy("{\"banned_layers\":");
+  let broken=save(@(layer("ner";"true";"2";"veto";"0";"")));
+  if(t.assert(broken.status==409 && str.contains(broken.body;"organisation policy loke.policy.json cannot be applied") && str.contains(broken.body;"so they are not saved");"a policy that cannot be read refuses the save, whatever it asks (\(broken.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(config();kept2;"and config.toml is unchanged")){pass=pass+1}el{fail=fail+1};
+  nopolicy();
+
+  (* ── A hand-written regex turn-down is shown, not applied ──────────────── *)
+  setconfig("[[privacy.layers]]\nid = \"regex\"\nenabled = false\n");
+  let warned=lv.editorjson();
+  if(t.assert(str.contains(warned;"\"warning\":\"enabled = false is not applied to the regex layer");"GET shows that config.toml asks to switch regex off and it is not applied (\(warned))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(warned;"{\"id\":\"regex\",\"name\":\"Regex Pattern Detector\",\"enabled\":true,");"and shows regex enabled, as it runs")){pass=pass+1}el{fail=fail+1};
+  setconfig("[[privacy.layers]]\nid = \"ner\"\nmode = \"sometimes\"\n");
+  if(t.assert(str.contains(lv.editorjson();"\"error\":\"privacy.layers in config.toml cannot be applied: config.toml line 1: mode must be");"GET shows a layers config that refuses every request")){pass=pass+1}el{fail=fail+1};
+
+  (* ── /api/health: the layers in force, with the policy applied ─────────── *)
+  let dead=pipe.newconfig("http://127.0.0.1:59992";"http://127.0.0.1:59991");
+  let configured=pipe.withconsensus(pipe.withlayerconfig(dead;"[[privacy.layers]]\nid = \"ner\"\nconfidence_threshold = 0.9\n");"unanimous";"");
+  let plain=lv.healthjson(pipe.withorgpolicy(configured;op.absent()));
+  if(t.assert(str.contains(plain;"{\"id\":\"ner\",\"enabled\":true,\"state\":\"unavailable\",\"reason\":\"Ollama unreachable\",\"priority\":2,\"mode\":\"detect-and-mask\",\"confidence_threshold\":0.9,\"policy_changed\":[]}");"with no policy, health reports config.toml's NER threshold, changed by nothing (\(plain))")){pass=pass+1}el{fail=fail+1};
+  let clamped=lv.healthjson(pipe.withorgpolicy(configured;op.fromtext("{\"max_confidence_threshold\":0.5,\"locked_consensus\":\"most-restrictive\"}")));
+  if(t.assert(str.contains(clamped;"\"id\":\"ner\",\"enabled\":true,\"state\":\"unavailable\",\"reason\":\"Ollama unreachable\",\"priority\":2,\"mode\":\"detect-and-mask\",\"confidence_threshold\":0.5,\"policy_changed\":[\"confidence_threshold\"]}");"under a 0.5 ceiling, health reports the threshold the pipeline runs, 0.5, and marks it changed by the policy (\(clamped))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(clamped;"\"consensus\":{\"configured\":\"unanimous\",\"effective\":\"most-restrictive\",\"policy_changed\":true}");"and the consensus strategy raised")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(clamped;"\"overrides\":[\"privacy.consensus_strategy unanimous is raised to most-restrictive\",\"the ner layer's confidence_threshold is lowered to 0.5\"]");"and lists the overrides")){pass=pass+1}el{fail=fail+1};
+  let banned=lv.healthjson(pipe.withorgpolicy(configured;op.fromtext("{\"banned_layers\":[\"presidio\"]}")));
+  if(t.assert(str.contains(banned;"{\"id\":\"presidio\",\"enabled\":false,\"state\":\"disabled\"") && str.contains(banned;"\"policy_changed\":[\"enabled\"]");"a banned layer is reported off, marked changed by the policy (\(banned))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(banned;"\"state\":\"unhealthy\",\"summary\":\"REFUSED: every request is refused: organisation policy loke.policy.json bans the presidio privacy layer");"and since config.toml enables it, health says every request is refused")){pass=pass+1}el{fail=fail+1};
+  let broke=lv.healthjson(pipe.withorgpolicy(configured;op.fromtext("[]")));
+  if(t.assert(str.contains(broke;"\"refused\":\"organisation policy loke.policy.json cannot be applied: it is not a JSON object\"") && str.contains(broke;"\"state\":\"unhealthy\"");"a policy that cannot be applied is reported as refusing every request, not as healthy (\(broke))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(broke;"\"confidence_threshold\":0.9");"and the layers are still config.toml's, never weakened")){pass=pass+1}el{fail=fail+1};
+
+  (* ── An unreadable config.toml is not written over ─────────────────────── *)
+  let gone=mt file.delete(sh.configpath()) { $ok:v v; $err:e false };
+  file.mkdir(sh.configpath());
+  let unreadable=save(@(layer("ner";"true";"2";"veto";"0";"")));
+  if(t.assert(unreadable.status==500 && str.contains(unreadable.body;"config.toml could not be read; it was not changed");"a config.toml that cannot be read is refused, not replaced (\(unreadable.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(file.isdir(sh.configpath());"and was not written")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

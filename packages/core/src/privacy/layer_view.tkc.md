@@ -1,0 +1,1 @@
+The privacy layers as the loke server shows and edits them: the effective, policy-applied layers for /api/health (F3b.8), the [[privacy.layers]] editor for /api/privacylayers (F3b.2) and the registered-model list and registration for /api/privacymodels (F3b.7). Each body is built without a request so it can be tested.

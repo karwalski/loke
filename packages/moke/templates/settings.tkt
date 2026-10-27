@@ -255,6 +255,54 @@
 
     </div>
   </div>
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- F3b.2 PRIVACY LAYERS · F3b.7 REGISTERED MODELS                       -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <div class="settings-section" id="privacy-layers-section">
+    <div class="section-head">Privacy Layers</div>
+    <div class="section-body">
+      <div class="field-hint">The <code>[[privacy.layers]]</code> entries in loke's <code>config.toml</code>. Lower priority runs first. Saving rewrites only these entries; every other setting in the file is kept.</div>
+      <div class="info-note" id="pl-policy" hidden></div>
+      <div class="info-note" id="pl-error" role="alert" hidden></div>
+      <div class="info-note" id="pl-warning" role="alert" hidden></div>
+      <div id="pl-layers"><span class="field-hint">Loading the privacy layers from loke…</span></div>
+      <div class="field-hint" id="pl-regex-rule"></div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button class="btn-save" id="pl-save" style="font-size:0.8em;padding:6px 16px;">Save privacy layers</button>
+        <span id="pl-status" role="status" aria-live="polite" style="font-size:0.82em;"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section" id="privacy-models-section">
+    <div class="section-head">Registered Privacy Models</div>
+    <div class="section-body">
+      <div class="field-hint">Token-classification models registered as privacy layers (<code>~/.loke/privacy-models.json</code>), the same registrations <code>loke privacy add-model</code> makes. A model is sent text only once its sidecar answers <code>/health</code> as that model.</div>
+      <div class="info-note" id="pm-error" role="alert" hidden></div>
+      <div id="pm-models"><span class="field-hint">Loading the registered models from loke…</span></div>
+      <div class="field-row">
+        <div class="field-label-col">
+          <span class="field-label">Add a model</span>
+          <span class="field-hint">Labels map the model's labels to loke types, e.g. <code>PER=PERSON, LOC=LOCATION</code>. The url must be on this machine.</span>
+        </div>
+        <div class="field-control" style="display:flex;flex-direction:column;gap:6px;">
+          <input class="field-select" id="pm-id" aria-label="Model id" placeholder="model id, e.g. dslim/bert-base-NER" autocomplete="off">
+          <input class="field-select" id="pm-url" aria-label="Sidecar url" placeholder="http://127.0.0.1:11436" autocomplete="off">
+          <input class="field-select" id="pm-labels" aria-label="Label mapping" placeholder="PER=PERSON, LOC=LOCATION" autocomplete="off">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <label style="font-size:0.82em;">Threshold <input type="number" id="pm-threshold" min="0" max="1" step="0.05" value="0" style="width:5em;"></label>
+            <label style="font-size:0.82em;">Priority <input type="number" id="pm-priority" min="0" max="1000" step="1" value="5" style="width:5em;"></label>
+            <label style="font-size:0.82em;"><input type="checkbox" id="pm-enabled" checked> Enabled</label>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button class="btn-save" id="pm-add" style="font-size:0.8em;padding:6px 16px;">Register model</button>
+            <span id="pm-status" role="status" aria-live="polite" style="font-size:0.82em;"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 
   <!-- ════════════════════════════════════════════════════════════════════ -->
   <!-- A4.4 PROMPT APPROVAL                                                 -->
@@ -783,6 +831,206 @@
   updateFeedbackButton();
   initVersionPanel();
 
+})();
+</script>
+<script>
+// ── F3b.2 (b) privacy layers · F3b.7 registered models ─────────────────────
+// Both go to loke directly (window.LOKE_DIRECT), as /api/settings does: they are loke's own
+// configuration, and loke guards them itself (GA2.6, GA2.7). Every value from loke is set as
+// text, never as HTML. What this page disables (the regex layer's switch, a required layer's
+// switch, a banned layer's) is what loke refuses to save; loke checks it again on POST and its
+// refusal is shown as it answers it.
+(function () {
+  'use strict';
+  const BASE = window.LOKE_DIRECT;
+  const MODES = ['detect-and-mask', 'detect-only', 'veto'];
+  let current = null;
+
+  function el(tag, attrs, text) {
+    const e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(k => {
+      if (k === 'style') e.style.cssText = attrs[k];
+      else if (k in e && typeof attrs[k] === 'boolean') e[k] = attrs[k];
+      else e.setAttribute(k, attrs[k]);
+    });
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function note(id, text) {
+    const n = document.getElementById(id);
+    if (!n) return;
+    n.textContent = text || '';
+    n.hidden = !text;
+  }
+
+  function policyText(p) {
+    if (!p || !p.present) return '';
+    if (p.error) return 'Organisation policy: ' + p.error;
+    if (!p.enforced) return 'Organisation policy loke.policy.json is present and not enforced.';
+    const parts = [];
+    if (p.minimum_layers > 0) parts.push('at least ' + p.minimum_layers + ' masking layers');
+    if (p.required_layers.length) parts.push('required: ' + p.required_layers.join(', '));
+    if (p.banned_layers.length) parts.push('banned: ' + p.banned_layers.join(', '));
+    if (p.max_confidence_threshold) parts.push('confidence threshold at most ' + p.max_confidence_threshold);
+    if (p.locked_consensus) parts.push('consensus at least ' + p.locked_consensus);
+    return 'Organisation policy loke.policy.json sets a floor these layers cannot be saved below: ' + (parts.join('; ') || 'nothing for the layers') + '.';
+  }
+
+  function layerRow(l, policy) {
+    const row = el('div', { class: 'pl-row', 'data-layer': l.id, style: 'border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:flex;flex-direction:column;gap:6px;' });
+    const head = el('div', { style: 'font-size:0.88em;font-weight:600;' }, l.name + ' (' + l.id + ')');
+    row.appendChild(head);
+    const controls = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:0.82em;' });
+    const locked = l.regex_locked;
+    const enabledBox = el('input', { type: 'checkbox', class: 'pl-enabled', 'aria-label': l.id + ' enabled' });
+    enabledBox.checked = !!l.enabled;
+    if (locked || l.policy_required) { enabledBox.checked = true; enabledBox.disabled = true; }
+    if (l.policy_banned) { enabledBox.checked = false; enabledBox.disabled = true; }
+    const enabledLabel = el('label', {});
+    enabledLabel.appendChild(enabledBox);
+    enabledLabel.appendChild(document.createTextNode(' Enabled'));
+    controls.appendChild(enabledLabel);
+    const prio = el('input', { type: 'number', class: 'pl-priority', step: '1', style: 'width:4.5em;', 'aria-label': l.id + ' priority' });
+    prio.value = l.priority;
+    const prioLabel = el('label', {}, 'Priority ');
+    prioLabel.appendChild(prio);
+    controls.appendChild(prioLabel);
+    const mode = el('select', { class: 'pl-mode', 'aria-label': l.id + ' mode' });
+    MODES.forEach(m => {
+      const o = el('option', { value: m }, m);
+      if (m === 'detect-only' && (locked || l.policy_required)) o.disabled = true;
+      mode.appendChild(o);
+    });
+    mode.value = l.mode;
+    controls.appendChild(mode);
+    const th = el('input', { type: 'number', class: 'pl-threshold', min: '0', max: '1', step: '0.05', style: 'width:5em;', 'aria-label': l.id + ' confidence threshold' });
+    th.value = l.confidence_threshold;
+    if (policy && policy.enforced && policy.max_confidence_threshold) th.max = policy.max_confidence_threshold;
+    if (locked) th.disabled = true;
+    const thLabel = el('label', {}, 'Threshold ');
+    thLabel.appendChild(th);
+    controls.appendChild(thLabel);
+    row.appendChild(controls);
+    const filter = el('input', { class: 'field-select pl-filter', 'aria-label': l.id + ' entity filter', placeholder: 'all types', title: 'Types this layer reports: ' + l.types.join(', ') });
+    filter.value = l.entity_filter.join(', ');
+    if (locked) filter.disabled = true;
+    row.appendChild(filter);
+    const marks = [];
+    if (locked) marks.push('the regex layer always runs and masks everything it finds');
+    if (l.policy_required) marks.push('required by the organisation policy');
+    if (l.policy_banned) marks.push('banned by the organisation policy');
+    if (marks.length) row.appendChild(el('div', { class: 'field-hint pl-marks' }, marks.join('; ')));
+    return row;
+  }
+
+  function render(d) {
+    current = d;
+    note('pl-policy', policyText(d.policy));
+    note('pl-error', d.error ? 'config.toml: ' + d.error + ' (every request is refused until it is fixed)' : '');
+    note('pl-warning', d.warning ? 'config.toml asks for something that is not applied: ' + d.warning : '');
+    document.getElementById('pl-regex-rule').textContent = d.regex_rule || '';
+    const box = document.getElementById('pl-layers');
+    box.textContent = '';
+    d.layers.forEach(l => box.appendChild(layerRow(l, d.policy)));
+  }
+
+  function collect() {
+    return Array.from(document.querySelectorAll('#pl-layers .pl-row')).map(r => {
+      const filter = r.querySelector('.pl-filter').value.split(',').map(s => s.trim()).filter(Boolean);
+      return {
+        id: r.dataset.layer,
+        enabled: r.querySelector('.pl-enabled').checked,
+        priority: parseInt(r.querySelector('.pl-priority').value, 10),
+        mode: r.querySelector('.pl-mode').value,
+        confidence_threshold: r.querySelector('.pl-threshold').value || '0',
+        entity_filter: filter,
+      };
+    });
+  }
+
+  function status(id, text, ok) {
+    const s = document.getElementById(id);
+    if (!s) return;
+    s.textContent = text;
+    s.style.color = ok ? 'var(--green)' : 'var(--red)';
+  }
+
+  window.loadPrivacyLayers = function () {
+    return fetch(BASE + '/api/privacylayers', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(render)
+      .catch(err => { document.getElementById('pl-layers').textContent = 'Could not reach loke: ' + err.message; });
+  };
+
+  window.savePrivacyLayers = function () {
+    if (!current) return Promise.resolve();
+    status('pl-status', 'Saving…', true);
+    return fetch(BASE + '/api/privacylayers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layers: collect() })
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) { status('pl-status', 'Saved to config.toml.', true); return window.loadPrivacyLayers(); }
+        status('pl-status', 'Not saved: ' + (d.error || 'loke refused it'), false);
+      })
+      .catch(err => status('pl-status', 'Could not reach loke: ' + err.message, false));
+  };
+
+  function modelRow(m) {
+    const flags = [m.enabled ? 'enabled' : 'disabled'];
+    if (m.policy_required) flags.push('required by the organisation policy');
+    if (m.policy_banned) flags.push('banned by the organisation policy');
+    return el('div', { class: 'pm-row', 'data-layer': m.layer, style: 'font-size:0.82em;border-bottom:1px solid var(--border);padding:6px 0;' },
+      m.layer + ' · ' + m.url + ' · labels ' + m.labels.join(', ') + ' · threshold ' + m.confidence_threshold + ' · priority ' + m.priority + ' · ' + flags.join(', '));
+  }
+
+  window.loadPrivacyModels = function () {
+    return fetch(BASE + '/api/privacymodels', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(d => {
+        note('pm-error', d.error ? d.error + ' (every request is refused until it is fixed)' : '');
+        const box = document.getElementById('pm-models');
+        box.textContent = '';
+        if (!d.models.length) box.appendChild(el('span', { class: 'field-hint' }, 'No registered privacy models.'));
+        d.models.forEach(m => box.appendChild(modelRow(m)));
+      })
+      .catch(err => { document.getElementById('pm-models').textContent = 'Could not reach loke: ' + err.message; });
+  };
+
+  window.addPrivacyModel = function () {
+    const labels = document.getElementById('pm-labels').value.split(',').map(s => s.trim()).filter(Boolean);
+    const body = {
+      id: document.getElementById('pm-id').value.trim(),
+      url: document.getElementById('pm-url').value.trim(),
+      labels: labels,
+      confidence_threshold: document.getElementById('pm-threshold').value || '0',
+      priority: parseInt(document.getElementById('pm-priority').value || '5', 10),
+      enabled: document.getElementById('pm-enabled').checked,
+    };
+    status('pm-status', 'Registering…', true);
+    return fetch(BASE + '/api/privacymodels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          status('pm-status', 'Registered ' + d.layer + '.', true);
+          return Promise.all([window.loadPrivacyModels(), window.loadPrivacyLayers()]);
+        }
+        status('pm-status', 'Not registered: ' + (d.error || 'loke refused it'), false);
+      })
+      .catch(err => status('pm-status', 'Could not reach loke: ' + err.message, false));
+  };
+
+  document.getElementById('pl-save').addEventListener('click', () => window.savePrivacyLayers());
+  document.getElementById('pm-add').addEventListener('click', () => window.addPrivacyModel());
+  window.loadPrivacyLayers();
+  window.loadPrivacyModels();
 })();
 </script>
 {! end !}

@@ -90,7 +90,7 @@ probe() {  # $1 method, $2 path, $3 optional body
   fi
 }
 
-for r in health models settings savings tabs privacy layermetrics; do probe GET "/api/$r"; done
+for r in health models settings savings tabs privacy layermetrics privacylayers privacymodels; do probe GET "/api/$r"; done
 probe POST /api/pipeline '{"text":"smoke test, no personal data","fallback_reason":"user_choice","fallback_selected_by":"user"}'
 for p in / /privacy /savings /pipeline /chat /setup /installer /approve /tabs /sysmon /evaluate; do probe GET "$p"; done
 
@@ -308,6 +308,13 @@ python3 "$ROOT/scripts/lib/evaluate_check.py" evaluate "http://127.0.0.1:$PORT" 
 # F3b.10: GET /api/layermetrics, judged against the database file itself.
 python3 "$ROOT/scripts/lib/evaluate_check.py" layermetrics "http://127.0.0.1:$PORT" "$WORK/home/.loke/loke.db" || fail=1
 
+# F3b.2 (b), F3b.7 (1), F3b.8 (3): the settings UI's privacy routes and /api/health's
+# policy-applied layers, judged on the bodies and on the files the server wrote. The check owns
+# config.toml, loke.policy.json and privacy-models.json while it runs and removes them after;
+# the NC1.14 checks above leave a config.toml, so it is removed first.
+rm -f "$WORK/home/.loke/config.toml"
+python3 "$ROOT/scripts/lib/privacy_settings_check.py" "http://127.0.0.1:$PORT" "$WORK/home" || fail=1
+
 # GA2.6: a hostile page's "simple" POST (text/plain, so no preflight) must be refused
 # before any handler does work. Loopback origins must still get through.
 xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
@@ -325,13 +332,13 @@ xorigin() {  # $1 path, $2 origin, $3 expect: refused|allowed
     echo "  ok   POST $1 from $2 [$code]"
   fi
 }
-for r in pipeline settings approve privacy savings tabs artifact evaluate; do
+for r in pipeline settings approve privacy savings tabs artifact evaluate privacylayers privacymodels; do
   xorigin "/api/$r" "https://evil.example" refused
 done
 xorigin /api/pipeline "http://127.0.0.1:$PORT" allowed
 
 # GA2.7: a DNS-rebound page reads GET routes as same-origin; its Host still names it.
-for r in settings health layermetrics; do
+for r in settings health layermetrics privacylayers privacymodels; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Host: rebind.example:$PORT" \
            "http://127.0.0.1:$PORT/api/$r")
   if [ "$code" != 403 ]; then

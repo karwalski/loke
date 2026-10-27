@@ -227,5 +227,13 @@ if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
   node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11430/setup" "$ROOT/tests/ui/setup_ls14b.json"
   rc=$?
 fi
+# F3b.2 (b), F3b.7 (1): moke's settings page edits loke's [[privacy.layers]] and registers a
+# privacy model, against this loke and its throwaway HOME. Last, because it changes that loke's
+# config.toml and privacy-models.json (presidio at priority 0 in veto mode, a model registered
+# switched off), which the checks above must not see.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/settings" "$ROOT/tests/ui/privacysettings_f3b2.json"
+  rc=$?
+fi
 [ "$rc" -eq 0 ] && echo "smoke_ui: OK — every GA3 check passed in a real browser" || echo "smoke_ui: FAILED" >&2
 exit $rc

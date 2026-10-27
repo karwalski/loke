@@ -1,0 +1,394 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.privacy.layerview;
+
+i=str:std.str;
+i=json:std.json;
+i=file:std.file;
+i=jx:shared.jsonobj;
+i=sh:shared.types;
+i=cfg:shared.config;
+i=fr:core.privacy.filterregistry;
+i=lh:core.privacy.layerhealth;
+i=op:core.privacy.orgpolicy;
+i=lyc:core.privacy.layerconfig;
+i=mr:core.privacy.modelregistry;
+i=pipe:core.privacy.pipeline;
+
+(* The privacy layers as the loke server shows them and as the settings UI edits them: the
+   bodies of GET /api/health's privacy_layers (F3b.8), GET and POST /api/privacylayers (F3b.2)
+   and GET and POST /api/privacymodels (F3b.7). Each is built without a request, so it can be
+   tested; the page modules are thin wrappers.
+
+   WHAT HEALTH REPORTS. The layers a request runs with: config.toml's, with the organisation
+   policy applied over them as core.privacy.pipeline.run applies it (orgpolicy.apply). Each
+   field the policy changed is named in the layer's policy_changed, and a policy or layers
+   config that refuses every request is reported as the reason, with the state unhealthy.
+
+   WHAT THE EDITOR WRITES. Only the [[privacy.layers]] entries of config.toml: every other line
+   of the file is kept as it was, in place (LS1.4a: a settings POST once replaced the whole
+   file). Before anything is written, the new text is put through the composition the server
+   runs (pipeline.servedwith), and refused if
+     - it cannot be applied (layerconfig.resolve's error: the pipeline would refuse every
+       request with it);
+     - it turns the regex layer down (layerconfig.resolve's warning): the pipeline does not
+       apply that, and whether a user may switch the regex layer off is an open decision
+       (F3b.2 (c)), so the UI is told no rather than shown a setting that is not in force;
+     - it falls below the organisation policy (orgpolicy.floorerror), or the policy cannot be
+       applied.
+   A config.toml that exists and cannot be read is not written. *)
+
+t=$layerreply{
+  status:i64;
+  body:str
+};
+
+f=reply(status:i64;body:str):$layerreply{
+  <$layerreply{status:status;body:body}
+};
+
+f=refusal(status:i64;message:str):$layerreply{
+  <reply(status;"{\"ok\":false,\"error\":\(jx.escape(message))}")
+};
+
+f=yes(b:bool):str{
+  if(b){ <"true" }el{};
+  <"false"
+};
+
+f=quotedstr(s:str):str{ <jx.escape(s) };
+
+f=joined(items:@str):str{ <str.join(",";items) };
+
+f=bracketed(inner:str):str{ <"[\(inner)]" };
+
+f=strarray(items:@str):str{
+  <bracketed(joined(items.map(&quotedstr)))
+};
+
+(* The separator before the i-th element of a JSON list. *)
+f=sep(i:i64):str{
+  if(i==0){ <"" }el{};
+  <","
+};
+
+f=arraylen(o:$json;key:str):i64{
+  <mt json.arr(o;key) { $ok:a a.len as i64; $jsonerr:x 0-1 }
+};
+
+f=listed(items:@str;id:str):bool{
+  lp(let i=0;i<items.len;i=i+1){
+    if(str.eq(items.get(i);id)){ <true }el{}
+  };
+  <false
+};
+
+f=filterlist(filter:str):@str{
+  if(str.len(filter)==0){ <@() }el{};
+  <str.split(filter;",")
+};
+
+(* ── The organisation policy, as the UI shows it ───────────────────────────── *)
+
+f=policyjson(p:$orgprivacypolicy):str{
+  <"{\"present\":\(yes(p.present)),\"enforced\":\(yes(op.applies(p))),\"error\":\(jx.escape(p.error)),\"minimum_layers\":\(str.fromint(p.minimumlayers)),\"required_layers\":\(strarray(p.requiredlayers)),\"banned_layers\":\(strarray(p.bannedlayers)),\"max_confidence_threshold\":\(jx.escape(p.maxthreshold)),\"locked_consensus\":\(jx.escape(p.lockedconsensus))}"
+};
+
+(* ── GET /api/health: the layers in force ───────────────────────────────────── *)
+
+(* The fields of a layer the policy changed: the configured entry against the applied one. *)
+f=changes(configured:$privacyfilter;applied:$privacyfilter):@str{
+  let out=mut.@();
+  if(configured.enabled!=applied.enabled){ out=out.push("enabled") }el{};
+  if(configured.threshold!=applied.threshold){ out=out.push("confidence_threshold") }el{};
+  if(!str.eq(configured.param;applied.param)){ out=out.push("privacy_filter_threshold") }el{};
+  <out
+};
+
+f=effectivelayerjson(s:$layerstatus;f:$privacyfilter;changed:@str):str{
+  let priority=str.fromint(f.priority);
+  let threshold=str.fromfloat(f.threshold);
+  <"{\"id\":\(jx.escape(s.id)),\"enabled\":\(yes(s.enabled)),\"state\":\(jx.escape(s.state)),\"reason\":\(jx.escape(s.reason)),\"priority\":\(priority),\"mode\":\(jx.escape(f.mode)),\"confidence_threshold\":\(threshold),\"policy_changed\":\(strarray(changed))}"
+};
+
+(* Why every request made with c is refused before any layer is consulted, or "": a layers
+   config that cannot be applied, or a policy that cannot be (or that bans an enabled layer). *)
+f=refusedwith(c:$pipelineconfig;applied:$orgapplied):str{
+  if(str.len(c.layererror)>0){ <lyc.refusal(c.layererror) }el{};
+  <applied.policy.error
+};
+
+f=consensusjson(c:$pipelineconfig;applied:$orgapplied):str{
+  <"{\"configured\":\(jx.escape(c.consensus)),\"effective\":\(jx.escape(applied.consensus)),\"policy_changed\":\(yes(str.len(applied.policy.raisedfrom)>0))}"
+};
+
+f=orgjson(p:$orgprivacypolicy):str{
+  <"{\"present\":\(yes(p.present)),\"enforced\":\(yes(op.applies(p))),\"error\":\(jx.escape(p.error)),\"overrides\":\(strarray(p.notes))}"
+};
+
+(* F3b.8 (3). {"state","summary","layers":[...],"uncovered_types":[...],"refused":"...",
+   "consensus":{...},"org_policy":{...}}: the layers c runs with once the policy is applied,
+   each probed as the pipeline probes it. *)
+f=healthjson(c:$pipelineconfig):str{
+  let applied:$orgapplied=op.apply(op.resolved(c.org);c.layers;c.consensus;c.consensusthreshold);
+  let reg=applied.registry;
+  let report=lh.checkhealth(reg);
+  let items=mut.@();
+  lp(let i=0;i<report.layers.len;i=i+1){
+    let s:$layerstatus=report.layers.get(i);
+    let f=fr.get(reg;s.id);
+    items=items.push(effectivelayerjson(s;f;changes(fr.get(c.layers;s.id);f)))
+  };
+  let refused=refusedwith(c;applied);
+  let state=mut.lh.overall(report);
+  let summary=mut.lh.formathealthstatus(report);
+  if(str.len(refused)>0){
+    state="unhealthy";
+    summary="REFUSED: every request is refused: \(refused)"
+  }el{};
+  <"{\"state\":\(jx.escape(state)),\"summary\":\(jx.escape(summary)),\"layers\":[\(joined(items))],\"uncovered_types\":\(lh.typesjson(report.uncovered)),\"refused\":\(jx.escape(refused)),\"consensus\":\(consensusjson(c;applied)),\"org_policy\":\(orgjson(applied.policy))}"
+};
+
+(* ── GET /api/privacylayers: what the editor shows ─────────────────────────── *)
+
+(* The registry [[privacy.layers]] is applied to: the four built-in layers, the privacy
+   filter as [privacy] sets it, and the registered models. The regex rule is checked
+   against it (layerconfig.resolve's warning). *)
+f=baseregistry(lc:$lokeconfig):$filterregistry{
+  <pipe.servedwith(cfg.withsource(lc;"")).layers
+};
+
+f=regexwarning(lc:$lokeconfig;text:str):str{
+  <lyc.resolve(baseregistry(lc);text).warning
+};
+
+f=regexrule():str{
+  <"The regex layer always runs and masks everything it finds: it cannot be switched off, set detect-only, given a confidence threshold or an entity filter here. Whether a user may switch it off is an open decision (F3b.2)."
+};
+
+f=editorlayerjson(f:$privacyfilter;p:$orgprivacypolicy):str{
+  let priority=str.fromint(f.priority);
+  let threshold=str.fromfloat(f.threshold);
+  <"{\"id\":\(jx.escape(f.id)),\"name\":\(jx.escape(f.name)),\"enabled\":\(yes(f.enabled)),\"priority\":\(priority),\"mode\":\(jx.escape(f.mode)),\"confidence_threshold\":\(threshold),\"entity_filter\":\(strarray(filterlist(f.entityfilter))),\"types\":\(strarray(fr.typesof(f))),\"regex_locked\":\(yes(str.eq(f.id;fr.regexid()))),\"policy_required\":\(yes(op.applies(p) && listed(p.requiredlayers;f.id))),\"policy_banned\":\(yes(op.applies(p) && listed(p.bannedlayers;f.id)))}"
+};
+
+(* {"ok":true,"error":"...","warning":"...","regex_rule":"...","layers":[...],"policy":{...}}:
+   the layers as config.toml sets them (before the policy), with the policy's floor beside
+   them. error is why the layers config refuses every request, if it does. *)
+f=editorjson():str{
+  let lc=cfg.loaded();
+  let c=pipe.servedwith(lc);
+  let p=op.resolved(c.org);
+  let items=mut."";
+  lp(let i=0;i<c.layers.filters.len;i=i+1){
+    items="\(items)\(sep(i))\(editorlayerjson(c.layers.filters.get(i);p))"
+  };
+  let error=mut."";
+  if(str.len(c.layererror)>0){ error=lyc.refusal(c.layererror) }el{};
+  <"{\"ok\":true,\"error\":\(jx.escape(error)),\"warning\":\(jx.escape(regexwarning(lc;lc.sourcetext))),\"regex_rule\":\(jx.escape(regexrule())),\"layers\":[\(items)],\"policy\":\(policyjson(p))}"
+};
+
+(* ── POST /api/privacylayers: writing the entries ──────────────────────────── *)
+
+(* A type name or layer id as written into config.toml: nothing that could end the quoted
+   string or the line. Layer ids are also checked against the registry, and type names by
+   layerconfig.resolve. *)
+f=safechar(c:i64):bool{
+  <(c>=65 && c<=90) || (c>=97 && c<=122) || (c>=48 && c<=57) || c==95 || c==45 || c==46 || c==47 || c==58 || c==64
+};
+
+f=issafe(s:str):bool{
+  let n=str.len(s) as i64;
+  if(n==0){ <false }el{};
+  lp(let i=0;i<n;i=i+1){
+    if(!safechar(str.charat(s;i))){ <false }el{}
+  };
+  <true
+};
+
+f=commalist(items:@str):str{ <str.join(", ";items) };
+
+f=isnumber(raw:str):bool{
+  <str.len(raw)>0 && lyc.isdecimal(raw) && !lyc.isquoted(raw)
+};
+
+(* One posted layer as a [[privacy.layers]] entry, or "" with why in the second element. *)
+f=entryof(e:$json;reg:$filterregistry):@str{
+  if(!str.startswith(e.raw;"{")){ <@("";"each layer must be an object") }el{};
+  let id=jx.strvalue(e;"id";"");
+  if(!issafe(id) || !fr.has(reg;id)){ <@("";"no layer has the id \(id)") }el{};
+  let enabled=jx.rawvalue(e;"enabled");
+  if(!str.eq(enabled;"true") && !str.eq(enabled;"false")){ <@("";"the \(id) layer's enabled must be true or false") }el{};
+  let priority=jx.rawvalue(e;"priority");
+  if(!lyc.isinteger(priority) || str.len(priority)>9){ <@("";"the \(id) layer's priority must be a whole number") }el{};
+  let mode=jx.strvalue(e;"mode";"");
+  if(!lyc.ismode(mode)){ <@("";"the \(id) layer's mode must be detect-and-mask, detect-only or veto") }el{};
+  let threshold=mut.jx.rawvalue(e;"confidence_threshold");
+  if(str.startswith(threshold;"\"")){ threshold=jx.strvalue(e;"confidence_threshold";"") }el{};
+  if(!isnumber(threshold)){ <@("";"the \(id) layer's confidence_threshold must be a number from 0 to 1") }el{};
+  if(!str.startswith(jx.rawvalue(e;"entity_filter");"[")){ <@("";"the \(id) layer's entity_filter must be an array of type names") }el{};
+  let names=jx.strelems(e;"entity_filter");
+  if(arraylen(e;"entity_filter")!=(names.len as i64)){ <@("";"the \(id) layer's entity_filter must be an array of type names") }el{};
+  let quoted=mut.@();
+  lp(let i=0;i<names.len;i=i+1){
+    let name:str=names.get(i);
+    if(!issafe(name)){ <@("";"the \(id) layer's entity_filter names a type that is not one") }el{};
+    quoted=quoted.push("\"\(name)\"")
+  };
+  <@("[[privacy.layers]]\nid = \"\(id)\"\nenabled = \(enabled)\npriority = \(priority)\nmode = \"\(mode)\"\nconfidence_threshold = \(threshold)\nentity_filter = [\(commalist(quoted))]\n";"")
+};
+
+(* config.toml's text with every [[privacy.layers]] entry taken out and entries put in their
+   place at the end. Every other line is kept as it was. Comment and blank lines at the end of
+   a removed entry are kept, since they usually introduce the table that follows. *)
+f=withentries(text:str;entries:str):str{
+  let lines=str.split(text;"\n");
+  let out=mut."";
+  let held=mut."";
+  let inentry=mut.false;
+  lp(let i=0;i<lines.len;i=i+1){
+    let line:str=lines.get(i);
+    let bare=str.trim(lyc.stripcomment(line));
+    if(str.startswith(bare;"[")){
+      out="\(out)\(held)";
+      held="";
+      inentry=str.startswith(bare;"[[") && str.eq(lyc.headername(bare);lyc.header());
+      if(!inentry){ out="\(out)\(line)\n" }el{}
+    }el{
+      if(inentry){
+        if(str.len(bare)==0){ held="\(held)\(line)\n" }el{ held="" }
+      }el{ out="\(out)\(line)\n" }
+    }
+  };
+  let body="\(out)\(held)";
+  let end=mut.str.len(body) as i64;
+  let going=mut.true;
+  lp(let k=0;going && end>0;k=k+1){
+    let c=str.charat(body;end-1);
+    if(c==10 || c==13 || c==32 || c==9){ end=end-1 }el{ going=false }
+  };
+  let head=sh.strslice(body;0;end);
+  if(str.len(entries)==0){
+    if(end==0){ <"" }el{};
+    <"\(head)\n"
+  }el{};
+  if(end==0){ <entries }el{};
+  <"\(head)\n\n\(entries)"
+};
+
+(* config.toml's text, "" when there is none, and false in ok when it is there and cannot be
+   read: a read error is not taken for an empty file, which would then be written over. A
+   directory in its place is checked first: std.file reads one as an empty file. *)
+f=configtext():@str{
+  let path=sh.configpath();
+  if(!file.exists(path)){ <@("ok";"") }el{};
+  if(file.isdir(path)){ <@("";"") }el{};
+  <mt file.read(path) { $ok:v @("ok";v); $err:e @("";"") }
+};
+
+(* POST /api/privacylayers {"layers":[{"id","enabled","priority","mode",
+   "confidence_threshold","entity_filter"},...]}: every layer named gets an entry with every
+   key; a layer not named gets none and keeps its default. *)
+f=savelayers(rawbody:str):$layerreply{
+  let body=mt json.dec(rawbody) { $ok:o o; $jsonerr:e jx.emptyobj() };
+  if(!str.startswith(jx.rawvalue(body;"layers");"[")){ <refusal(400;"the body must be {\"layers\":[...]}") }el{};
+  let current=configtext();
+  if(str.len(current.get(0))==0){ <refusal(500;"config.toml could not be read; it was not changed") }el{};
+  let existing=current.get(1);
+  let reg=baseregistry(cfg.fromtext(existing));
+  let els=mt json.arr(body;"layers") { $ok:a a; $jsonerr:e @() };
+  let blocks=mut.@();
+  let seen=mut.@();
+  lp(let i=0;i<els.len;i=i+1){
+    let r=entryof(els.get(i);reg);
+    if(str.len(r.get(0))==0){ <refusal(400;r.get(1)) }el{};
+    let id=jx.strvalue(els.get(i);"id";"");
+    if(listed(seen;id)){ <refusal(400;"the \(id) layer is given twice") }el{};
+    seen=seen.push(id);
+    blocks=blocks.push(r.get(0))
+  };
+  let text=withentries(existing;str.join("\n";blocks));
+  let next=cfg.fromtext(text);
+  let warning=regexwarning(next;text);
+  if(str.len(warning)>0){ <refusal(400;"not saved: \(warning). \(regexrule())") }el{};
+  let c=pipe.servedwith(next);
+  if(str.len(c.layererror)>0){ <refusal(400;"not saved: \(lyc.refusal(c.layererror))") }el{};
+  let floor=op.floorerror(op.resolved(c.org);c.layers);
+  if(str.len(floor)>0){ <refusal(409;"not saved: \(floor)") }el{};
+  file.mkdir(sh.lokedir());
+  <mt file.write(sh.configpath();text) {
+    $ok:v reply(200;"{\"ok\":true,\"layers\":\(str.fromint(blocks.len as i64))}");
+    $err:e refusal(500;"config.toml could not be written")
+  }
+};
+
+(* ── GET and POST /api/privacymodels ───────────────────────────────────────── *)
+
+f=modeljson(m:$registeredmodel;p:$orgprivacypolicy):str{
+  let layer=mr.layerid(m.id);
+  let banned=op.applies(p) && listed(p.bannedlayers;layer);
+  let required=op.applies(p) && listed(p.requiredlayers;layer);
+  let priority=str.fromint(m.priority);
+  <"{\"id\":\(jx.escape(m.id)),\"layer\":\(jx.escape(layer)),\"url\":\(jx.escape(m.url)),\"labels\":\(strarray(m.labels)),\"confidence_threshold\":\(jx.escape(m.threshold)),\"priority\":\(priority),\"enabled\":\(yes(m.enabled)),\"policy_required\":\(yes(required)),\"policy_banned\":\(yes(banned))}"
+};
+
+(* {"ok":true,"error":"...","models":[...],"policy":{...}}: the registrations as the pipeline
+   reads them. error is why the file refuses every request, if it does. *)
+f=modelsjson():str{
+  let set=mr.load(mr.modelspath());
+  let p=op.resolved(op.notloaded());
+  let items=mut."";
+  lp(let i=0;i<set.models.len;i=i+1){
+    items="\(items)\(sep(i))\(modeljson(set.models.get(i);p))"
+  };
+  <"{\"ok\":true,\"error\":\(jx.escape(set.error)),\"models\":[\(items)],\"policy\":\(policyjson(p))}"
+};
+
+(* Why the policy refuses registering m, or "": it bans the layer, or m's threshold is above
+   the policy's ceiling. A policy that cannot be applied refuses too. *)
+f=modelfloorerror(p:$orgprivacypolicy;m:$registeredmodel):str{
+  if(!p.present){ <"" }el{};
+  if(str.len(p.error)>0){ <"\(p.error); the model cannot be checked against it, so it is not registered" }el{};
+  if(!p.enforced || !m.enabled){ <"" }el{};
+  let layer=mr.layerid(m.id);
+  if(listed(p.bannedlayers;layer)){ <"\(op.header()) bans the \(layer) privacy layer, so it cannot be registered enabled" }el{};
+  if(str.len(p.maxthreshold)>0 && op.asnumber(m.threshold)>op.asnumber(p.maxthreshold)){ <"\(op.header()) sets max_confidence_threshold \(p.maxthreshold), so the model's confidence_threshold cannot be above it" }el{};
+  <""
+};
+
+(* POST /api/privacymodels {"id","url","labels":["PER=PERSON"],"confidence_threshold",
+   "priority","enabled"}: registered through modelregistry.register, the path
+   `loke privacy add-model` takes. *)
+f=addmodel(rawbody:str):$layerreply{
+  let o=mt json.dec(rawbody) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  if(!str.startswith(jx.rawvalue(o;"id");"\"")){ <refusal(400;"a model needs a string id") }el{};
+  if(!str.startswith(jx.rawvalue(o;"url");"\"")){ <refusal(400;"a model needs a string url") }el{};
+  let rawlabels=jx.rawvalue(o;"labels");
+  let labels=jx.strelems(o;"labels");
+  if(!str.startswith(rawlabels;"[") || arraylen(o;"labels")!=(labels.len as i64)){ <refusal(400;"labels must be an array of MODEL_LABEL=TYPE strings") }el{};
+  let threshold=mut."0";
+  if(jx.has(o;"confidence_threshold")){
+    let raw=jx.rawvalue(o;"confidence_threshold");
+    threshold=raw;
+    if(str.startswith(raw;"\"")){ threshold=jx.strvalue(o;"confidence_threshold";"") }el{}
+  }el{};
+  let priority=mut.mr.defaultpriority();
+  if(jx.has(o;"priority")){
+    let raw=jx.rawvalue(o;"priority");
+    if(!str.isdigit(raw) || str.len(raw)>9){ <refusal(400;"priority must be a whole number from 0 to 1000") }el{};
+    priority=mt str.toint(raw) { $ok:x x; $err:e 0-1 }
+  }el{};
+  let enabled=jx.rawvalue(o;"enabled");
+  if(jx.has(o;"enabled") && !str.eq(enabled;"true") && !str.eq(enabled;"false")){ <refusal(400;"enabled must be true or false") }el{};
+  let m=$registeredmodel{id:jx.strvalue(o;"id";"");url:jx.strvalue(o;"url";"");labels:labels;threshold:threshold;priority:priority;enabled:!str.eq(enabled;"false")};
+  let why=mr.modelerror(m);
+  if(str.len(why)>0){ <refusal(400;why) }el{};
+  let set=mr.load(mr.modelspath());
+  if(str.len(set.error)>0){ <refusal(409;"\(set.error); fix or remove it first") }el{};
+  let floor=modelfloorerror(op.resolved(op.notloaded());m);
+  if(str.len(floor)>0){ <refusal(409;floor) }el{};
+  let failed=mr.register(m);
+  if(str.len(failed)>0){ <refusal(500;failed) }el{};
+  <reply(200;"{\"ok\":true,\"layer\":\(jx.escape(mr.layerid(m.id)))}")
+};

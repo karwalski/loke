@@ -1,0 +1,92 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.privacymodelsapi;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=sh:shared.types;
+i=op:core.privacy.orgpolicy;
+i=mr:core.privacy.modelregistry;
+i=pipe:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=lv:core.privacy.layerview;
+
+(* F3b.7 (1). The settings UI's registered-model panel: core.privacy.layerview.modelsjson and
+   addmodel, the bodies of GET and POST /api/privacymodels. A registration goes through
+   core.privacy.modelregistry.register, the call `loke privacy add-model` makes, into
+   ~/.loke/privacy-models.json under this test's throwaway HOME, and is read back through
+   modelregistry.load and pipeline.served, as a request would read it. *)
+
+f=writefile(path:str;text:str):bool{
+  file.mkdir(sh.lokedir());
+  <mt file.write(path;text) { $ok:v v; $err:e false }
+};
+
+f=readfile(path:str):str{
+  <mt file.read(path) { $ok:v v; $err:e "" }
+};
+
+f=registrations():str{ <readfile(mr.modelspath()) };
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  if(t.assert(str.contains(lv.modelsjson();"\"error\":\"\",\"models\":[]");"with no file, no model is listed")){pass=pass+1}el{fail=fail+1};
+
+  let ok=lv.addmodel("{\"id\":\"dslim/bert-base-NER\",\"url\":\"http://127.0.0.1:11436\",\"labels\":[\"PER=PERSON\",\"LOC=LOCATION\"],\"confidence_threshold\":0.5,\"priority\":7,\"enabled\":true}");
+  if(t.assert(ok.status==200 && str.contains(ok.body;"\"layer\":\"model:dslim/bert-base-NER\"");"a valid model is registered (\(ok.body))")){pass=pass+1}el{fail=fail+1};
+  let set=mr.load(mr.modelspath());
+  if(t.assert(str.len(set.error)==0 && set.models.len==1;"the file it wrote is one the pipeline reads")){pass=pass+1}el{fail=fail+1};
+  let reg:$registeredmodel=set.models.get(0);
+  if(t.assert(str.eq(reg.id;"dslim/bert-base-NER") && str.eq(reg.url;"http://127.0.0.1:11436") && str.eq(str.join(",";reg.labels);"PER=PERSON,LOC=LOCATION") && str.eq(reg.threshold;"0.5") && reg.priority==7 && reg.enabled;"with every field as posted")){pass=pass+1}el{fail=fail+1};
+  let served=pipe.served().layers;
+  if(t.assert(fr.has(served;"model:dslim/bert-base-NER") && fr.get(served;"model:dslim/bert-base-NER").enabled;"and the server runs it as a layer from the next request")){pass=pass+1}el{fail=fail+1};
+  let listed=lv.modelsjson();
+  if(t.assert(str.contains(listed;"{\"id\":\"dslim/bert-base-NER\",\"layer\":\"model:dslim/bert-base-NER\",\"url\":\"http://127.0.0.1:11436\",\"labels\":[\"PER=PERSON\",\"LOC=LOCATION\"],\"confidence_threshold\":\"0.5\",\"priority\":7,\"enabled\":true");"GET lists it (\(listed))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lv.editorjson();"\"id\":\"model:dslim/bert-base-NER\"");"and the layers editor shows it as a layer")){pass=pass+1}el{fail=fail+1};
+
+  let again=lv.addmodel("{\"id\":\"dslim/bert-base-NER\",\"url\":\"http://127.0.0.1:11437\",\"labels\":[\"PER=PERSON\"],\"enabled\":false}");
+  let set2=mr.load(mr.modelspath());
+  if(t.assert(again.status==200 && set2.models.len==1 && str.eq(set2.models.get(0).url;"http://127.0.0.1:11437") && !set2.models.get(0).enabled && set2.models.get(0).priority==5;"registering an id again replaces it, with the defaults for what is left out")){pass=pass+1}el{fail=fail+1};
+
+  let kept=registrations();
+  let unknown=lv.addmodel("{\"id\":\"m\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"MISC=MISCELLANEOUS\"]}");
+  if(t.assert(unknown.status==400 && str.contains(unknown.body;"maps MISC to MISCELLANEOUS, which is not an entity type loke knows");"a label mapped to a type loke does not know is refused, as add-model refuses it (\(unknown.body))")){pass=pass+1}el{fail=fail+1};
+  let remote=lv.addmodel("{\"id\":\"m\",\"url\":\"http://192.168.1.4:9000\",\"labels\":[\"PER=PERSON\"]}");
+  if(t.assert(remote.status==400 && str.contains(remote.body;"is not an http:// address on this machine");"a url off this machine is refused")){pass=pass+1}el{fail=fail+1};
+  let nolabels=lv.addmodel("{\"id\":\"m\",\"url\":\"http://127.0.0.1:9000\",\"labels\":\"PER=PERSON\"}");
+  if(t.asserteq(nolabels.body;"{\"ok\":false,\"error\":\"labels must be an array of MODEL_LABEL=TYPE strings\"}";"labels that are not an array are refused")){pass=pass+1}el{fail=fail+1};
+  let badprio=lv.addmodel("{\"id\":\"m\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"],\"priority\":-1}");
+  if(t.assert(badprio.status==400 && str.contains(badprio.body;"priority must be a whole number from 0 to 1000");"a negative priority is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(registrations();kept;"no refused registration changed the file")){pass=pass+1}el{fail=fail+1};
+
+  (* The organisation policy *)
+  writefile(op.policypath();"{\"banned_layers\":[\"model:acme/ner\"]}");
+  let banned=lv.addmodel("{\"id\":\"acme/ner\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"]}");
+  if(t.assert(banned.status==409 && str.contains(banned.body;"bans the model:acme/ner privacy layer, so it cannot be registered enabled");"a model the policy bans cannot be registered enabled (\(banned.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lv.modelsjson();"\"banned_layers\":[\"model:acme/ner\"]");"GET shows the policy's banned layers")){pass=pass+1}el{fail=fail+1};
+  let disabled=lv.addmodel("{\"id\":\"acme/ner\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"],\"enabled\":false}");
+  if(t.asserteq(str.fromint(disabled.status);"200";"it can be registered switched off")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lv.modelsjson();"\"layer\":\"model:acme/ner\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"],\"confidence_threshold\":\"0\",\"priority\":5,\"enabled\":false,\"policy_required\":false,\"policy_banned\":true}");"and is listed marked banned")){pass=pass+1}el{fail=fail+1};
+  writefile(op.policypath();"{\"max_confidence_threshold\":0.4}");
+  let kept2=registrations();
+  let above=lv.addmodel("{\"id\":\"x\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"],\"confidence_threshold\":\"0.9\"}");
+  if(t.assert(above.status==409 && str.contains(above.body;"max_confidence_threshold 0.4, so the model's confidence_threshold cannot be above it");"a threshold above the policy's ceiling is refused (\(above.body))")){pass=pass+1}el{fail=fail+1};
+  writefile(op.policypath();"not json");
+  let broken=lv.addmodel("{\"id\":\"x\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"]}");
+  if(t.assert(broken.status==409 && str.contains(broken.body;"cannot be applied") && str.contains(broken.body;"so it is not registered");"a policy that cannot be applied refuses the registration")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(registrations();kept2;"and neither changed the file")){pass=pass+1}el{fail=fail+1};
+  let gone=mt file.delete(op.policypath()) { $ok:v v; $err:e false };
+
+  (* A broken registration file is not rewritten *)
+  writefile(mr.modelspath();"{\"models\":[{\"id\":\"m\"}]}");
+  let onbroken=lv.addmodel("{\"id\":\"y\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"]}");
+  if(t.assert(onbroken.status==409 && str.contains(onbroken.body;"registered privacy models privacy-models.json cannot be applied") && str.contains(onbroken.body;"fix or remove it first");"a registration file that is already broken is not written over (\(onbroken.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(registrations();"{\"models\":[{\"id\":\"m\"}]}";"and is left as it was")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(lv.modelsjson();"\"error\":\"registered privacy models privacy-models.json cannot be applied");"GET shows why it refuses every request")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

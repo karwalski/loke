@@ -403,8 +403,7 @@ organisation policy loke.policy.json cannot be applied: minimum_layers must be a
 
 **Not built.** The file is in the user's own loke directory, which the user can edit or delete: nothing
 makes it tamper-proof. It is not distributed by the compliance engine (A3), and the governance dashboard
-(G4) does not show violations; they are in the alert log, the audit trail and the reply. `/api/health`
-reports the layers as `config.toml` configures them, not as the policy changes them. The alerts are not
+(G4) does not show violations; they are in the alert log, the audit trail and the reply. The alerts are not
 de-duplicated across runs. The CLI proxy, `loke ask` and `mcp-broker` refuse with the policy's reason
 like any other refusal, but write no `org_policy_*` audit row: only `POST /api/pipeline` does.
 
@@ -475,6 +474,32 @@ What a registered model is, as a layer:
 - It has no stage of its own in the pipeline trace; its id, state and counts are in the run's layer
   metrics (`privacy_layer_metrics`).
 
+## Settings UI (F3b.2, F3b.7)
+
+moke's settings page (`/settings`) has two panels that talk to loke directly (`window.LOKE_DIRECT`, as
+`/api/settings` does; loke guards both routes against foreign origins and hosts):
+
+- **Privacy Layers** reads `GET /api/privacylayers` (each layer's `enabled`, `priority`, `mode`,
+  `confidence_threshold`, `entity_filter` and reported types as `config.toml` sets them, the policy's
+  floor, and why the layers config refuses requests if it does) and saves with
+  `POST /api/privacylayers {"layers":[...]}`. A save replaces only the `[[privacy.layers]]` entries of
+  `config.toml`: every other line is kept in place. It is refused, and nothing is written, when the text
+  it would write cannot be applied (400, the pipeline's own reason), when it turns the regex layer down
+  (400: the pipeline does not apply that, and whether a user may switch regex off is an open decision,
+  F3b.2), when it falls below the organisation policy (409: a banned layer enabled, a required layer off
+  or detect-only, a threshold above `max_confidence_threshold`, fewer masking layers than
+  `minimum_layers`; `orgpolicy.floorerror`), when the policy cannot be applied (409), and when
+  `config.toml` exists and cannot be read (500). The page locks the switches the server would refuse and
+  shows the server's refusal as it answers it.
+- **Registered Privacy Models** lists `GET /api/privacymodels` and registers with
+  `POST /api/privacymodels {"id","url","labels":[...],"confidence_threshold","priority","enabled"}`
+  through `modelregistry.register`, the call `loke privacy add-model` makes. The policy refuses a model
+  it bans registered enabled, or one with a threshold above its ceiling (409).
+
+Evidence: `tests/unit/privacy/test_layer_view.tk`, `tests/unit/privacy/test_privacy_models_api.tk`,
+`scripts/lib/privacy_settings_check.py` in `scripts/smoke_serve.sh`, and
+`tests/ui/privacysettings_f3b2.json` in `scripts/smoke_ui.sh`.
+
 ## Fail-closed rules
 
 `pipeline.issafetoforward(run)` is a plain bool (not a result type, because of toke trap T-18 at the time
@@ -515,7 +540,14 @@ it was written). It is false, and the run must not be sent, when any of these ho
 (Presidio's and the sidecar's `GET /health`, Ollama's model list); no user text is sent to a layer that
 has not answered it. `/api/health` carries `privacy_layers`:
 `{"state","summary","layers":[{"id","enabled","state","reason"}],"uncovered_types":[...]}` for the
-layers `/api/pipeline` runs. The overall state is `healthy`, `degraded` (at least one enabled layer is
+layers `/api/pipeline` runs, **with the organisation policy applied** as `pipeline.run` applies it
+(F3b.8; `core.privacy.layerview.healthjson`). Each layer also carries `priority`, `mode`,
+`confidence_threshold` and `policy_changed`, the fields the policy changed (`enabled` for a banned
+layer, `confidence_threshold` for a clamped one, `privacy_filter_threshold`); `consensus` gives the
+configured and effective strategy, `org_policy` whether a policy is present and enforced, its error and
+its overrides, and `refused` why every request is refused, if one is (a `[[privacy.layers]]` that cannot
+be applied, or a policy that cannot be, or that bans an enabled layer). While anything is refused the
+state is `unhealthy` and the summary begins `REFUSED: every request is refused:`. The overall state is `healthy`, `degraded` (at least one enabled layer is
 unavailable) or `unhealthy` (none available, or none enabled). `formathealthstatus` gives
 `HEALTHY: all N layers available`, `DEGRADED: a/N layers available` or
 `UNHEALTHY: no detection layer available (0/N)`.
@@ -691,8 +723,8 @@ request, not that no harm follows. Definitions, and the only figures this projec
 
 ## What is not built
 
-- **Parts of custom model registration (F3b.7).** Registration is built (above); not built are: a
-  settings panel; ONNX models (the sidecar refuses a `.onnx` path at start); an Ollama-served model as a
+- **Parts of custom model registration (F3b.7).** Registration and its settings panel are built
+  (above); not built are: removing a model from the panel (`loke privacy remove-model` does); ONNX models (the sidecar refuses a `.onnx` path at start); an Ollama-served model as a
   registered layer (Ollama serves generative models, not token classifiers; the NER layer is the Ollama
   layer); a sidecar process serving more than one model (one per model, `LOKE_PF_MODEL`); `add-model`
   writing the sidecar's own `models.json`; a check of the model's output beyond its `/health` naming the
@@ -700,7 +732,8 @@ request, not that no harm follows. Definitions, and the only figures this projec
 - **Organisation policy distribution and display (F3b.8).** The policy is enforced (above), but it is
   not distributed by the compliance engine (A3), not protected from the user editing it, and not shown
   on the governance dashboard (G4).
-- **Settings UI** for layers, routing or consensus. They are set in `config.toml` only.
+- **Settings UI** for routing or consensus: they are set in `config.toml` only. The layers and the
+  registered models have one (see [Settings UI](#settings-ui-f3b2-f3b7)).
 - **Privacy-layer settings in the policy presets.** The GDPR, HIPAA, Australian Privacy Act and other
   presets in `packages/core/src/policy/presets` set anonymisation rules, blocked entity types and
   retention; none sets a consensus strategy, a layer, a threshold or a route, and

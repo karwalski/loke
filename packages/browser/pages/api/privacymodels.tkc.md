@@ -1,0 +1,1 @@
+Settings UI API for registered token-classification privacy models (F3b.7). GET lists ~/.loke/privacy-models.json as the pipeline reads it; POST registers one through core.privacy.modelregistry.register, the path loke privacy add-model takes. Bodies come from core.privacy.layerview.

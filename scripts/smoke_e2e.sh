@@ -652,19 +652,21 @@ else
     *) echo "  FAIL the disclosure record's detection layers are '$pflayers'" >&2; fail=1 ;;
   esac
   # F3b.6: /api/health reports each layer of the same registry the request just ran through.
+  # F3b.8 (3) added fields after each layer's reason and after uncovered_types, so each
+  # needle ends at the field's own comma.
   health_get
   judge "/api/health lists the privacy filter from config.toml, enabled and answering" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"healthy"'
   judge "and the in-process regex layer as healthy" 200 '{"id":"regex","enabled":true,"state":"healthy"'
-  judge "with every configured layer for each type answering, no entity type is uncovered" 200 '"uncovered_types":[]}'
+  judge "with every configured layer for each type answering, no entity type is uncovered" 200 '"uncovered_types":[],'
   # The sidecar down: the layer is degraded, recorded as skipped, and nothing claims it scanned.
   kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null
   health_get
-  judge "with the sidecar down, /api/health reports it unavailable, with the reason the pipeline records" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"unavailable","reason":"privacy-filter sidecar unreachable"}'
+  judge "with the sidecar down, /api/health reports it unavailable, with the reason the pipeline records" 200 '{"id":"openai-privacy-filter","enabled":true,"state":"unavailable","reason":"privacy-filter sidecar unreachable",'
   judge "and the privacy layers as a whole degraded" 200 '"privacy_layers":{"state":"degraded"'
   # Of the sidecar's types, only SECRET (a password or key) has no other layer here to mask it:
   # NER answers PERSON, DATE, FINANCIAL and LOCATION (the sidecar's ADDRESS), regex email,
   # phone and url. Whether Presidio answers on this machine changes nothing in that list.
-  judge "F3b.6: and names SECRET as the entity type no answering layer masks" 200 '"uncovered_types":["SECRET"]}'
+  judge "F3b.6: and names SECRET as the entity type no answering layer masks" 200 '"uncovered_types":["SECRET"],'
   PFALERT='governance alert: privacy layer coverage: no available detection layer masks SECRET; the layers configured for them are down: openai-privacy-filter (privacy-filter sidecar unreachable)'
   ALERTS_BEFORE=$(grep -cF "$PFALERT" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
   pipe_post "summarise what $PFNAME asked about the invoice" ""
