@@ -1,0 +1,88 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.memory.mcpstoreclassify;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=json:std.json;
+i=db:std.db;
+i=proto:core.mcp.protocol;
+i=sdb:core.storage.db;
+i=mcpmem:core.memory.mcpserver;
+i=mprivacy:core.memory.privacy;
+i=lg:shared.log;
+
+(* MK6.19 — memory.store classifies what it stores. Through handlememorytool, the one entry point
+   core.memory.mcpserver's callers use. Before MK6.19 memory.store built every drawer PUBLIC
+   whatever the note held, so a note with an email address or a card number was stored unflagged
+   and privacy.forgetpii ("forget my personal data", `WHERE pii_flagged=1`) left it behind.
+   Each drawer is read back from the palace by the id memory.store reported. *)
+
+f=testdir():str{
+  <str.concat(std.homedir();"/.loke/test-mcp-store-classify")
+};
+
+f=store(content:str;dir:str):str{
+  let args="{\"content\":\"\(content)\",\"role\":\"user\"}";
+  let r=mcpmem.handlememorytool("memory.store";args;dir);
+  <mt json.dec(r.text) {
+    $ok:o mt json.str(o;"drawer_id") {
+      $ok:v v;
+      $jsonerr:e ""
+    };
+    $jsonerr:e ""
+  }
+};
+
+f=sensitivityof(id:str):str{
+  <mt db.many("SELECT sensitivity FROM memory_drawers WHERE id=?";@(id)) {
+    $ok:rows firstsensitivity(rows);
+    $err:e "none"
+  }
+};
+
+f=firstsensitivity(rows:@$row):str{
+  if(rows.len==0){ <"none" }el{ <sdb.rowstr(rows.get(0);"sensitivity") }
+};
+
+f=flagged(id:str):bool{
+  <sdb.countquery("SELECT id FROM memory_scores WHERE id=? AND pii_flagged=1";@(id))==1
+};
+
+f=present(id:str):bool{
+  <sdb.countquery("SELECT id FROM memory_drawers WHERE id=?";@(id))==1
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let dir=testdir();
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+
+  let email=store("write to jane.doe@example.com about the invoice";dir);
+  let card=store("my card is 4111111111111111 for the booking";dir);
+  let plain=store("a note about the garden and the roses";dir);
+  if(t.assert(str.len(email)==32 && str.len(card)==32 && str.len(plain)==32;"memory.store wrote all three notes and named each drawer")){pass=pass+1}el{fail=fail+1};
+
+  if(t.assert(str.eq(sensitivityof(email);"CONFIDENTIAL");"a note holding an email address is stored CONFIDENTIAL, not PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(flagged(email);"and is pii_flagged")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(sensitivityof(card);"RESTRICTED");"a note holding a card number is stored RESTRICTED, not PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(flagged(card);"and is pii_flagged")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(sensitivityof(plain);"PUBLIC");"a plain note stays PUBLIC")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!flagged(plain);"and is not pii_flagged")){pass=pass+1}el{fail=fail+1};
+
+  let removed=mprivacy.forgetpii(0) as i64;
+  if(t.assert(removed==2;"forget my personal data removes exactly the two flagged notes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!present(email) && !present(card);"the email and card notes are gone from the palace")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(present(plain);"the plain note is kept")){pass=pass+1}el{fail=fail+1};
+
+  let logged=mt file.read(lg.logpath()) { $ok:v v; $err:e "" };
+  if(t.assert(!str.contains(logged;"jane.doe@example.com") && !str.contains(logged;"4111111111111111");"neither stored value reaches the log")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};
