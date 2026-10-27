@@ -8,7 +8,8 @@
 #
 # Checks: every layer is reported with its own detections by type and span, no detected value
 # is printed without --show-values, the stand-ins really were asked (a report right by
-# accident is not a check), a labelled file is scored per layer, and with the stand-in gone
+# accident is not a check), a labelled file is scored per layer (the corpus JSONL and the
+# JSON array, and a malformed array refused), and with the stand-in gone
 # NER and Presidio are reported unavailable rather than as finding nothing.
 #
 # The stand-in (scripts/lib/http_recorder.py) takes a port from the OS and HOME is a
@@ -68,6 +69,20 @@ check "regex is scored tp=1 fp=0 fn=1" $(grep "^layer=regex recall=" "$WORK/file
 check "Presidio is scored with its false positive" $(grep "^layer=presidio recall=" "$WORK/file.txt" | grep -q "tp=1 fp=1 fn=1 texts=2/2"; echo $?)
 check "the labelled report prints no value or text" $(! grep -qiE "jane|citizen|weather" "$WORK/file.txt"; echo $?)
 
+# The JSON-array format, told apart from the JSONL by its content: the same two texts, the
+# same scores. Then a malformed array, which must be refused with the entry at fault.
+printf '%s\n' '[{"text":"Jane Citizen called Tuesday, mail jane@example.com","entities":[{"start":0,"end":12,"type":"PERSON"},{"start":34,"end":50,"type":"EMAIL"}]},' \
+  ' {"text":"The weather is fine today, thanks.","entities":[]}]' > "$WORK/labelled.json"
+HOME="$WORK/home" "$BIN" privacy evaluate --file "$WORK/labelled.json" >"$WORK/arr.txt" 2>&1; rc=$?
+check "evaluate --file reads a JSON array and exits 0" $([ "$rc" -eq 0 ] && grep -q "2 labelled texts, 2 labelled entities scored (JSON array" "$WORK/arr.txt"; echo $?)
+check "the array scores regex as the JSONL does (tp=1 fp=0 fn=1)" $(grep "^layer=regex recall=" "$WORK/arr.txt" | grep -q "tp=1 fp=0 fn=1 texts=2/2"; echo $?)
+check "and the consensus (tp=2 fp=1 fn=0)" $(grep "^layer=consensus recall=100.00%" "$WORK/arr.txt" | grep -q "tp=2 fp=1 fn=0"; echo $?)
+check "the array report prints no value or text" $(! grep -qiE "jane|citizen|weather" "$WORK/arr.txt"; echo $?)
+printf '%s\n' '[{"text":"Jane Citizen","entities":[{"start":0,"end":99,"type":"PERSON"}]}]' > "$WORK/bad.json"
+HOME="$WORK/home" "$BIN" privacy evaluate --file "$WORK/bad.json" >"$WORK/bad.txt" 2>"$WORK/bad.err"; rc=$?
+check "a malformed array exits 1, scores nothing, and says as an error which entry and entity are wrong" $([ "$rc" -eq 1 ] && cat "$WORK/bad.txt" "$WORK/bad.err" | grep -q "^error: loke privacy evaluate --file: entry 1, entity 1 needs whole-number \"start\" and \"end\" with 0 <= start < end <= 12" && ! grep -q "^layer=" "$WORK/bad.txt"; echo $?)
+check "the refusal quotes no text" $(! cat "$WORK/bad.txt" "$WORK/bad.err" | grep -qiE "jane|citizen"; echo $?)
+
 # With nothing listening, NER and Presidio are unavailable; the regex layer still scans.
 kill "$RPID" 2>/dev/null; wait "$RPID" 2>/dev/null; RPID=
 HOME="$WORK/home" "$BIN" privacy evaluate "$TEXT" >"$WORK/down.txt" 2>&1; rc=$?
@@ -99,7 +114,7 @@ HOME="$WORK/home" "$BIN" privacy evaluate "Jane Citizen" >"$WORK/removed.txt" 2>
 check "remove-model removes the layer" $([ "$rc" -eq 0 ] && ! grep -q "model:recorder/token-model" "$WORK/removed.txt"; echo $?)
 
 if [ "$FAILS" -ne 0 ]; then
-  for f in up shown file down filedown addbad add list model removed; do echo "--- $f ---"; cat "$WORK/$f.txt" 2>/dev/null; done
+  for f in up shown file arr bad down filedown addbad add list model removed; do echo "--- $f ---"; cat "$WORK/$f.txt" 2>/dev/null; done
   echo "smoke_privacy_evaluate: $FAILS check(s) FAILED"
   exit 1
 fi

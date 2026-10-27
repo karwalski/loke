@@ -31,7 +31,8 @@ i=cn:core.privacy.consensus;
    of a vetoing layer. Never a detected value, and never a hash of one.
 
    AGGREGATES are computed from the rows by SQL, never estimated: detections by layer per UTC
-   day, by entity type, and the agreement rate between layers. *)
+   day, by entity type, the agreement rate between layers, and each layer's scan latency
+   percentiles. Each takes the start of a time window (windowsince: 24h, 7d, 30d or all). *)
 
 t=$layerday{
   day:str;
@@ -56,6 +57,17 @@ t=$agreement{
   resolved:i64;
   agreed:i64;
   ratetext:str
+};
+
+(* One layer's scan time over a window: how many timed scans, and the 50th, 95th and 99th
+   percentile in milliseconds. The percentiles are formatted to text here, in the module that
+   computed them, as integer milliseconds. *)
+t=$layerlatency{
+  layerid:str;
+  samples:i64;
+  p50:str;
+  p95:str;
+  p99:str
 };
 
 f=exec(sql:str;params:@str):bool{
@@ -216,4 +228,70 @@ f=agreementsince(sincems:i64):$agreement{
    consensus row per request, so this counts those rows. *)
 f=requestssince(sincems:i64):i64{
   <s.scalari64("SELECT COUNT() AS n FROM privacy_layer_metrics WHERE kind='consensus' AND created_at>=?";@(str.fromi64(sincems));"n";0)
+};
+
+(* ── Time windows ────────────────────────────────────────────────────────────────── *)
+
+(* The windows a caller may ask for, by name, in milliseconds: 0 for "all" (every row), -1
+   for a name that is not one of them, which the caller refuses rather than guessing. *)
+f=windowms(name:str):i64{
+  if(str.eq(name;"24h")){ <86400000 }el{};
+  if(str.eq(name;"7d")){ <604800000 }el{};
+  if(str.eq(name;"30d")){ <2592000000 }el{};
+  if(str.eq(name;"all")){ <0 }el{};
+  <0-1
+};
+
+(* The `sincems` every aggregate here takes, for a window ending now: 0 for "all" or an
+   unknown name, otherwise now minus the window. *)
+f=windowsince(name:str):i64{
+  let w=windowms(name);
+  if(w<=0){ <0 }el{};
+  <db.nowms()-w
+};
+
+(* ── Latency percentiles, from the rows ─────────────────────────────────────────── *)
+
+
+(* The p-th percentile of rows[lo..lo+n), which are in ascending duration order, by the
+   nearest-rank method: the smallest recorded value with at least p per cent of the scans at or
+   below it. Always a time a scan actually took, never an interpolation between two. *)
+f=percentiletext(rows:@$row;lo:i64;n:i64;p:i64):str{
+  let rank=mut.((p*n)+99)/100;
+  if(rank<1){ rank=1 }el{};
+  if(rank>n){ rank=n }el{};
+  <str.fromi64(s.rowi64(rows.get(lo+rank-1);"duration_ms"))
+};
+
+f=latencyof(rows:@$row;lo:i64;hi:i64):$layerlatency{
+  let n=hi-lo;
+  <$layerlatency{layerid:s.rowstr(rows.get(lo);"layer_id");samples:n;p50:percentiletext(rows;lo;n;50);p95:percentiletext(rows;lo;n;95);p99:percentiletext(rows;lo;n;99)}
+};
+
+(* rows are ordered by layer, then duration; each layer's rows are one run of them. *)
+f=latenciesfromrows(rows:@$row):@$layerlatency{
+  let out=mut.@($layerlatency);
+  let n=rows.len as i64;
+  let lo=mut.0;
+  lp(let i=1;i<=n;i=i+1){
+    let boundary=mut.(i==n);
+    if(!boundary){ boundary=!str.eq(s.rowstr(rows.get(i);"layer_id");s.rowstr(rows.get(lo);"layer_id")) }el{};
+    if(boundary){
+      out=out.push(latencyof(rows;lo;i));
+      lo=i
+    }el{}
+  };
+  <out
+};
+
+(* Per layer, the latency percentiles of its scans since `sincems`. Only rows of a layer that
+   COMPLETED its scan and was timed count: an unavailable layer's probe or a disabled layer is
+   not a scan, and a row without a time (duration_ms NULL) has nothing to contribute. A layer
+   with no such row is absent, never shown with a time of 0. At the recorded resolution a
+   regex scan usually reads 0 ms. *)
+f=latencybylayer(sincems:i64):@$layerlatency{
+  <mt db.many("SELECT layer_id, duration_ms FROM privacy_layer_metrics WHERE kind='layer' AND state='completed' AND duration_ms IS NOT NULL AND created_at>=? ORDER BY layer_id ASC, duration_ms ASC";@(str.fromi64(sincems))) {
+    $ok:rows latenciesfromrows(rows);
+    $err:e @()
+  }
 };

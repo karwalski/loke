@@ -19,7 +19,9 @@ i=h:page.api.layermetrics;
 (* F3b.10 — GET /api/layermetrics, which moke's governance page shows, through metricsjson,
    the body get() answers with (T-16). Rows are written by core.audit.layermetrics.record,
    the writer the request path uses, and the body must be the aggregates of exactly those
-   rows: no figure with no rows, and figures that change when a row is added. *)
+   rows: no figure with no rows, and figures that change when a row is added. Then the
+   latency percentiles per layer, and the time windows (24h, 7d, 30d, all): every aggregate
+   over a window counts only the rows created in it. *)
 
 f=storedir():str{
   <str.concat(std.homedir();"/.loke/test-layermetrics-handler")
@@ -45,7 +47,11 @@ f=today():str{
 };
 
 f=lrow(layer:str;det:i64;acc:i64):$layermetric{
-  <$layermetric{layerid:layer;entitytype:"";state:"completed";mode:"detect-and-mask";durationms:1;detections:det;accepted:acc;routed:acc;confminmilli:900;confmaxmilli:950;confsummilli:900*det}
+  <timed(layer;det;acc;1;"completed")
+};
+
+f=timed(layer:str;det:i64;acc:i64;ms:i64;state:str):$layermetric{
+  <$layermetric{layerid:layer;entitytype:"";state:state;mode:"detect-and-mask";durationms:ms;detections:det;accepted:acc;routed:acc;confminmilli:900;confmaxmilli:950;confsummilli:900*det}
 };
 
 f=trow(layer:str;ty:str;det:i64;acc:i64):$layermetric{
@@ -68,7 +74,7 @@ f=main():i64{
 
   (* ── No rows: no figure ───────────────────────────────────────────────────── *)
   let empty=h.metricsjson();
-  if(t.asserteq(empty;"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[]}";"with no request recorded the body says recorded false, with no agreement figure and no rows")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(empty;"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"since_ms\":0,\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[]}";"with no request recorded the body says recorded false, with no agreement figure and no rows")){pass=pass+1}el{fail=fail+1};
 
   (* ── Two requests ─────────────────────────────────────────────────────────── *)
   let voters=@("regex";"ner");
@@ -82,7 +88,7 @@ f=main():i64{
   let d=today();
   let j=h.metricsjson();
   if(t.assert(validjson(j);"the body is valid JSON")){pass=pass+1}el{fail=fail+1};
-  if(t.assert(str.startswith(j;"{\"measured\":true,\"recorded\":true,\"period\":\"all\",\"requests\":2,");"two requests recorded (\(j))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(j;"{\"measured\":true,\"recorded\":true,\"period\":\"all\",\"since_ms\":0,\"requests\":2,");"two requests recorded (\(j))")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(j;"{\"day\":\"\(d)\",\"layer\":\"ner\",\"requests\":2,\"detections\":1,\"accepted\":1}");"by layer per day: NER was in two requests and found one")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(j;"{\"day\":\"\(d)\",\"layer\":\"regex\",\"requests\":2,\"detections\":3,\"accepted\":3}");"by layer per day: regex was in two requests and found three")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(j;"\"agreement\":{\"runs\":2,\"resolved\":3,\"agreed\":1,\"rate\":\"33.3%\"}");"agreement: one of three resolved detections found by both voters, 33.3%")){pass=pass+1}el{fail=fail+1};
@@ -94,6 +100,45 @@ f=main():i64{
   if(t.assert(lmx.record("lm-c";mc;"most-restrictive";"";rc;voters;@());"request C's metrics are recorded")){pass=pass+1}el{fail=fail+1};
   let j3=h.metricsjson();
   if(t.assert(str.contains(j3;"\"requests\":3,") && str.contains(j3;"\"layer\":\"regex\",\"requests\":3,\"detections\":4,\"accepted\":4}") && str.contains(j3;"\"agreement\":{\"runs\":3,\"resolved\":4,\"agreed\":2,\"rate\":\"50.0%\"}");"the figures follow the rows: three requests, regex four, agreement two of four")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Latency percentiles, per layer, from the rows ─────────────────────────── *)
+  (* lm-a, lm-b and lm-c timed every layer at 1 ms. Seven more NER scans at 10..70 ms, one
+     unavailable NER row with a time (a probe, not a scan) and one regex row with no time:
+     NER then has ten completed, timed scans, 1,1,1,10,20,30,40,50,60,70, whose nearest-rank
+     p50 is the 5th (20), and p95 and p99 the 10th (70). *)
+  lp(let k=1;k<=7;k=k+1){
+    lmx.record("lm-t\(k)";@(timed("ner";0;0;k*10;"completed"));"most-restrictive";"";@($resolvedentity);@("ner");@());
+  };
+  lmx.record("lm-u";@(timed("ner";0;0;9000;"unavailable"));"most-restrictive";"";@($resolvedentity);@();@());
+  lmx.record("lm-n";@(timed("regex";0;0;0-1;"completed"));"most-restrictive";"";@($resolvedentity);@("regex");@());
+  let lat=lmx.latencybylayer(0);
+  if(t.assert(lat.len==2;"two layers have timed scans (\(lat.len))")){pass=pass+1}el{fail=fail+1};
+  let jl=h.metricsjson();
+  if(t.assert(str.contains(jl;"\"latency\":[{\"layer\":\"ner\",\"samples\":10,\"p50_ms\":20,\"p95_ms\":70,\"p99_ms\":70},{\"layer\":\"regex\",\"samples\":3,\"p50_ms\":1,\"p95_ms\":1,\"p99_ms\":1}]");"latency: NER p50 20, p95 70, p99 70 over its ten completed, timed scans; the unavailable probe and the untimed row are not counted (\(jl))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── Time windows ────────────────────────────────────────────────────────── *)
+  (* lm-a and lm-b are moved eight days back. The 24h and 7d windows then hold the other
+     ten requests; 30d and all hold all twelve. *)
+  let moved=mt db.exec("UPDATE privacy_layer_metrics SET created_at=created_at-691200000 WHERE correlation_id IN ('lm-a','lm-b')";@()) { $ok:v true; $err:e false };
+  if(t.assert(moved;"lm-a and lm-b are moved back eight days")){pass=pass+1}el{fail=fail+1};
+  let j24=h.metricsjsonfor("24h");
+  let j7=h.metricsjsonfor("7d");
+  let j30=h.metricsjsonfor("30d");
+  let jall=h.metricsjsonfor("all");
+  if(t.assert(validjson(j24) && str.contains(j24;"\"period\":\"24h\",\"since_ms\":") && str.contains(j24;"\"requests\":10,");"24h: the ten requests of today, not the two eight days old (\(j24))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j24;"\"layer\":\"regex\",\"requests\":2,\"detections\":1,\"accepted\":1}") && str.contains(j24;"\"agreement\":{\"runs\":1,\"resolved\":1,\"agreed\":1,\"rate\":\"100.0%\"}");"24h: per day and agreement from lm-c alone among the two-voter runs")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j24;"{\"layer\":\"regex\",\"type\":\"email\",\"detections\":1,\"accepted\":1}") && str.contains(j24;"{\"layer\":\"ner\",\"samples\":8,\"p50_ms\":30,\"p95_ms\":70,\"p99_ms\":70}");"24h: by type and latency without lm-a and lm-b")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j7;"\"period\":\"7d\",") && str.contains(j7;"\"requests\":10,");"7d: the same ten")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(j30;"\"period\":\"30d\",") && str.contains(j30;"\"requests\":12,") && str.contains(jall;"\"period\":\"all\",\"since_ms\":0,\"requests\":12,");"30d and all: all twelve")){pass=pass+1}el{fail=fail+1};
+  let now=mt db.many("SELECT CAST(strftime('%s','now') AS INTEGER)*1000 AS n";@()) { $ok:rs sdb.rowi64(rs.get(0);"n"); $err:e 0 };
+  let s24=lmx.windowsince("24h");
+  if(t.assert(s24>now-86400000-5000 && s24<=now-86400000+5000 && lmx.windowsince("all")==0;"24h starts a day before now; all starts at 0")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(lmx.windowms("1y")<0 && lmx.windowms("")<0 && lmx.windowms("7d")==604800000;"an unknown window is refused, not guessed at")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.eq(h.windowfrom("/api/layermetrics");"all") && str.eq(h.windowfrom("/api/layermetrics?window=24h");"24h") && str.eq(h.windowfrom("/api/layermetrics?x=1&window=7d");"7d") && str.eq(h.windowfrom("/api/layermetrics?window=1y");"1y");"the window is read from the request target")){pass=pass+1}el{fail=fail+1};
+  let cleared=mt db.exec("DELETE FROM privacy_layer_metrics WHERE created_at>=\(s24)";@()) { $ok:v true; $err:e false };
+  if(t.assert(cleared;"the last day's rows are deleted")){pass=pass+1}el{fail=fail+1};
+  let jempty=h.metricsjsonfor("24h");
+  if(t.assert(str.startswith(jempty;"{\"measured\":true,\"recorded\":false,\"period\":\"24h\",\"since_ms\":") && str.contains(jempty;"\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[]}");"a window with no request says recorded false and gives no figure (\(jempty))")){pass=pass+1}el{fail=fail+1};
 
   file.delete(str.concat(storedir();"/loke.db"));
   <fail

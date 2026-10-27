@@ -46,6 +46,31 @@
     <tbody id="ev-decisions"></tbody>
   </table>
   <p class="ev-note" id="ev-summary"></p>
+  <div id="ev-routing" hidden>
+    <h2 style="margin-top:20px">Not accepted by entity routing</h2>
+    <p class="ev-note">Detections a masking layer made that <code>[[privacy.entity_routing]]</code> does not accept from that layer, so they do not reach consensus.</p>
+    <table class="ev-table" aria-label="Detections entity routing did not accept">
+      <thead><tr><th>Detection</th><th>From layer</th></tr></thead>
+      <tbody id="ev-dropped"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Score a labelled file</h2>
+  <p class="ev-note">Scores every layer, and the consensus outcome, against a labelled file of at most 65536 bytes, as <code>loke privacy evaluate --file</code> does: the corpus JSONL (one <code>{"text", "entities"}</code> object per line), or a JSON array <code>[{"text": "...", "entities": [{"start": 0, "end": 4, "type": "PERSON"}]}]</code> with offsets in characters. The texts go to the local detection layers only, and no text or value is shown.</p>
+  <input type="file" id="ev-file" accept=".json,.jsonl,application/json" aria-label="Labelled file">
+  <div class="ev-actions">
+    <button class="ev-btn" id="ev-score" onclick="scoreFile()">Score</button>
+    <span class="ev-status" id="ev-file-status" aria-live="polite"></span>
+  </div>
+  <div id="ev-scored" hidden>
+    <p class="ev-note" id="ev-scored-head"></p>
+    <table class="ev-table" aria-label="Each layer's score on the labelled file">
+      <thead><tr><th>Layer</th><th>Texts scanned</th><th>Recall</th><th>Precision</th><th>F1</th><th>TP</th><th>FP</th><th>FN</th></tr></thead>
+      <tbody id="ev-scores"></tbody>
+    </table>
+  </div>
 </div>
 
 <script>
@@ -117,10 +142,74 @@
     var s = c.summary;
     document.getElementById('ev-summary').textContent = s.detections + ' detection(s), ' + s.overlaps + ' found by more than one layer, ' +
       s.disagreements + ' not found by every voter; ' + s.masked + ' would be masked, ' + s.passed + ' passed.';
+    var dropped = d.not_accepted || [];
+    var db = document.getElementById('ev-dropped');
+    db.textContent = '';
+    dropped.forEach(function (x) {
+      var tr = el('tr');
+      tr.dataset.layer = x.layer;
+      tr.appendChild(el('td', x.placeholder + ' ' + spansText(x.spans), 'ev-hit'));
+      tr.appendChild(el('td', x.layer));
+      db.appendChild(tr);
+    });
+    document.getElementById('ev-routing').hidden = dropped.length === 0;
     document.getElementById('ev-result').hidden = false;
     var st = document.getElementById('ev-status');
     st.className = 'ev-status';
     st.textContent = d.evaluated ? (d.completed_layers + ' layer(s) scanned the text') : 'No layer scanned this text, or the layer config is refused: nothing was evaluated.';
+  };
+  // F3b.9: a layer that scanned none of the texts is "not scored", never a recall of zero.
+  function scoreRow(r) {
+    var tr = el('tr');
+    tr.dataset.layer = r.layer;
+    tr.appendChild(el('td', r.layer));
+    if (!r.scored) {
+      var td = el('td', 'not scored: it scanned none of the texts (' + r.reason + '). That is not a recall of zero.');
+      td.colSpan = 7;
+      tr.appendChild(td);
+      return tr;
+    }
+    tr.appendChild(el('td', r.texts + ' of ' + r.of + (r.reason ? ' (' + r.reason + ')' : '')));
+    [r.recall, r.precision, r.f1, r.tp, r.fp, r.fn].forEach(function (v) { tr.appendChild(el('td', v)); });
+    return tr;
+  }
+  window.renderScores = function (d) {
+    var body = document.getElementById('ev-scores');
+    body.textContent = '';
+    d.scores.forEach(function (r) { body.appendChild(scoreRow(r)); });
+    document.getElementById('ev-scored-head').textContent = d.texts + ' labelled text(s), ' + d.labelled_entities + ' labelled entities scored (' +
+      (d.format === 'json-array' ? 'JSON array' : 'corpus JSONL') + ')' + (d.layer_error ? '. ' + d.layer_error : '');
+    document.getElementById('ev-scored').hidden = false;
+  };
+  // The file's contents go to POST /api/evaluate as {"labelled": ...}; the route scores them.
+  window.runLabelled = async function (contents) {
+    var st = document.getElementById('ev-file-status');
+    st.className = 'ev-status';
+    st.textContent = 'Scoring each layer...';
+    try {
+      var r = await fetch('/api/evaluate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelled: contents }) });
+      var d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      window.renderScores(d);
+      st.textContent = d.evaluated ? 'Scored.' : 'No layer scanned any text, or the layer config is refused: not a clean evaluation.';
+      return d;
+    } catch (e) {
+      st.className = 'ev-status error';
+      st.textContent = 'Not scored: ' + e.message;
+      document.getElementById('ev-scored').hidden = true;
+      return null;
+    }
+  };
+  window.scoreFile = async function () {
+    var f = document.getElementById('ev-file').files[0];
+    if (!f) {
+      var st = document.getElementById('ev-file-status');
+      st.className = 'ev-status error';
+      st.textContent = 'Choose a labelled file first.';
+      return null;
+    }
+    return window.runLabelled(await f.text());
   };
   window.runEvaluate = async function () {
     var st = document.getElementById('ev-status');

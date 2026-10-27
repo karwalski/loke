@@ -16,7 +16,13 @@ anywhere in the body. An empty text is refused with 400.
 `layermetrics` reads the route and judges it against the database file directly with
 Python's sqlite3, an independent count of privacy_layer_metrics: requests equals the number
 of consensus rows; with none, recorded is false and no figure is given; with some, each
-per-day layer row matches a GROUP BY of the same rows.
+per-day layer row matches a GROUP BY of the same rows. For the 24h, 7d and all windows the
+same is judged over the rows since the window start the route reports, which must be now
+minus the window, and each layer's latency p50/p95/p99 must be the nearest rank of the
+database's completed, timed scans. An unknown window is refused with 400.
+
+`evaluate` also posts a labelled file in the JSON-array format and judges the scores, and
+refuses a malformed array (400) and one over 65536 bytes (413).
 
 Prints `  ok   ...` per check and `  FAIL ...` to stderr; exits 1 on any failure.
 """
@@ -78,11 +84,93 @@ def evaluate(base):
        "the consensus lists regex as a voter and decides on its detection", json.dumps(c)[:300])
     leaked = [p for p in (secret, "jane.smoke", "example.com") if p in raw]
     ok(not leaked, "no detected value, or part of one, is in the body", ",".join(leaked))
+    ok(d.get("not_accepted") == [], "with no route configured, nothing is listed as not accepted by routing",
+       json.dumps(d.get("not_accepted"))[:200])
     code, raw = call(base + "/api/evaluate", json.dumps({"text": ""}))
     ok(code == 400 and '"ok":false' in raw, "an empty text is refused with 400", "[%s] %s" % (code, raw[:200]))
+    labelled(base, secret, text, start)
+
+
+def labelled(base, secret, text, start):
+    """F3b.9: a labelled file scored through {"labelled": ...}, in the JSON-array format."""
+    entries = [{"text": text, "entities": [{"start": start, "end": start + len(secret), "type": "EMAIL"}]},
+               {"text": "nothing personal in this one", "entities": []}]
+    code, raw = call(base + "/api/evaluate", json.dumps({"labelled": json.dumps(entries)}))
+    ok(code == 200, "POST /api/evaluate with a labelled JSON array answers 200", "[%s] %s" % (code, raw[:300]))
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        ok(False, "the labelled reply is JSON", raw[:200])
+        return
+    ok(d.get("ok") is True and d.get("labelled") is True and d.get("format") == "json-array"
+       and d.get("texts") == 2 and d.get("labelled_entities") == 1,
+       "it read the JSON array: two texts, one labelled entity", raw[:300])
+    scores = {r["layer"]: r for r in d.get("scores", [])}
+    rx = scores.get("regex", {})
+    ok(rx.get("scored") is True and rx.get("recall") == "100.00%" and rx.get("tp") == 1 and rx.get("fn") == 0
+       and rx.get("texts") == 2 and rx.get("of") == 2,
+       "the regex layer scanned both texts and found the labelled email (recall 100.00%, tp 1, fn 0)", json.dumps(rx))
+    down = [r for r in d.get("scores", []) if not r.get("scored")]
+    ok(all(r.get("recall") is None and r.get("tp") is None and r.get("reason") for r in down),
+       "every layer that scanned nothing (%s) is not scored, with null figures and a reason"
+       % (",".join(r["layer"] for r in down) or "none"), json.dumps(down)[:300])
+    ok(d.get("scores", [{}])[-1].get("layer") == "consensus", "the consensus outcome is scored last", raw[:300])
+    leaked = [p for p in (secret, "jane.smoke", "example.com", "nothing personal") if p in raw]
+    ok(not leaked, "no text or value is in the labelled reply", ",".join(leaked))
+    bad = json.dumps([{"text": text, "entities": [{"start": 0, "end": 9999, "type": "EMAIL"}]}])
+    code, raw = call(base + "/api/evaluate", json.dumps({"labelled": bad}))
+    ok(code == 400 and '"ok":false' in raw and "entry 1, entity 1 needs whole-number" in raw and secret not in raw,
+       "a malformed array is refused with 400, naming the entry and entity at fault", "[%s] %s" % (code, raw[:300]))
+    code, raw = call(base + "/api/evaluate", json.dumps({"labelled": "[" + " " * 65536 + "]"}))
+    ok(code == 413 and '"ok":false' in raw, "a labelled file over 65536 bytes is refused with 413", "[%s] %s" % (code, raw[:200]))
+
+
+def percentile(sorted_ms, p):
+    n = len(sorted_ms)
+    rank = min(max((p * n + 99) // 100, 1), n)
+    return sorted_ms[rank - 1]
+
+
+def layerwindow(base, dbpath, window, span_ms):
+    """F3b.10: GET /api/layermetrics?window=..., judged against the database with the
+    window start the route reports, which must itself be now minus the window."""
+    import time
+    code, raw = call(base + "/api/layermetrics?window=" + window)
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        ok(False, "GET /api/layermetrics?window=%s answers JSON" % window, "[%s] %s" % (code, raw[:200]))
+        return
+    since = d.get("since_ms")
+    now = int(time.time() * 1000)
+    want = 0 if span_ms == 0 else now - span_ms
+    ok(code == 200 and d.get("period") == window and isinstance(since, int) and abs(since - want) < 120000,
+       "window %s: 200, and it starts at now minus the window (%s)" % (window, since), raw[:200])
+    con = sqlite3.connect(dbpath)
+    n = con.execute("SELECT COUNT(*) FROM privacy_layer_metrics WHERE kind='consensus' AND created_at>=?", (since,)).fetchone()[0]
+    ok(d.get("requests") == n and d.get("recorded") is (n > 0),
+       "window %s: requests is the database's count of requests since then (%d)" % (window, n), raw[:200])
+    rows = con.execute("SELECT strftime('%Y-%m-%d', created_at/1000, 'unixepoch'), layer_id, COUNT(*), SUM(detections), "
+                       "SUM(accepted) FROM privacy_layer_metrics WHERE kind='layer' AND created_at>=? GROUP BY 1, 2 ORDER BY 1, 2",
+                       (since,)).fetchall()
+    got = [(r["day"], r["layer"], r["requests"], r["detections"], r["accepted"]) for r in d.get("by_layer_day", [])]
+    ok(got == [tuple(r) for r in rows], "window %s: every per-day layer row matches the database" % window,
+       "%s vs %s" % (got[:4], rows[:4]))
+    lat = {}
+    for layer, ms in con.execute("SELECT layer_id, duration_ms FROM privacy_layer_metrics WHERE kind='layer' AND "
+                                 "state='completed' AND duration_ms IS NOT NULL AND created_at>=? ORDER BY 1, 2", (since,)):
+        lat.setdefault(layer, []).append(ms)
+    want_lat = [{"layer": k, "samples": len(v), "p50_ms": percentile(v, 50), "p95_ms": percentile(v, 95),
+                 "p99_ms": percentile(v, 99)} for k, v in sorted(lat.items())]
+    ok(d.get("latency") == want_lat, "window %s: each layer's latency p50/p95/p99 is the nearest rank of the database's "
+       "completed, timed scans (%d layer(s))" % (window, len(want_lat)), "%s vs %s" % (d.get("latency"), want_lat))
 
 
 def layermetrics(base, dbpath):
+    for window, span in (("24h", 86400000), ("7d", 604800000), ("all", 0)):
+        layerwindow(base, dbpath, window, span)
+    code, raw = call(base + "/api/layermetrics?window=1y")
+    ok(code == 400 and "use 24h, 7d, 30d or all" in raw, "an unknown window is refused with 400", "[%s] %s" % (code, raw[:200]))
     code, raw = call(base + "/api/layermetrics")
     ok(code == 200, "GET /api/layermetrics answers 200", "[%s] %s" % (code, raw[:200]))
     try:

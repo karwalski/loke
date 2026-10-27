@@ -11,14 +11,18 @@ i=jx:shared.jsonobj;
 i=dbmod:core.storage.db;
 i=lmx:core.audit.layermetrics;
 
-(* F3b.10. GET /api/layermetrics: the per-layer privacy metrics loke has recorded, as
-   aggregates over the privacy_layer_metrics rows, computed by core.audit.layermetrics
-   (bylayerday, agreementsince, bytype, requestssince) and never estimated. Every figure is
-   over all recorded time.
+(* F3b.10. GET /api/layermetrics[?window=24h|7d|30d|all]: the per-layer privacy metrics loke
+   has recorded, as aggregates over the privacy_layer_metrics rows, computed by
+   core.audit.layermetrics (bylayerday, agreementsince, bytype, requestssince,
+   latencybylayer) and never estimated. Every figure is over the window: the rows created at
+   or after "since_ms" (now minus the window; 0 for "all", the default). A window that is not
+   one of the four is refused with 400 rather than guessed at.
 
-   "recorded":false, with no figure, when no request has recorded metrics, so an empty table
-   reads as "no requests recorded" and never as a row of zeros. The agreement rate is the
-   module's own text: "n/a" when no run had two or more voting layers.
+   "recorded":false, with no figure, when no request in the window recorded metrics, so an
+   empty table reads as "no requests recorded" and never as a row of zeros. The agreement rate
+   is the module's own text: "n/a" when no run had two or more voting layers. The latency
+   percentiles (p50, p95, p99, in ms) are the module's own text too, per layer over the scans
+   it completed and timed; a layer with none is not listed.
 
    The rows hold layer ids, entity type labels, counts and confidences, never a detected
    value (core.audit.layermetrics), so nothing here can carry one. moke's governance page
@@ -55,13 +59,49 @@ f=agreementjson(a:$agreement):str{
   <"{\"runs\":\(a.runs),\"resolved\":\(a.resolved),\"agreed\":\(a.agreed),\"rate\":\(jx.escape(a.ratetext))}"
 };
 
-(* The body, from the open store's rows. *)
-f=metricsjson():str{
-  let n=lmx.requestssince(0);
+f=latencyjson(l:$layerlatency):str{
+  <"{\"layer\":\(jx.escape(l.layerid)),\"samples\":\(l.samples),\"p50_ms\":\(l.p50),\"p95_ms\":\(l.p95),\"p99_ms\":\(l.p99)}"
+};
+
+f=latenciesjson(ls:@$layerlatency):str{
+  <"[\(commas(ls.map(&latencyjson)))]"
+};
+
+(* The body over the window's rows, from the open store. window must be one lmx.windowms
+   knows; get() refuses any other. *)
+f=metricsjsonfor(window:str):str{
+  let since=lmx.windowsince(window);
+  let head="{\"measured\":true,\"recorded\":";
+  let period="\"period\":\(jx.escape(window)),\"since_ms\":\(since)";
+  let n=lmx.requestssince(since);
   if(n<=0){
-    <"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[]}"
+    <"\(head)false,\(period),\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[]}"
   }el{};
-  <"{\"measured\":true,\"recorded\":true,\"period\":\"all\",\"requests\":\(n),\"by_layer_day\":\(daysjson(lmx.bylayerday(0))),\"agreement\":\(agreementjson(lmx.agreementsince(0))),\"by_type\":\(typesjson(lmx.bytype(0)))}"
+  <"\(head)true,\(period),\"requests\":\(n),\"by_layer_day\":\(daysjson(lmx.bylayerday(since))),\"agreement\":\(agreementjson(lmx.agreementsince(since))),\"by_type\":\(typesjson(lmx.bytype(since))),\"latency\":\(latenciesjson(lmx.latencybylayer(since)))}"
+};
+
+(* Over all recorded time. *)
+f=metricsjson():str{
+  <metricsjsonfor("all")
+};
+
+(* The window a request target asks for: the value of its `window` query parameter, or "all"
+   when it names none. The four names are plain letters and digits, so nothing is decoded; a
+   value that is not one of them is refused by get(), whatever it is. *)
+f=windowfrom(target:str):str{
+  let qi=str.indexof(target;"?");
+  if(qi<0){ <"all" }el{};
+  let pairs=str.split(str.slice(target;qi+1;str.len(target));"&");
+  let found=mut."all";
+  lp(let i=0;i<pairs.len;i=i+1){
+    let p:str=pairs.get(i);
+    if(str.startswith(p;"window=")){ found=str.slice(p;7;str.len(p)) }el{}
+  };
+  <found
+};
+
+f=badwindowjson():str{
+  <"{\"measured\":false,\"error\":\"unknown window: use 24h, 7d, 30d or all\"}"
 };
 
 f=unavailablejson():str{
@@ -71,6 +111,8 @@ f=unavailablejson():str{
 f=get(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
+  let window=windowfrom(http.reqpath(req));
+  if(lmx.windowms(window)<0){ <http.res(400;badwindowjson()) }el{};
   if(openstore()==0){ <http.res(503;unavailablejson()) }el{};
-  <http.res(200;metricsjson())
+  <http.res(200;metricsjsonfor(window))
 };

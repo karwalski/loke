@@ -15,7 +15,8 @@ i=cn:core.privacy.consensus;
 i=ev:core.privacy.evaluation;
 i=er:core.privacy.entityrouting;
 
-(* F3b.9. POST /api/evaluate {"text":"..."}: `loke privacy evaluate` for the browser. Every
+(* F3b.9. POST /api/evaluate {"text":"..."}: `loke privacy evaluate` for the browser.
+   POST /api/evaluate {"labelled":"..."}: `loke privacy evaluate --file`, below. Every
    configured detection layer runs on the text side by side, through
    core.privacy.comparison.compare, the function the CLI prints, and the reply gives each
    layer's own result and the consensus decision over them.
@@ -136,6 +137,22 @@ f=consensusjson(text:str;c:$comparison):str{
   <"{\"strategy\":\(jx.escape(c.strategy)),\"strategy_name\":\(jx.escape(cn.strategyname(c.strategy))),\"voters\":\(strsjson(c.voters)),\"decisions\":[\(commas(decisions))],\"summary\":\(summaryjson(c.resolved.len as i64;overlaps;disagree;masked))}"
 };
 
+(* Each detection routing did not accept: type, placeholder, spans and the layer that made
+   it, as the CLI's "not accepted by routing" lines give them. Never the value. *)
+f=dropjson(text:str;d:$routingdrop):str{
+  <"{\"type\":\(jx.escape(d.entity.entitytype)),\"placeholder\":\(jx.escape(placeholder(d.entity.entitytype))),\"spans\":\(spansjson(cmp.spansof(text;d.entity))),\"layer\":\(jx.escape(d.layerid))}"
+};
+
+f=dropsjson(text:str;c:$comparison):str{
+  let drops=cmp.notaccepted(c);
+  let out=mut."";
+  lp(let i=0;i<drops.len;i=i+1){
+    if(i>0){ out="\(out)," }el{};
+    out="\(out)\(dropjson(text;drops.get(i)))"
+  };
+  <"[\(out)]"
+};
+
 (* The reply for one text under one pipeline config. post() passes pipe.served(); a test
    passes a config whose layers are recorders. *)
 f=evaluatejson(text:str;config:$pipelineconfig):str{
@@ -146,7 +163,45 @@ f=evaluatejson(text:str;config:$pipelineconfig):str{
   };
   let lerr=mut."";
   if(str.len(c.layererror)>0){ lerr=cmp.errortext(c) }el{};
-  <"{\"ok\":true,\"evaluated\":\(booltext(cmp.evaluated(c))),\"values_shown\":false,\"text_bytes\":\(ev.numtext(str.len(text) as i64)),\"completed_layers\":\(ev.numtext(cmp.completedcount(c))),\"layer_error\":\(jx.escape(lerr)),\"layers\":[\(commas(layers))],\"routing\":\(routesjson(c)),\"consensus\":\(consensusjson(text;c))}"
+  <"{\"ok\":true,\"evaluated\":\(booltext(cmp.evaluated(c))),\"values_shown\":false,\"text_bytes\":\(ev.numtext(str.len(text) as i64)),\"completed_layers\":\(ev.numtext(cmp.completedcount(c))),\"layer_error\":\(jx.escape(lerr)),\"layers\":[\(commas(layers))],\"routing\":\(routesjson(c)),\"not_accepted\":\(dropsjson(text;c)),\"consensus\":\(consensusjson(text;c))}"
+};
+
+(* ── A labelled file ─────────────────────────────────────────────────────────
+
+   {"labelled":"<the file's contents>"}: the CLI's `--file`, scored by the same
+   core.privacy.comparison.scorelabelled, in either format (the corpus JSONL or the JSON array,
+   told apart by content). Per layer, and for the consensus outcome last: the texts it
+   scanned of the texts read, and recall, precision and F1 as evaluation renders them, with
+   tp, fp and fn. A layer that scanned none of the texts has "scored":false and null figures,
+   never a recall of zero. No text and no value is returned. *)
+
+f=nulltext(scored:bool;v:str):str{
+  if(scored){ <v }el{};
+  <"null"
+};
+
+f=tallyjson(tl:$layertally;ntexts:i64):str{
+  let s=tl.score;
+  let scored=tl.texts>0;
+  let reason=mut."";
+  if(tl.texts<ntexts){ reason=tl.reason }el{};
+  <"{\"layer\":\(jx.escape(tl.id)),\"scored\":\(booltext(scored)),\"texts\":\(ev.numtext(tl.texts)),\"of\":\(ev.numtext(ntexts)),\"reason\":\(jx.escape(reason)),\"recall\":\(nulltext(scored;jx.escape(ev.bplabel(ev.entityrecallbp(s))))),\"precision\":\(nulltext(scored;jx.escape(ev.bplabel(ev.entityprecisionbp(s))))),\"f1\":\(nulltext(scored;jx.escape(cmp.f1text(s)))),\"tp\":\(nulltext(scored;ev.numtext(s.matched))),\"fp\":\(nulltext(scored;ev.numtext(s.spurious))),\"fn\":\(nulltext(scored;ev.numtext(s.labelled-s.matched)))}"
+};
+
+(* The reply for a labelled file that was read (s.error empty; post() answers 400 otherwise). *)
+f=labelledjson(s:$labelledscores):str{
+  let rows=mut."";
+  lp(let i=0;i<s.tallies.len;i=i+1){
+    if(i>0){ rows="\(rows)," }el{};
+    rows="\(rows)\(tallyjson(s.tallies.get(i);s.ntexts))"
+  };
+  <"{\"ok\":true,\"labelled\":true,\"evaluated\":\(booltext(cmp.labelledok(s))),\"values_shown\":false,\"format\":\(jx.escape(s.format)),\"texts\":\(ev.numtext(s.ntexts)),\"labelled_entities\":\(ev.numtext(s.labelled)),\"layer_error\":\(jx.escape(s.layererror)),\"scores\":[\(rows)]}"
+};
+
+(* The "labelled" field of a request body, decoded; "" when absent or not a string. *)
+f=labelledfrom(body:str):str{
+  let o=mt json.dec(body) { $ok:o o; $jsonerr:e jx.emptyobj() };
+  <jx.strvalue(o;"labelled";"")
 };
 
 f=errorjson(msg:str):str{
@@ -157,8 +212,15 @@ f=post(req:i64):i64{
   (* GA2.6, GA2.7: foreign Origin or non-loopback Host. See shared.origin. *)
   if(org.requestrefused(req)){ <org.refuse() }el{};
   let body=mt http.body(req) {$ok:v v; $err:e ""};
+  let labelled=labelledfrom(body);
+  if(str.len(labelled)>0){
+    if((str.len(labelled) as i64)>maxbytes()){ <http.res(413;errorjson("the labelled file is longer than 65536 bytes")) }el{};
+    let scores=cmp.scorelabelled(labelled;pipe.served());
+    if(str.len(scores.error)>0){ <http.res(400;errorjson(scores.error)) }el{};
+    <http.res(200;labelledjson(scores))
+  }el{};
   let text=textfrom(body);
-  if(str.len(text)==0){ <http.res(400;errorjson("a non-empty text field is required")) }el{};
+  if(str.len(text)==0){ <http.res(400;errorjson("a non-empty text field (or a labelled field holding a labelled file) is required")) }el{};
   if((str.len(text) as i64)>maxbytes()){ <http.res(413;errorjson("the text is longer than 65536 bytes")) }el{};
   <http.res(200;evaluatejson(text;pipe.served()))
 };

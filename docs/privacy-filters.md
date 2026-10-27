@@ -566,7 +566,7 @@ Not built: a cached last-checked state or health history; each run and each `/ap
 
 ```
 loke privacy evaluate "<text>" [--show-values]
-loke privacy evaluate --file <labelled.jsonl>
+loke privacy evaluate --file <labelled.jsonl | labelled.json>
 ```
 
 It runs the same registry `loke ask` builds (`withlokeconfig`: Presidio and Ollama URLs, the privacy
@@ -579,8 +579,14 @@ filter, `consensus_strategy`, `[[privacy.layers]]`, `[[privacy.entity_routing]]`
   as finding nothing", never as zero detections. Then each consensus decision: the reporting layer, the
   layers that found the group with their confidences, the voters that did not (DISAGREEMENT), routing,
   and mask or pass. No detected value is printed unless `--show-values` is given.
-- **With `--file`:** the JSONL of `tests/fixtures/pii-corpus` (entities with `expected_detected:true`
-  count towards recall). Per layer and for the consensus outcome: precision, recall, F1 and tp/fp/fn,
+- **With `--file`:** one of two formats, told apart by the file's content (a first non-blank `[` is the
+  array). The JSONL of `tests/fixtures/pii-corpus` (entities with `expected_detected:true` count towards
+  recall; a line that is not an object is skipped). Or a JSON array
+  `[{"text": "...", "entities": [{"start": 0, "end": 4, "type": "PERSON"}]}]`, whose offsets count
+  characters (code points) and are converted to byte offsets; every entity counts except one typed
+  `NOT_PII`. A malformed array (not JSON, empty, an entry without `text` or `entities`, an entity
+  without `type` or with offsets outside `0 <= start < end <= length`) is refused whole, on stderr with
+  exit 1, naming the entry and entity at fault and quoting no text. Per layer and for the consensus outcome: precision, recall, F1 and tp/fp/fn,
   scored by `core.privacy.evaluation`. A layer is scored only on texts it scanned; one that scanned none
   is "not scored", not a recall of zero. No text or value is printed.
 - **Exit status** 1 when no layer scanned, the layer or routing config is refused, or the file has no
@@ -601,8 +607,18 @@ layers; nothing routes, dispatches or records. Origin-guarded (GA2.6, GA2.7). Te
 `scripts/smoke_serve.sh` (`scripts/lib/evaluate_check.py`, over HTTP, and a foreign Origin refused),
 `tests/ui/evaluate_f3b9.json` in `scripts/smoke_ui.sh`.
 
-Not built: the `[{text, entities}]` JSON-array import the F3b.9 row names, and labelled-file scoring in
-the browser. No figure from it is published; published figures are only in
+**A labelled file in the browser:** the same page has a file input; the file's contents go to
+`POST /api/evaluate` as `{"labelled": "..."}` (at most 65536 bytes: 413 above; 400 for a file that
+cannot be read, with the reason), scored by the same `comparison.scorelabelled` as the CLI's `--file`, in
+either format. The reply gives per layer, and for the consensus outcome last, the texts scanned of the
+texts read and recall, precision, F1, tp, fp and fn; a layer that scanned none is `"scored":false` with
+null figures. No text and no value is returned.
+
+**Entity routing:** the reply's `not_accepted` lists each detection a masking layer made that
+`[[privacy.entity_routing]]` did not accept (type, placeholder, spans, layer; never the value), as the
+CLI's "not accepted by routing" lines do, and the page shows them under the consensus table.
+
+No figure from it is published; published figures are only in
 [metrics-baseline.md](metrics-baseline.md).
 
 ## Audit metrics (F3b.10)
@@ -632,18 +648,25 @@ Where it goes:
   value or its sha256"); `scripts/smoke_e2e.sh` (rows bound, no planted value or its sha256 in the
   database).
 - `core.audit.layermetrics` aggregates the rows: detections by layer per UTC day, by entity type, and
-  the agreement rate between layers over runs with two or more voters, and the number of requests
-  recorded. Test: `test_layer_metrics_audit.tk`.
-- `GET /api/layermetrics` (`packages/browser/pages/api/layermetrics.tk`, origin-guarded) answers those
-  aggregates over all recorded time, or `"recorded":false` with no figure when no request has recorded
-  metrics. moke relays it (`packages/moke/pages/api/layermetrics.tk`) to the governance page's "Privacy
+  the agreement rate between layers over runs with two or more voters, the number of requests
+  recorded, and per layer the p50, p95 and p99 of its scan time (`latencybylayer`: nearest rank over
+  the rows where the layer completed and was timed, so an unavailable layer's probe is not a scan;
+  formatted to text, in integer milliseconds, inside the module). Each takes the start of a time
+  window (`windowsince`: `24h`, `7d`, `30d` or `all`). Tests: `test_layer_metrics_audit.tk`,
+  `tests/unit/browser/test_layermetrics_handler.tk`.
+- `GET /api/layermetrics[?window=24h|7d|30d|all]` (`packages/browser/pages/api/layermetrics.tk`,
+  origin-guarded) answers those aggregates over the window (default `all`), with `period` and
+  `since_ms`, or `"recorded":false` with no figure when no request in the window recorded metrics; an
+  unknown window is refused with 400. moke relays it (`packages/moke/pages/api/layermetrics.tk`) to the governance page's "Privacy
   Layer Metrics" section, which shows the request count, the agreement rate, detections by layer per
-  day and by layer and entity type, and "No requests recorded" for an empty table. Tests:
+  day and by layer and entity type, scan latency percentiles by layer, and "No requests recorded" for
+  an empty table, over the window its selector names (last 24 hours, 7 days, 30 days, or all time).
+  moke passes the window on only when it is letters and digits, and refuses anything else with 400. Tests:
   `tests/unit/browser/test_layermetrics_handler.tk`, `scripts/smoke_serve.sh` (judged against the
   database file), `tests/ui/layermetrics_f3b10_empty.json` and `tests/ui/layermetrics_f3b10.json` (rows
   seeded from `tests/ui/layermetrics_f3b10_seed.sql`) in `scripts/smoke_ui.sh`.
 
-Not built: latency percentiles, a time-window selector (every figure is all-time), and exposure through MCP.
+Not built: exposure through MCP; a per-entity record (the rows are per layer and per entity type).
 
 ## What a disclosure measure cannot capture (EM1.5)
 

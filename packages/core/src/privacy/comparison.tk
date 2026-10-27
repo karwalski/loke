@@ -13,6 +13,7 @@ i=cn:core.privacy.consensus;
 i=ev:core.privacy.evaluation;
 i=pl:core.privacy.pipeline;
 i=er:core.privacy.entityrouting;
+i=jx:shared.jsonobj;
 
 (* F3b.9. `loke privacy evaluate`: every configured detection layer side by side, on one text
    or on a labelled file.
@@ -45,9 +46,12 @@ i=er:core.privacy.entityrouting;
    values, as NER does) and are scored per text with corpuslabels and scoretext, the entity-
    level rule tests/integration/test_detection_recall.tk uses. tp is the labelled entities a
    layer's detections overlap, fn those they miss, fp its detection regions that overlap no
-   real PII. The labelled file is the corpus JSONL of tests/fixtures/pii-corpus: one object
-   per line with "text" and "entities":[{"type","value","start","end","expected_detected"}];
-   only entities with expected_detected true count towards recall. *)
+   real PII. A labelled file is one of two formats, told apart by its content (isjsonarray):
+   the corpus JSONL of tests/fixtures/pii-corpus, one object per line with "text" and
+   "entities":[{"type","value","start","end","expected_detected"}], where only entities with
+   expected_detected true count towards recall; or a JSON array
+   [{"text","entities":[{"start","end","type"}]}], where every entity counts, its offsets in
+   characters, and anything malformed refuses the whole file (arraycases). *)
 
 (* One layer's part in one text. hits are the detections its settings accept (what the
    pipeline would hand to consensus), rawcount what it reported before they were applied. *)
@@ -89,9 +93,50 @@ t=$layertally{
   reason:str
 };
 
+(* A detection routing did not accept, and the layer that made it. *)
+t=$routingdrop{
+  layerid:str;
+  entity:$piientity
+};
+
+(* One labelled text, its labels already in byte offsets. scored is what recall is computed
+   over; realpii is every labelled entity that is genuinely PII, which a detection must
+   overlap not to be a false positive (see core.privacy.evaluation.scoretext). *)
+t=$labelledcase{
+  text:str;
+  scored:@$labelspan;
+  realpii:@$labelspan
+};
+
+(* A labelled file as read: its format ("jsonl" or "json-array"), its texts, and, when it
+   cannot be used, why. A non-empty error means nothing is scored. *)
+t=$labelledinput{
+  format:str;
+  cases:@$labelledcase;
+  error:str
+};
+
+(* Every layer's tally over a labelled file, and the consensus tally last. *)
+t=$labelledscores{
+  format:str;
+  error:str;
+  layererror:str;
+  ntexts:i64;
+  labelled:i64;
+  tallies:@$layertally
+};
+
+(* One entry's entities as byte spans, or the reason it cannot be scored. *)
+t=$entryspans{
+  spans:@$labelspan;
+  error:str
+};
+
+(* error is set, and text is that error, when the file could not be used at all. *)
 t=$labelledresult{
   text:str;
-  ok:bool
+  ok:bool;
+  error:str
 };
 
 f=view(layer:$privacyfilter;lr:$layerresult):$layerview{
@@ -163,13 +208,27 @@ f=routinglines(lines:@str;text:str;c:$comparison;showvalues:bool):@str{
   lp(let k=0;k<c.routing.routes.len;k=k+1){
     out=addline(out;"  \(c.routing.routes.get(k).entitytype): \(c.routedesc.get(k))")
   };
+  let drops=notaccepted(c);
+  lp(let i=0;i<drops.len;i=i+1){
+    let d:$routingdrop=drops.get(i);
+    out=out.push("    not accepted by routing: \(shown(d.entity.entitytype;d.entity.value;showvalues)) \(spanstext(spansof(text;d.entity))) from \(d.layerid)")
+  };
+  <out
+};
+
+(* Every detection a masking layer made that entity routing did not accept, in registry
+   order: what routinglines prints and page.api.evaluate answers as "not_accepted". Empty
+   when no route is configured. *)
+f=notaccepted(c:$comparison):@$routingdrop{
+  let out=mut.@($routingdrop);
+  if(c.routing.routes.len==0){ <out }el{};
   lp(let i=0;i<c.layers.len;i=i+1){
     let v:$layerview=c.layers.get(i);
     if(v.completed && v.masks){
       lp(let h=0;h<v.hits.len;h=h+1){
         let e:$piientity=v.hits.get(h);
         if(!er.keeps(c.routing;c.accepts;v.id;e.entitytype)){
-          out=out.push("    not accepted by routing: \(shown(e.entitytype;e.value;showvalues)) \(spanstext(spansof(text;e))) from \(v.id)")
+          out=out.push($routingdrop{layerid:v.id;entity:e})
         }el{}
       }
     }el{}
@@ -387,16 +446,18 @@ f=tallytext(acc:$layertally;text:str;scored:@$labelspan;realpii:@$labelspan;ok:b
   <$layertally{id:acc.id;score:ev.scoretext(scored;realpii;allspans(text;dets);acc.score);texts:acc.texts+1;reason:acc.reason}
 };
 
-f=scoreline(text:str;ents:@$json;c:$comparison;acc:@$layertally):@$layertally{
-  let scored=ev.corpuslabels(text;ents;true);
-  let realpii=ev.corpuslabels(text;ents;false);
+f=scorecase(lc:$labelledcase;c:$comparison;acc:@$layertally):@$layertally{
   let out=mut.@($layertally);
   lp(let i=0;i<c.layers.len;i=i+1){
     let v:$layerview=c.layers.get(i);
-    out=out.push(tallytext(prior(acc;i;v.id);text;scored;realpii;v.completed;v.hits;"\(v.state): \(v.reason)"))
+    out=out.push(tallytext(prior(acc;i;v.id);lc.text;lc.scored;lc.realpii;v.completed;v.hits;"\(v.state): \(v.reason)"))
   };
-  out=out.push(tallytext(prior(acc;c.layers.len as i64;"consensus");text;scored;realpii;c.voters.len>0;maskedentities(c);"no masking layer completed"));
+  out=out.push(tallytext(prior(acc;c.layers.len as i64;"consensus");lc.text;lc.scored;lc.realpii;c.voters.len>0;maskedentities(c);"no masking layer completed"));
   <out
+};
+
+f=f1text(s:$entityscore):str{
+  <ev.bplabel(ev.f1bp(ev.entityprecisionbp(s);ev.entityrecallbp(s)))
 };
 
 f=tallyline(tl:$layertally;ntexts:i64):str{
@@ -404,20 +465,20 @@ f=tallyline(tl:$layertally;ntexts:i64):str{
     <"layer=\(tl.id) not scored: it scanned none of the texts (\(tl.reason)). That is not a recall of zero."
   }el{};
   let s=tl.score;
-  let line=mut."\(ev.scoreline(tl.id;s)) f1=\(ev.bplabel(ev.f1bp(ev.entityprecisionbp(s);ev.entityrecallbp(s)))) tp=\(ev.numtext(s.matched)) fp=\(ev.numtext(s.spurious)) fn=\(ev.numtext(s.labelled-s.matched)) texts=\(ev.numtext(tl.texts))/\(ev.numtext(ntexts))";
+  let line=mut."\(ev.scoreline(tl.id;s)) f1=\(f1text(s)) tp=\(ev.numtext(s.matched)) fp=\(ev.numtext(s.spurious)) fn=\(ev.numtext(s.labelled-s.matched)) texts=\(ev.numtext(tl.texts))/\(ev.numtext(ntexts))";
   if(tl.texts<ntexts){ line="\(line) (not scored on the texts it did not scan: \(tl.reason))" }el{};
   <line
 };
 
-(* The per-layer TP/FP/FN report on a labelled file. Prints no text and no value. ok is true
-   when at least one text was read, some layer scanned at least one of them, and the layer
-   config applies. *)
-f=labelledreport(jsonl:str;config:$pipelineconfig):$labelledresult{
-  let lines=str.split(jsonl;"\n");
-  let tallies=mut.@($layertally);
-  let ntexts=mut.0;
-  let labelled=mut.0;
-  let layererror=mut."";
+(* ── Reading a labelled file ───────────────────────────────────────────────── *)
+
+(* The corpus JSONL of tests/fixtures/pii-corpus: one object per line, "text" and
+   "entities":[{"type","value","start","end","expected_detected"}]. Only entities with
+   expected_detected true count towards recall (core.privacy.evaluation.corpuslabels). A line
+   that is not such an object is skipped, as it always was. *)
+f=jsonlcases(raw:str):@$labelledcase{
+  let lines=str.split(raw;"\n");
+  let out=mut.@($labelledcase);
   lp(let i=0;i<lines.len;i=i+1){
     let line:str=lines.get(i);
     if(str.len(line)>2){
@@ -425,32 +486,158 @@ f=labelledreport(jsonl:str;config:$pipelineconfig):$labelledresult{
       let text=mt json.str(obj;"text") { $ok:s s; $err:e "" };
       if(str.len(text)>0){
         let ents=mt json.arr(obj;"entities") { $ok:a a; $err:e @() };
-        let c=compare(text;config);
-        layererror=c.layererror;
-        if(str.len(c.layererror)>0){ layererror=errortext(c) }el{};
-        tallies=scoreline(text;ents;c;tallies);
-        ntexts=ntexts+1;
-        labelled=labelled+(ev.corpuslabels(text;ents;true).len as i64)
+        out=out.push($labelledcase{text:text;scored:ev.corpuslabels(text;ents;true);realpii:ev.corpuslabels(text;ents;false)})
       }el{}
     }el{}
   };
-  let out=mut.@();
-  out=out.push("loke privacy evaluate --file: \(ev.numtext(ntexts)) labelled texts, \(ev.numtext(labelled)) labelled entities scored (expected_detected true)");
-  if(ntexts==0){
-    out=out.push("no text could be read from the file: nothing was evaluated");
-    <$labelledresult{text:str.join("\n";out);ok:false}
+  <out
+};
+
+f=arrayshape():str{
+  <"the format is a JSON array [{\"text\": \"...\", \"entities\": [{\"start\": 0, \"end\": 4, \"type\": \"PERSON\"}]}]"
+};
+
+f=decodes(raw:str):bool{
+  <mt json.dec(raw) { $ok:o true; $jsonerr:e false }
+};
+
+f=hasarray(o:$json;key:str):bool{
+  <mt json.arr(o;key) { $ok:a true; $err:e false }
+};
+
+f=arrayat(o:$json;key:str):@$json{
+  <mt json.arr(o;key) { $ok:a a; $err:e @() }
+};
+
+f=arrayerror(msg:str):$labelledinput{
+  <$labelledinput{format:"json-array";cases:@($labelledcase);error:msg}
+};
+
+(* The entities of entry n. Each needs a non-empty "type" and whole-number "start" and "end"
+   with 0 <= start < end <= the text's length. The offsets count CHARACTERS (code points), as
+   the corpus's do and as a labelling tool working on decoded text writes them; they are
+   converted to the byte offsets loke's detectors report with evaluation.bytestart. Every
+   entity counts towards recall and is real PII, except one typed NOT_PII, which is a decoy
+   (it is never returned, as in corpuslabels). *)
+f=arrayentities(text:str;ents:@$json;n:str):$entryspans{
+  let out=mut.@($labelspan);
+  let nchars=ev.charcount(text);
+  lp(let k=0;k<ents.len;k=k+1){
+    let en=ents.get(k);
+    let kind=mt json.str(en;"type") { $ok:s s; $err:x "" };
+    let st=mt json.i64(en;"start") { $ok:v v; $err:x 0-1 };
+    let fin=mt json.i64(en;"end") { $ok:v v; $err:x 0-1 };
+    let where="entry \(n), entity \(ev.numtext((k as i64)+1))";
+    if(str.len(kind)==0){
+      <$entryspans{spans:@($labelspan);error:"\(where) has no non-empty \"type\" string"}
+    }el{};
+    if(st<0 || fin<=st || fin>nchars){
+      <$entryspans{spans:@($labelspan);error:"\(where) needs whole-number \"start\" and \"end\" with 0 <= start < end <= \(ev.numtext(nchars)), the text's length in characters"}
+    }el{};
+    if(!str.eq(kind;"NOT_PII")){
+      out=out.push($labelspan{kind:kind;start:ev.bytestart(text;st);end:ev.bytestart(text;fin)})
+    }el{}
+  };
+  <$entryspans{spans:out;error:""}
+};
+
+(* The JSON-array format the story names: [{"text","entities":[{"start","end","type"}]}].
+   Unlike the JSONL reader, nothing malformed is skipped: a file that says it is this format
+   and is not is refused whole, with the entry and entity at fault, so a score is never
+   reported over part of a file the person thinks was read. The error names positions and
+   fields, never a text or a value. *)
+f=arraycases(raw:str):$labelledinput{
+  let wrapped="{\"v\":\(raw)}";
+  if(!decodes(wrapped)){ <arrayerror("the file starts with [ but is not valid JSON; \(arrayshape())") }el{};
+  let o=mt json.dec(wrapped) { $ok:o o; $jsonerr:e jx.emptyobj() };
+  if(!hasarray(o;"v")){ <arrayerror("the file starts with [ but is not a JSON array; \(arrayshape())") }el{};
+  let items=arrayat(o;"v");
+  if(items.len==0){ <arrayerror("the array holds no entries, so there is nothing to evaluate") }el{};
+  let out=mut.@($labelledcase);
+  lp(let i=0;i<items.len;i=i+1){
+    let e=items.get(i);
+    let n=ev.numtext((i as i64)+1);
+    let text=mt json.str(e;"text") { $ok:s s; $err:x "" };
+    if(str.len(text)==0){ <arrayerror("entry \(n) has no non-empty \"text\" string; \(arrayshape())") }el{};
+    if(!hasarray(e;"entities")){ <arrayerror("entry \(n) has no \"entities\" array (a text with no PII has \"entities\": [])") }el{};
+    let spans=arrayentities(text;arrayat(e;"entities");n);
+    if(str.len(spans.error)>0){ <arrayerror(spans.error) }el{};
+    out=out.push($labelledcase{text:text;scored:spans.spans;realpii:spans.spans})
+  };
+  <$labelledinput{format:"json-array";cases:out;error:""}
+};
+
+(* The format is told by the content, not the file name: a file whose first non-blank
+   character is [ is the JSON array, anything else is read as the corpus JSONL. *)
+f=isjsonarray(raw:str):bool{
+  <str.startswith(str.trim(raw);"[")
+};
+
+f=readlabelled(raw:str):$labelledinput{
+  if(isjsonarray(raw)){ <arraycases(raw) }el{};
+  let cases=jsonlcases(raw);
+  if(cases.len==0){
+    <$labelledinput{format:"jsonl";cases:cases;error:"no text could be read from the file: nothing was evaluated (a labelled file is the corpus JSONL, one {\"text\", \"entities\"} object per line, or a JSON array of them)"}
   }el{};
-  if(str.len(layererror)>0){
-    out=out.push(layererror)
+  <$labelledinput{format:"jsonl";cases:cases;error:""}
+};
+
+(* Every layer, and the consensus, scored over a labelled file in either format. *)
+f=scorelabelled(raw:str;config:$pipelineconfig):$labelledscores{
+  let input=readlabelled(raw);
+  if(str.len(input.error)>0){
+    <$labelledscores{format:input.format;error:input.error;layererror:"";ntexts:0;labelled:0;tallies:@($layertally)}
+  }el{};
+  let tallies=mut.@($layertally);
+  let labelled=mut.0;
+  let layererror=mut."";
+  lp(let i=0;i<input.cases.len;i=i+1){
+    let lc:$labelledcase=input.cases.get(i);
+    let c=compare(lc.text;config);
+    if(str.len(c.layererror)>0){ layererror=errortext(c) }el{};
+    tallies=scorecase(lc;c;tallies);
+    labelled=labelled+(lc.scored.len as i64)
+  };
+  <$labelledscores{format:input.format;error:"";layererror:layererror;ntexts:input.cases.len as i64;labelled:labelled;tallies:tallies}
+};
+
+f=scannedany(s:$labelledscores):bool{
+  let any=mut.false;
+  lp(let i=0;i<s.tallies.len;i=i+1){
+    if(s.tallies.get(i).texts>0){ any=true }el{}
+  };
+  <any
+};
+
+(* A clean evaluation: the file was read, some layer scanned some text, the config applies. *)
+f=labelledok(s:$labelledscores):bool{
+  <str.len(s.error)==0 && scannedany(s) && str.len(s.layererror)==0
+};
+
+(* Which entities a format scores, in words. *)
+f=scoredwhat(format:str):str{
+  if(str.eq(format;"json-array")){ <"JSON array; every entity but NOT_PII is scored" }el{};
+  <"corpus JSONL; entities with expected_detected true are scored"
+};
+
+(* The per-layer TP/FP/FN report on a labelled file. Prints no text and no value. *)
+f=labelledreport(raw:str;config:$pipelineconfig):$labelledresult{
+  let s=scorelabelled(raw;config);
+  if(str.len(s.error)>0){
+    let msg="loke privacy evaluate --file: \(s.error)";
+    <$labelledresult{text:msg;ok:false;error:msg}
+  }el{};
+  let out=mut.@();
+  out=out.push("loke privacy evaluate --file: \(ev.numtext(s.ntexts)) labelled texts, \(ev.numtext(s.labelled)) labelled entities scored (\(scoredwhat(s.format)))");
+  if(str.len(s.layererror)>0){
+    out=out.push(s.layererror)
   }el{};
   out=out.push("tp = labelled entities a layer's detections overlap; fn = labelled entities they miss; fp = detection regions overlapping no real PII. Values are never printed.");
-  let scannedany=mut.false;
-  lp(let i=0;i<tallies.len;i=i+1){
-    let tl:$layertally=tallies.get(i);
-    if(tl.texts>0){ scannedany=true }el{};
-    out=out.push(tallyline(tl;ntexts))
+  let text=mut.str.join("\n";out);
+  lp(let i=0;i<s.tallies.len;i=i+1){
+    text="\(text)\n\(tallyline(s.tallies.get(i);s.ntexts))"
   };
-  <$labelledresult{text:str.join("\n";out);ok:scannedany && str.len(layererror)==0}
+  <$labelledresult{text:text;ok:labelledok(s);error:""}
 };
 
 (* What the CLI exits with: 0 when at least one layer scanned the text and the layer config
