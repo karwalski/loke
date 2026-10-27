@@ -1,0 +1,1 @@
+Tests that every loke.cli.* key the CLI translates (51, restated from packages/cli/src) resolves to text — not empty, not its key, no key text inside — through core.i18n.translator in en-AU (tr.t) and en-US (tr.tfor), with three exact values. F10.12c. Depends on `std.test`, `std.str`, `core.i18n.translator`.
