@@ -8,7 +8,7 @@ i=t:std.time;
 i=jx:shared.jsonobj;
 
 (* Ported from src/platform/a11y/testing.tk (F10.12-T2). A static check of an HTML string
-   for three violations, with a JSON form of the result. It is not axe-core
+   for four violations, with a JSON form of the result. It is not axe-core
    (docs/specifications/accessibility-platform.md section 7.1) and does not claim to be: it
    reads markup as text, sees no CSS and runs no script.
 
@@ -24,7 +24,12 @@ i=jx:shared.jsonobj;
 
    The rules now examine every tag. An input is labelled when it carries aria-label or
    aria-labelledby, when a <label for> names its id, or when it sits inside a <label>
-   (section 2.3); hidden, submit, reset, button and image inputs need no label. *)
+   (section 2.3); hidden, submit, reset, button and image inputs need no label.
+
+   T13.1 added the fourth rule, which the legacy checker never had: a <button> needs an
+   accessible name (section 2.3's icon-only button row). It has one when it carries a
+   non-empty aria-label or title, carries aria-labelledby, or holds text or an <img> with a
+   non-empty alt before its </button>. An unclosed button is judged at the end of the page. *)
 
 t=$a11yviolation{
   rule:str;
@@ -75,6 +80,34 @@ f=attrof(tag:str;name:str):str{
   <str.slice(rest;0;end)
 };
 
+(* The text after a tag's `>`, up to the next `<`, trimmed. *)
+f=textafter(piece:str):str{
+  let close=str.indexof(piece;">");
+  if(close<0){ <"" }el{};
+  <str.trim(str.slice(piece;close+1;str.len(piece) as i64))
+};
+
+(* True when the tag carries attribute `name` with a value that is not written empty. *)
+f=nonemptyattr(tag:str;name:str):bool{
+  let lower=str.lower(tag);
+  <hasattr(tag;name) && !str.contains(lower;" \(name)=\"\"") && !str.contains(lower;" \(name)=''")
+};
+
+f=buttonnamedbyattr(tag:str):bool{
+  <nonemptyattr(tag;"aria-label") || hasattr(tag;"aria-labelledby") || nonemptyattr(tag;"title")
+};
+
+(* True when a piece inside a button gives it a name: text, or an image with a non-empty alt. *)
+f=namesbutton(piece:str):bool{
+  let tag=tagtext(piece);
+  if(istag(tag;"img") && nonemptyattr(tag;"alt")){ <true }el{};
+  <str.len(textafter(piece))>0
+};
+
+f=buttonviolation():$a11yviolation{
+  <violation("button-name";"<button>";"Button element has no accessible name";"critical")
+};
+
 f=needsnolabel(tag:str):bool{
   let ty=str.lower(attrof(tag;"type"));
   <str.eq(ty;"hidden") || str.eq(ty;"submit") || str.eq(ty;"reset") || str.eq(ty;"button") || str.eq(ty;"image")
@@ -116,11 +149,25 @@ f=checkhtml(html:str;url:str):$a11yresult{
   let forids=labelledids(pieces);
   let violations=mut.@();
   let inlabel=mut.false;
+  let inbutton=mut.false;
+  let buttonnamed=mut.false;
   (* Piece 0 is the text before the first `<`, which is not a tag. *)
   lp(let i=1;i<pieces.len;i=i+1){
     let tag=tagtext(pieces.get(i));
     if(istag(tag;"label")){ inlabel=true }el{};
     if(istag(tag;"/label")){ inlabel=false }el{};
+    if(inbutton){
+      if(istag(tag;"/button")){
+        if(!buttonnamed){ violations=violations.push(buttonviolation()) }el{};
+        inbutton=false
+      }el{
+        if(namesbutton(pieces.get(i))){ buttonnamed=true }el{}
+      }
+    }el{};
+    if(istag(tag;"button")){
+      inbutton=true;
+      buttonnamed=buttonnamedbyattr(tag) || str.len(textafter(pieces.get(i)))>0
+    }el{};
     if(istag(tag;"img") && !hasattr(tag;"alt")){
       violations=violations.push(violation("img-alt";"<img>";"Image element is missing an alt attribute";"critical"))
     }el{};
@@ -132,6 +179,7 @@ f=checkhtml(html:str;url:str):$a11yresult{
       violations=violations.push(violation("role-value";"[role]";"role attribute has an empty value";"moderate"))
     }el{}
   };
+  if(inbutton && !buttonnamed){ violations=violations.push(buttonviolation()) }el{};
   <$a11yresult{url:url;violations:violations;passed:violations.len==0;checkedat:t.nowms()}
 };
 
