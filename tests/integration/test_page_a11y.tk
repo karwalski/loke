@@ -1,0 +1,110 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.pagea11y;
+
+i=t:std.test;
+i=str:std.str;
+i=io:std.io;
+i=file:std.file;
+i=env:std.env;
+i=http:std.http;
+i=process:std.process;
+i=rch:shared.reachability;
+i=a11y:core.a11y.testing;
+
+(* T13.2. Every HTML page the built loke serves passes core.a11y.testing.
+
+   The checker had tests of its own (T13.1) and no caller: nothing ran it over a page loke
+   actually sends, so a page could lose a button's name or an image's alt and every test
+   would still pass. This test serves the BUILT binary (scripts/lib/serve_built_loke.sh: a
+   copy on a free port, under a throwaway HOME whose config points Ollama and the other
+   local services at a dead port), GETs each page over HTTP, and judges the body: status
+   200, an html document, and no violation of the four rules the checker knows (img-alt,
+   input-label, role-value, button-name). A failing page prints its result as JSON, which
+   names each rule broken.
+
+   What it cannot see is what the checker cannot see: CSS, script-built markup at run time,
+   and every WCAG rule beyond those four. A button or input written inside a JavaScript
+   string is still markup to a text scan, and is judged like any other. *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<200 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=waitup(port:str):bool{
+  let n=mt str.toint(port) { $ok:v v; $err:e 0 };
+  let up=mut.false;
+  lp(let k=0;k<100 && !up;k=k+1){
+    up=rch.connects(n);
+    if(!up){ pause() }el{}
+  };
+  <up
+};
+
+(* The body of GET path, or "" when the answer is not a 200 or there is none. *)
+f=fetch(base:str;path:str):str{
+  <mt http.clientget(http.client(base);path) {
+    $ok:r pagebody(r);
+    $err:e ""
+  }
+};
+
+f=pagebody(r:$httpresp):str{
+  if(r.status!=200){ <"" }el{};
+  <mt str.frombytes(r.body) { $ok:s s; $err:e "" }
+};
+
+f=checkpage(base:str;path:str):bool{
+  let body=fetch(base;path);
+  let ishtml=str.contains(str.lower(body);"<html");
+  if(!t.assert(ishtml;"GET \(path) answers 200 with an html document")){ <false }el{};
+  let result=a11y.checkhtml(body;path);
+  if(!result.passed){ io.println("  \(a11y.resulttojson(result))") }el{};
+  <t.assert(a11y.assertnoviolations(result);"GET \(path): the served page has no accessibility violation")
+};
+
+f=pages():@str{
+  <@("/";"/privacy";"/savings";"/pipeline";"/chat";"/setup";"/installer";"/approve";"/tabs";"/evaluate")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let scratch=str.concat(env.getor("BUILDDIR";"/tmp/loke-tests");"/page-a11y");
+  let portfile="\(scratch).port";
+  file.delete(portfile);
+  let server=mt process.spawn(@("bash";"scripts/lib/serve_built_loke.sh";scratch;portfile)) { $ok:h h; $err:e 0 };
+  let port=waitport(portfile);
+  let up=str.len(port)>0 && waitup(port);
+  if(t.assert(server!=0 && up;"the built loke is served on a port of its own")){pass=pass+1}el{fail=fail+1};
+
+  if(up){
+    let base="http://127.0.0.1:\(port)";
+    let paths=pages();
+    lp(let i=0;i<paths.len;i=i+1){
+      if(checkpage(base;paths.get(i))){pass=pass+1}el{fail=fail+1}
+    }
+  }el{
+    io.println("  the server did not come up; see \(scratch)/serve.log")
+  };
+
+  if(server!=0){ process.kill(server); process.wait(server); }el{};
+  io.println("test_page_a11y: \(pass) passed, \(fail) failed");
+  <fail
+};
