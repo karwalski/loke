@@ -760,6 +760,10 @@ is stored (a name or phone number is low-entropy, so its hash is reversible by t
   integer thousandths).
 - **Consensus:** the strategy applied, the voters, how many detections were resolved, masked and passed,
   how many every voter found, the vetoing layer if any, and routing's notes.
+- **Per resolved detection** (rows of kind `entity`, after the consensus row): its entity type, the ids
+  of the layers that found it, the action taken (`mask` or `pass`), how many layers found it, the
+  group's confidence in thousandths, and whether every voter found it. Not its value, its offsets or
+  its length, and no hash of any of them.
 
 Where it goes:
 
@@ -768,8 +772,11 @@ Where it goes:
   `test_layer_metrics_audit.tk` ("the reply's fields carry the per-layer summary").
 - The `/api/pipeline` handler writes the rows to the `privacy_layer_metrics` table (migration 41; 42 indexes it),
   once per request id, before the request's first audit row. Every `audit_log` row on that request id
-  binds their digest (`layer_digest`, migration 43), so `loke audit verify` fails on an edited, added or
-  deleted metrics row. A write failure is logged, not refused. Test: `test_layer_metrics_audit.tk` ("the
+  binds their digest (`layer_digest`, migration 43), and so does every row of a fallback hop after the
+  first, sent under `<request id>-h<n>` (`core.storage.audit.requestof`), so `loke audit verify` fails on
+  an edited, added or deleted metrics row. Tests: `test_layer_metrics_audit.tk` ("the hop's row binds
+  the request's metrics"), `tests/integration/test_browser_fallback.tk` ("every audit row of the second
+  hop binds the run's layer metrics digest"). A write failure is logged, not refused. Test: `test_layer_metrics_audit.tk` ("the
   chain breaks at the request's audit row", "a metrics row is added", "no metrics row holds a planted
   value or its sha256"); `scripts/smoke_e2e.sh` (rows bound, no planted value or its sha256 in the
   database).
@@ -791,8 +798,14 @@ Where it goes:
   `tests/unit/browser/test_layermetrics_handler.tk`, `scripts/smoke_serve.sh` (judged against the
   database file), `tests/ui/layermetrics_f3b10_empty.json` and `tests/ui/layermetrics_f3b10.json` (rows
   seeded from `tests/ui/layermetrics_f3b10_seed.sql`) in `scripts/smoke_ui.sh`.
+- loke's MCP server (`packages/mcp-toke`, `mcptoke.server`) offers a `layer_metrics` tool
+  (`mcptoke.metricstool`) with an optional `window` argument; it answers exactly the body
+  `GET /api/layermetrics` answers (both are built by `core.audit.layermetricsreport`), and an unknown
+  window as a tool error. Test: `tests/unit/mcp_toke/test_layer_metrics_tool.tk`.
 
-Not built: exposure through MCP; a per-entity record (the rows are per layer and per entity type).
+Not built: a running MCP endpoint. No loke process serves `mcp-toke` (its binary is not linked; MK6.20
+holds that decision), so the tool is reached today only through the server's request handler, as the
+test drives it.
 
 ## What a disclosure measure cannot capture (EM1.5)
 
@@ -836,8 +849,9 @@ request, not that no harm follows. Definitions, and the only figures this projec
   presets in `packages/core/src/policy/presets` set anonymisation rules, blocked entity types and
   retention; none sets a consensus strategy, a layer, a threshold or a route, and
   `pipeline.applypreset` returns its argument unchanged.
-- **The per-entity provenance** (which layers found each value, with what confidence) is on the
-  in-memory run (`$pipelinerun.resolved`); only its counts reach the reply and the audit trail.
+- **The per-layer confidence of each detection.** The audit trail records each resolved detection's
+  type, the ids of the layers that found it, the action taken and the group's confidence (entity rows,
+  F3b.10); each layer's own confidence for it stays on the in-memory run (`$pipelinerun.resolved`).
 
 ## Configurations for compliance regimes
 

@@ -1,0 +1,86 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.mcptoke.layermetricstool;
+
+i=t:std.test;
+i=str:std.str;
+i=std:std;
+i=json:std.json;
+i=jx:shared.jsonobj;
+i=sdb:core.storage.db;
+i=lmx:core.audit.layermetrics;
+(* For $layermetric and $resolvedentity. *)
+i=fm:core.privacy.filtermetrics;
+i=cn:core.privacy.consensus;
+i=srv:mcptoke.server;
+i=h:page.api.layermetrics;
+
+(* F3b.10 — the privacy layers' metrics through loke's MCP server (mcp-toke), so an external
+   tool can query filter performance. The `layer_metrics` tool is called the way a client
+   calls it, one JSON-RPC line through mcptoke.server.handlerequest, over rows written by
+   core.audit.layermetrics.record (the request path's writer) into the store in the
+   throwaway HOME's loke directory, the one the tool opens. What it answers must be exactly
+   the body GET /api/layermetrics answers over the same rows (page.api.layermetrics), for
+   each window, and an unknown window must be refused as the route refuses it.
+
+   Not checked here: that a loke process serves this server. None does (MK6.20 records that
+   mcp-toke's binary is not linked); this is the request handling such a process would run. *)
+
+f=lrow(layer:str;det:i64;acc:i64):$layermetric{
+  <$layermetric{layerid:layer;entitytype:"";state:"completed";mode:"detect-and-mask";durationms:3;detections:det;accepted:acc;routed:acc;confminmilli:900;confmaxmilli:950;confsummilli:900*det}
+};
+
+f=trow(layer:str;ty:str;det:i64):$layermetric{
+  <$layermetric{layerid:layer;entitytype:ty;state:"completed";mode:"detect-and-mask";durationms:0;detections:det;accepted:det;routed:det;confminmilli:900;confmaxmilli:950;confsummilli:900*det}
+};
+
+f=resolved(ty:str;layers:str):$resolvedentity{
+  <$resolvedentity{entitytype:ty;value:"mcp.planted@example.com";start:0;end:4;finalconfidence:0.9;detectinglayers:layers;action:"mask"}
+};
+
+f=call(args:str):str{
+  <srv.handlerequest("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"layer_metrics\",\"arguments\":\(args)}}";srv.defaultconfig())
+};
+
+(* The text of the tool result's first content item. *)
+f=textof(resp:str):str{
+  let o=mt json.dec(resp) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  let items=mt json.arr(jx.nested(o;"result");"content") { $ok:a a; $jsonerr:e @() };
+  if(items.len==0){ <"" }el{};
+  <jx.strvalue(items.get(0);"text";"")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=mt sdb.openstore(str.concat(std.homedir();"/.loke")) { $ok:s 1; $err:e 0 };
+  if(t.assert(store!=0;"the store in the loke directory opens")){pass=pass+1}el{fail=fail+1};
+
+  let lst=srv.handlerequest("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}";srv.defaultconfig());
+  if(t.assert(str.contains(lst;"\"name\":\"layer_metrics\"") && str.contains(lst;"\"window\":{\"type\":\"string\",\"enum\":[\"24h\",\"7d\",\"30d\",\"all\"]}");"tools/list offers layer_metrics, with the four windows (\(lst))")){pass=pass+1}el{fail=fail+1};
+
+  (* No rows: the route's empty body, recorded false. *)
+  let empty=call("{}");
+  if(t.asserteq(textof(empty);h.metricsjson();"with no request recorded, the tool answers the route's own body")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(textof(empty);"\"recorded\":false") && !str.contains(empty;"\"isError\":true");"which says recorded false, and is not an error")){pass=pass+1}el{fail=fail+1};
+
+  let voters=@("regex";"ner");
+  let ma=@(lrow("regex";2;2);trow("regex";"email";2);lrow("ner";1;1);trow("ner";"PERSON";1));
+  if(t.assert(lmx.record("mcp-a";ma;"most-restrictive";"";@(resolved("email";"regex=0.95,ner=0.80");resolved("email";"regex=0.95"));voters;@());"request A's metrics are recorded")){pass=pass+1}el{fail=fail+1};
+  let mb=@(lrow("regex";1;1);trow("regex";"email";1);lrow("ner";0;0));
+  if(t.assert(lmx.record("mcp-b";mb;"most-restrictive";"";@(resolved("email";"regex=0.90"));voters;@());"request B's metrics are recorded")){pass=pass+1}el{fail=fail+1};
+
+  let all=textof(call("{\"window\":\"all\"}"));
+  if(t.asserteq(all;h.metricsjsonfor("all");"over all time, the tool answers exactly the route's body over the same rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(all;"\"requests\":2,") && str.contains(all;"\"agreement\":{\"runs\":2,\"resolved\":3,\"agreed\":1,\"rate\":\"33.3%\"}") && str.contains(all;"{\"layer\":\"regex\",\"type\":\"email\",\"detections\":3,\"accepted\":3}");"which holds the rows' aggregates: two requests, 33.3% agreement, three emails from regex (\(all))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof(call("{}"));all;"a call naming no window is all time")){pass=pass+1}el{fail=fail+1};
+  let day=textof(call("{\"window\":\"24h\"}"));
+  if(t.assert(str.contains(day;"\"period\":\"24h\"") && str.contains(day;"\"requests\":2,");"the 24h window: both requests are today's (\(day))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(all;"mcp.planted@example.com") && !str.contains(day;"mcp.planted@example.com");"no answer holds a detected value")){pass=pass+1}el{fail=fail+1};
+
+  let bad=call("{\"window\":\"1y\"}");
+  if(t.assert(str.contains(bad;"\"isError\":true") && str.contains(textof(bad);"unknown window: use 24h, 7d, 30d or all");"an unknown window is refused as the route refuses it (\(bad))")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

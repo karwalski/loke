@@ -1,0 +1,105 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.audit.layermetricsreport;
+
+i=str:std.str;
+i=std:std;
+i=jx:shared.jsonobj;
+i=dbmod:core.storage.db;
+i=lmx:core.audit.layermetrics;
+
+(* F3b.10. The per-layer privacy metrics loke has recorded, as one JSON body: what
+   GET /api/layermetrics answers (page.api.layermetrics) and what the `layer_metrics` tool of
+   loke's MCP server answers (mcptoke.tools), built here once so the two cannot differ.
+
+   Every figure is an aggregate over the privacy_layer_metrics rows, computed by
+   core.audit.layermetrics (bylayerday, agreementsince, bytype, requestssince,
+   latencybylayer) and never estimated, over a window: the rows created at or after "since_ms"
+   (now minus the window; 0 for "all"). A window lmx.windowms does not know is the caller's to
+   refuse (badwindowjson) rather than guessed at.
+
+   "recorded":false, with no figure, when no request in the window recorded metrics, so an
+   empty table reads as "no requests recorded" and never as a row of zeros. The agreement rate
+   is the module's own text: "n/a" when no run had two or more voting layers. The latency
+   percentiles (p50, p95, p99, in ms) are the module's own text too, per layer over the scans
+   it completed and timed; a layer with none is not listed.
+
+   The rows hold layer ids, entity type labels, counts and confidences, never a detected
+   value (core.audit.layermetrics), so nothing here can carry one. *)
+
+(* The body for a window name: refused when the window is unknown or the store cannot be
+   opened, otherwise metricsjsonfor. ok is false for a refusal; status is the HTTP status the
+   route answers with it. *)
+t=$metricsbody{
+  ok:bool;
+  status:i64;
+  body:str
+};
+
+(* The store in the user's loke directory: 1 when it opened, 0 when it did not. *)
+f=openstore():i64{
+  <mt dbmod.openstore(str.concat(std.homedir();"/.loke")) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=commas(items:@str):str{
+  <str.join(",";items)
+};
+
+f=dayjson(d:$layerday):str{
+  <"{\"day\":\(jx.escape(d.day)),\"layer\":\(jx.escape(d.layerid)),\"requests\":\(d.requests),\"detections\":\(d.detections),\"accepted\":\(d.accepted)}"
+};
+
+f=daysjson(days:@$layerday):str{
+  <"[\(commas(days.map(&dayjson)))]"
+};
+
+f=typejson(c:$typecount):str{
+  <"{\"layer\":\(jx.escape(c.layerid)),\"type\":\(jx.escape(c.entitytype)),\"detections\":\(c.detections),\"accepted\":\(c.accepted)}"
+};
+
+f=typesjson(types:@$typecount):str{
+  <"[\(commas(types.map(&typejson)))]"
+};
+
+f=agreementjson(a:$agreement):str{
+  <"{\"runs\":\(a.runs),\"resolved\":\(a.resolved),\"agreed\":\(a.agreed),\"rate\":\(jx.escape(a.ratetext))}"
+};
+
+f=latencyjson(l:$layerlatency):str{
+  <"{\"layer\":\(jx.escape(l.layerid)),\"samples\":\(l.samples),\"p50_ms\":\(l.p50),\"p95_ms\":\(l.p95),\"p99_ms\":\(l.p99)}"
+};
+
+f=latenciesjson(ls:@$layerlatency):str{
+  <"[\(commas(ls.map(&latencyjson)))]"
+};
+
+(* The body over the window's rows, from the open store. window must be one lmx.windowms
+   knows; a caller refuses any other. *)
+f=metricsjsonfor(window:str):str{
+  let since=lmx.windowsince(window);
+  let head="{\"measured\":true,\"recorded\":";
+  let period="\"period\":\(jx.escape(window)),\"since_ms\":\(since)";
+  let n=lmx.requestssince(since);
+  if(n<=0){
+    <"\(head)false,\(period),\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[]}"
+  }el{};
+  <"\(head)true,\(period),\"requests\":\(n),\"by_layer_day\":\(daysjson(lmx.bylayerday(since))),\"agreement\":\(agreementjson(lmx.agreementsince(since))),\"by_type\":\(typesjson(lmx.bytype(since))),\"latency\":\(latenciesjson(lmx.latencybylayer(since)))}"
+};
+
+f=badwindowjson():str{
+  <"{\"measured\":false,\"error\":\"unknown window: use 24h, 7d, 30d or all\"}"
+};
+
+f=unavailablejson():str{
+  <"{\"measured\":false,\"error\":\"the local store could not be opened, so nothing can be read\"}"
+};
+
+f=bodyfor(window:str):$metricsbody{
+  if(lmx.windowms(window)<0){ <$metricsbody{ok:false;status:400;body:badwindowjson()} }el{};
+  if(openstore()==0){ <$metricsbody{ok:false;status:503;body:unavailablejson()} }el{};
+  <$metricsbody{ok:true;status:200;body:metricsjsonfor(window)}
+};

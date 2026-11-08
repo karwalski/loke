@@ -928,6 +928,14 @@ if [ -x "$CLI_BIN" ]; then
   lbound=$(dl "SELECT COUNT() FROM audit_log WHERE length(layer_digest)=64")
   if [ "$unbound" = "0" ] && [ -n "$lbound" ] && [ "$lbound" -gt 0 ]; then echo "  ok   F3b.10: $lbound audit rows bind their request's per-layer metrics, and none on such a request does not"
   else echo "  FAIL $unbound audit row(s) on a request with per-layer metrics do not bind them ($lbound bound)" >&2; fail=1; fi
+  # F3b.10: the per-entity record. Every request the built binary recorded has one entity row
+  # per detection its consensus resolved, each naming layer ids, a type and mask or pass (no
+  # value: the dump check below finds none of the planted values or their sha256 in any row).
+  ents=$(dl "SELECT COUNT() FROM privacy_layer_metrics WHERE kind='entity'")
+  eshort=$(dl "SELECT COUNT() FROM privacy_layer_metrics c WHERE c.kind='consensus' AND c.resolved <> (SELECT COUNT() FROM privacy_layer_metrics e WHERE e.correlation_id=c.correlation_id AND e.kind='entity')")
+  eodd=$(dl "SELECT COUNT() FROM privacy_layer_metrics WHERE kind='entity' AND (mode NOT IN ('mask','pass') OR state<>'resolved' OR layer_id GLOB '*[@=]*' OR layer_id='')")
+  if [ -n "$ents" ] && [ "$ents" -gt 0 ] && [ "$eshort" = "0" ] && [ "$eodd" = "0" ]; then echo "  ok   F3b.10: $ents entity rows, one per resolved detection of every recorded request, each naming layer ids, a type and mask or pass"
+  else echo "  FAIL F3b.10: entity rows '$ents', requests short of one per resolved detection '$eshort', odd rows '$eodd'" >&2; fail=1; fi
   mkdir -p "$WORK/tamper2/home/.loke"
   TDB2="$WORK/tamper2/home/.loke/loke.db"
   sqlite3 "$DB" ".backup '$TDB2'"

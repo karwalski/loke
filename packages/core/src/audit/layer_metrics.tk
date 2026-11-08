@@ -28,7 +28,9 @@ i=cn:core.privacy.consensus;
 
    WHAT A ROW HOLDS: layer ids, entity type labels, states, modes, counts, confidences as
    integer thousandths, milliseconds, the consensus strategy, counts of its outcome and the id
-   of a vetoing layer. Never a detected value, and never a hash of one.
+   of a vetoing layer; and, per resolved detection, its type, the layers that found it and
+   what was done with it (entityrow). Never a detected value, its offsets or its length, and
+   never a hash of one.
 
    AGGREGATES are computed from the rows by SQL, never estimated: detections by layer per UTC
    day, by entity type, the agreement rate between layers, and each layer's scan latency
@@ -145,6 +147,62 @@ f=consensusrow(cid:str;seq:i64;strategy:str;vetoedby:str;resolved:@$resolvedenti
     created))
 };
 
+(* F3b.10. The ids in a $resolvedentity's detectinglayers ("regex=0.95,ner=0.80" is
+   "regex,ner"): which layers found the detection, without their confidences. *)
+f=detectingids(detectinglayers:str):str{
+  if(str.len(detectinglayers)==0){ <"" }el{};
+  let parts=str.split(detectinglayers;",");
+  let ids=mut.@();
+  lp(let i=0;i<parts.len;i=i+1){
+    let p:str=parts.get(i);
+    let at=str.indexof(p;"=");
+    if(at<0){ ids=ids.push(p) }el{ ids=ids.push(str.slice(p;0;at)) }
+  };
+  <str.join(",";ids)
+};
+
+f=flag(b:bool):str{
+  if(b){ <"1" }el{};
+  <"0"
+};
+
+(* F3b.10. The per-entity record: one row (kind 'entity') for each detection the consensus
+   resolved, in its order, after the consensus row. layer_id is the layers that found it
+   (detectingids), entity_type its type, mode the action taken ("mask" or "pass"),
+   detections how many layers found it, conf_* the group's confidence in thousandths, voters
+   the run's voter count, masked or passed 1, and agreed 1 when every voter found it. The
+   detection's value, its offsets and its length are NOT recorded, nor a hash of any of them:
+   the row says which layers found a detection of which type and what was done with it. *)
+f=entityrow(cid:str;seq:i64;r:$resolvedentity;nv:i64;created:str):bool{
+  let n=fm.layersin(r.detectinglayers);
+  let conf=str.fromint(fm.milli(r.finalconfidence));
+  let masked=str.eq(r.action;"mask");
+  <exec(insertsql();@(
+    cid;
+    str.fromint(seq);
+    "entity";
+    detectingids(r.detectinglayers);
+    r.entitytype;
+    "resolved";
+    r.action;
+    "-1";
+    str.fromint(n);
+    flag(masked);
+    "0";
+    conf;
+    conf;
+    conf;
+    "";
+    "";
+    str.fromint(nv);
+    "1";
+    flag(masked);
+    flag(!masked);
+    flag(nv>0 && n>=nv);
+    "";
+    created))
+};
+
 (* Writes the request's rows in one savepoint: all of them or none. *)
 f=record(cid:str;metrics:@$layermetric;strategy:str;vetoedby:str;resolved:@$resolvedentity;voters:@str;notes:@str):bool{
   if(str.len(cid)==0){ <false };
@@ -156,6 +214,9 @@ f=record(cid:str;metrics:@$layermetric;strategy:str;vetoedby:str;resolved:@$reso
     if(ok){ ok=metricrow(cid;i as i64;metrics.get(i);created) }el{}
   };
   if(ok){ ok=consensusrow(cid;metrics.len as i64;strategy;vetoedby;resolved;voters;notes;created) }el{};
+  lp(let k=0;k<resolved.len;k=k+1){
+    if(ok){ ok=entityrow(cid;(metrics.len as i64)+1+(k as i64);resolved.get(k);voters.len as i64;created) }el{}
+  };
   if(ok){
     if(exec("RELEASE layermetrics";@())){ <true }el{}
   }el{};

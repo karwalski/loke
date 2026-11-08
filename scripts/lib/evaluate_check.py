@@ -191,6 +191,16 @@ def layermetrics(base, dbpath):
     got = [(r["day"], r["layer"], r["requests"], r["detections"], r["accepted"]) for r in d.get("by_layer_day", [])]
     ok(d.get("recorded") is True and got == [tuple(r) for r in rows],
        "every per-day layer row matches the database (%d rows)" % len(rows), "%s vs %s" % (got[:4], rows[:4]))
+    # F3b.10: the per-entity record. Each request has one entity row per detection its
+    # consensus resolved (the consensus row's `resolved`), and an entity row names layers, a
+    # type and an action: its layer_id is ids only, never a value.
+    short = con.execute("SELECT COUNT(*) FROM privacy_layer_metrics c WHERE c.kind='consensus' AND c.resolved <> "
+                        "(SELECT COUNT(*) FROM privacy_layer_metrics e WHERE e.correlation_id=c.correlation_id AND e.kind='entity')").fetchone()[0]
+    ents = con.execute("SELECT COUNT(*) FROM privacy_layer_metrics WHERE kind='entity'").fetchone()[0]
+    odd = con.execute("SELECT COUNT(*) FROM privacy_layer_metrics WHERE kind='entity' AND (mode NOT IN ('mask','pass') OR "
+                      "state<>'resolved' OR layer_id GLOB '*[@=]*')").fetchone()[0]
+    ok(short == 0 and odd == 0, "every request has an entity row per resolved detection (%d rows), each naming layer "
+       "ids, a type and mask or pass" % ents, "%d request(s) short, %d odd row(s)" % (short, odd))
 
 
 if __name__ == "__main__":
