@@ -13,6 +13,7 @@ i=cn:core.privacy.consensus;
 i=ev:core.privacy.evaluation;
 i=pl:core.privacy.pipeline;
 i=er:core.privacy.entityrouting;
+i=op:core.privacy.orgpolicy;
 i=jx:shared.jsonobj;
 
 (* F3b.9. `loke privacy evaluate`: every configured detection layer side by side, on one text
@@ -81,7 +82,11 @@ t=$comparison{
      every layer), as entityrouting.accepting gives it, and routedesc[k] says so in words. *)
   routing:$routingconfig;
   accepts:@str;
-  routedesc:@str
+  routedesc:@str;
+  (* F3b.8 (5). The organisation policy's refusal of this text, as pipeline.run would make it
+     ("" when none), and each setting it overrode. *)
+  policyerror:str;
+  policynotes:@str
 };
 
 (* A layer's running score over a labelled file. texts counts the texts it scanned; a text it
@@ -153,10 +158,20 @@ f=compare(text:str;config:$pipelineconfig):$comparison{
   let allentities=mut.@($piientity);
   let hitlayers=mut.@();
   let voters=mut.@();
-  let reg=config.layers;
+  let states=mut.@();
+  (* F3b.8 (5). The organisation policy over the configuration, as in pipeline.run: a banned
+     layer is off and sent nothing, a weaker strategy is raised, a threshold lowered, and each
+     layer is consulted under it (orgpolicy.consult). No alert is raised: nothing is sent. *)
+  let applied:$orgapplied=op.apply(op.resolved(config.org);config.layers;config.consensus;config.consensusthreshold);
+  let policy=applied.policy;
+  let notes=mut.policy.notes;
+  let reg=applied.registry;
   lp(let li=0;li<reg.filters.len;li=li+1){
     let layer:$privacyfilter=reg.filters.get(li);
-    let v=view(layer;lh.consult(layer;text));
+    let oc:$orgconsult=op.consult(policy;reg;layer;text);
+    if(str.len(oc.note)>0){ notes=notes.push(oc.note) }el{};
+    states=states.push(oc.result.status);
+    let v=view(layer;oc.result);
     views=views.push(v);
     if(v.completed && v.masks){
       voters=voters.push(v.id);
@@ -177,8 +192,8 @@ f=compare(text:str;config:$pipelineconfig):$comparison{
   let routed:$routedhits=er.apply(config.routing;reg;voters;allentities;hitlayers);
   let cfgerror=mut.config.layererror;
   if(str.len(cfgerror)==0 && str.len(config.routing.error)>0){ cfgerror=er.refusal(config.routing) }el{};
-  let agreed:$consensusresult=cn.apply(routed.entities;routed.layers;voters;config.consensus;config.consensusthreshold);
-  <$comparison{layers:views;resolved:agreed.resolved;resolvedlayer:routed.layers;voters:voters;strategy:agreed.strategy;layererror:cfgerror;routing:config.routing;accepts:accepts;routedesc:routedesc}
+  let agreed:$consensusresult=cn.apply(routed.entities;routed.layers;voters;applied.consensus;applied.consensusthreshold);
+  <$comparison{layers:views;resolved:agreed.resolved;resolvedlayer:routed.layers;voters:voters;strategy:agreed.strategy;layererror:cfgerror;routing:config.routing;accepts:accepts;routedesc:routedesc;policyerror:op.refusal(policy;reg;states;voters);policynotes:notes}
 };
 
 (* Which layers route r accepts this run, in words: the three cases of
@@ -386,6 +401,12 @@ f=reportlines(text:str;c:$comparison;showvalues:bool):@str{
   };
   if(str.len(c.layererror)>0){
     out=out.push(errortext(c))
+  }el{};
+  if(str.len(c.policyerror)>0){
+    out=out.push("\(c.policyerror), so the pipeline refuses this text")
+  }el{};
+  if(c.policynotes.len>0){
+    out=out.push("\(op.header()) overrides this configuration: \(str.join(lh.listsep();c.policynotes))")
   }el{};
   out=out.push("");
   out=out.push("layers, in registry order:");
@@ -595,6 +616,7 @@ f=scorelabelled(raw:str;config:$pipelineconfig):$labelledscores{
     let lc:$labelledcase=input.cases.get(i);
     let c=compare(lc.text;config);
     if(str.len(c.layererror)>0){ layererror=errortext(c) }el{};
+    if(str.len(layererror)==0 && str.len(c.policyerror)>0){ layererror="\(c.policyerror), so the pipeline refuses this text" }el{};
     tallies=scorecase(lc;c;tallies);
     labelled=labelled+(lc.scored.len as i64)
   };
@@ -643,5 +665,5 @@ f=labelledreport(raw:str;config:$pipelineconfig):$labelledresult{
 (* What the CLI exits with: 0 when at least one layer scanned the text and the layer config
    applies, 1 otherwise. A report is printed either way. *)
 f=evaluated(c:$comparison):bool{
-  <completedcount(c)>0 && str.len(c.layererror)==0
+  <completedcount(c)>0 && str.len(c.layererror)==0 && str.len(c.policyerror)==0
 };

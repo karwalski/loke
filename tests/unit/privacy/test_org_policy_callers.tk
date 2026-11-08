@@ -1,0 +1,185 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.privacy.orgpolicycallers;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=db:std.db;
+i=log:shared.log;
+i=sh:shared.types;
+i=cfg:shared.config;
+i=sdb:core.storage.db;
+i=pl:core.privacy.pipeline;
+i=op:core.privacy.orgpolicy;
+i=cmp:core.privacy.comparison;
+i=al:core.governance.alertledger;
+i=disp:core.providers.dispatcher;
+i=ask:cli.ask;
+i=px:cli.proxy;
+i=bproxy:mcpbroker.proxy;
+i=reg:mcpbroker.registry;
+i=ev:page.api.evaluate;
+
+(* F3b.8 (4), (5) and (6), against the production modules, under the throwaway HOME with a
+   loke.policy.json written to its loke directory.
+
+   (4) Every caller that refuses on the policy's account audits it as /api/pipeline does:
+       `loke ask` (cli.ask.run), the CLI proxy (cli.proxy.handlerequestwith) and the MCP
+       broker (mcpbroker.proxy.proxycallwith) each write an org_policy_violation row on the
+       run's request id, and an org_policy_override row when the policy overrode the
+       configuration; with no policy file, none. Each refuses naming the policy's reason.
+   (5) `loke privacy evaluate` (core.privacy.comparison) applies the policy as the pipeline
+       does: a banned layer is off and sent nothing, a weaker consensus strategy is raised, and
+       a required layer that did not scan is reported as the pipeline's refusal, so the
+       evaluation fails; POST /api/evaluate says so too.
+   (6) The policy's governance alerts are de-duplicated (core.governance.alertledger): two
+       runs under one standing refusal write ONE alert to loke.log and count two occurrences;
+       a different refusal is alerted; an hour later the same one is alerted again.
+
+   No layer listens on port 9 and NER and Presidio point there, so only the regex layer scans
+   and nothing is sent anywhere: every request here is refused before any dispatch, and the
+   dispatcher has no key and a dead Ollama. *)
+
+f=dead():str{ <"http://127.0.0.1:9" };
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=countof(hay:str;needle:str):i64{
+  let without=str.replace(hay;needle;"");
+  <(str.len(hay)-str.len(without))/str.len(needle)
+};
+
+f=writepolicy(body:str):bool{
+  let made=mt file.mkdir(sh.lokedir()) {$ok:v v;$err:e false};
+  <mt file.write(op.policypath();body) {$ok:v v;$err:e false}
+};
+
+f=rows(eventtype:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE event_type=?";@(eventtype);"n";0-1)
+};
+
+(* The correlation id of the newest row of eventtype. *)
+f=lastcid(eventtype:str):str{
+  <mt db.many("SELECT correlation_id AS c FROM audit_log WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 1";@(eventtype)) {
+    $ok:rs firstc(rs);
+    $err:e "<error>"
+  }
+};
+
+f=firstc(rs:@$row):str{
+  if(rs.len==0){ <"<none>" }el{};
+  <db.rowstr(rs.get(0);"c")
+};
+
+f=occurrences(message:str):i64{
+  <sdb.scalari64("SELECT occurrences AS n FROM governance_alert_ledger WHERE kind='privacy_org_policy' AND message=?";@(message);"n";0-1)
+};
+
+(* config.toml with every model layer on port 9 and the unanimous strategy. *)
+f=tomltext():str{
+  <"[providers]\nollama_url = \"http://127.0.0.1:9\"\n\n[privacy]\npresidio_url = \"http://127.0.0.1:9\"\nconsensus_strategy = \"unanimous\"\n"
+};
+
+f=nokeys():$apikeys{
+  <$apikeys{anthropic:"";openai:""}
+};
+
+f=pipecfg():$pipelineconfig{
+  <pl.withlokeconfig(pl.newconfig(dead();dead());cfg.fromtext(tomltext()))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=mt sdb.openstore(sh.lokedir()) { $ok:s 1; $err:e 0 };
+  if(t.assert(store!=0;"the store in the test HOME's loke directory opens")){pass=pass+1}el{fail=fail+1};
+  let lc=cfg.fromtext(tomltext());
+  let h="organisation policy loke.policy.json";
+  let why="\(h) requires the presidio privacy layer, and it did not scan this request: Presidio sidecar unreachable";
+  let alertline="governance alert: privacy organisation policy: ";
+  let logp=log.logpath();
+
+  (* ── (4) no policy file: no policy row from any caller ───────────────────────── *)
+  let opts=ask.parseopts(@("ask";"please mail jane@example.com the notes"));
+  let v0=rows("org_policy_violation");
+  let o0=rows("org_policy_override");
+  let pcfg=px.defaultconfig("ollama");
+  let none=disp.new(nokeys();dead());
+  let body="{\"prompt\":\"please mail jane@example.com the notes\"}";
+  let notools:@str=@();
+  let entry=$serverentry{ name:"rec"; host:"127.0.0.1"; port:9 as i32; toolprefix:"rec_"; healthy:true; lastchecked:0; tools:notools };
+  let registry=reg.register(reg.newregistry();entry);
+  if(t.assert(!file.exists(op.policypath());"there is no loke.policy.json yet")){pass=pass+1}el{fail=fail+1};
+  px.handlerequestwith(body;pcfg;pipecfg();store;none);
+  bproxy.proxycallwith("rec_echo";"{\"a\":\"mail jane@example.com\"}";registry;pipecfg();store);
+  if(t.assert(rows("org_policy_violation")==v0 && rows("org_policy_override")==o0;"with no policy file, neither the proxy nor the broker writes a policy row")){pass=pass+1}el{fail=fail+1};
+
+  (* ── (4) a policy that refuses and overrides ─────────────────────────────────── *)
+  if(t.assert(writepolicy("{\"required_layers\":[\"presidio\"],\"locked_consensus\":\"most-restrictive\"}");"a policy requiring Presidio, with a consensus floor, is written")){pass=pass+1}el{fail=fail+1};
+
+  let askrc=ask.run(opts;lc);
+  if(t.assert(askrc==1;"loke ask refuses the prompt (exit \(askrc))")){pass=pass+1}el{fail=fail+1};
+  let askcid=lastcid("privacy_refused");
+  if(t.assert(rows("org_policy_violation")==v0+1 && str.eq(lastcid("org_policy_violation");askcid);"loke ask writes an org_policy_violation row on the run's request id, beside privacy_refused")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("org_policy_override")==o0+1 && str.eq(lastcid("org_policy_override");askcid);"and an org_policy_override row for the strategy it raised")){pass=pass+1}el{fail=fail+1};
+
+  let pans=px.handlerequestwith(body;pcfg;pipecfg();store;none);
+  if(t.assert(rows("org_policy_violation")==v0+2 && rows("org_policy_override")==o0+2;"the CLI proxy writes both rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(pans;why) && !str.contains(pans;"jane@example.com");"and refuses naming the policy's reason, with no text (\(pans))")){pass=pass+1}el{fail=fail+1};
+  let pcid=lastcid("org_policy_violation");
+  if(t.assert(str.eq(lastcid("org_policy_override");pcid) && !str.eq(pcid;askcid);"on one request id of its own")){pass=pass+1}el{fail=fail+1};
+
+  let bans=bproxy.proxycallwith("rec_echo";"{\"a\":\"mail jane@example.com\"}";registry;pipecfg();store);
+  if(t.assert(!bans.ok && rows("org_policy_violation")==v0+3 && rows("org_policy_override")==o0+3;"the MCP broker refuses the call and writes both rows")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(bans.responsebody;why) && !str.contains(bans.responsebody;"jane@example.com");"naming the policy's reason (\(bans.responsebody))")){pass=pass+1}el{fail=fail+1};
+  let bnostore=bproxy.proxycallwith("rec_echo";"{\"a\":\"mail jane@example.com\"}";registry;pipecfg();0);
+  if(t.assert(!bnostore.ok && rows("org_policy_violation")==v0+3;"with no store the broker still refuses, and writes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── (6) the alerts behind those runs, de-duplicated ─────────────────────────── *)
+  let refusalmsg="privacy organisation policy: \(why); the request is refused";
+  let logged=countof(readfile(logp);"\(alertline)\(why); the request is refused");
+  if(t.assert(logged==1;"four runs under one standing refusal wrote ONE alert to loke.log (\(logged))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(occurrences(refusalmsg)==4;"and the ledger counts all four occurrences (\(occurrences(refusalmsg)))")){pass=pass+1}el{fail=fail+1};
+  let overridemsg="privacy organisation policy: \(h) overrode this configuration: privacy.consensus_strategy unanimous is raised to most-restrictive";
+  if(t.assert(countof(readfile(logp);overridemsg)==1 && occurrences(overridemsg)==4;"the override alert likewise: once in the log, four occurrences")){pass=pass+1}el{fail=fail+1};
+  let raised=al.raise("privacy_org_policy";"critical";"privacy organisation policy: a different refusal");
+  if(t.assert(raised && countof(readfile(logp);"\(alertline)a different refusal")==1;"a different alert is sent at once")){pass=pass+1}el{fail=fail+1};
+  let later=al.raiseat("privacy_org_policy";"critical";refusalmsg;db.nowms()+al.windowms()+1;al.windowms());
+  if(t.assert(later && countof(readfile(logp);"\(alertline)\(why); the request is refused")==2 && occurrences(refusalmsg)==5;"an hour later the standing refusal is alerted again, and counted")){pass=pass+1}el{fail=fail+1};
+  let within=al.raiseat("privacy_org_policy";"warn";overridemsg;db.nowms()+1000;al.windowms());
+  if(t.assert(!within && occurrences(overridemsg)==5;"a repeat inside the hour is counted, not sent")){pass=pass+1}el{fail=fail+1};
+  let seen=al.seensince("privacy_org_policy";0);
+  if(t.assert(seen.len==3;"the ledger lists the three distinct alerts (\(seen.len))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(readfile(logp);"jane@example.com") && sdb.scalari64("SELECT COUNT() AS n FROM governance_alert_ledger WHERE message LIKE '%jane@%'";@();"n";0-1)==0;"neither loke.log nor the ledger holds the prompt's address")){pass=pass+1}el{fail=fail+1};
+
+  (* ── (5) loke privacy evaluate applies the policy ─────────────────────────────── *)
+  let text="please mail jane@example.com the notes";
+  let c=cmp.compare(text;pipecfg());
+  if(t.asserteq(c.policyerror;why;"the comparison reports the refusal the pipeline makes")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!cmp.evaluated(c);"so the evaluation does not pass (loke privacy evaluate exits 1)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(c.strategy;"most-restrictive";"and the consensus strategy is the policy's floor, not config.toml's unanimous")){pass=pass+1}el{fail=fail+1};
+  let rep=str.join("\n";cmp.reportlines(text;c;false));
+  if(t.assert(str.contains(rep;"\(why), so the pipeline refuses this text") && str.contains(rep;"\(h) overrides this configuration: privacy.consensus_strategy unanimous is raised to most-restrictive");"the report says both (\(rep))")){pass=pass+1}el{fail=fail+1};
+  let ej=ev.evaluatejson(text;pipecfg());
+  if(t.assert(str.contains(ej;"\"evaluated\":false") && str.contains(ej;"\"org_policy_error\":\"\(why)\"") && str.contains(ej;"\"org_policy_overrides\":[\"privacy.consensus_strategy unanimous is raised to most-restrictive\"]");"POST /api/evaluate's body says so too")){pass=pass+1}el{fail=fail+1};
+  writepolicy("{\"banned_layers\":[\"ner\"]}");
+  let nerless=pl.withlayer(pipecfg();"ner";false);
+  let cb=cmp.compare(text;nerless);
+  if(t.assert(str.len(cb.policyerror)==0 && cmp.evaluated(cb);"with NER off and the policy banning it, nothing is refused")){pass=pass+1}el{fail=fail+1};
+  let cbon=cmp.compare(text;pipecfg());
+  if(t.asserteq(cbon.policyerror;"\(h) bans the ner privacy layer, and this configuration enables it (switch it off in config.toml)";"with NER on, the banned layer is the refusal")){pass=pass+1}el{fail=fail+1};
+  let nerview=mut."";
+  lp(let i=0;i<cbon.layers.len;i=i+1){
+    if(str.eq(cbon.layers.get(i).id;"ner")){ nerview=cbon.layers.get(i).state }el{}
+  };
+  if(t.asserteq(nerview;"disabled";"and it is shown off, not consulted")){pass=pass+1}el{fail=fail+1};
+  file.delete(op.policypath());
+  let cn0=cmp.compare(text;pipecfg());
+  if(t.assert(str.len(cn0.policyerror)==0 && cn0.policynotes.len==0 && str.eq(cn0.strategy;"unanimous");"with the file gone, the comparison is config.toml's again")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

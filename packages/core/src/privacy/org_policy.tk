@@ -81,6 +81,13 @@ t=$orgprivacypolicy{
   maxinstallprobes:i64
 };
 
+(* F3b.8 (7). One layer consulted under the policy: its result, and the override made to get
+   it ("" when none). *)
+t=$orgconsult{
+  result:$layerresult;
+  note:str
+};
+
 (* A policy applied to one run's registry and consensus settings. *)
 t=$orgapplied{
   registry:$filterregistry;
@@ -90,6 +97,9 @@ t=$orgapplied{
 };
 
 f=filename():str{ <"loke.policy.json" };
+
+(* The kind of every governance alert the policy raises (core.governance.alert). *)
+f=alertkind():str{ <"privacy_org_policy" };
 
 f=policypath():str{ <sh.lokefile(filename()) };
 
@@ -329,6 +339,36 @@ f=apply(p:$orgprivacypolicy;reg:$filterregistry;consensus:str;cthreshold:str):$o
     out=fr.setenabled(out;id;false)
   };
   <$orgapplied{registry:out;consensus:strategy;consensusthreshold:ct;policy:withresult(p;error;notes;raised)}
+};
+
+(* F3b.8 (7). One layer, consulted as core.privacy.layerhealth.consult does, under the policy.
+
+   With privacy.privacy_filter_threshold unset, loke sends the privacy-filter sidecar no
+   threshold and the sidecar applies its own default (models.json's confidence_threshold, or
+   LOKE_PF_THRESHOLD), which apply() cannot see. The sidecar reports the threshold it applied, so
+   it is checked here, after the scan: above max_confidence_threshold, the scan is made again at
+   the ceiling (clamped, as apply clamps a configured one), and noted. A sidecar that reports no
+   threshold, or that does not apply the ceiling when asked, has scanned at an operating point
+   the policy cannot vouch for, and the layer is treated as failed (not completed, so a policy
+   that requires it refuses). Every other layer, a configured threshold, and a run with no
+   ceiling are consulted exactly as before. *)
+f=consult(p:$orgprivacypolicy;reg:$filterregistry;f:$privacyfilter;text:str):$orgconsult{
+  let lr:$layerresult=lh.consult(f;text);
+  let asis=$orgconsult{result:lr;note:""};
+  if(!applies(p) || str.len(p.maxthreshold)==0){ <asis }el{};
+  if(!str.eq(f.id;fr.privacyfilterid()) || str.len(f.param)>0 || !lh.iscompleted(lr.status)){ <asis }el{};
+  let ceiling=asnumber(p.maxthreshold);
+  let h=header();
+  if(str.len(lr.applied)==0){
+    <$orgconsult{result:lh.failedbecause(f;"the privacy-filter sidecar did not report the threshold it applied, so \(h)'s max_confidence_threshold cannot be checked");note:""}
+  }el{};
+  if(asnumber(lr.applied)<=ceiling){ <asis }el{};
+  let again:$layerresult=lh.consult(fr.get(fr.setparam(reg;f.id;p.maxthreshold);f.id);text);
+  let note="the \(f.id) sidecar's own threshold \(lr.applied) is lowered to \(p.maxthreshold) (privacy.privacy_filter_threshold is unset)";
+  if(lh.iscompleted(again.status) && (str.len(again.applied)==0 || asnumber(again.applied)>ceiling)){
+    <$orgconsult{result:lh.failedbecause(f;"the privacy-filter sidecar did not apply the threshold \(p.maxthreshold) that \(h)'s max_confidence_threshold requires");note:note}
+  }el{};
+  <$orgconsult{result:again;note:note}
 };
 
 (* Why the policy refuses a run made with registry reg, whose layers ended in states (one per

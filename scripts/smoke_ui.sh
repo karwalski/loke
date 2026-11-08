@@ -112,6 +112,22 @@ if [ -z "${UI_CHECKS:-}" ]; then
     fi
   fi
 fi
+# F3b.8 (2): the organisation policy's violations on the governance page. A loke.policy.json
+# that requires the privacy filter (which this loke does not enable) refuses two requests; the
+# page must show the two violations and the one de-duplicated alert, seen twice, as loke's
+# /api/layermetrics answers them. The policy is removed again before anything else runs.
+if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then
+  UIPOLICY="$WORK/lk/home/.loke/loke.policy.json"
+  printf '{"required_layers":["openai-privacy-filter"]}\n' > "$UIPOLICY"
+  for _ in 1 2; do
+    curl -s -o /dev/null -m 20 -X POST -H 'Content-Type: application/json' \
+      -d '{"fallback_reason":"user_choice","fallback_selected_by":"user","text":"please write to ui.policy@example.com"}' \
+      http://127.0.0.1:11430/api/pipeline
+  done
+  rm -f "$UIPOLICY"
+  node "$ROOT/scripts/lib/ui_check.mjs" "http://127.0.0.1:11432/governance" "$ROOT/tests/ui/orgpolicy_f3b8.json"
+  rc=$?
+fi
 # F3b.9: loke's layer comparison panel, against the layers loke serves here (regex in process,
 # NER on the stand-in Ollama, Presidio not running, so unavailable).
 if [ "$rc" -eq 0 ] && [ -z "${UI_CHECKS:-}" ]; then

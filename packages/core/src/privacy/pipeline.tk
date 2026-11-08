@@ -22,6 +22,7 @@ i=fm:core.privacy.filtermetrics;
 i=vocab:core.privacy.entityvocab;
 i=alert:core.governance.alert;
 i=op:core.privacy.orgpolicy;
+i=al:core.governance.alertledger;
 i=mr:core.privacy.modelregistry;
 
 (* F3b.1. The pipeline's layers are a filter registry (core.privacy.filterregistry): which
@@ -523,11 +524,13 @@ f=coveragealert(msg:str):bool{
 };
 
 (* F3b.8. The governance alerts for the organisation policy: a refusal (critical, logged as an
-   error) and the settings it overrode (warn). Policy values, layer ids and setting names only. *)
-f=orgpolicyalertkind():str{ <"privacy_org_policy" };
+   error) and the settings it overrode (warn). Policy values, layer ids and setting names only.
+   F3b.8 (6): de-duplicated by core.governance.alertledger, because a standing policy raises the
+   same alert on every run: sent once an hour while it recurs, every occurrence counted. *)
+f=orgpolicyalertkind():str{ <op.alertkind() };
 
 f=orgpolicyalert(severity:str;msg:str):bool{
-  <alert.send(alert.defaultconfig();alert.makealert(orgpolicyalertkind();severity;"privacy organisation policy: \(msg)"))
+  <al.raise(orgpolicyalertkind();severity;"privacy organisation policy: \(msg)")
 };
 
 (* F3b.8. ,"org_policy_overrides":[...] for a reply, or "" when the policy overrode nothing. *)
@@ -607,12 +610,19 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     log.warn("\(op.header()): \(policy.notes.get(pi))";"pipeline";requestid)
   };
   let reg=applied.registry;
+  (* F3b.8 (7). The settings the policy overrode: apply()'s, and a sidecar default it lowered. *)
+  let policynotes=mut.policy.notes;
   lp(let li=0;li<reg.filters.len;li=li+1){
     let layer:$privacyfilter=reg.filters.get(li);
     (* F3b.10. Timed with the millisecond clock around the whole call, probe included. *)
     let began=t.nowms();
-    let lr:$layerresult=lh.consult(layer;text);
+    let oc:$orgconsult=op.consult(policy;reg;layer;text);
+    let lr:$layerresult=oc.result;
     let tookms=t.nowms()-began;
+    if(str.len(oc.note)>0){
+      policynotes=policynotes.push(oc.note);
+      log.warn("\(op.header()): \(oc.note)";"pipeline";requestid)
+    }el{};
     let st:$layerstatus=lr.status;
     states=states.push(st);
     (* F3b.2. Only the detections the layer's threshold and entity filter accept count; a
@@ -665,7 +675,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
      a required layer that did not scan, or too few masking layers. *)
   let policyerror=op.refusal(policy;reg;states;voters);
   if(str.len(policyerror)>0){ orgpolicyalert("critical";"\(policyerror); the request is refused") }el{};
-  if(policy.notes.len>0){ orgpolicyalert("warn";"\(op.header()) overrode this configuration: \(str.join(lh.listsep();policy.notes))") }el{};
+  if(policynotes.len>0){ orgpolicyalert("warn";"\(op.header()) overrode this configuration: \(str.join(lh.listsep();policynotes))") }el{};
 
   (* F3b.5. A routed entity type is accepted only from the layers its route names; with no
      route this returns the detections as they are. *)
@@ -776,7 +786,7 @@ f=run(text:str;basesystemprompt:str;config:$pipelineconfig):$pipelinerun{
     routingnotes:routed.notes;
     uncovered:uncovered;
     policyerror:policyerror;
-    policynotes:policy.notes;
+    policynotes:policynotes;
     policyraisedfrom:policy.raisedfrom
   }
 };

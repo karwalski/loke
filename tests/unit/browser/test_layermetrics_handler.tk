@@ -15,6 +15,8 @@ i=lmx:core.audit.layermetrics;
 i=fm:core.privacy.filtermetrics;
 i=cn:core.privacy.consensus;
 i=h:page.api.layermetrics;
+i=audit:core.storage.audit;
+i=al:core.governance.alertledger;
 
 (* F3b.10 — GET /api/layermetrics, which moke's governance page shows, through metricsjson,
    the body get() answers with (T-16). Rows are written by core.audit.layermetrics.record,
@@ -74,7 +76,7 @@ f=main():i64{
 
   (* ── No rows: no figure ───────────────────────────────────────────────────── *)
   let empty=h.metricsjson();
-  if(t.asserteq(empty;"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"since_ms\":0,\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[]}";"with no request recorded the body says recorded false, with no agreement figure and no rows")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(empty;"{\"measured\":true,\"recorded\":false,\"period\":\"all\",\"since_ms\":0,\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[],\"org_policy\":{\"violations\":0,\"overrides\":0,\"alerts\":[]}}";"with no request recorded the body says recorded false, with no agreement figure and no rows, and no organisation policy action")){pass=pass+1}el{fail=fail+1};
 
   (* ── Two requests ─────────────────────────────────────────────────────────── *)
   let voters=@("regex";"ner");
@@ -138,7 +140,28 @@ f=main():i64{
   let cleared=mt db.exec("DELETE FROM privacy_layer_metrics WHERE created_at>=\(s24)";@()) { $ok:v true; $err:e false };
   if(t.assert(cleared;"the last day's rows are deleted")){pass=pass+1}el{fail=fail+1};
   let jempty=h.metricsjsonfor("24h");
-  if(t.assert(str.startswith(jempty;"{\"measured\":true,\"recorded\":false,\"period\":\"24h\",\"since_ms\":") && str.contains(jempty;"\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[]}");"a window with no request says recorded false and gives no figure (\(jempty))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(jempty;"{\"measured\":true,\"recorded\":false,\"period\":\"24h\",\"since_ms\":") && str.contains(jempty;"\"requests\":0,\"by_layer_day\":[],\"agreement\":null,\"by_type\":[],\"latency\":[],\"org_policy\":{");"a window with no request says recorded false and gives no figure (\(jempty))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── F3b.8 (2): the organisation policy's violations and overrides ──────────── *)
+  (* Counted from the audit trail's org_policy_* rows, which every caller writes when the
+     policy refuses or overrides a run, and listed from the de-duplicated policy alerts
+     (core.governance.alertledger), over the same window. Shown even when no layer metrics
+     are in the window: a policy refusal is a fact about the trail, not about the layers. *)
+  let pev=$auditevent{eventtype:"org_policy_violation";usecase:"browser-chat";modelid:"none";provider:"none";sensitivity:"public";risktier:"low";tokensin:0;tokensout:0;costusd:0.0;durationms:0 as u32;correlationid:"op-1"};
+  let ovr=$auditevent{eventtype:"org_policy_override";usecase:"browser-chat";modelid:"none";provider:"none";sensitivity:"public";risktier:"low";tokensin:0;tokensout:0;costusd:0.0;durationms:0 as u32;correlationid:"op-1"};
+  if(t.assert(audit.insertevent(store;pev) && audit.insertevent(store;ovr);"a refusal and an override are audited on op-1")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.insertevent(store;$auditevent{eventtype:"org_policy_violation";usecase:"cli-ask";modelid:"none";provider:"none";sensitivity:"public";risktier:"low";tokensin:0;tokensout:0;costusd:0.0;durationms:0 as u32;correlationid:"op-2"});"and a second refusal on op-2")){pass=pass+1}el{fail=fail+1};
+  let refusal="privacy organisation policy: organisation policy loke.policy.json requires the presidio privacy layer, and it did not scan this request: Presidio sidecar unreachable; the request is refused";
+  al.raise("privacy_org_policy";"critical";refusal);
+  al.raise("privacy_org_policy";"critical";refusal);
+  let eightdays=691200000;
+  al.raiseat("privacy_org_policy";"warn";"privacy organisation policy: an old override";sdb.nowms()-eightdays;al.windowms());
+  let ja=h.metricsjsonfor("all");
+  if(t.assert(validjson(ja) && str.contains(ja;"\"org_policy\":{\"violations\":2,\"overrides\":1,\"alerts\":[{\"severity\":\"critical\",\"message\":\"\(refusal)\",\"occurrences\":2,\"first_ms\":");"all time: two refusals and one override from the trail, and the refusal's alert seen twice, newest first (\(ja))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ja;"{\"severity\":\"warn\",\"message\":\"privacy organisation policy: an old override\",\"occurrences\":1,");"and the alert of eight days ago")){pass=pass+1}el{fail=fail+1};
+  let jd=h.metricsjsonfor("24h");
+  if(t.assert(str.contains(jd;"\"recorded\":false,") && str.contains(jd;"\"org_policy\":{\"violations\":2,\"overrides\":1,\"alerts\":[{\"severity\":\"critical\"") && !str.contains(jd;"an old override");"24h: no layer metrics, and still the policy's two refusals and override; the old alert is out of the window (\(jd))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(h.metricsjsonfor("7d");"\"alerts\":[{\"severity\":\"critical\"") && !str.contains(h.metricsjsonfor("7d");"an old override") && str.contains(h.metricsjsonfor("30d");"an old override");"7d leaves it out, 30d has it")){pass=pass+1}el{fail=fail+1};
 
   file.delete(str.concat(storedir();"/loke.db"));
   <fail

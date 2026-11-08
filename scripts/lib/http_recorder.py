@@ -131,13 +131,18 @@ PF_SPANS = [{"type": "private_person", "value": "Jane Citizen", "start": 0, "end
             {"type": "private_date", "value": "Tuesday", "start": 20, "end": 27, "confidence": 0.4, "placeholder": "[DATE_1]"}]
 
 
+# F3b.8 (7): the sidecar's own default threshold, applied when a request names none, as
+# server.py's DEFAULT_THRESHOLD is (models.json's confidence_threshold, or LOKE_PF_THRESHOLD).
+PF_DEFAULT = float(os.environ.get("RECORDER_PF_DEFAULT_THRESHOLD", "0") or 0)
+
+
 def pf_answer(body, path):
     try:
         req = json.loads(body) if body else {}
     except ValueError:
         req = {}
     thr = req.get("threshold")
-    thr = 0.0 if thr is None else min(max(float(thr), 0.0), 1.0)
+    thr = PF_DEFAULT if thr is None else min(max(float(thr), 0.0), 1.0)
     kept = [e for e in PF_SPANS if thr <= 0.0 or e["confidence"] >= thr]
     out = {"count": len(kept), "threshold": thr, "suppressed_below_threshold": len(PF_SPANS) - len(kept)}
     if path == "/detect":

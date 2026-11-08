@@ -364,7 +364,7 @@ masks at least what the configuration masks, or stops a layer being sent text:
 | `minimum_layers` | 0 to 4. At least this many layers must complete and mask (vote); a detect-only layer does not count. | `organisation policy loke.policy.json requires at least <n> privacy layers to mask each request, and <m> did` |
 | `banned_layers` | The layer is switched off before the run, so it is sent nothing. If `config.toml` (or the default, for `ner` and `presidio`) enables it, **every request is refused** until it is switched off in `[[privacy.layers]]`: dropping it quietly would mask less than the configuration asks for. `config.toml` cannot re-enable it. `regex` cannot be banned. | `organisation policy loke.policy.json bans the <id> privacy layer, and this configuration enables it (switch it off in config.toml)` |
 | `locked_consensus` | Only `most-restrictive`, a floor: a configured strategy that is anything else is raised to it, never silently. The other strategies are not ordered by strictness, so locking one could mask less than the user's own choice; a policy naming one is refused as malformed. | note `privacy.consensus_strategy <s> is raised to most-restrictive` |
-| `max_confidence_threshold` | 0 to 1. **Clamped, not refused**: an enabled layer's `confidence_threshold`, a set `privacy.privacy_filter_threshold` (with the sidecar on) and, under `confidence-weighted`, `privacy.consensus_threshold` above it are lowered to it, so more is accepted and masked. A lower threshold is never raised. The privacy-filter sidecar's own default, used when `privacy_filter_threshold` is unset, is not checked. | note `the <id> layer's confidence_threshold is lowered to <max>` (and the two `privacy.` forms) |
+| `max_confidence_threshold` | 0 to 1. **Clamped, not refused**: an enabled layer's `confidence_threshold`, a set `privacy.privacy_filter_threshold` (with the sidecar on) and, under `confidence-weighted`, `privacy.consensus_threshold` above it are lowered to it, so more is accepted and masked. A lower threshold is never raised. With `privacy_filter_threshold` unset, loke sends the sidecar no threshold and it applies its own default (`models.json`, or `LOKE_PF_THRESHOLD`); the sidecar reports what it applied, and when that is above the ceiling the scan is made again at the ceiling (`orgpolicy.consult`, F3b.8 (7)). A sidecar that reports no threshold, or does not apply the ceiling when asked, is treated as a failed scan, so a policy that requires it refuses. | note `the <id> layer's confidence_threshold is lowered to <max>` (and the two `privacy.` forms); `the openai-privacy-filter sidecar's own threshold <t> is lowered to <max> (privacy.privacy_filter_threshold is unset)` |
 | `max_session_cell_budget`, `max_session_predicate_repeat_limit`, `max_installation_cell_budget`, `max_installation_predicate_repeat_limit` | NC1.14. Ceilings on the no-custody limits `config.toml`'s `[nocustody]` table sets (`docs/specifications/artifact-contract.md` §8.2), applied by `core.nocustody.bound` to every artifact run, not by the privacy pipeline. Each is a whole number from 0 to the contract's default (50 000 cells, 20 repeats); a ceiling above it is malformed and refuses the file. The limit in force is the lowest of the default, `config.toml` and the policy; an unset `config.toml` key takes the ceiling (an override). **A `config.toml` value above a ceiling is refused, not clamped** (unlike `max_confidence_threshold`): `core.nocustody.limits` already refuses a value above the contract's default rather than clamping it (NC1.10), and a ceiling is treated the same whoever sets it, so `config.toml` never says one budget while another is enforced. Every artifact run is then refused 503 `org_policy_violation`. | `nocustody.<key> = <n> in config.toml is above the ceiling of <m> that organisation policy loke.policy.json sets (<policy key>): ...`; note `nocustody.<key> is lowered from <n> to <m> by <policy key>` |
 | `enforced` | `false` leaves `config.toml` alone (the file must still be valid). Absent means `true`. | |
 | `description` | Ignored. | |
@@ -384,9 +384,19 @@ read refuses too"). A **missing** file is no policy: nothing changes, byte for b
 **Surfaced.** Every run the policy refuses raises a governance alert (`core.governance.alert`, kind
 `privacy_org_policy`, severity `critical`, logged as `governance alert: privacy organisation policy:
 <reason>; the request is refused`), and every run whose configuration it overrode raises one at `warn`
-naming each override. Both name layers, settings and policy values, never text. On `POST
-/api/pipeline` a refused request is audited as `org_policy_violation` as well as `privacy_refused`, and an
-overridden one as `org_policy_override`; the reply's `consensus` object carries `configured_strategy` and
+naming each override. Both name layers, settings and policy values, never text. **De-duplicated**
+(F3b.8 (6), `core.governance.alertledger`, table `governance_alert_ledger`, migration 44): an alert is
+sent the first time its severity and message are seen and then at most once an hour while it recurs;
+every occurrence is counted, with when it was first and last seen. What is de-duplicated is the alert,
+not the run: every refused run is still refused, audited and answered. When the ledger cannot be read or
+written the alert is sent (`test_org_policy_callers.tk`: "four runs under one standing refusal wrote ONE
+alert to loke.log", "an hour later the standing refusal is alerted again"; `scripts/smoke_e2e.sh`). The
+no-custody path's alerts (`core.nocustody.bound`, below) are not de-duplicated. A refused request is
+audited as `org_policy_violation` and an overridden one as `org_policy_override`, on its request id, by
+every caller: `POST /api/pipeline` (beside `privacy_refused`), `loke ask` (beside `privacy_refused`), the
+CLI proxy and the MCP broker (F3b.8 (4), `core.audit.hoprecord.orgpolicyaudit`;
+`test_org_policy_callers.tk`); the CLI proxy, `loke ask` and the broker also refuse naming the policy's
+reason. On `POST /api/pipeline` the reply's `consensus` object carries `configured_strategy` and
 `raised_by` when the floor raised the strategy, and `org_policy_overrides` lists the overrides. With no
 policy, none of these appears. For the no-custody ceilings (NC1.14), `POST /api/artifact` surfaces the
 same way: a refusal raises the same `privacy_org_policy` alert at `critical` (`...; the artifact run is
@@ -394,7 +404,25 @@ refused`) and a run whose limits a ceiling lowered one at `warn` (`organisation 
 overrode the no-custody limits in config.toml: <notes>`), and each writes a row to the artifact ledger
 that route writes, `nc_artifact_runs`: verdict `refused` with code `org_policy_violation`, or verdict
 `org_policy_override`, with no op, fingerprint or probe key and nothing released (`test_policy_limits.tk`,
-`scripts/smoke_serve.sh`). Measured by `scripts/smoke_e2e.sh` against the built binary:
+`scripts/smoke_serve.sh`).
+
+**On the governance page** (F3b.8 (2)). `GET /api/layermetrics` answers, in every window, an
+`org_policy` object: `violations` and `overrides`, the counts of those audit rows in the window, and
+`alerts`, the policy's de-duplicated alerts seen in it (severity, message, occurrences, first and last
+time). moke's governance page shows it under the privacy layer metrics, whether or not any layer
+metrics are in the window, and "No organisation policy violation or override recorded" for none. Tests:
+`tests/unit/browser/test_layermetrics_handler.tk`, `scripts/lib/evaluate_check.py` in
+`scripts/smoke_serve.sh` (judged against the database file), `tests/ui/layermetrics_f3b10_empty.json` and
+`tests/ui/orgpolicy_f3b8.json` in `scripts/smoke_ui.sh` (two requests refused by a real policy file).
+
+**`loke privacy evaluate` applies it** (F3b.8 (5)): `core.privacy.comparison.compare` applies the policy
+as `pipeline.run` does (a banned layer off and sent nothing, the consensus floor, thresholds clamped, the
+sidecar's default checked) and reports the refusal the pipeline would make (`... , so the pipeline
+refuses this text`) and each override; the evaluation then exits 1, and `POST /api/evaluate` answers
+`org_policy_error` and `org_policy_overrides` (`test_org_policy_callers.tk`). The `/evaluate` page does
+not display them.
+
+Measured by `scripts/smoke_e2e.sh` against the built binary:
 
 ```
 organisation policy loke.policy.json requires the openai-privacy-filter privacy layer, and it did not scan this request: privacy-filter sidecar unreachable
@@ -402,10 +430,10 @@ organisation policy loke.policy.json cannot be applied: minimum_layers must be a
 ```
 
 **Not built.** The file is in the user's own loke directory, which the user can edit or delete: nothing
-makes it tamper-proof. It is not distributed by the compliance engine (A3), and the governance dashboard
-(G4) does not show violations; they are in the alert log, the audit trail and the reply. The alerts are not
-de-duplicated across runs. The CLI proxy, `loke ask` and `mcp-broker` refuse with the policy's reason
-like any other refusal, but write no `org_policy_*` audit row: only `POST /api/pipeline` does.
+makes it tamper-proof. It is not distributed by the compliance engine (A3). The governance page shows
+the policy's alerts with the reasons they name, and counts of the audit rows; the rows themselves hold no
+reason. The CLI proxy and the MCP broker write the `org_policy_*` rows but, as before, no
+`privacy_refused` row and no per-layer metrics.
 
 ## Registered models (`loke privacy add-model`, F3b.7)
 
@@ -840,9 +868,9 @@ request, not that no harm follows. Definitions, and the only figures this projec
   own label mapping, to placeholder prefixes rather than loke types, so a second copy of each
   registration there could only drift from `privacy-models.json`, which is the one the pipeline
   enforces); and a check of the model's output beyond its `/health` naming the task.
-- **Organisation policy distribution and display (F3b.8).** The policy is enforced (above), but it is
-  not distributed by the compliance engine (A3), not protected from the user editing it, and not shown
-  on the governance dashboard (G4).
+- **Organisation policy distribution (F3b.8).** The policy is enforced and its violations are on the
+  governance page (above), but it is not distributed by the compliance engine (A3) and not protected
+  from the user editing it.
 - **Settings UI** for routing or consensus: they are set in `config.toml` only. The layers and the
   registered models have one (see [Settings UI](#settings-ui-f3b2-f3b7)).
 - **Privacy-layer settings in the policy presets.** The GDPR, HIPAA, Australian Privacy Act and other
@@ -898,6 +926,8 @@ What **does** change for an existing deployment, with no configuration:
   `entity_routing_notes`). A client that rejects unknown fields would notice.
 - The database gains the `privacy_layer_metrics` table and `audit_log.layer_digest` (migrations 41 to 43,
   applied when the store is opened), and a refused request is now audited as `privacy_refused`.
+- The database gains `governance_alert_ledger` (migration 44, F3b.8), which de-duplicates the
+  organisation policy's governance alerts; with no `loke.policy.json` it stays empty.
 
 ### Opting in
 

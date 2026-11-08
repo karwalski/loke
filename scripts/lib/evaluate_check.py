@@ -164,6 +164,17 @@ def layerwindow(base, dbpath, window, span_ms):
                  "p99_ms": percentile(v, 99)} for k, v in sorted(lat.items())]
     ok(d.get("latency") == want_lat, "window %s: each layer's latency p50/p95/p99 is the nearest rank of the database's "
        "completed, timed scans (%d layer(s))" % (window, len(want_lat)), "%s vs %s" % (d.get("latency"), want_lat))
+    # F3b.8 (2): the organisation policy's violations and overrides, from the audit trail.
+    op = d.get("org_policy") or {}
+    nv = con.execute("SELECT COUNT(*) FROM audit_log WHERE event_type='org_policy_violation' AND created_at>=?", (since,)).fetchone()[0]
+    no = con.execute("SELECT COUNT(*) FROM audit_log WHERE event_type='org_policy_override' AND created_at>=?", (since,)).fetchone()[0]
+    try:
+        na = con.execute("SELECT COUNT(*) FROM governance_alert_ledger WHERE kind='privacy_org_policy' AND last_at>=?", (since,)).fetchone()[0]
+    except sqlite3.Error:
+        na = -1
+    ok(op.get("violations") == nv and op.get("overrides") == no and len(op.get("alerts", [])) == min(na, 50),
+       "window %s: org_policy counts the database's org_policy_violation (%d) and org_policy_override (%d) rows and "
+       "lists its %d policy alert(s)" % (window, nv, no, na), raw[:300])
 
 
 def layermetrics(base, dbpath):

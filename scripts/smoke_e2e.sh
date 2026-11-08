@@ -708,6 +708,24 @@ else
     if [ "${OPALERTS_AFTER:-0}" -gt "${OPALERTS_BEFORE:-0}" ] && ! grep -q "$PFNAME" "$WORK/lk/home/.loke/loke.log"; then
       echo "  ok   F3b.8: a governance alert names the required layer, and loke.log holds no name"
     else echo "  FAIL F3b.8: no policy alert in loke.log (before ${OPALERTS_BEFORE:-0}, after ${OPALERTS_AFTER:-0}), or the log holds the name" >&2; fail=1; fi
+    # F3b.8 (6): the same refusal again is refused and audited again, but not alerted again
+    # within the hour; the ledger counts it, and GET /api/layermetrics (the governance page's
+    # source) shows the violations and the one alert with its occurrences.
+    V_BEFORE=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='org_policy_violation'")
+    pipe_post "summarise what $PFNAME asked about the invoice" ""
+    judge "F3b.8: the same request again is refused again" 503 '"refused":true'
+    OPALERTS_AGAIN=$(grep -cF "$OPALERT" "$WORK/lk/home/.loke/loke.log" 2>/dev/null)
+    V_AFTER=$(dl "SELECT COUNT() FROM audit_log WHERE event_type='org_policy_violation'")
+    OCC=$(dl "SELECT occurrences FROM governance_alert_ledger WHERE kind='privacy_org_policy' AND severity='critical' AND message LIKE 'privacy organisation policy: organisation policy loke.policy.json requires the openai-privacy-filter%'")
+    if [ "$OPALERTS_AGAIN" = "$OPALERTS_AFTER" ] && [ "$V_AFTER" = "$((V_BEFORE + 1))" ] && [ "${OCC:-0}" -ge 2 ]; then
+      echo "  ok   F3b.8: it is audited again (org_policy_violation $V_BEFORE -> $V_AFTER) but not alerted again; the ledger counts $OCC occurrences"
+    else echo "  FAIL F3b.8: the repeat refusal: alerts ${OPALERTS_AFTER:-0} -> ${OPALERTS_AGAIN:-0}, violation rows $V_BEFORE -> $V_AFTER, occurrences '${OCC:-}'" >&2; fail=1; fi
+    LMOP=$(curl -s -m 20 http://127.0.0.1:11430/api/layermetrics?window=24h | python3 -c 'import json,sys
+d=json.load(sys.stdin)["org_policy"]
+a=[x for x in d["alerts"] if x["severity"]=="critical" and "requires the openai-privacy-filter" in x["message"]]
+print("%d/%d" % (d["violations"], a[0]["occurrences"] if a else -1))' 2>/dev/null)
+    if [ "$LMOP" = "$V_AFTER/$OCC" ]; then echo "  ok   F3b.8: /api/layermetrics reports the $V_AFTER violation(s) from the audit trail and the alert's $OCC occurrences from the ledger"
+    else echo "  FAIL F3b.8: /api/layermetrics org_policy says '$LMOP', the database $V_AFTER/$OCC" >&2; fail=1; fi
     printf '{"minimum_layers":"two"}\n' > "$POLICY"
     pipe_post "what is the capital of France" ""
     judge "F3b.8: a malformed policy refuses even a request with no PII, naming the fault" 503 '"error":"organisation policy loke.policy.json cannot be applied: minimum_layers must be a whole number from 0 to 4","refused":true'

@@ -1,0 +1,103 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=core.governance.alertledger;
+
+i=str:std.str;
+i=db:std.db;
+i=s:core.storage.db;
+i=alert:core.governance.alert;
+
+(* F3b.8 (6). Governance alerts that a condition raises on every run, de-duplicated.
+
+   core.privacy.pipeline raises a `privacy_org_policy` alert whenever the organisation policy
+   refuses a run or overrides its configuration, and the same policy over the same
+   configuration does that on every request: before this module, a thousand requests under a
+   standing override wrote a thousand identical alerts. raise() writes an alert the first time
+   its kind, severity and message are seen, and then at most once an hour (windowms) while
+   they recur; every occurrence is counted in governance_alert_ledger (migration 44), with the
+   first and last time it was seen and the last time it was sent, so a repeat is counted and
+   shown (core.audit.layermetricsreport, the governance page), never lost.
+
+   What is de-duplicated is the ALERT, not what the run does: a refused run is still refused,
+   audited and answered with its reason every time.
+
+   FAILS TOWARDS ALERTING. When the ledger cannot be read or written (no store open, the table
+   missing, a write refused), the alert is sent, as it was before this module. A repeat is
+   suppressed only when the ledger says it was sent inside the window AND the occurrence was
+   counted.
+
+   WHAT A ROW HOLDS: the alert's kind, severity and message. The callers' messages name layers,
+   settings and policy values, never text a user sent (core.privacy.orgpolicy); a caller whose
+   message could hold one must not use this. *)
+
+t=$alertseen{
+  kind:str;
+  severity:str;
+  message:str;
+  occurrences:i64;
+  firstms:i64;
+  lastms:i64;
+  sentms:i64
+};
+
+(* An identical alert is sent at most once in this many milliseconds: one hour. *)
+f=windowms():i64{ <3600000 };
+
+f=exec(sql:str;params:@str):bool{
+  <mt db.exec(sql;params) {
+    $ok:v true;
+    $err:e false
+  }
+};
+
+(* When the alert was last sent, or -1 when the ledger has no row for it or cannot be read. *)
+f=sentat(kind:str;severity:str;message:str):i64{
+  <s.scalari64("SELECT sent_at AS n FROM governance_alert_ledger WHERE kind=? AND severity=? AND message=?";@(kind;severity;message);"n";0-1)
+};
+
+(* Counts an occurrence of an alert sent less than `window` ago. False when it could not be
+   counted, and the caller then sends the alert. *)
+f=counted(kind:str;severity:str;message:str;nowms:i64):bool{
+  <exec("UPDATE governance_alert_ledger SET occurrences=occurrences+1, last_at=? WHERE kind=? AND severity=? AND message=?";@(str.fromi64(nowms);kind;severity;message))
+};
+
+(* Records an occurrence that is being sent now. Its result is not consulted: an alert that
+   could not be recorded is sent all the same. *)
+f=recordsent(kind:str;severity:str;message:str;nowms:i64):bool{
+  let now=str.fromi64(nowms);
+  <exec("INSERT INTO governance_alert_ledger (kind,severity,message,occurrences,first_at,last_at,sent_at) VALUES (?,?,?,1,?,?,?) ON CONFLICT(kind,severity,message) DO UPDATE SET occurrences=occurrences+1, last_at=excluded.last_at, sent_at=excluded.sent_at";@(kind;severity;message;now;now;now))
+};
+
+(* The alert at time nowms, under a window of `window` ms: true when it was SENT, false when it
+   was a repeat inside the window and was counted instead. *)
+f=raiseat(kind:str;severity:str;message:str;nowms:i64;window:i64):bool{
+  let sent=sentat(kind;severity;message);
+  if(sent>=0 && nowms-sent<window){
+    if(counted(kind;severity;message;nowms)){ <false }el{}
+  }el{};
+  recordsent(kind;severity;message;nowms);
+  alert.send(alert.defaultconfig();alert.makealert(kind;severity;message));
+  <true
+};
+
+f=raise(kind:str;severity:str;message:str):bool{
+  <raiseat(kind;severity;message;db.nowms();windowms())
+};
+
+f=fromrows(rows:@$row):@$alertseen{
+  let out=mut.@($alertseen);
+  lp(let i=0;i<rows.len;i=i+1){
+    let r:$row=rows.get(i);
+    out=out.push($alertseen{kind:s.rowstr(r;"kind");severity:s.rowstr(r;"severity");message:s.rowstr(r;"message");occurrences:s.rowi64(r;"occurrences");firstms:s.rowi64(r;"first_at");lastms:s.rowi64(r;"last_at");sentms:s.rowi64(r;"sent_at")})
+  };
+  <out
+};
+
+(* The alerts of `kind` seen at or after `sincems`, the most recently seen first, at most 50. *)
+f=seensince(kind:str;sincems:i64):@$alertseen{
+  <mt db.many("SELECT kind, severity, message, occurrences, first_at, last_at, sent_at FROM governance_alert_ledger WHERE kind=? AND last_at>=? ORDER BY last_at DESC, severity ASC, message ASC LIMIT 50";@(kind;str.fromi64(sincems))) {
+    $ok:rows fromrows(rows);
+    $err:e @()
+  }
+};
