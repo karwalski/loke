@@ -1,0 +1,205 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=tests.unit.audit.testrefusalauditcallers;
+
+i=t:std.test;
+i=str:std.str;
+i=db:std.db;
+i=file:std.file;
+i=process:std.process;
+i=sh:shared.types;
+i=sdb:core.storage.db;
+i=audit:core.storage.audit;
+i=pl:core.privacy.pipeline;
+i=fr:core.privacy.filterregistry;
+i=disp:core.providers.dispatcher;
+i=px:cli.proxy;
+i=bproxy:mcpbroker.proxy;
+i=reg:mcpbroker.registry;
+
+(* F3b.18, against the production callers, the real migrations and the real audit chain,
+   under the throwaway HOME's loke directory with no loke.policy.json.
+
+   The CLI proxy (cli.proxy.handlerequestwith) and the MCP broker
+   (mcpbroker.proxy.proxycallwith, through proxyhandleentrywith) each record the run's
+   per-layer metrics on its request id (core.audit.hoprecord.recordlayers) and, when the run
+   is not safe to forward, a privacy_refused audit row on the same id
+   (core.audit.hoprecord.privacyrefused), as POST /api/pipeline and `loke ask` do. Asserted
+   per caller: a veto refuses the request; a new privacy_refused row exists on the run's
+   request id; the metrics rows on that id record the veto; the row binds a sha256 of exactly
+   those rows (layer_digest, recomputed by verifychain); the chain verifies; a run that is
+   forwarded records its metrics too and has no privacy_refused row; no metrics row, audit
+   column or reply holds the planted address or its sha256. The broker's own refusal, a
+   name found across two argument values (scripts/lib/http_recorder.py standing in for
+   Presidio, which reports a PERSON wherever "Jane" and "Citizen" stand together), is
+   audited the same way.
+
+   Only the regex layer is on (NER and Presidio are off in the registry), the dispatcher has
+   no key and an Ollama on port 9, and the broker's upstream is on port 9, so nothing is sent
+   anywhere: a forwarded request fails upstream. *)
+
+f=dead():str{ <"http://127.0.0.1:9" };
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=firstcol(rs:@$row;c:str):str{
+  if(rs.len==0){ <"<none>" }el{ <db.rowstr(rs.get(0);c) }
+};
+
+f=textof(sql:str;params:@str):str{
+  <mt db.many(sql;params) {
+    $ok:rs firstcol(rs;"v");
+    $err:e "<error>"
+  }
+};
+
+f=rows(eventtype:str):i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE event_type=?";@(eventtype);"n";0-1)
+};
+
+f=runs():i64{
+  <sdb.scalari64("SELECT COUNT() AS n FROM privacy_layer_metrics WHERE kind='consensus'";@();"n";0-1)
+};
+
+(* The newest privacy_refused row's request id. *)
+f=lastrefused():str{
+  <textof("SELECT correlation_id AS v FROM audit_log WHERE event_type='privacy_refused' ORDER BY created_at DESC, rowid DESC LIMIT 1";@())
+};
+
+(* The newest run's request id, from its consensus metrics row. *)
+f=lastrun():str{
+  <textof("SELECT correlation_id AS v FROM privacy_layer_metrics WHERE kind='consensus' ORDER BY rowid DESC LIMIT 1";@())
+};
+
+f=regexonly():$pipelineconfig{
+  let c=pl.newconfig(dead();dead());
+  <pl.withlayer(pl.withlayer(c;fr.nerid();false);fr.presidioid();false)
+};
+
+f=vetocfg():$pipelineconfig{
+  <pl.withlayerconfig(regexonly();"[[privacy.layers]]\nid = \"regex\"\nmode = \"veto\"\n")
+};
+
+f=everymetricscolumn():str{
+  <textof("SELECT COALESCE(group_concat(correlation_id||'|'||kind||'|'||layer_id||'|'||entity_type||'|'||state||'|'||mode||'|'||detections||'|'||strategy||'|'||vetoed_by||'|'||voters||'|'||routing_notes, char(10)),'') AS v FROM privacy_layer_metrics";@())
+};
+
+f=everyauditcolumn():str{
+  <textof("SELECT COALESCE(group_concat(id||'|'||event_type||'|'||use_case||'|'||model_id||'|'||provider||'|'||sensitivity||'|'||risk_tier||'|'||correlation_id||'|'||hash||'|'||COALESCE(layer_digest,''), char(10)),'') AS v FROM audit_log";@())
+};
+
+f=holdsnone(hay:str;v:str):bool{
+  <!str.contains(hay;v) && !str.contains(hay;audit.sha256hex(v))
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let store=mt sdb.openstore(sh.lokedir()) { $ok:s 1; $err:e 0 };
+  if(t.assert(store!=0;"the store in the test HOME's loke directory opens")){pass=pass+1}el{fail=fail+1};
+  let mail="f3b18.planted@example.com";
+  let none=disp.new($apikeys{anthropic:"";openai:""};dead());
+  let pcfg=px.defaultconfig("ollama");
+  let body="{\"prompt\":\"please write to \(mail) today\"}";
+  let notools:@str=@();
+  let entry=$serverentry{ name:"rec"; host:"127.0.0.1"; port:9 as i32; toolprefix:"rec_"; healthy:true; lastchecked:0; tools:notools };
+  let registry=reg.register(reg.newregistry();entry);
+  let args="{\"a\":\"please write to \(mail) today\"}";
+
+  (* ── the CLI proxy: a veto ────────────────────────────────────────────────────── *)
+  let r0=rows("privacy_refused");
+  let n0=runs();
+  let pans=px.handlerequestwith(body;pcfg;vetocfg();store;none);
+  if(t.assert(str.contains(pans;"\"error\":\"blocked:") && !str.contains(pans;mail);"the CLI proxy refuses the vetoed prompt, with no text (\(pans))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("privacy_refused")==r0+1;"the CLI proxy writes a privacy_refused row")){pass=pass+1}el{fail=fail+1};
+  let pcid=lastrefused();
+  if(t.assert(runs()==n0+1 && str.eq(lastrun();pcid);"the CLI proxy records the run's per-layer metrics on the refused row's request id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT vetoed_by||' '||strategy AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='consensus'";@(pcid));"regex most-restrictive";"CLI proxy: the consensus row records the veto")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT state||' '||mode||' '||detections AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='layer' AND layer_id='regex'";@(pcid));"completed veto 1";"CLI proxy: the regex layer row: completed, in veto mode, one detection")){pass=pass+1}el{fail=fail+1};
+  let pdig=textof("SELECT COALESCE(layer_digest,'') AS v FROM audit_log WHERE correlation_id=? AND event_type='privacy_refused'";@(pcid));
+  if(t.assert(str.len(pdig)==64 && str.eq(pdig;audit.layerdigest(pcid));"CLI proxy: the privacy_refused row binds a sha256 of exactly the run's metrics rows")){pass=pass+1}el{fail=fail+1};
+  let v1=audit.verifychain(store);
+  if(t.assert(v1.ok;"CLI proxy: the chain verifies: \(audit.formatchainresult(v1))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the CLI proxy: a run it forwards ──────────────────────────────────────────── *)
+  let r1=rows("privacy_refused");
+  let n1=runs();
+  let fans=px.handlerequestwith(body;pcfg;regexonly();store;none);
+  if(t.asserteq(fans;"{\"error\":\"upstream failure\"}";"the CLI proxy forwards the masked prompt, and the dead upstream fails it")){pass=pass+1}el{fail=fail+1};
+  let fcid=lastrun();
+  if(t.assert(runs()==n1+1 && !str.eq(fcid;pcid);"the forwarded run's metrics are recorded, on a request id of its own")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("privacy_refused")==r1 && sdb.scalari64("SELECT COUNT() AS n FROM audit_log WHERE correlation_id=? AND event_type='privacy_refused'";@(fcid);"n";0-1)==0;"and no privacy_refused row is written for it")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT vetoed_by||'|'||masked AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='consensus'";@(fcid));"|1";"its consensus row: no veto, the address masked")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the MCP broker: a veto ───────────────────────────────────────────────────── *)
+  let r2=rows("privacy_refused");
+  let n2=runs();
+  let bans=bproxy.proxycallwith("rec_echo";args;registry;vetocfg();store);
+  if(t.assert(!bans.ok && str.contains(bans.responsebody;"Blocked") && !str.contains(bans.responsebody;mail);"the MCP broker refuses the vetoed call, with no argument (\(bans.responsebody))")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("privacy_refused")==r2+1;"the MCP broker writes a privacy_refused row")){pass=pass+1}el{fail=fail+1};
+  let bcid=lastrefused();
+  if(t.assert(runs()==n2+1 && str.eq(lastrun();bcid) && !str.eq(bcid;pcid);"the MCP broker records the run's per-layer metrics on the refused row's request id")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(textof("SELECT vetoed_by||' '||strategy AS v FROM privacy_layer_metrics WHERE correlation_id=? AND kind='consensus'";@(bcid));"regex most-restrictive";"MCP broker: the consensus row records the veto")){pass=pass+1}el{fail=fail+1};
+  let bdig=textof("SELECT COALESCE(layer_digest,'') AS v FROM audit_log WHERE correlation_id=? AND event_type='privacy_refused'";@(bcid));
+  if(t.assert(str.len(bdig)==64 && str.eq(bdig;audit.layerdigest(bcid));"MCP broker: the privacy_refused row binds a sha256 of exactly the run's metrics rows")){pass=pass+1}el{fail=fail+1};
+  let v2=audit.verifychain(store);
+  if(t.assert(v2.ok;"MCP broker: the chain verifies: \(audit.formatchainresult(v2))")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the MCP broker: a call it forwards ────────────────────────────────────────── *)
+  let r3=rows("privacy_refused");
+  let n3=runs();
+  let fb=bproxy.proxycallwith("rec_echo";args;registry;regexonly();store);
+  if(t.assert(!fb.ok && str.contains(fb.responsebody;"Upstream error");"the MCP broker forwards the masked call, and the dead upstream fails it (\(fb.responsebody))")){pass=pass+1}el{fail=fail+1};
+  let fbcid=lastrun();
+  if(t.assert(runs()==n3+1 && !str.eq(fbcid;bcid);"the forwarded call's metrics are recorded, on a request id of its own")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(rows("privacy_refused")==r3;"and no privacy_refused row is written for it")){pass=pass+1}el{fail=fail+1};
+
+  (* ── the MCP broker: a name across two argument values ─────────────────────────── *)
+  let hex:str=str.randhex(8);
+  let base="/tmp/loke_f3b18_\(hex)";
+  let rec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";"\(base).log";"\(base).port";"mcpecho")) { $ok:h h; $err:e 0 };
+  let rport=waitport("\(base).port");
+  if(t.assert(str.len(rport)>0;"the recorder standing in for Presidio came up")){pass=pass+1}el{fail=fail+1};
+  let withpresidio=pl.newconfig("http://127.0.0.1:\(rport)";dead());
+  let r5=rows("privacy_refused");
+  let n5=runs();
+  let sp=bproxy.proxycallwith("rec_echo";"{\"name\":[\"Jane\",\"Citizen\"]}";registry;withpresidio;store);
+  if(t.assert(!sp.ok && str.contains(sp.responsebody;"spans two argument values");"the MCP broker refuses a name spanning two values (\(sp.responsebody))")){pass=pass+1}el{fail=fail+1};
+  let scid=lastrefused();
+  if(t.assert(rows("privacy_refused")==r5+1 && runs()==n5+1 && str.eq(lastrun();scid);"MCP broker: the spanning refusal writes a privacy_refused row on the run's request id, with its metrics")){pass=pass+1}el{fail=fail+1};
+  let sdig=textof("SELECT COALESCE(layer_digest,'') AS v FROM audit_log WHERE correlation_id=? AND event_type='privacy_refused'";@(scid));
+  if(t.assert(str.len(sdig)==64 && str.eq(sdig;audit.layerdigest(scid));"MCP broker: and that row binds the run's metrics")){pass=pass+1}el{fail=fail+1};
+  if(rec!=0){ process.kill(rec); process.wait(rec); }el{};
+  if(t.assert(holdsnone(everymetricscolumn();"Jane Citizen") && holdsnone(everyauditcolumn();"Jane Citizen") && holdsnone(everyauditcolumn();"Jane\n\nCitizen");"no row holds the name or its sha256")){pass=pass+1}el{fail=fail+1};
+
+  (* ── with no store, nothing is written and the refusal stands ─────────────────── *)
+  let n4=runs();
+  let r4=rows("privacy_refused");
+  let nostore=bproxy.proxycallwith("rec_echo";args;registry;vetocfg();0);
+  if(t.assert(!nostore.ok && runs()==n4 && rows("privacy_refused")==r4;"with no store the broker still refuses, and writes nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* ── no value, anywhere ───────────────────────────────────────────────────────── *)
+  if(t.assert(holdsnone(everymetricscolumn();mail);"no metrics row holds the planted address or its sha256")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(holdsnone(everyauditcolumn();mail);"no audit_log column holds it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(audit.verifychain(store).ok;"the chain still verifies at the end")){pass=pass+1}el{fail=fail+1};
+
+  <fail
+};

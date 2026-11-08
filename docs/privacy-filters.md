@@ -432,8 +432,8 @@ organisation policy loke.policy.json cannot be applied: minimum_layers must be a
 **Not built.** The file is in the user's own loke directory, which the user can edit or delete: nothing
 makes it tamper-proof. It is not distributed by the compliance engine (A3). The governance page shows
 the policy's alerts with the reasons they name, and counts of the audit rows; the rows themselves hold no
-reason. The CLI proxy and the MCP broker write the `org_policy_*` rows but, as before, no
-`privacy_refused` row and no per-layer metrics.
+reason. The CLI proxy and the MCP broker write the `org_policy_*` rows, and since F3b.18 also each
+run's per-layer metrics and, for a refused request, a `privacy_refused` row on the same request id.
 
 ## Registered models (`loke privacy add-model`, F3b.7)
 
@@ -808,6 +808,16 @@ Where it goes:
   chain breaks at the request's audit row", "a metrics row is added", "no metrics row holds a planted
   value or its sha256"); `scripts/smoke_e2e.sh` (rows bound, no planted value or its sha256 in the
   database).
+- The CLI proxy (`cli.proxy.handlerequestwith`) and the MCP broker
+  (`mcpbroker.proxy.proxyhandleentrywith`) record the same rows on each run's request id
+  (`core.audit.hoprecord.recordlayers`, as `loke ask` does) before any audit row, and audit a run they
+  refuse as `privacy_refused` on that id (`core.audit.hoprecord.privacyrefused`), which binds the
+  digest: no layer scanned, an unplaced span, a veto, a layer error, the organisation policy's refusal,
+  and, in the broker, an entity found across two argument values (F3b.18). Neither writes an audit row
+  for a request it forwards, so a forwarded run's metrics are recorded but bound by no row. Test:
+  `tests/unit/audit/test_refusal_audit_callers.tk` ("the CLI proxy writes a privacy_refused row",
+  "MCP broker: the privacy_refused row binds a sha256 of exactly the run's metrics rows", "the chain
+  still verifies at the end").
 - `core.audit.layermetrics` aggregates the rows: detections by layer per UTC day, by entity type, and
   the agreement rate between layers over runs with two or more voters, the number of requests
   recorded, and per layer the p50, p95 and p99 of its scan time (`latencybylayer`: nearest rank over

@@ -213,21 +213,30 @@ f=proxyhandleentry(entry:$serverentry;toolname:str;argsjson:str;pipecfg:$pipelin
   <proxyhandleentrywith(entry;toolname;argsjson;pipecfg;0)
 };
 
-(* store is the opened store (1), or 0 for none: the org_policy_* rows (F3b.8 (4)) are written
-   to it, as /api/pipeline writes them. *)
+(* store is the opened store (1), or 0 for none: the run's per-layer metrics (F3b.18), the
+   org_policy_* rows (F3b.8 (4)) and a refusal's privacy_refused row (F3b.18) are written to
+   it, as /api/pipeline writes them. *)
 f=proxyhandleentrywith(entry:$serverentry;toolname:str;argsjson:str;pipecfg:$pipelineconfig;store:i64):$proxyresult{
   let segs=jx.segments(argsjson);
   if(segs.len==0){ <proxyrefused(toolname;entry;"the arguments are not readable JSON") }el{};
   let run=pipe.run(scantext(segs);"";pipecfg);
   let detected=run.result;
-  hr.orgpolicyaudit(store;hr.factsof(run;"mcp-broker";"none";"none");run);
+  let facts=hr.factsof(run;"mcp-broker";"none";"none");
+  (* F3b.18. The run's per-layer metrics first, on its request id, so every audit row below
+     binds them (F3b.10), as /api/pipeline and `loke ask` record them. *)
+  hr.recordlayers(store;run);
+  hr.orgpolicyaudit(store;facts;run);
   (* Fail closed: what the policy will not forward does not go upstream. The organisation
-     policy's refusal names its reason (layer ids and policy values, never an argument). *)
+     policy's refusal names its reason (layer ids and policy values, never an argument).
+     F3b.18: every refusal of a scanned call, including an entity spanning two values, is
+     audited as privacy_refused on the request id; the row carries no argument. *)
   if(pipe.issafetoforward(run)){}el{
+    hr.privacyrefused(store;facts);
     if(str.len(run.policyerror)>0){ <proxyrefused(toolname;entry;run.policyerror) }el{};
     <proxyblocked(toolname;entry)
   };
   if(spansvalues(segs;detected.entities)){
+    hr.privacyrefused(store;facts);
     <proxyrefused(toolname;entry;"a detected entity spans two argument values")
   }el{};
   <proxysendrequest(anonymiseargs(segs;detected.entities);toolname;entry;ph.mapfromentities(detected.entities))
