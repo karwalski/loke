@@ -438,6 +438,83 @@ its task. Tests: `tests/unit/privacy/test_model_registry.tk`, `tests/unit/privac
 are a recording stand-in in every test (`scripts/lib/http_recorder.py`, mode `tokenmodel`): no model is
 loaded by any test, so how well a real model detects anything is not measured here.
 
+### Adding a custom model, step by step
+
+Each `loke` command below was run on 2026-11-09 with the built `loke-cli` under a throwaway `HOME`, with
+`scripts/lib/http_recorder.py` in `tokenmodel` mode standing in for the sidecar (it answers `/health` as
+`recorder/token-model` and reports fixed spans on `/detect`); the output quoted is what it printed. Step 2
+was not run with a real model: no test or check here downloads or loads one, so step 2 is described from
+`packages/privacy-filter/server.py` only, apart from its `.onnx` refusal, which was run.
+
+1. **Choose a token-classification model and write its label mapping.** Note each label the model
+   reports (for `dslim/bert-base-NER`: `PER`, `LOC`, `ORG`, `MISC`) and the loke type each one is. A type
+   must be one a built-in layer reports (the list is in the refusal below); there is no type for `MISC`,
+   so leave it out: an unmapped label is still masked, under the label upper-cased.
+2. **Start a sidecar serving it**, one process per model, on a loopback port:
+
+       LOKE_PF_MODEL=dslim/bert-base-NER python3 packages/privacy-filter/server.py 11436
+
+   `LOKE_PF_MODEL` is an `id` in `packages/privacy-filter/models.json` or, if none matches, a hub id or
+   local directory loaded as given (through `transformers`, PyTorch or SafeTensors weights; a hub id is
+   downloaded by `transformers` on first start). `LOKE_PF_REVISION` pins the hub revision; unpinned, the
+   sidecar warns that results are not reproducible. Its `/health` then names the model (`model_id`) and
+   the task `token-classification`. An `.onnx` path is refused at start (`ERROR: ... is an ONNX model;
+   this sidecar loads only transformers token-classification models`, exit 2; run offline with
+   `HF_HUB_OFFLINE=1`).
+3. **Register it.** The id must be the one the sidecar's `/health` names, and the url its address:
+
+       $ loke privacy add-model dslim/bert-base-NER --url http://127.0.0.1:11436 \
+             --label PER=PERSON --label LOC=LOCATION --label ORG=ORGANIZATION --threshold 0.5 --priority 5
+       registered model:dslim/bert-base-NER: it is a privacy layer from the next request.
+
+   (Run as `recorder/token-model` with `PER=PERSON`, `LOC=LOCATION`, exit 0.) It writes
+   `~/.loke/privacy-models.json`:
+
+       {"models":[
+         {"id":"recorder/token-model","url":"http://127.0.0.1:49369","labels":["PER=PERSON","LOC=LOCATION"],"confidence_threshold":0.5,"priority":5,"enabled":true}
+       ]}
+
+   Nothing is contacted when you register: the model is probed before the first text it is sent.
+   Refused, exit 1, nothing written: a label mapped to an unknown type (`the label mapping
+   MISC=MISCELLANEOUS maps MISC to MISCELLANEOUS, which is not an entity type loke knows; a label must
+   map to a type a built-in layer reports (email, ..., PERSON, ORGANIZATION, LOCATION, ...)`) and a url
+   off this machine (`the url http://192.168.1.4:11436 is not an http:// address on this machine
+   (127.0.0.1, localhost or [::1]); the text is sent to it in clear`). Registering an id that is
+   registered **replaces** it, and an option left out takes its default (`--threshold` 0, `--priority`
+   5, enabled), not its earlier value. `--disabled` registers it switched off. The settings page's
+   **Registered Privacy Models** panel does the same through `POST /api/privacymodels`.
+4. **Check it.** `loke privacy list-models` prints each registration
+   (`model:recorder/token-model  http://127.0.0.1:49369  labels=PER=PERSON,LOC=LOCATION
+   confidence_threshold=0.5  priority=5  enabled`). `loke privacy evaluate "<text>"` runs it beside the
+   other layers and shows what it found, values hidden:
+
+       model:recorder/token-model (detect-and-mask): completed, 3 detections
+         (1 detection below the layer's threshold or outside its entity filter, not counted)
+         [PERSON] 0-12 confidence 0.91
+         [LOCATION] 18-26 confidence 0.88
+         [WIDGET] 31-38 confidence 0.7
+
+   A sidecar that is down or answers as another model shows as unavailable, and the run goes on
+   without it (degraded, F3b.6). `GET /api/health`'s `privacy_layers` lists it too.
+5. **Optionally, tune it in `config.toml`** like any layer, by its layer id:
+
+       [[privacy.layers]]
+       id = "model:recorder/token-model"
+       mode = "detect-only"
+
+   `loke privacy evaluate` then shows `model:recorder/token-model (detect-only): completed, 2
+   detections ... detect-only: these are reported, not masked, and the layer does not vote`.
+   `[[privacy.entity_routing]]` and an organisation policy's `required_layers`/`banned_layers` take the
+   same id.
+6. **Remove it** with `loke privacy remove-model recorder/token-model` (`removed
+   model:recorder/token-model`; then `list-models` prints `no registered privacy models`), or **Remove**
+   in the panel.
+
+If `privacy-models.json` cannot be applied (for example an entry with no url), every request is refused
+and the CLI will not write over it: `add-model` and `remove-model` exit 1 with `registered privacy models
+privacy-models.json cannot be applied: model m has no url; fix or remove it first`, and `list-models`
+names the same fault. Edit or delete the file.
+
 What a registered model is, as a layer:
 
 - **Its detections are masked under the loke type its label mapping gives** (`PER=PERSON`): rated,
