@@ -41,9 +41,10 @@ Seven checks:
   7. Figures answerable to the build. Error and module ladders must not fork, and the
      error total in `build/census-baseline*.json` must be accounted for by a story row.
      A ladder that arrives in disconnected pieces warns rather than fails, because a
-     reset and a wrong figure look identical to a script — the F10 ladder is in two
-     pieces for both errors and modules, including the unexplained 88 → 90 module jump
-     between F10.15 and F10.18, and only a human knows which it is.
+     reset and a wrong figure look identical to a script, and only a human knows which
+     it is. The F10 ladders warned this way until 2026-11-09, when they were settled from
+     git history: the 88-to-90 module step was F10.19/F10.20's commit, not F10.24's, and
+     F10.7's 308-to-0 is a summary over the whole ladder, not a rung in it.
 
 What this script deliberately does NOT do: judge whether a `**Done**` marker is *true*.
 That is RV1's human work — exercising the code and writing a verdict — and a script
