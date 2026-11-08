@@ -644,6 +644,51 @@ def cases(rng: random.Random) -> list[dict]:
     add("negative", "Order {n} shipped from the depot.",
         {"n": ("NOT_PII", nric_like(rng, "S"), False, "an NRIC-shaped run with no NRIC or FIN context")})
 
+    # --- RG1.7a (Not done 4): licence and member numbers with letters ------
+    # Appended after every earlier case, so those keep their values. Australian
+    # licence shapes are those Microsoft Purview lists for its Australia driver's
+    # licence type (two letters and four digits, four digits and two letters, and
+    # the 2-2-4, 3-3-3/3-3-4 and 1-3-3-3 grouped digit forms); no state publishes a
+    # check. Each is still gated on the licence words. The near misses carry the
+    # words without a licence-shaped run, or the run without the words.
+    def letters(n: int) -> str:
+        return "".join(rng.choice("ABCDEFGHJKLMNPRSTUVWXYZ") for _ in range(n))
+
+    def digits(n: int) -> str:
+        return "".join(str(rng.randint(0, 9)) for _ in range(n))
+
+    for template, gen, note in [
+        ("Driver's licence {dl} on the hire form.", lambda: f"{letters(2)}{digits(4)}",
+         "two letters and four digits"),
+        ("Driver licence number: {dl} (copy sighted).", lambda: f"{digits(4)}{letters(2)}",
+         "four digits and two letters: letters after the digits"),
+        ("drivers licence no. {dl} on file.", lambda: f"{digits(3)} {digits(3)} {digits(3)}",
+         "nine digits grouped 3-3-3"),
+        ("Driving licence {dl} was checked.", lambda: f"{digits(2)}-{digits(2)}-{digits(4)}",
+         "eight digits grouped 2-2-4 with hyphens"),
+    ]:
+        add("adversarial", template, {"dl": ("DRIVER_LICENCE", gen(), True, note)})
+
+    for template, gen, note in [
+        ("Super fund member number: {sm} for the rollover.", lambda: f"{letters(2)}{digits(8)}",
+         "a member number with two leading letters"),
+        ("Superannuation member no. {sm} please.", lambda: f"{letters(1)}{digits(7)}",
+         "a member number with one leading letter"),
+    ]:
+        add("adversarial", template, {"sm": ("AU_SUPER_MEMBER", gen(), True, note)})
+
+    add("negative", "Driver's licence class {c} was upgraded.",
+        {"c": ("NOT_PII", f"HR{rng.randint(1, 9)}", False, "a licence class after the words: too short")})
+    add("negative", "Driver's licence {d} was the start date.",
+        {"d": ("NOT_PII", f"{rng.randint(10, 28)} 0{rng.randint(1, 9)} {rng.randint(10, 99)}", False,
+               "dd mm yy after the words: six digits is not a grouped licence form")})
+    add("negative", "Software licence number {n} was renewed.",
+        {"n": ("NOT_PII", f"{letters(2)}{digits(4)}", False,
+               "two letters and four digits after a licence that is not a driver's")})
+    add("negative", "Gym member number {n} checked in.",
+        {"n": ("NOT_PII", f"{letters(2)}{digits(8)}", False,
+               "a lettered member number with no superannuation context")})
+
     return out
 
 

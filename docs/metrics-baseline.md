@@ -563,6 +563,52 @@ scripts/build_loke.sh
 HARNESS_RECORD=benchmarks/results/f39.jsonl scripts/smoke_privacy_harness.sh
 ```
 
+### PII detection, regex layer, RG1.7a lettered and grouped licence and member numbers — 2026-11-08
+
+**Evidence: verified.** Eight rows, read from the AD1.2 line `tests/integration/test_detection_recall.tk`
+prints, with toke `86c432da` (ooke `3cc4998`). The "before" rows are loke `e063e5c7`, whose detector
+source is unchanged; only the corpus generator was extended. The "after" rows are `e063e5c7-dirty`:
+that tree with the RG1.7a change (branch `w112-rg17a-uk`) applied before it was committed. Recall
+over a fixed corpus is deterministic, so each row is one observation.
+
+**What changed.** `driver_licence` now also matches, after the licence words, the shapes Microsoft
+Purview lists for an Australian driver's licence (two letters and four digits, four digits and two
+letters, and digits grouped 2-2-4, 3-3-3, 3-3-4 and 1-3-3-3). `au_super_member` now also matches one
+or two leading letters. Ten cases were appended to the corpus: six positives in those shapes and four
+near misses. The first 146 cases are byte-identical.
+
+| Metric, 156-case corpus | Before | After |
+|---|---|---|
+| Recall, every regex-addressable type | 96.03% <sub>[ev:728599f61866 n=151]</sub> | **100.00%** <sub>[ev:94f434fa860d n=151]</sub> |
+| Recall, direct identifiers | 95.88% <sub>[ev:39dd7998934d n=97]</sub> | **100.00%** <sub>[ev:70d0895895c3 n=97]</sub> |
+| Precision (utility cost), detection regions overlapping real PII | 93.55% <sub>[ev:5775f9d34ea0 n=155]</sub> | 93.79% <sub>[ev:0db1b0389dd9 n=161]</sub> |
+| False-positive regions | 10 <sub>[ev:3940ff497391 n=155]</sub> | 10 <sub>[ev:82d694318678 n=161]</sub> |
+
+The six misses before were the six new positives. None of the four near misses is reported, and
+the false-positive count does not change. On the first 146 cases alone the change makes no
+difference to any figure the test prints.
+
+**Mutation-checked.** With the licence run reverted to its old form and the lettered member
+alternatives removed, recall fell to the "before" figures and both floor assertions failed.
+Restored and checked with `cmp`.
+
+**Caveats:**
+
+- **The shapes are a vendor's list, not an issuer's.** No Australian state publishes a licence
+  format or a check, and which state issues which shape is not known here. A licence in a shape
+  Purview does not list is still missed.
+- **Context-gated.** Every one of these is found only after its words. An identifier without its
+  label is missed, and the corpus records that as a gap. It is not counted as a success.
+- **A synthetic corpus written by the project**, which includes the new cases. Recall on text the
+  project did not write is unmeasured.
+
+Reproduce:
+
+```sh
+python3 tests/fixtures/pii-corpus/generate.py
+./scripts/run_tests.sh tests/integration
+```
+
 ---
 
 ## Status: no *performance* figure is published
