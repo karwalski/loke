@@ -423,8 +423,14 @@ are in the table above, and `core.privacy.pipeline.withlokeconfig` registers eac
 `model:<model-id>` (`core.privacy.modelregistry`) **before** `[[privacy.layers]]` and
 `[[privacy.entity_routing]]` are applied, so both can name it. So the registered models reach exactly the
 callers that read `config.toml` (see [Which callers read config.toml](#which-callers-read-configtoml)),
-read when their config is built; `mcp-broker` and the agent executor do not run them. Only
-`withlokeconfig` reading the file is tested; that `/api/pipeline` runs a registered model is not tested.
+read when their config is built; `mcp-broker` and the agent executor do not run them. That
+`withlokeconfig` reads the file is tested (`test_model_registry_pipeline.tk`), and that the built loke's
+`POST /api/pipeline` runs a registered model is tested over HTTP by `scripts/lib/model_layer_smoke.py`
+in `scripts/smoke_privacy_harness.sh`: the model is registered through `POST /api/privacymodels`, and
+the request is judged on what the Ollama stand-in received (neither value the model found, a
+`LOCATION` and a `WIDGET` placeholder in their place), on the reply's `privacy_layers` (the layer
+completed with 2 detections) and on `loke.db` (below); with the registration removed, the same request
+reaches the stand-in with the value in it.
 The model is served by the existing sidecar, one process per model:
 `LOKE_PF_MODEL` names the `models.json` entry or hub id it loads, and its `/health` names the model and
 its task. Tests: `tests/unit/privacy/test_model_registry.tk`, `tests/unit/privacy/test_model_registry_pipeline.tk`,
@@ -471,8 +477,14 @@ What a registered model is, as a layer:
 - **`loke privacy evaluate`** reports it as a layer with its detections. Test:
   `test_model_registry_pipeline.tk` ("loke privacy evaluate shows the model as a layer, with what it
   found"); `scripts/smoke_privacy_evaluate.sh`.
-- It has no stage of its own in the pipeline trace; its id, state and counts are in the run's layer
-  metrics (`privacy_layer_metrics`).
+- **It has a stage of its own in the pipeline trace** (`$modelscan`, carrying its layer id), scanned
+  with what it found or skipped with the reason, so `detection_layers` in the decision trace and the
+  disclosure record names it beside the built-in layers:
+  `scanned=regex,model:recorder/token-model;skipped=ner,presidio,privacy_filter`. Its counts are also in
+  the run's layer metrics (`privacy_layer_metrics`). Test: `test_model_registry_pipeline.tk` ("the model
+  leaves one scan stage in the run's trace...", "the decision trace's detection_layers names the model
+  among the layers that scanned", "a model that answers as another, or is down, leaves a skipped stage,
+  not a scan"); `model_layer_smoke.py` reads both columns from `loke.db`.
 
 ## Settings UI (F3b.2, F3b.7)
 
@@ -493,8 +505,13 @@ moke's settings page (`/settings`) has two panels that talk to loke directly (`w
   shows the server's refusal as it answers it.
 - **Registered Privacy Models** lists `GET /api/privacymodels` and registers with
   `POST /api/privacymodels {"id","url","labels":[...],"confidence_threshold","priority","enabled"}`
-  through `modelregistry.register`, the call `loke privacy add-model` makes. The policy refuses a model
-  it bans registered enabled, or one with a threshold above its ceiling (409).
+  through `modelregistry.register`, the call `loke privacy add-model` makes. **Edit** puts a row's values
+  in the form; registering an id that is registered replaces it in place. **Remove** asks again ("Confirm
+  remove") and then sends `POST /api/privacymodels {"remove":"<model-id>"}` through
+  `modelregistry.unregister`, the call `loke privacy remove-model` makes (404 when the id is not
+  registered; a broken `privacy-models.json` is not rewritten, 409). The policy refuses a model it bans
+  registered enabled, one with a threshold above its ceiling, and a model it requires registered
+  switched off or removed (409): the pipeline would then refuse every request.
 
 Evidence: `tests/unit/privacy/test_layer_view.tk`, `tests/unit/privacy/test_privacy_models_api.tk`,
 `scripts/lib/privacy_settings_check.py` in `scripts/smoke_serve.sh`, and
@@ -723,12 +740,16 @@ request, not that no harm follows. Definitions, and the only figures this projec
 
 ## What is not built
 
-- **Parts of custom model registration (F3b.7).** Registration and its settings panel are built
-  (above); not built are: removing a model from the panel (`loke privacy remove-model` does); ONNX models (the sidecar refuses a `.onnx` path at start); an Ollama-served model as a
-  registered layer (Ollama serves generative models, not token classifiers; the NER layer is the Ollama
-  layer); a sidecar process serving more than one model (one per model, `LOKE_PF_MODEL`); `add-model`
-  writing the sidecar's own `models.json`; a check of the model's output beyond its `/health` naming the
-  task; and a stage of its own in the pipeline trace (`detection_layers`).
+- **Parts of custom model registration (F3b.7).** Registration, its settings panel (add, edit,
+  remove) and its trace stage are built (above); not built are: ONNX models (the sidecar refuses a
+  `.onnx` path at start); an Ollama-served model as a registered layer (Ollama serves generative models,
+  not token classifiers; the NER layer is the Ollama layer); a sidecar process serving more than one
+  model (one per model, `LOKE_PF_MODEL`); `add-model` writing the sidecar's own `models.json` (not
+  built by design: `LOKE_PF_MODEL` already loads a hub id or local directory that `models.json` does
+  not list, `LOKE_PF_REVISION` pins its revision, and `models.json` sits beside `server.py` with its
+  own label mapping, to placeholder prefixes rather than loke types, so a second copy of each
+  registration there could only drift from `privacy-models.json`, which is the one the pipeline
+  enforces); and a check of the model's output beyond its `/health` naming the task.
 - **Organisation policy distribution and display (F3b.8).** The policy is enforced (above), but it is
   not distributed by the compliance engine (A3), not protected from the user editing it, and not shown
   on the governance dashboard (G4).

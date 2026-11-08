@@ -346,12 +346,15 @@ f=modelsjson():str{
 };
 
 (* Why the policy refuses registering m, or "": it bans the layer, or m's threshold is above
-   the policy's ceiling. A policy that cannot be applied refuses too. *)
+   the policy's ceiling, or it requires the layer and m is switched off (the pipeline would
+   then refuse every request). A policy that cannot be applied refuses too. *)
 f=modelfloorerror(p:$orgprivacypolicy;m:$registeredmodel):str{
   if(!p.present){ <"" }el{};
   if(str.len(p.error)>0){ <"\(p.error); the model cannot be checked against it, so it is not registered" }el{};
-  if(!p.enforced || !m.enabled){ <"" }el{};
+  if(!p.enforced){ <"" }el{};
   let layer=mr.layerid(m.id);
+  if(!m.enabled && listed(p.requiredlayers;layer)){ <"\(op.header()) requires the \(layer) privacy layer, so it cannot be registered switched off" }el{};
+  if(!m.enabled){ <"" }el{};
   if(listed(p.bannedlayers;layer)){ <"\(op.header()) bans the \(layer) privacy layer, so it cannot be registered enabled" }el{};
   if(str.len(p.maxthreshold)>0 && op.asnumber(m.threshold)>op.asnumber(p.maxthreshold)){ <"\(op.header()) sets max_confidence_threshold \(p.maxthreshold), so the model's confidence_threshold cannot be above it" }el{};
   <""
@@ -391,4 +394,30 @@ f=addmodel(rawbody:str):$layerreply{
   let failed=mr.register(m);
   if(str.len(failed)>0){ <refusal(500;failed) }el{};
   <reply(200;"{\"ok\":true,\"layer\":\(jx.escape(mr.layerid(m.id)))}")
+};
+
+(* F3b.7. POST /api/privacymodels {"remove":"<id>"}: the registration removed through
+   modelregistry.unregister, the path `loke privacy remove-model` takes. A model the
+   organisation policy requires is not removed (every request would then be refused), nor is
+   one while the policy cannot be applied. *)
+f=removemodel(id:str):$layerreply{
+  let layer=mr.layerid(id);
+  let p=op.resolved(op.notloaded());
+  if(p.present && str.len(p.error)>0){ <refusal(409;"\(p.error); the model cannot be checked against it, so it is not removed") }el{};
+  if(op.applies(p) && listed(p.requiredlayers;layer)){ <refusal(409;"\(op.header()) requires the \(layer) privacy layer, so it cannot be removed") }el{};
+  let set=mr.load(mr.modelspath());
+  if(str.len(set.error)>0){ <refusal(409;"\(set.error); fix or remove it first") }el{};
+  if(!mr.has(set;id)){ <refusal(404;"\(id) is not registered") }el{};
+  let failed=mr.unregister(id);
+  if(str.len(failed)>0){ <refusal(500;failed) }el{};
+  <reply(200;"{\"ok\":true,\"removed\":\(jx.escape(layer))}")
+};
+
+(* POST /api/privacymodels: a body with a string "remove" removes that registration
+   (removemodel); any other body registers one (addmodel). *)
+f=postmodel(rawbody:str):$layerreply{
+  let o=mt json.dec(rawbody) { $ok:v v; $jsonerr:e jx.emptyobj() };
+  if(!jx.has(o;"remove")){ <addmodel(rawbody) }el{};
+  if(!str.startswith(jx.rawvalue(o;"remove");"\"")){ <refusal(400;"remove must name a registered model's id") }el{};
+  <removemodel(jx.strvalue(o;"remove";""))
 };

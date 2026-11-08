@@ -44,7 +44,11 @@
 # the guardian. Clean ones must reach the model with the guardian as the start of `system`, byte
 # for byte; a cell (a guardian word or not) in the question or system prompt must be refused.
 #
-# After the matrix, one fallback request (F5.3a, scripts/lib/fallback_smoke.py): the stand-in is
+# After the matrix, a registered privacy model (F3b.7, scripts/lib/model_layer_smoke.py): a
+# `tokenmodel` recorder stands in for the model's sidecar, and the request is judged on what
+# reached the Ollama stand-in and on the decision trace's detection_layers.
+#
+# Then one fallback request (F5.3a, scripts/lib/fallback_smoke.py): the stand-in is
 # restarted with the first local choice failing, and the next local hop must answer.
 #
 # Then the CLI path, `loke ask` (F3.9, F5.3), over the BUILT loke-cli binary
@@ -127,6 +131,25 @@ python3 "$ROOT/scripts/lib/privacy_harness.py" \
 rc=$?
 # For inspection: every request the stand-in received, kept when HARNESS_BODIES names a file.
 [ -n "${HARNESS_BODIES:-}" ] && cp "$WORK/model.log.bodies" "$HARNESS_BODIES"
+
+# F3b.7 (8), (6): a registered privacy model on /api/pipeline. A recorder in `tokenmodel` mode
+# on a port the OS hands out stands in for packages/privacy-filter/server.py serving the model;
+# scripts/lib/model_layer_smoke.py registers it through POST /api/privacymodels, judges what
+# the Ollama stand-in and the model's sidecar received and what loke.db's decision trace and
+# disclosure record name, then removes it and sends the request again as the control.
+python3 "$ROOT/scripts/lib/http_recorder.py" "$WORK/tokenmodel.log" "$WORK/tokenmodel.port" tokenmodel \
+  >/dev/null 2>&1 & PIDS="$PIDS $!"
+TMPID=$!
+for _ in $(seq 1 40); do [ -s "$WORK/tokenmodel.port" ] && break; sleep 0.25; done
+if [ -s "$WORK/tokenmodel.port" ]; then
+  python3 "$ROOT/scripts/lib/model_layer_smoke.py" --loke "http://127.0.0.1:$PORT" --bodies "$WORK/model.log.bodies" \
+    --model-url "http://127.0.0.1:$(cat "$WORK/tokenmodel.port")" --model-bodies "$WORK/tokenmodel.log.bodies" \
+    --home "$WORK/home" || rc=1
+else
+  echo "smoke_privacy_harness: the token-model stand-in never came up" >&2
+  rc=1
+fi
+kill "$TMPID" 2>/dev/null; wait "$TMPID" 2>/dev/null
 
 # F5.3a: the fallback chain over the real binary. The stand-in is restarted on the same port
 # with the router's first local choice failing, and one request is judged on its reply and on

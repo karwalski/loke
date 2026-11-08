@@ -17,7 +17,10 @@ i=lv:core.privacy.layerview;
    addmodel, the bodies of GET and POST /api/privacymodels. A registration goes through
    core.privacy.modelregistry.register, the call `loke privacy add-model` makes, into
    ~/.loke/privacy-models.json under this test's throwaway HOME, and is read back through
-   modelregistry.load and pipeline.served, as a request would read it. *)
+   modelregistry.load and pipeline.served, as a request would read it. postmodel, what POST
+   /api/privacymodels calls, registers (an id again: the panel's edit) or, with
+   {"remove":"<id>"}, removes through modelregistry.unregister, the call
+   `loke privacy remove-model` makes. *)
 
 f=writefile(path:str;text:str):bool{
   file.mkdir(sh.lokedir());
@@ -79,7 +82,31 @@ f=main():i64{
   let broken=lv.addmodel("{\"id\":\"x\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"]}");
   if(t.assert(broken.status==409 && str.contains(broken.body;"cannot be applied") && str.contains(broken.body;"so it is not registered");"a policy that cannot be applied refuses the registration")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(registrations();kept2;"and neither changed the file")){pass=pass+1}el{fail=fail+1};
+
+  (* A model the policy requires cannot be removed or registered switched off *)
+  writefile(op.policypath();"{\"required_layers\":[\"model:acme/ner\"]}");
+  let kept3=registrations();
+  let reqrm=lv.postmodel("{\"remove\":\"acme/ner\"}");
+  if(t.assert(reqrm.status==409 && str.contains(reqrm.body;"requires the model:acme/ner privacy layer, so it cannot be removed");"a model the policy requires is not removed (\(reqrm.body))")){pass=pass+1}el{fail=fail+1};
+  let reqoff=lv.postmodel("{\"id\":\"acme/ner\",\"url\":\"http://127.0.0.1:9000\",\"labels\":[\"PER=PERSON\"],\"enabled\":false}");
+  if(t.assert(reqoff.status==409 && str.contains(reqoff.body;"requires the model:acme/ner privacy layer, so it cannot be registered switched off");"nor registered switched off (\(reqoff.body))")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(registrations();kept3;"and neither changed the file")){pass=pass+1}el{fail=fail+1};
   let gone=mt file.delete(op.policypath()) { $ok:v v; $err:e false };
+
+  (* Edit and remove *)
+  let edited=lv.postmodel("{\"id\":\"dslim/bert-base-NER\",\"url\":\"http://127.0.0.1:11437\",\"labels\":[\"PER=PERSON\",\"LOC=LOCATION\"],\"confidence_threshold\":0.7,\"priority\":3,\"enabled\":true}");
+  let set3=mr.load(mr.modelspath());
+  if(t.assert(edited.status==200 && set3.models.len==2 && str.eq(set3.models.get(0).id;"dslim/bert-base-NER") && str.eq(set3.models.get(0).threshold;"0.7") && set3.models.get(0).priority==3 && set3.models.get(0).enabled;"POST with a registered id edits it in place, through postmodel (\(edited.body))")){pass=pass+1}el{fail=fail+1};
+  let nope=lv.postmodel("{\"remove\":\"nope\"}");
+  if(t.asserteq(nope.body;"{\"ok\":false,\"error\":\"nope is not registered\"}";"removing a model that is not registered is refused")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(str.fromint(nope.status);"404";"with 404")){pass=pass+1}el{fail=fail+1};
+  let badrm=lv.postmodel("{\"remove\":5}");
+  if(t.assert(badrm.status==400 && str.contains(badrm.body;"remove must name a registered model's id");"a remove that is not a string is refused")){pass=pass+1}el{fail=fail+1};
+  let rm=lv.postmodel("{\"remove\":\"acme/ner\"}");
+  if(t.asserteq(rm.body;"{\"ok\":true,\"removed\":\"model:acme/ner\"}";"POST {remove} removes a registration")){pass=pass+1}el{fail=fail+1};
+  let set4=mr.load(mr.modelspath());
+  if(t.assert(str.len(set4.error)==0 && set4.models.len==1 && str.eq(set4.models.get(0).id;"dslim/bert-base-NER");"the file then holds only the other model, and the pipeline reads it")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!str.contains(lv.modelsjson();"acme/ner") && !fr.has(pipe.served().layers;"model:acme/ner") && fr.has(pipe.served().layers;"model:dslim/bert-base-NER");"GET no longer lists it and the server no longer runs it as a layer")){pass=pass+1}el{fail=fail+1};
 
   (* A broken registration file is not rewritten *)
   writefile(mr.modelspath();"{\"models\":[{\"id\":\"m\"}]}");
@@ -87,6 +114,8 @@ f=main():i64{
   if(t.assert(onbroken.status==409 && str.contains(onbroken.body;"registered privacy models privacy-models.json cannot be applied") && str.contains(onbroken.body;"fix or remove it first");"a registration file that is already broken is not written over (\(onbroken.body))")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(registrations();"{\"models\":[{\"id\":\"m\"}]}";"and is left as it was")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(lv.modelsjson();"\"error\":\"registered privacy models privacy-models.json cannot be applied");"GET shows why it refuses every request")){pass=pass+1}el{fail=fail+1};
+  let rmbroken=lv.postmodel("{\"remove\":\"m\"}");
+  if(t.assert(rmbroken.status==409 && str.contains(rmbroken.body;"fix or remove it first") && str.eq(registrations();"{\"models\":[{\"id\":\"m\"}]}");"nor is a remove written over it")){pass=pass+1}el{fail=fail+1};
 
   <fail
 };

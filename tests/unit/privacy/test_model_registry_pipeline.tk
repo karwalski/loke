@@ -13,6 +13,9 @@ i=pl:core.privacy.pipeline;
 i=mr:core.privacy.modelregistry;
 i=op:core.privacy.orgpolicy;
 i=cmp:core.privacy.comparison;
+i=pt:core.privacy.pipelinetypes;
+i=hr:core.audit.hoprecord;
+i=ap:page.api.pipeline;
 
 (* F3b.7 — a token classifier registered with `loke privacy add-model`, judged by what the
    production pipeline (core.privacy.pipeline.runforward) masks, refuses and sends.
@@ -37,6 +40,10 @@ i=cmp:core.privacy.comparison;
      - it only adds: under unanimous and first-match the regex layer's email is still masked;
      - [[privacy.layers]] can put it in veto mode; ~/.loke/privacy-models.json is read by
        withlokeconfig;
+     - it leaves a stage in the run's trace (F3b.7 (6)): a $modelscan stage carrying its layer
+       id, scanned with what it found, or skipped with the reason, and detection_layers (as
+       page.api.pipeline and core.audit.hoprecord write it for the decision trace and the
+       disclosure record) names it;
      - `loke privacy evaluate` (core.privacy.comparison) shows it as a layer. *)
 
 f=scratch():str{
@@ -102,6 +109,36 @@ f=voted(r:$pipelinerun;id:str):bool{
   <listed(r.voters;id)
 };
 
+(* Every arm of $pipelinestage, so a new stage is a compile error here rather than a gap. *)
+f=stagename(st:$pipelinestage):str{
+  <mt st {
+    $regexscan:v "regex";
+    $nerscan:v "ner";
+    $presidioscan:v "presidio";
+    $dedup:v "dedup";
+    $anonymise:v "anonymise";
+    $guardianinject:v "guardian";
+    $privacyfilterscan:v "privacy_filter";
+    $modelscan:v "model"
+  }
+};
+
+(* What the run's trace holds for the model stage of layer id: "scanned:<entities found>",
+   "skipped:<reason>", "absent", or "twice" when it holds more than one. *)
+f=modelstage(r:$pipelinerun;id:str):str{
+  let out=mut."absent";
+  let n=mut.0;
+  lp(let i=0;i<r.stages.len;i=i+1){
+    let sr:$stageresult=r.stages.get(i);
+    if(str.eq(stagename(sr.stage);"model") && str.eq(sr.layer;id)){
+      n=n+1;
+      if(sr.skipped){ out="skipped:\(sr.skipreason)" }el{ out="scanned:\(sr.entitiesfound)" }
+    }el{}
+  };
+  if(n>1){ <"twice" }el{};
+  <out
+};
+
 f=main():i64{
   let pass=mut.0;
   let fail=mut.0;
@@ -146,6 +183,13 @@ f=main():i64{
   if(t.assert(firsthealth>=0 && firstdetect>firsthealth;"the model was probed on /health before it was sent any text")){pass=pass+1}el{fail=fail+1};
   if(t.assert(str.contains(log1;"\"threshold\":0") && countof(log1;detect)==1;"and sent the text once, asking for every span (threshold 0) so loke applies the registration's threshold")){pass=pass+1}el{fail=fail+1};
 
+  (* ── Its stage in the trace ───────────────────────────────────────────────────── *)
+  if(t.asserteq(modelstage(r;layer);"scanned:4";"the model leaves one scan stage in the run's trace, carrying its layer id and the 4 spans it reported (the one below its threshold included, as every layer's stage counts what the layer reported)")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(modelstage(plain;layer);"absent";"and a run with no registered model has none")){pass=pass+1}el{fail=fail+1};
+  let traced=hr.detectionlayers(r);
+  if(t.asserteq(traced;"scanned=regex,model:recorder/token-model;skipped=ner,presidio,privacy_filter";"the decision trace's detection_layers names the model among the layers that scanned")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ap.detectionlayers(r);traced;"and /api/pipeline writes the same detection_layers for the disclosure record")){pass=pass+1}el{fail=fail+1};
+
   (* ── A model that does not answer as itself, or is down, is degraded ───────────── *)
   let before=countof(readfile(rlog);detect);
   let other=pl.runforward(text;"";withmodel(regexonly();registration("other/model";url;labels;"")));
@@ -154,6 +198,10 @@ f=main():i64{
   if(t.assert(str.contains(other.result.anonymised;name) && listed(other.uncovered;"PERSON");"what only it masks is reported uncovered")){pass=pass+1}el{fail=fail+1};
   let down=pl.runforward(text;"";withmodel(regexonly();registration("recorder/token-model";dead;labels;"")));
   if(t.assert(pl.issafetoforward(down) && down.layersdegraded==(1 as u32) && !str.contains(down.result.anonymised;email);"a registered model that is down is degraded; the regex layer still masks")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.startswith(modelstage(other;"model:other/model");"skipped:") && str.startswith(modelstage(down;layer);"skipped:");"a model that answers as another, or is down, leaves a skipped stage, not a scan")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(ap.detectionlayers(down);";skipped=") && str.contains(ap.detectionlayers(down);"model:recorder/token-model") && !str.contains(ap.detectionlayers(down);"scanned=regex,model:");"and detection_layers lists it as skipped")){pass=pass+1}el{fail=fail+1};
+  let off=pl.runforward(text;"";withmodel(regexonly();registration("recorder/token-model";url;labels;",\"enabled\":false")));
+  if(t.assert(str.startswith(modelstage(off;layer);"skipped:");"a model registered disabled leaves a skipped stage (\(modelstage(off;layer)))")){pass=pass+1}el{fail=fail+1};
 
   (* ── An unmapped label type refuses every request ────────────────────────────── *)
   let bad=registration("recorder/token-model";url;"\"PER=PERSON\",\"MISC=MISCELLANEOUS\"";"");

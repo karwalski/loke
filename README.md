@@ -142,7 +142,7 @@ property of the host.
 > through one health path, applies `[[privacy.layers]]`, `[[privacy.entity_routing]]` and
 > `privacy.consensus_strategy` from `config.toml`, records per-layer metrics in the audit chain, and
 > `loke privacy evaluate` compares the layers. Organisation policies are applied but not distributed, and a token
-> classifier can be registered as a layer with `loke privacy add-model` (no settings panel). What each setting does, and the test behind it:
+> classifier can be registered as a layer with `loke privacy add-model` or the settings page (no ONNX). What each setting does, and the test behind it:
 > [docs/privacy-filters.md](docs/privacy-filters.md).
 
 - **Regex detector** — 22 patterns (email, AU and US phone, credit card, TFN, ABN, SSN, IPv4, URL,
