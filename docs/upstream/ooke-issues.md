@@ -1,6 +1,8 @@
 # ooke upstream issues
 
 > **Current state: see [`handoff-2026-09-27.md`](handoff-2026-09-27.md)** (O-1 re-verified; O-2 and O-3 added).
+> O-4 and O-5 re-verified at rc.2 (`3cc4998`) on 2026-11-09, with reproducers, in
+> [`handoff-2026-11-09.md`](handoff-2026-11-09.md) (drafted, not sent).
 
 Defects in ooke found while building loke. The toke ones are in `toke-issues.md`.
 
@@ -45,6 +47,11 @@ whose `block`/`end` counts differ.
 **The ask:** return a `$tplerr` (and log it, per 134.24) for an unknown directive name and for
 a block still open at the end of the template.
 
+**Reproduced 2026-11-09 at rc.2 (`3cc4998`)** with rc.2's own `template.tk`:
+[`repro-2026-11-09/O-4/`](repro-2026-11-09/O-4/). An unknown directive renders `AB` from
+`A{! frobnicate("x") !}B`; a body block closed with `endblock`, or never closed, renders the
+layout with an empty `<main>`; all three answer `$ok`.
+
 ## O-5 — the 3.0.0 changelog names a raw syntax the engine does not have
 
 **Severity: documentation; misleads a consumer migrating from 2.0.0.**
@@ -56,3 +63,6 @@ interpolation should "Use `{{raw ...}}`". The rc.2 lexer recognises `{= =}`, `{!
 page rather than an error.
 
 **The ask:** correct the changelog entry to `{= key | raw =}`.
+
+**Reproduced 2026-11-09 at rc.2 (`3cc4998`)**, [`repro-2026-11-09/O-5/`](repro-2026-11-09/O-5/):
+`A{{raw x}}B|{= x | raw =}|{= x =}` with `x = "<b>"` renders `A{{raw x}}B|<b>|&lt;b&gt;`.

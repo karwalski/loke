@@ -3,6 +3,10 @@
 > **Current state: see [`handoff-2026-09-27.md`](handoff-2026-09-27.md).** Every entry below was
 > re-verified there against toke `0b0bc4e` and `4a50b87`, several are stale, and T-47 names two
 > different defects (T-47a/T-47b there). This file is the detailed history.
+>
+> **Second batch, 2026-11-09: see [`handoff-2026-11-09.md`](handoff-2026-11-09.md)** (drafted, not
+> sent), with reproducers in [`repro-2026-11-09/`](repro-2026-11-09/) run at toke v3.1.0
+> (`86c432da`). It covers T-60 to T-64 below and ooke O-4/O-5.
 
 **Reported by:** the loke project (`github.com/karwalski/loke`)
 **Toolchain under test:** toke `445f519` (mechanisms re-verified against `c4e4704`) (on `feat/type-flow-bytes-redesign`, `toke_min_commit = 6cc9061`), ooke `v3.0.0-rc.1`
@@ -2266,6 +2270,13 @@ already half does) or reject it with a diagnostic pointing at `.len`; and give
 `process.spawn` a failure value that cannot be mistaken for a handle, or have
 `process.wait` refuse an address that is not one it handed out.
 
+**Reproduced 2026-11-09 at `86c432da`, with one correction**
+([`repro-2026-11-09/T-60/`](repro-2026-11-09/T-60/)). The string compare in point 2 is not
+limited to untyped empties: `==` between two NAMED typed arrays lowers to `tk_str_cmp` on the
+array blocks, so it compares element bytes as a C string and stops at the first zero byte.
+Measured: `@(1;2)==@(1;2;3)` is true, `@(256)==@(512)` is true, `@(1;2)==@(7;8)` is false (all
+`@i64`). Comparing with the literal `@()` is still the address compare.
+
 ## T-61 — adding an untyped integer local to a u32 struct field emits invalid IR
 
 **Severity: build break (the compiler rejects its own output); not silent.**
@@ -2282,3 +2293,64 @@ and narrow once, `((r.unplaced as i64)+stray) as u32`.
 
 **The ask.** Either widen or narrow the operands consistently when an untyped integer meets a
 u32, or reject the mixed expression with a type error naming both operands.
+
+**Not reproduced, 2026-11-09, at toke v3.1.0 (`86c432da`).** A standalone reproducer,
+[`repro-2026-11-09/T-61/`](repro-2026-11-09/T-61/) (the sum as a `let`, in a struct literal,
+in a returned struct declared in another module, with the local counted in a loop or returned
+by a function), compiles and exits 5 as expected. The filed site itself, with line 82 put back
+to `unplaced:r.unplaced+stray;` and compiled against a full loke build's interfaces, gives IR
+that clang accepts (the add is i64 throughout). The failing source was never committed, so the
+shape that failed is unknown. The handoff makes no ask; the workaround stays. Details in
+`repro-2026-11-09/T-61/result.md`.
+
+## T-62 — an `@@str` row subscripted inline as a call argument emits invalid IR (loke F10.42)
+
+**Severity: build break; `--check` passes and the error is clang's.**
+
+Found 2026-10-01 by loke F10.39; reproduced 2026-11-09 at toke v3.1.0 (`86c432da`),
+[`repro-2026-11-09/F10.42/`](repro-2026-11-09/F10.42/). With `let rows:@@str=@(...)`,
+`str.eq(rows.get(i).get(0);"x")` passes `--check` and fails at clang with
+`'%t65' defined with type 'ptr' but expected 'i64'` (E9003): the element is loaded as `i8*`
+and passed where the callee takes `i64`. A user function taking a `str` fails the same way
+(`inttoptr i64 %t61`), so it is not specific to std. Binding the row first
+(`let row:@str=rows.get(i);`) compiles and runs.
+
+Workaround in loke: bind the row with its declared type before subscripting it
+(`tests/unit/nocustody/test_artifact.tk`, `packages/moke/tests/test_upload_csv.tk`).
+
+**The ask.** Load the inner element with the outer array's element type, or refuse the shape
+in the checker until it does.
+
+## T-63 — the https client cannot be told where to connect, has no body cap and no whole-request deadline (loke MK19.11)
+
+**Severity: feature ask with a security reason (SSRF defences for a user-supplied URL).**
+
+Read from toke 3.1.0 `src/stdlib/http.c` `client_do_request` (loke MK19.9, 2026-10-01): the
+client resolves the host inside connect and takes no address, and std exports no general
+resolver, so a program cannot pin the address it checked (DNS rebinding). Measured 2026-11-09 at
+`86c432da` over plain http on loopback ([`repro-2026-11-09/MK19.11/`](repro-2026-11-09/MK19.11/)):
+a server sending one body byte every 5 s held `http.geturl` for 40,041 ms and the call answered
+`$ok` (the only clock is the 30 s `SO_RCVTIMEO`, which restarts on every byte); a 64 MiB body was
+read whole and answered `$ok`, length 67,108,864.
+
+Workaround in loke: `moke.proxy.fetch` runs the system curl (no shell, absolute path) with
+`--resolve`, `--max-filesize`, `--max-time`, `--proto =https`, `--max-redirs 0`, `--noproxy '*'`.
+
+**The ask.** A client option to connect to a given address while verifying the certificate
+against the URL's name; a resolver returning every address; a body-size limit enforced while
+reading; a deadline for the whole request.
+
+## T-64 — a per-read timeout ends a response as `$ok` with a short body
+
+**Severity: silent wrong result.**
+
+Measured 2026-11-09 at toke v3.1.0 (`86c432da`), loopback, plain http
+([`repro-2026-11-09/MK19.11/`](repro-2026-11-09/MK19.11/), `stall` case): a server answering
+`Content-Length: 8` that sends three body bytes and then nothing for 45 s makes `http.geturl`
+answer **`$ok` with a 3-byte body** after 30,001 ms. The per-read timer's expiry is read as the
+end of the body. `http.clientget` and `http.postheaders` were not measured.
+
+Workaround in loke: none in the client; loke's fetch of untrusted servers uses curl (T-63).
+
+**The ask.** A body shorter than its `Content-Length` (or a chunked body without its last
+chunk) is a transport error.
