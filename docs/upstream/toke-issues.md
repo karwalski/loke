@@ -8,6 +8,10 @@
 > sent), with reproducers in [`repro-2026-11-09/`](repro-2026-11-09/) run at toke v3.1.0
 > (`86c432da`). It covers T-60 to T-64 below and ooke O-4/O-5.
 >
+> **Status of every item at toke v3.2.0, 2026-11-15: [`status-2026-11-15.md`](status-2026-11-15.md)**,
+> measured with [`repro-2026-11-15/`](repro-2026-11-15/). Three new items, T-65 to T-67, are at the end. The third
+> handoff, for what is still open, is drafted (not sent) as [`handoff-2026-11-15.md`](handoff-2026-11-15.md).
+>
 > **Answered 2026-11-15** by toke v3.2.0 (`ea7ddf22`) and ooke v3.0.0 (`7ac2472`): see
 > [`toke-reply-2026-11-15.md`](toke-reply-2026-11-15.md), loke's record of the answer, measured with the same reproducers
 > ([`results-v3.2.0-ea7ddf22.txt`](repro-2026-11-09/results-v3.2.0-ea7ddf22.txt)).
@@ -41,38 +45,78 @@ already had and discarded.
 
 ## Summary
 
-| | Severity | What | Reported as |
+| | Severity | What | Reported as | At toke v3.2.0, 2026-11-15 |
+|---|---|---|---|---|
+| **T-1** | Blocks | `$ok(<bool>)` in a `bool!$err` function emits invalid IR | clang: `'%t' defined with type 'i1' but expected 'i64'` | fixed |
+| **T-2** | Blocks | A `mt` of 3+ arms whose subject type is not known emits duplicate basic-block labels | clang: `Terminator found in the middle of a basic block!` | fixed (residue: T-66) |
+| **T-3** | Blocks | An `i32` used as an array index is widened with `zext i1` | clang: `'%t' defined with type 'i32' but expected 'i1'` | fixed |
+| **T-4** | Blocks, silent | A bare **type name** in expression position gets no diagnostic | clang: `use of undefined value '%store'` | fixed |
+| **T-5** | Blocks | `void!$err` lowers to LLVM `void`, so binding the result emits `alloca void` | clang: `void type only allowed for function results` | fixed |
+| **T-6** | Blocks | **Any** `let` shadowing an enclosing `let` emits invalid IR | clang: `Instruction does not dominate all uses!` | fixed |
+| **T-7** | Blocks, silent | An unknown **method** call is not checked; it becomes an undefined external symbol | ld: `Undefined symbols` | fixed |
+| **T-8** | Hazard | `--lint --fix` deletes imports that are needed | none — it reports success | fixed |
+| **T-9** | Hazard, silent | The regex engine ignores unsupported syntax instead of rejecting it | none | rejected at check (E4075) |
+| **T-10** | Hazard | `http.post` is declared twice in `http.tki`, so the function form is unreachable | misleading arity error | rejected at check |
+| **T-11** | Correctness | `std.tls`, `std.mdns`, `std.infer`, `std.mlx` are stubs that return 0 or a sentinel string | none | fixed |
+| **T-12** | Docs | Four stdlib `.tki` files disagree with the compiler's own builtin table | none | fixed |
+| **T-13** | Blocks, silent | A bare sum variant in a value position crashes when matched | none | rejected at check (E4033) |
+| **T-14** | Correctness, silent | `==` on two sums compares the handle, not the variant | none | rejected at check (E4031) |
+| **T-15** | Correctness, silent | `http.get` on a closed port returns `$ok` with a NIL response | none | rejected at check |
+| **T-16** | Testability | No way to construct an http request or read a response body from source | n/a | fixed |
+| **T-17** | Blocks, silent | `json.parse` binds to an unrelated runtime function | none | rejected at check (E4031) |
+| **T-18** | **Correctness, silent** | **`mt` on an `X!$userErr` takes the FIRST arm whatever the value is** | none | fixed |
+| **T-19** | Blocks, silent | E4071 misses a trailing bare `mt` when the function returns a sum or struct | none | fixed |
+| **T-20** | **Correctness, silent** | **An `f64` returned across a module boundary is corrupted** | none | fixed |
+| **T-21** | Correctness, silent | A string returned by `std.homedir()` is truncated when interpolated | none | fixed |
+| **T-22** | Blocks, silent | `row.f64` is declared as a result but returns a bare `i64` | none | fixed |
+| **T-23** | **Correctness, silent** | **Arguments of different declared types but the same ABI are accepted reversed** (`str.join`) | none — segfault | fixed |
+| **T-24** | **Correctness, silent** | **`@(array; element)` nests instead of appending** | none — intermittent segfault | rejected at check (E4031) |
+| **T-25** | Blocks | `max_funcs` counts imported signatures; E9010 names neither the limit, the cause, nor that it is configurable | E9010, no line number | fixed |
+| **T-26** | **Blocks, and the fix advice creates a silent bug** | **No assignment to a struct field or array element, and E2002 recommends `==`, which compiles to a no-op** | E2002, with wrong advice | fixed |
+| **T-27** | **Silent code deletion** | **Comments nest, so `(*` inside a comment (e.g. `COUNT(*)`) swallows the rest of the file** | none at all | fixed as E1007; nesting declined |
+| **T-28** | Silent segfault | **`str.isdigit` crashes on a `str.charat` result** — the only producer of a character cannot feed the only classifier of one | none — SIGSEGV | rejected at check (E4031) |
+| **T-29** | Minor | Control-flow keywords (`sc`, `mt`, `lp`, `el`, `br`, `if`) are reserved as import aliases and the diagnostic does not name the reserved word | E2002, unhelpful | fixed |
+| **T-30** | **Correctness, silent** | **`std.db` has ONE global connection; `db.open`'s returned handle selects nothing, so a two-database program silently queries whichever opened last** | none | fixed |
+
+**Status of every item at toke v3.2.0 (`ea7ddf22`), measured by loke on 2026-11-15:
+[`status-2026-11-15.md`](status-2026-11-15.md).** The later items, which this table never listed:
+
+| | What | At toke v3.2.0, 2026-11-15 | Story |
 |---|---|---|---|
-| **T-1** | Blocks | `$ok(<bool>)` in a `bool!$err` function emits invalid IR | clang: `'%t' defined with type 'i1' but expected 'i64'` |
-| **T-2** | Blocks | A `mt` of 3+ arms whose subject type is not known emits duplicate basic-block labels | clang: `Terminator found in the middle of a basic block!` |
-| **T-3** | Blocks | An `i32` used as an array index is widened with `zext i1` | clang: `'%t' defined with type 'i32' but expected 'i1'` |
-| **T-4** | Blocks, silent | A bare **type name** in expression position gets no diagnostic | clang: `use of undefined value '%store'` |
-| **T-5** | Blocks | `void!$err` lowers to LLVM `void`, so binding the result emits `alloca void` | clang: `void type only allowed for function results` |
-| **T-6** | Blocks | **Any** `let` shadowing an enclosing `let` emits invalid IR | clang: `Instruction does not dominate all uses!` |
-| **T-7** | Blocks, silent | An unknown **method** call is not checked; it becomes an undefined external symbol | ld: `Undefined symbols` |
-| **T-8** | Hazard | `--lint --fix` deletes imports that are needed | none — it reports success |
-| **T-9** | Hazard, silent | The regex engine ignores unsupported syntax instead of rejecting it | none |
-| **T-10** | Hazard | `http.post` is declared twice in `http.tki`, so the function form is unreachable | misleading arity error |
-| **T-11** | Correctness | `std.tls`, `std.mdns`, `std.infer`, `std.mlx` are stubs that return 0 or a sentinel string | none |
-| **T-12** | Docs | Four stdlib `.tki` files disagree with the compiler's own builtin table | none |
-| **T-13** | Blocks, silent | A bare sum variant in a value position crashes when matched | none |
-| **T-14** | Correctness, silent | `==` on two sums compares the handle, not the variant | none |
-| **T-15** | Correctness, silent | `http.get` on a closed port returns `$ok` with a NIL response | none |
-| **T-16** | Testability | No way to construct an http request or read a response body from source | n/a |
-| **T-17** | Blocks, silent | `json.parse` binds to an unrelated runtime function | none |
-| **T-18** | **Correctness, silent** | **`mt` on an `X!$userErr` takes the FIRST arm whatever the value is** | none |
-| **T-19** | Blocks, silent | E4071 misses a trailing bare `mt` when the function returns a sum or struct | none |
-| **T-20** | **Correctness, silent** | **An `f64` returned across a module boundary is corrupted** | none |
-| **T-21** | Correctness, silent | A string returned by `std.homedir()` is truncated when interpolated | none |
-| **T-22** | Blocks, silent | `row.f64` is declared as a result but returns a bare `i64` | none |
-| **T-23** | **Correctness, silent** | **Arguments of different declared types but the same ABI are accepted reversed** (`str.join`) | none — segfault |
-| **T-24** | **Correctness, silent** | **`@(array; element)` nests instead of appending** | none — intermittent segfault |
-| **T-25** | Blocks | `max_funcs` counts imported signatures; E9010 names neither the limit, the cause, nor that it is configurable | E9010, no line number |
-| **T-26** | **Blocks, and the fix advice creates a silent bug** | **No assignment to a struct field or array element, and E2002 recommends `==`, which compiles to a no-op** | E2002, with wrong advice |
-| **T-27** | **Silent code deletion** | **Comments nest, so `(*` inside a comment (e.g. `COUNT(*)`) swallows the rest of the file** | none at all |
-| **T-28** | Silent segfault | **`str.isdigit` crashes on a `str.charat` result** — the only producer of a character cannot feed the only classifier of one | none — SIGSEGV |
-| **T-29** | Minor | Control-flow keywords (`sc`, `mt`, `lp`, `el`, `br`, `if`) are reserved as import aliases and the diagnostic does not name the reserved word | E2002, unhelpful |
-| **T-30** | **Correctness, silent** | **`std.db` has ONE global connection; `db.open`'s returned handle selects nothing, so a two-database program silently queries whichever opened last** | none |
+| T-31 | `mt` binds result arms by position | fixed | 138.2 |
+| T-32 | no nested JSON read | rejected at check; `json.at` reads | 138.12 |
+| T-33 | falsy JSON values read as errors | fixed | before 3.0.0 |
+| T-34 | three-segment std member lowered to a bare global | fixed | before 3.0.0 |
+| T-35 | emitted IR silently truncated | fixed | 138.14 |
+| T-36 | `str.tki` untyped `abi` block | fixed | 138.11 |
+| T-37, T-38, T-39 | `@f64` conversion; function-wide retyping; unused-import lint | fixed | before 3.0.0 |
+| T-40 | `db.exec` runs one statement | fixed | 138.6 |
+| T-41 | `std.str` results interpolate as addresses | fixed | 138.11 |
+| T-42 | literal of an undeclared struct type | fixed | 138.9 |
+| T-43 | no bind address | fixed (`http.serveon`); port-only `serve` on `*` declined | 138.1 |
+| T-44, T-47a | `json.str` unescape | fixed | 138.12 |
+| T-45 | `json.enc` leaves control characters raw | fixed | 127.229 |
+| T-46 | annotated binding spread in an array literal | fixed | before 3.0.0 |
+| T-47b | `str.nowunix()` a string declared i64 | fixed | 138.11 |
+| T-48 | `postheaders` sends nothing in loke's shape | rejected at check; typed call arrives | 138.8, 138.26 |
+| T-49 | `net.listen(port)` segfaults | rejected at check | 138.13 |
+| T-50 | `mt` on `process.wait` inverts success | rejected at check | before 3.0.0 |
+| T-51 | `json.dec` accepts `{not json` | fixed | 138.2 |
+| T-52 | `@$self` field crashes the compiler | fixed | 138.13 |
+| T-53, T-54 | field cap; 65th struct type | fixed | 127.190; 138.15, 127.250 |
+| T-55 | `str.charat` quadratic | fixed (linear, measured) | 127.170 |
+| T-56 | 32-import cap | fixed as a diagnostic; default 32 kept | 138.15 |
+| T-57 | `http.get(client;path)` registers a route | rejected at check | 138.3 |
+| T-58 | https client verifies nothing | fixed; Host port fixed; **header-carrying GET open** | 135.25; 138.28; **138.27** |
+| T-59 | capability grants cannot be scoped | **open** (owner) | **138.19** |
+| T-60 | `==` on arrays; spawn-failure idiom | `==` **open** (owner); spawn idiom rejected at check (residue T-67) | **138.20**; 138.21 |
+| T-61 | u32 field plus untyped local | rejected at check (never reproduced) | 127.356 |
+| T-62 | inline `@@str` row as a call argument | fixed | 127.274 |
+| T-63 | client connect-to-address, resolver, body cap, deadline | **open** (owner) | **138.24, 138.25** |
+| T-64 | cut response answered `$ok` | fixed (every client call measured) | 138.23, 138.31 |
+| **T-65** | a parameter named `t<digits>` collides with IR temporaries | **new**, build break after a clean `--check` | — |
+| **T-66** | `mt` with variant arms on an i64 passes `--check` | **new**, E9005 at build | — |
+| **T-67** | an integer accepted where the runtime reads a pointer (`process.wait(5)`, `str.toupper(42)`) | **new**, silent crash | — |
 
 T-1 to T-7 are build-breaking. T-8 to T-12 are hazards that let a wrong program look
 right. **T-13 to T-24 were found later, getting loke's test suite to run against real
@@ -138,6 +182,8 @@ All three fail identically.
 **Suggested fix:** `zext i1 … to i64` before the `inttoptr`, wherever a success value
 is boxed into the result representation.
 
+**2026-11-15: fixed** (before toke 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): the reproducer builds and exits 10 ([`repro-2026-09-27/results-v3.2.0-ea7ddf22.txt`](repro-2026-09-27/results-v3.2.0-ea7ddf22.txt)).
+
 ---
 
 ## T-2 — a multi-arm `mt` whose subject type is not known emits duplicate labels
@@ -202,6 +248,8 @@ declares a local sum with the same variant names and uses that as the parameter 
 match on a value whose sum type is not known is worth an error in its own right — that
 is the condition that makes this reachable.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): the declared-field subject builds and exits 33. The i64-subject program no longer reaches clang: it passes `--check` and the build stops with a located E9005 ("the sum type of the matched value is not established"), filed as **T-66**.
+
 ---
 
 ## T-3 — an `i32` array index is widened with `zext i1`
@@ -234,6 +282,8 @@ The emitted IR loads the index as `i32` and then widens it as if it were a bool:
 
 **Suggested fix:** `sext i32 … to i64` for a signed index. The `zext i1` looks like a
 default branch being taken for any non-`i64` integer.
+
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): exit 2.
 
 ---
 
@@ -280,6 +330,8 @@ functions referenced a `store` that was declared nowhere. The sibling function
 
 **Suggested fix:** extend E4033 to a bare type name in any value position.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): E4033 "'thing' is a type name, not a value" at `--check`.
+
 ---
 
 ## T-5 — `void!$err` lowers to LLVM `void`
@@ -315,6 +367,8 @@ loke had **17** such declarations across 8 files.
 
 **Suggested fix:** represent a `void` success as a zero-width or i64 placeholder in the
 result lowering, as `$ok(void)` already implies.
+
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): `$ok(0)` in a `void!$err` function builds and exits 0; the filed `$ok(void)` is E4033.
 
 ---
 
@@ -380,6 +434,8 @@ in this migration.
 **Suggested fix:** hoist every `alloca` to the function entry block. Independently,
 reject or warn on a shadowing `let`.
 
+**2026-11-15: fixed** (before 3.0.0), with the W3013 shadowing warning. Measured at toke v3.2.0 (`ea7ddf22`): exit 57, W3013 emitted.
+
 ---
 
 ## T-7 — an unknown method call is not checked
@@ -413,6 +469,8 @@ is not a toke array method.
 **Suggested fix:** resolve method calls against the receiver's type and report E4027
 (`module 'x' has no member 'y'`) or its method equivalent when there is no match.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): E4036 "no receiver method" at `--check`.
+
 ---
 
 ## T-8 — `toke --lint --fix` deletes imports that are needed
@@ -427,6 +485,8 @@ is `$lokeerr`. Applied across loke it deleted **197 imports in 119 files** and p
 A `--fix` that breaks a correct file is worse than no `--fix`. Suggested fix: count
 `$type` references as uses; failing that, exclude `unused-import` from `--fix`.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): `--lint --fix` keeps the import and `--check` afterwards is rc 0.
+
 ---
 
 ## T-9 — the regex engine ignores unsupported syntax
@@ -439,6 +499,8 @@ how loke's `privacy/content.tk` script-stripping sanitiser passed review for mon
 was a privacy control that matched nothing.
 
 Either support them or reject them at compile time. Silence is the worst of the three.
+
+**2026-11-15: rejected at check** (toke 137.9, one regex engine). Measured at toke v3.2.0 (`ea7ddf22`): the lazy `<.*?>` is E4075 at `--check`, suggesting `<[^>]*>`; without that line `\s`, `\S` and `(?i)` match (`s: a_b S: _ _ ci: Z`, [`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p09.tk`).
 
 ---
 
@@ -458,6 +520,8 @@ migrating call sites to the correct four-parameter form and getting the same err
 
 `http.postheaders` and `http.postjson` are the workarounds and are what loke now uses
 at all eight former `http.post` sites.
+
+**2026-11-15: rejected at check** (138.3, 137.10). Measured at toke v3.2.0 (`ea7ddf22`): the four-argument call is E4026 naming route registration; `http.post(url;body)` is E4031 naming `http.clientpost`; `clientpost`, `clientput` and `clientdelete` arrive at a loopback recorder ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p10.tk`).
 
 ---
 
@@ -502,6 +566,8 @@ functions in its builtin table and resolves them regardless of the `.tki`; they 
 reachable and they are stubs. We had concluded a hard ceiling of 209 of 217 modules on
 that basis. The real figure is 217 of 217, which is what now builds.
 
+**2026-11-15: fixed** (137.11, 121.53). Measured at toke v3.2.0 (`ea7ddf22`): the `.tki`-arity calls take their `$err` arms (`mlx.isavailable=false`, `load`/`generate` errors), and the implementation-arity call is E4026. No stub reports success.
+
 ---
 
 ## T-12 — four stdlib `.tki` files disagree with the compiler's builtin table
@@ -534,6 +600,8 @@ another project's stdlib, is a trap for that consumer.
 
 Suggested fix: generate the `.tki` files from the builtin table, or state in each that
 the table wins.
+
+**2026-11-15: fixed** (138.11). Measured at toke v3.2.0 (`ea7ddf22`): the four names are in their `.tki`; `str.padright` with a pad pads `[ab***]`; `json.getregulations` has length 1.
 
 ---
 
@@ -570,6 +638,10 @@ in 445f519, and the fifteen found since include four that are more damaging than
    minute of reading. This remains the single highest-leverage item in the document:
    T-23 took a day to find and five minutes to fix.
 
+**2026-11-15: all nine are done at toke v3.2.0 (`ea7ddf22`)**, each measured (status lines under
+each item). Item 9 included: an E9003 now reads "while compiling f=judge at repro.tk:14" with a
+`-->` location (seen on T-65, the one new build break of this kind).
+
 ## Reproducing
 
 Every program above is complete and was compiled with:
@@ -600,6 +672,9 @@ when the left operand is a void call, and then it arrives as
 `void type only allowed for function results` from clang. A warning on a discarded
 comparison would catch it — the `discarded-value-result` rule already covers the
 neighbouring case.
+
+**2026-11-15: loke's error, not toke's;** not re-measured. The neighbouring E4074 (a comparison
+standing as a statement, 138.10) is the warning asked for in its statement form.
 
 ---
 
@@ -644,6 +719,8 @@ unscanned text would have been forwarded. We converted that gate to a plain bool
 There is no arm order that works, so the workaround is to avoid result types for
 anything that matters and return an explicit struct or bool instead.
 
+**2026-11-15: fixed** (138.2). Verified by loke at 3.1.0 (F10.39; the tripwire tests now assert the fix) and measured at toke v3.2.0 (`ea7ddf22`): exit 77.
+
 ---
 
 ## T-19 — E4071 misses a trailing bare `mt` when the function returns a sum or a struct
@@ -667,6 +744,8 @@ declared type and crashes when it matches on it.
 `governance.policy.evaluate`. Each computed the correct answer and discarded it. The
 diagnostic already exists and is good — it just needs to fire for the other return
 kinds.
+
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): E4071 for the sum and for the struct.
 
 ---
 
@@ -772,6 +851,8 @@ in loke, four arms: a module-local control, the loke-boundary case, the stdlib-b
 and the integer workaround. Arm B is written as a tripwire that asserts the defect is still
 present, so it fails on the day you fix this.
 
+**2026-11-15: fixed** (138.5). Verified by loke at 3.1.0 (F10.39) and measured at toke v3.2.0 (`ea7ddf22`): exit 55, `declare fastcc double @lib_f64abs(double)`.
+
 ---
 
 ## T-21 — a string returned by `std.homedir()` is truncated when interpolated
@@ -794,6 +875,8 @@ exist, so `db.open` failed on it — which is how four of our tests came to open
 database in a directory that was never there. We now use `str.concat` for this one call
 and interpolation everywhere else, which is an unsatisfying rule to have to remember.
 
+**2026-11-15: fixed** (138.11). Measured at toke v3.2.0 (`ea7ddf22`): every form of the interpolation has the length of `$HOME` plus 2, and `std.homedir` links without `std.process`.
+
 ---
 
 ## T-22 — `row.f64` is declared as a result but does not return one
@@ -810,6 +893,8 @@ builtin table, or check them against it in CI — matters more than any individu
 
 We work around it by reading the column as TEXT and parsing it, which also sidesteps
 T-20.
+
+**2026-11-15: fixed** (138.6). Measured at toke v3.2.0 (`ea7ddf22`): `x: ok 25 | zero: ok 0 | nosuch: err`.
 
 ---
 
@@ -877,6 +962,8 @@ This is the same class as T-4, T-7 and T-22: something the interface file alread
 knows,
 which the call site is not checked against.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): the reversed `str.join` is E4031 "argument 1 of 'str.join' is declared 'str' (str.tki), got '@(str)'".
+
 ---
 
 ## T-24 — `@(array; element)` nests silently where an append was meant
@@ -907,6 +994,8 @@ enabled-privacy-layer list, the local NER entity list, the provider registry, th
 pipeline hook registry and the OpenAI system-prompt prepend. Each silently held at most
 one element or nested on the first append. `.push()` is the correct append and now
 appears at all 29.
+
+**2026-11-15: rejected at check** (138.9). Measured at toke v3.2.0 (`ea7ddf22`): E4031 "array literal elements must share one type"; an append is written `x=x+@(v)`.
 
 ---
 
@@ -945,6 +1034,8 @@ function, bisected with `--max-funcs`, and the fix was one line of `tkc.toml`. T
 perfectly reasonable design — we are not asking for a bigger default. We are asking for the
 diagnostic to be the thing that tells us, because this is the same shape as the ask at the
 bottom of this document: **the compiler knew the answer and printed something else.**
+
+**2026-11-15: fixed** (138.15, 127.250). Verified by loke at 3.1.0 (`max_funcs` removed from `tkc.toml`) and measured at toke v3.2.0 (`ea7ddf22`): 130 imported signatures build with no flag (the default is 1024); over a cap, `--check` names the count, the limit and the flag.
 
 ---
 
@@ -995,6 +1086,8 @@ Three asks, in order of value:
 3. Consider allowing field assignment on a local `mut` struct, which is what people
    reach for and is sound under value semantics.
 
+**2026-11-15: fixed** (138.10). Measured at toke v3.2.0 (`ea7ddf22`): `x.a=9` is E2002 showing the rebuild (`x=$type{a:9;b:x.b}`), and the applied old advice `x.a==9;` is E4074 "a comparison stands as a statement".
+
 ---
 
 ## T-27 — comments nest, so `(*` inside a comment silently deletes the rest of the file
@@ -1038,6 +1131,8 @@ Either treatment would be fine, and we have no preference:
 
 The current combination — nesting plus silence — is the one that loses code.
 
+**2026-11-15: fixed as a diagnostic** (138.10); **nesting itself declined** (spec §8.10). Measured at toke v3.2.0 (`ea7ddf22`): E1007 "the '(*' at 7:1 is never closed ... the '(*' at 7:15 inside it opened a nested comment". loke's runner still prints DEFECT because it counts the IR; with an error there is none. Comments still nest, so loke's rule against `(*` and `*)` inside comments stays.
+
 ---
 
 ## T-28 — `str.isdigit` segfaults on a character code, which is the only thing you have to give it
@@ -1079,6 +1174,8 @@ composition into a crash.
 If `isdigit` is genuinely meant to take a character code, the fix is smaller still: declare
 it `(u8) -> bool` or document the unit. Either way the current pair cannot both be right.
 
+**2026-11-15: rejected at check** (138.13). Measured at toke v3.2.0 (`ea7ddf22`): E4031 "argument 1 of 'str.isdigit' is declared 'str'".
+
 ---
 
 ## T-29 — control-flow keywords are reserved as import aliases, and the diagnostic does not say so
@@ -1105,6 +1202,8 @@ compiler already knows which token it rejected.
 
 Same family as T-25 and T-26: the information needed to act is in the compiler's hand at the
 moment it emits the diagnostic, and is not in the diagnostic.
+
+**2026-11-15: fixed** (138.10). Measured at toke v3.2.0 (`ea7ddf22`): one E2002 "'sc' is a reserved keyword and cannot be an import alias".
 
 ---
 
@@ -1160,6 +1259,8 @@ row.i64` takes that to `$err`. loke's own `rowi64`/`rowi32` wrappers then map th
 back to `0`, so **every integer column read in this codebase conflates "the value is 0" with
 "the read failed"**, including `tokens_in`, `tokens_out` and `duration_ms` in the audit trail.
 The same shape as T-22: a result whose error side is indistinguishable from a valid value.
+
+**2026-11-15: fixed** (138.6). Measured at toke v3.2.0 (`ea7ddf22`): `ha=1 hb=2 ta-before-b=ok ta-after-b=ok`; with `db.execon` each database gets its own tables (A.db `ta ta2`, B.db `tb`, [`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`pr8.tk`).
 
 ---
 
@@ -1224,6 +1325,8 @@ gate, failing any `mt` over a result whose `$ok` arm is not written first, and
 `scripts/fix_err_arm_first.py` to reorder them. It is a lint rule standing in for a type
 rule, and it cannot see a match built by a macro or spread across a helper.
 
+**2026-11-15: fixed** (138.2). Verified by loke at 3.1.0 (F10.39) and measured at toke v3.2.0 (`ea7ddf22`): `valid,okfirst=ok valid,errfirst=ok invalid,okfirst=err invalid,errfirst=err` (the runner's REPRODUCES is its substring match).
+
 ## T-32 — `std.json` cannot read a nested value
 
 **Severity: capability gap, and every workaround for it fails differently.**
@@ -1273,6 +1376,8 @@ different depths, and it is O(n) per lookup over the whole document.
 support a dotted path in the existing accessors. And separately: either fix or remove the
 fifty untyped `(i64, i64) -> i64` names, because at present the interface advertises them
 alongside the eight that work.
+
+**2026-11-15: rejected at check** (138.12). Measured at toke v3.2.0 (`ea7ddf22`): a `json.getval` string passed to `json.i64` is E4031 ("declared 'jsonval', got 'str'"), so the crash cannot be written; `json.at(j;"usage")` then `json.i64` reads 150 ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p32.tk`).
 
 ---
 
@@ -1326,6 +1431,8 @@ still errored is treated as a genuine type mismatch and gets the caller's fallba
 That works for numbers. There is no equivalent trick for `false`, which is why nothing in this
 codebase now reads a boolean out of JSON.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`) (the reproducer's `$json` spelled `$jsonval`, 3.2.0's rename): 0, 0.0, false and "" are each `$ok`; a missing key is `$err`.
+
 ## T-34 — a three-segment stdlib member is lowered as a call to a bare unqualified global
 
 **Severity: correctness AND availability, silent, and one case terminates the process.**
@@ -1369,6 +1476,8 @@ fails.
 **Ask.** Reject a member path that resolves to no declared export, rather than emitting a call
 to its last segment. A diagnostic naming `http.res.json` would have cost us nothing; the
 silent one cost a demo application's entire API surface.
+
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): both programs build and run.
 
 ---
 
@@ -1430,6 +1539,8 @@ symbols" for every function in the affected module and no indication why.
 is incomplete**. The silence is worse than the limit: a compiler that reports success having
 written a truncated artefact cannot be trusted by any build system.
 
+**2026-11-15: fixed** (138.14). Measured at toke v3.2.0 (`ea7ddf22`): 670 constants and a 300k-character string, toke rc 0 and clang rc 0.
+
 ## T-36 — `str.tki`'s `gen:"abi"` block declares ~90 members as `(i64,…) -> i64`, disabling argument type checking for all of them
 
 **Severity: correctness, silent, and it is the reason most of the other defects here were
@@ -1473,6 +1584,8 @@ share with this one.
 trip.** `arr.len()` is **not** a defect: `arr.len()` and `arr.len` emit the identical
 `getelementptr i64, i64* %p, i32 -1`, and the compiler labels it `; .len()`. Only
 `str.len(<array>)` is wrong.
+
+**2026-11-15: fixed for the filed cases** (138.11); **the class remains for integers (T-67)**. Measured at toke v3.2.0 (`ea7ddf22`): `compare(a,b)=-1 compare(b,a)=1 compare(a,a)=0 padleft=[007] tof32=12345` ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p36.tk`); `str.len(array)` and `str.tof32(12345)` are E4031. But 56 of `str.tki`'s 105 members are still `gen:"abi"` (the same 56 as at 3.1.0), and an integer in one of their string slots checks clean and segfaults (`str.toupper(42)`): filed with T-67.
 
 ## T-37 — a declared `@f64` gets the SCALAR f64 conversion applied to its array handle
 
@@ -1560,6 +1673,8 @@ paths disagree, and only one of them is wrong.
 **Ask.** Use the array conversion for any `@T`, including `@f64`. The element type should not
 select the conversion for the container.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): `2 1.5` and `2 2.5`.
+
 ## T-38 — a name's type is resolved function-wide, so a later `let` retypes an earlier binder and the diagnostic points at the wrong line
 
 **Severity: diagnostic quality, and the suggested fix is actively wrong.**
@@ -1598,6 +1713,8 @@ A reader has no way to connect the two sites, and it cost us a build cycle to fi
 **Ask.** Scope a `let` to its block for type resolution. Failing that, when two bindings of one
 name disagree, name **both** locations in the diagnostic — the way E4034 does for a field declared
 at two offsets, which is the same class of problem and is reported far better.
+
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): exit 7.
 
 ## T-39 — the `unused-import` lint rule is unsound, and `--lint --fix` breaks the build
 
@@ -1642,6 +1759,8 @@ DECLARED TYPE, because E4034 reports field-offset ambiguity at the read rather t
 and annotating the intermediate is the documented remedy. Inlining those would reintroduce the
 ambiguity. The hint is fine; a fix for it would not be.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): no `unused-import` on the type-only import; `--lint --fix` keeps it; `--check` afterwards is clean. LS1.3 and LS1.4 noted it the same day.
+
 ## T-40 — `db.exec` applies only the FIRST statement of a multi-statement string, and reports success for all of them
 
 **Severity: a migration silently does not apply, and reports that it did.**
@@ -1684,6 +1803,8 @@ by `scripts/find_multistatement_exec.py`, which resolves literals, `str.concat` 
 `let` bindings, same-file helpers, pass-through wrappers and `sql:` field initialisers. The
 guard exists because the work-around lives in one file and the hazard does not.
 
+**2026-11-15: fixed** (138.6). Measured at toke v3.2.0 (`ea7ddf22`): `sqlite_master` lists `x,ix_x`.
+
 ## T-41 — interpolating a `std.str` result prints the string's ADDRESS for fifteen functions
 
 **Severity: wrong output, silently. This one reached the privacy pipeline's own summary line.**
@@ -1721,6 +1842,8 @@ ids were `p-` followed by an address. **Worked around** by annotating the bindin
 `str.concat`. **Guarded** by `scripts/find_interp_abi_str.py`, in the quality gate. The guard
 flags direct interpolation and unannotated bindings for the fifteen measured names.
 
+**2026-11-15: fixed** (138.11). Measured at toke v3.2.0 (`ea7ddf22`): 0 of 14 print an address.
+
 ## T-43 — no toke API can choose the address a server binds, so every server listens on all interfaces
 
 **Severity: a local-first product cannot keep its API off the network.**
@@ -1740,6 +1863,8 @@ on `serveworkers`, passed through to `bind_listen`. ooke's `serverun` would then
 `host` it already parses from `ooke.toml`. Until then loke refuses requests per request
 (a foreign Origin, GA2.6; a non-loopback Host, GA2.7). That stops a browser and does not
 stop a client on the same network.
+
+**2026-11-15: fixed** (138.1); **the port-only form declined**. Measured at toke v3.2.0 (`ea7ddf22`): `http.serveon("127.0.0.1";P)` and `http.listen("127.0.0.1:P";…)` listen on `127.0.0.1` only ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p43.tk`), while `http.serve(P)` still listens on `*`: toke's owner kept it, because moving it to loopback would take deployed servers off the network with no diagnostic (`docs/stdlib/http.md`). loke calls the `…on` forms through ooke's `[server] host`.
 
 ## T-42 — a struct literal naming an UNDECLARED type is accepted, and read positionally
 
@@ -1776,6 +1901,8 @@ with no diagnostic, and the row's label, value and detail come back as each othe
 **Suggested fix:** report an undeclared type name in a struct literal (E3011 or E4033), and
 check a literal's field names against the declared type it is assigned to.
 
+**2026-11-15: fixed** (138.9). Measured at toke v3.2.0 (`ea7ddf22`): E3011 "identifier 'ghost' is not declared".
+
 ## T-46 — an annotated `let s:str=` binding of a T-41 function, used as an array element, is compiled as a spread
 
 **Severity: a value silently disappears from an array; for some functions, SIGBUS.**
@@ -1807,6 +1934,8 @@ declared to return `str`: `str.fromint`, or `str.concat("";...)`.
 **Guarded** by the array-element check in `scripts/find_interp_abi_str.py`. The ask is T-36's:
 declare these functions with the type they return.
 
+**2026-11-15: fixed** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): `len(@("g";g))=2`.
+
 ## T-47 — `json.str` unescapes by dropping the backslash, so `\n` reads back as the letter `n`
 
 **The same defect as T-44**, which a parallel branch filed the same day. Kept, because the measurements below go further than T-44's. Treat the two as one upstream ask.
@@ -1830,6 +1959,8 @@ In loke it meant a memory export, which escapes newlines correctly, could not be
 without every multi-line memory collapsing onto one line. **Worked around** in
 `shared.jsonobj.strvalue`, which takes the raw value with `json.getval` and decodes it.
 **Ask:** use the streaming parser's unescape in `json_str`.
+
+**2026-11-15 (T-47a): fixed** (138.12). Measured at toke v3.2.0 (`ea7ddf22`): bytes `97 10 98 9 99 13 100 34 101 92 102 65`.
 
 ## T-48 — `http.postheaders` sends nothing, in the shape loke's cloud providers call it
 
@@ -1873,11 +2004,15 @@ arrives: a caller's `content-type` REPLACES the default (one Content-Type line a
 Host header still omits the port. **The ask (new):** reject an `httpclient` where a `str` URL is
 declared, as the four-argument form already is.
 
+**2026-11-15: rejected at check** (138.8; the client-first three-argument shape by 138.26). Measured at toke v3.2.0 (`ea7ddf22`): the typed `http.postheaders(url;body;@(@(name;value)))` arrives at a loopback recorder with `x-api-key=k1` and one `content-type` ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p48.tk`); both four-argument shapes are E4026 and the three-argument client-first one E4031 (W117). Certificate verification is T-58.
+
 ## T-49 — `net.listen(port)` segfaults
 
 Measured 2026-09-25: `let fd=net.listen(59433);` in a test binary crashes (SIGSEGV).
 `std.net` declares it as `gen:"abi"` `(i64) -> i64`, so the compiler cannot check what it
 is given. loke's test opens a listener with `nc -l` instead.
+
+**2026-11-15: rejected at check** (138.13). Measured at toke v3.2.0 (`ea7ddf22`): `net.listen(port)` is E4031; `net.listen("127.0.0.1:P")` returns a descriptor ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p49.tk`).
 
 ## T-50 — `process.wait` is a plain `i32`, and every `mt` on it inverts success
 
@@ -1888,6 +2023,8 @@ on every successful step, `uname` answered an "unknown" platform, and the CLI's 
 reported 127 for commands that had succeeded. The ask is the same as T-33's: declare the
 error side, or reject a match on a non-result.
 
+**2026-11-15: rejected at check** (before 3.0.0). Measured at toke v3.2.0 (`ea7ddf22`): E4031 "expected an error union 'T!E', got 'i32'".
+
 ## T-51 — `json.dec` accepts `{not json`, and reading the result crashes
 
 Measured 2026-09-25: `mt json.dec("{not json") { $ok:o ...; $jsonerr:e ... }` takes the `$ok`
@@ -1895,6 +2032,8 @@ arm, and `json.str(o;"method")` on that value then segfaults. So the decoder's o
 cannot guard a server's input. The mcp-toke server was taken down by one malformed line from
 any client. loke now pre-checks structure (a single `{...}` with balanced braces outside
 strings) before decoding. The ask: `json.dec` should reject input that is not JSON.
+
+**2026-11-15: fixed** (138.2). Measured at toke v3.2.0 (`ea7ddf22`): with either arm first, `dec arm=jsonerr read=dec-err`.
 
 ## T-52 — a struct holding an array of its own type crashes the compiler
 
@@ -1912,6 +2051,8 @@ A struct field of type `@$self` is how a tree is written (loke's navigation item
 use of the shape; `packages/browser/src/nav.tk` is the file that hit it, and it has no
 importer.
 
+**2026-11-15: fixed** (138.13). Measured at toke v3.2.0 (`ea7ddf22`): `--emit-interface --check` exits 0.
+
 ## T-13 — a bare sum variant in a value position produces a value that crashes
 
 ```toke
@@ -1925,6 +2066,8 @@ f=main():i64{ let l=mut.$public; <name(l) };     (* SIGTRAP *)
 The bare form compiles with no diagnostic and produces a value that crashes when
 matched. loke had **280 of them**, including every pattern definition in the privacy
 detector, which is why that detector crashed on the first text that matched.
+
+**2026-11-15: rejected at check** (138.13). Measured at toke v3.2.0 (`ea7ddf22`): both forms are E4033 "'$internal' is a type, not a value".
 
 ## T-14 — `==` on two sums compares the handle, not the variant
 
@@ -1941,6 +2084,8 @@ Every `sensitivity==$restricted` in loke's privacy and governance decisions was
 therefore false. We replaced them with a ranking function that matches once and
 compares integers.
 
+**2026-11-15: rejected at check** (138.9). Measured at toke v3.2.0 (`ea7ddf22`): E4031 "'==' does not compare struct or sum values ... match on the variant or compare a field". (loke's 2026-09-27 runner still prints DEFECT, because it accepts only exit 11.)
+
 ## T-15 — `http.get` against a closed port returns `$ok` with a nil response
 
 The `$err` arm never runs, and reading `.status` on the nil response is a dereference a
@@ -1951,6 +2096,8 @@ Both of loke's sidecar health checks returned **available** for a dead port beca
 this, which is how the privacy pipeline came to call layers that were not running and
 crash. We now probe with `net.portavailable`, which answers honestly for a local
 service because it tries to bind.
+
+**2026-11-15: rejected at check** (138.3). Measured at toke v3.2.0 (`ea7ddf22`): the one-argument `http.get(url)` is E4026; against a closed port `http.clientget` answers `$err` ("TCP connect failed") and `http.geturl` `$err` ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p15.tk`).
 
 ## T-16 — no way to construct an http request or read a response body from source
 
@@ -1964,6 +2111,8 @@ possible. We worked around it by splitting each handler's body-building into a f
 that takes no request, which is better structure anyway, but the plumbing itself remains
 untestable.
 
+**2026-11-15: fixed** (138.16). Measured at toke v3.2.0 (`ea7ddf22`): a handler called with `http.mockreq("POST";"/x";headers;"hello";@())` answers `status=200 body=[got POST /x body=hello]` ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p16.tk`).
+
 ## T-17 — `json.parse` binds to an unrelated function
 
 `json.parse` mangles to `tk_json_parse_w`, which does not exist. The linker resolves it
@@ -1975,6 +2124,8 @@ document. It links silently.
 loke had 14 call sites: config parsing, the Ollama response parsers, the dashboard
 preferences and the ephemeral placeholder map. `json.decode` is correct and is what we
 now use. Either alias `parse` to `dec` or remove the name.
+
+**2026-11-15: rejected at check** (138.9, `12c71a58`). Measured at toke v3.2.0 (`ea7ddf22`): the filed program is E4031 at `--check` ("argument 1 of 'json.getstr' is a JSON document ... but this value comes from json.parse, which returns a str, number, bool or array"). toke kept `json.parse` as a scalar and array parser rather than aliasing it to `json.dec`; loke has no `json.parse` call.
 
 
 ## T-44 — `json.str` unescapes `\n` to a bare `n`
@@ -1995,6 +2146,8 @@ matches the task name by prefix (F5.9). Any other exact comparison on a `json.st
 from an LLM is exposed to this in the same way. The ask: decode the JSON escapes as the
 spec defines them.
 
+**2026-11-15: fixed** (138.12). Verified by loke at 3.1.0 (the brief: `json.str` unescape) and measured at toke v3.2.0 (`ea7ddf22`): `len=14 lastbyte=10`.
+
 ## T-45 — `json.enc` escapes only `"` and `\`
 
 **Severity: malformed output, silently.**
@@ -2007,6 +2160,8 @@ it. Found 2026-09-24: `core.router.intent.classifybody` (F5.10) sent every multi
 Ollama as invalid JSON. **Worked around** with `shared.jsonobj.escape`, which escapes newline,
 CR and tab as well. Other control characters below 0x20 are still not escaped by either.
 The ask: escape all control characters, as the spec requires.
+
+**2026-11-15: fixed** (127.229). Measured at toke v3.2.0 (`ea7ddf22`): `json.enc` writes `\n`, `\t` and `\r` as escapes (`34 97 92 110 98 92 116 …`). loke's `shared.jsonobj.escape` workaround is harmless and stays.
 
 ## T-53 — a struct is capped at sixteen fields, `--max-params` does not raise it, and the error names neither
 
@@ -2036,6 +2191,8 @@ and reads the correlation id, provider and model from it, so no call passes more
 **The ask:** reject a call or a declaration with more than `TKC_MAX_PARAMS` parameters, naming
 the limit.
 
+**2026-11-15: fixed** (before 3.0.0, 127.190). Measured at toke v3.2.0 (`ea7ddf22`): the filed program prints `16 17 20`.
+
 ## T-54 — a 65th struct type in scope silently displaces another, and the error blames a field name
 
 **Severity: blocks, with a misleading diagnostic.**
@@ -2052,6 +2209,8 @@ the file had changed near that line, and renaming a local called `body` elsewher
 than a record, so importing it adds no struct type. **The ask:** reject the 65th type where it
 is declared or imported and name the limit, or grow the table.
 
+**2026-11-15: fixed** (138.15, 127.250). Measured at toke v3.2.0 (`ea7ddf22`): 58 library types plus std.http build with no flag (`one=1`).
+
 ## T-55 — `str.charat` measures the whole string on every call, so a byte loop is quadratic
 
 **Severity: performance, silently. It turns a linear scan into a quadratic one.**
@@ -2065,6 +2224,8 @@ string too, but once per call rather than once per byte.
 
 **What it cost in loke.** F3.1b searches a growing window with `str.indexof` over `str.substr`
 instead. **The ask:** bounds-check against a stored length, or add `str.byteat` without the check.
+
+**2026-11-15: fixed** (127.170, a length-carrying string heap). Measured at toke v3.2.0 (`ea7ddf22`), at a larger size because the filed one runs in about a millisecond: 1.6 M and 3.2 M bytes scanned in 3 and 7 ms, ratio x10 = 17, linear ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p55.tk`). The filed program at 3.1.0, measured the same day: 195 and 774 ms for 100 k and 200 k, ratio x10 = 39.
 
 ## T-56 — a module may import at most 32 others, which caps an ooke application's routes
 
@@ -2087,6 +2248,8 @@ split the registry across modules.
 file fails with E9010 on its 33rd import. What remains upstream is that the diagnostic does not
 name the setting, and that ooke does not set it (O-2).
 
+**2026-11-15: fixed as a diagnostic** (138.15); **the default declined**. Measured at toke v3.2.0 (`ea7ddf22`): E9010 at `--check`, "this module has 36 imports and the limit is 32 (max_imports)", with the flag named; `--max-imports=64` builds. The default stays 32 by toke's choice; loke sets `max_imports = 40` in `tkc.toml`. (loke's runner calls any E9010 a reproduction.)
+
 ## T-47 — `str.nowunix()` returns the time as a STRING and is declared `i64`
 
 **Severity: wrong value, silently. It reached a budget, a kill switch and an audit trail.**
@@ -2106,6 +2269,8 @@ accumulate across requests. `metrics_raw.timestamp` held a pointer, and a test a
 `engaged_at` and auto-release (GA5.28). **Worked around** with `shared.types.nowi64()` and
 `nowms()`, which read `std.time`. **The ask** is the T-36 one: declare it `str`, or make it
 return the number its name promises.
+
+**2026-11-15 (T-47b): fixed** (138.11). Measured at toke v3.2.0 (`ea7ddf22`): `str.nowunix()` interpolates as the number of seconds, and `a/86400` is E4031 "'/' requires numeric operands: the left side is 'str'".
 
 ## T-57 — `http.get(client;path)` registers a server route; nothing says so, and its return value reads as success after 256 calls
 
@@ -2151,6 +2316,8 @@ after a TCP reachability probe, and by returning plain structs, not results, fro
 two-argument `http.get` whose first argument is an `httpclient` (the type is known), and make
 `tk_http_get_handler` return a value `mt` cannot read as success when the table is full.
 
+**2026-11-15: rejected at check** (138.3). Measured at toke v3.2.0 (`ea7ddf22`): `http.get(client;path)` is E4031 naming `http.clientget`; 300 `http.clientget` calls put 300 `GET /health` at a loopback recorder and take the ok arm 300 times ([`repro-2026-11-15/rewrites/`](repro-2026-11-15/rewrites/)`p57.tk`).
+
 ## T-58 — `http.postheaders` over https does not verify the server's certificate
 
 **Severity: security. Any API key sent through it is exposed to anyone who can intercept the
@@ -2186,6 +2353,8 @@ the test CA was trusted through `SSL_CERT_FILE`. `tests/integration/test_https_v
 `test_hosted_tls.tk`. Still open, and not a verification gap: there is no header-carrying GET
 (`http.geturl` and `http.clientget` send only `Host` and `Connection`), so a GET that needs a
 `User-Agent` or an `Authorization` (GitHub's API needs the first) cannot be written.
+
+**2026-11-15 at toke v3.2.0 (`ea7ddf22`).** Certificate verification: fixed (135.25), as verified by loke at 3.1.0 above; not re-run for this entry (F10.53 runs `test_https_verify.tk` and `test_hosted_tls.tk` on 3.2.0). 3.2.0 also makes `std.tls` clients verify by default (121.64; read from the CHANGELOG). The Host header names a non-default port: fixed (138.28; W117 measured `Host: 127.0.0.1:47979`). **The header-carrying GET is still open as toke 138.27**: a new function and a spec amendment, waiting on toke's owner (register item 2.3 recommends `http.getheaders(url:str;headers:[[str]]):httpresp!httperr`, "accept as proposed"); `http.tki` at 3.2.0 has no such call. VM1.6g waits on it.
 
 ## T-59 — a capability grant cannot be scoped, and anyone who launches the binary can widen it
 
@@ -2240,6 +2409,8 @@ scope of each in a comment. `env_write` is not granted. Keeping network traffic 
 machine rests on `core.providers.transport` refusing every non-loopback send, a check in
 loke's code, not on this manifest.
 
+**2026-11-15: still open at toke v3.2.0 (`ea7ddf22`), as toke 138.19**, which toke's tracker marks **blocked on its owner**: a design note (`docs/decisions/138.19-scoped-capability-grants.md`, commit `b33e7a62` on branch `feature/z136-design-notes`, not on main) proposes per-class scope lists, direction-prefixed `net` scopes, runtime flags that narrow a baked set, a CAP002 code and a warning release before quoted strings change meaning; decisions D1–D5 are register item 3.4. Measured at 3.2.0 with loke's probe ([`repro-2026-11-15/T-59/`](repro-2026-11-15/T-59/)): points 1, 4, 5 and 6 are unchanged (a scoped `fs_read` reads `/etc/hosts`, a scoped `net` grants the class, `--allow-env` adds env_write to loke's manifest, `env = true` grants env_write with no warning, `enforce = false` still traps CAP001). Points 2 and 3 are read, not measured.
+
 ---
 
 ## T-60 — `==` on an array compares addresses, so `x == @()` is never true
@@ -2287,6 +2458,8 @@ Measured: `@(1;2)==@(1;2;3)` is true, `@(256)==@(512)` is true, `@(1;2)==@(7;8)`
 `$err:e 0` (loke's idiom) still checks clean. `==` on arrays is **still open as 138.20** (refuse
 or element-wise is with toke's owner): measured unchanged, exits 2 and 3. loke keeps
 `scripts/find_empty_array_sentinel.py` and the `$err:e 0` arms. See [`toke-reply-2026-11-15.md`](toke-reply-2026-11-15.md).
+
+**2026-11-15 (W118), what 138.21 leaves.** An integer is still accepted where `handle` is declared: `process.wait(5)` checks clean and dies with SIGSEGV at 3.1.0 and 3.2.0, and so does the same call through a helper whose parameter loke must spell `h:i64`, because `handle` cannot be named (138.32). The NULL filler `0` is safe (`process.wait(0)` answers -1). Filed as **T-67**; the second half of this entry's ask ("have `process.wait` refuse an address that is not one it handed out") is not done.
 
 ## T-61 — adding an untyped integer local to a u32 struct field emits invalid IR
 
@@ -2384,3 +2557,97 @@ chunk) is a transport error.
 bodies in **138.31** (`1046f364`). Measured: the `stall` case now answers `$err` after about 30 s.
 toke states one reader serves `geturl`, `clientget`/`post`/`put`/`delete` and `postheaders`; loke
 measured `geturl` only. F10.52's caller audit is overtaken once loke builds on 3.2.0 (F10.53).
+
+**2026-11-15 (W118): toke's wider claim measured.** With [`repro-2026-11-15/T-64/`](repro-2026-11-15/T-64/) at 3.2.0: `http.clientget` and `http.postheaders` answer `$err` for the stall (about 30 s), and `clientget`, `clientpost`, `postheaders` and `geturl` answer `$err` for a chunked body cut before its last chunk and for a close-delimited body ended by a reset, while a clean close answers `$ok` with the 3 bytes. Nothing toke claimed for 138.23 and 138.31 failed.
+
+---
+
+## T-65 — a function parameter named `t<digits>` collides with toke's IR temporaries
+
+**Severity: build break after a clean `--check`. Not silent; not reached by loke.**
+
+Found 2026-11-15 (W118) while writing a reproducer for T-64, and reduced
+([`repro-2026-11-15/T-65/`](repro-2026-11-15/T-65/)). Measured at toke v3.1.0 (`86c432da`) and
+v3.2.0 (`ea7ddf22`):
+
+```toke
+m=t65;
+f=g(t0:i64):i64{
+  <t0+1
+};
+f=main():i64{
+  <g(4)
+};
+```
+
+`toke --check` is rc 0. The build stops at clang: `multiple definition of local value named 't0'`
+(E9003, "while compiling f=g"). The emitted IR names the parameter's stack slot `%t0` and the
+first temporary `%t0` as well (`%t0 = alloca i64` … `%t0 = load i64, i64* %t0`). A parameter `t5`
+collides the same way when the function has a fifth temporary. A **local** `let t0=4;` is fine
+(`control.tk` exits 5), so only parameters are affected.
+
+**What it cost loke:** nothing yet; no loke function has a parameter named so (grep, 2026-11-15).
+It cost the T-64 reproducer one rename.
+
+**The ask.** Give parameter slots a name that cannot collide with a temporary (a suffix or a
+different prefix, as the `.arg` value already has), or refuse the name at `--check`.
+
+## T-66 — a `mt` with variant arms on an i64 passes `--check` and fails at build
+
+**Severity: a check-only target cannot see it. Not silent at build: the error is located.**
+
+Found 2026-11-15 re-running T-2's reproducer at v3.2.0
+([`repro-2026-11-15/T-66/`](repro-2026-11-15/T-66/)). A three-arm `mt` whose labels are
+`FileErr` variants (`$notfound`, `$permission`, `$io`) on a parameter declared `i64` passes
+`toke --check` (rc 0). The build stops with `error[E9005]: match has 3 arms, but the sum type of
+the matched value is not established`, located at the `mt`. Same at v3.1.0.
+
+This is the class toke closed elsewhere in 3.2.0: an unrecognised arm label is E3011 at
+`--check` (127.292) and `mt` with variant arms on a record value is E4080 (127.367), each of
+which "failed at build" before. An i64 subject is the case left.
+
+**What it cost loke:** nothing measured. loke builds three linked trees and keeps check-only
+trees (legacy `src/`, `packages/browser/src`) where such a match would pass.
+
+**The ask.** Refuse variant arms on a subject that is not a sum or a result at `--check`, as
+E4080 does for a record.
+
+## T-67 — an integer is accepted where the runtime reads a pointer: `process.wait(5)` and `str.toupper(42)` segfault
+
+**Severity: silent until it crashes. The remaining half of T-60's spawn ask.**
+
+Found 2026-11-15 (W118) checking toke 138.21 for this ledger
+([`repro-2026-11-15/T-67/`](repro-2026-11-15/T-67/)). Measured at v3.1.0 and v3.2.0:
+
+- `process.wait(5)` checks clean, builds, and the program dies with SIGSEGV (exit 139).
+  `process.wait(4096)` and `process.stdout(7)` do the same.
+- `process.wait(0)`, the NULL handle that a `$err:e 0` arm yields, answers -1 (`zero.tk`).
+  loke's idiom is safe.
+- **The shape loke writes** (`laundered.tk`): `handle` cannot be named in type position
+  (`let h:handle` is E2005; toke 138.32), so a helper that takes a process handle declares
+  `h:i64` (`packages/core/src/installer/detect.tk`, `ollamacli.tk`, `install.tk`). The real
+  handle passes through it correctly (`real=0`), and so does any other integer: `waitfor(5)`
+  checks clean and segfaults.
+
+toke 3.2.0's breaking change 6 (138.21) judges a str, float, array, map or record where a
+`handle` is declared, which is what T-60 measured (`process.wait("abc")` is E4031). An integer is
+deliberately left legal, because `0` is the failure filler. T-60's ask had a second half, "or
+have `process.wait` refuse an address it did not hand out", which is not done.
+
+- **The same class through `std.str`** (`abistr.tk`): 56 of `str.tki`'s 105 members are still
+  `gen:"abi"`, 41 of them with every parameter and the result declared `i64` (T-36's residue;
+  the same 56 as at 3.1.0). 3.2.0 refuses an array there when the runtime reads a C string
+  (`str.toupper(@("x"))` is E4031, "read by the runtime as a C string"), but not an integer:
+  `str.toupper(42)` and `str.reverse(12345)` check clean and segfault, at 3.1.0 and 3.2.0.
+
+**What it cost loke:** no live defect known: loke passes only real handles and the `0` filler,
+and strings to `std.str`.
+But the 138.21 check never reaches loke's own handle passing, since every helper parameter is an
+`i64`.
+
+**The ask, either of:** (1) let a program name `handle` as a parameter type (138.32, option (b)),
+so the checker judges loke's helpers as it now judges std's slots; or (2) have the process
+runtime refuse a handle it did not create (a registry of live handles, or a tagged header),
+answering -1 / `$err` as for NULL rather than dereferencing it. (2) also covers a forged handle
+that reaches the runtime some other way. For `std.str`: type the remaining `gen:"abi"` members
+(T-36's original ask), or extend the C-string check to integer arguments.

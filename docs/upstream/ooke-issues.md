@@ -3,6 +3,10 @@
 > **Current state: see [`handoff-2026-09-27.md`](handoff-2026-09-27.md)** (O-1 re-verified; O-2 and O-3 added).
 > O-4 and O-5 re-verified at rc.2 (`3cc4998`) on 2026-11-09, with reproducers, in
 > [`handoff-2026-11-09.md`](handoff-2026-11-09.md) (drafted, not sent).
+> **Status of every item at ooke v3.0.0, 2026-11-15:** [`status-2026-11-15.md`](status-2026-11-15.md). O-1 to O-5 are all
+> fixed; no new ooke item was found. ooke calls the modules loke imports internal (F10.54); the third handoff,
+> [`handoff-2026-11-15.md`](handoff-2026-11-15.md) (drafted, not sent), lists the calls without making a request.
+>
 > **Answered 2026-11-15** by ooke v3.0.0 (`7ac2472`, requires toke 3.2.0): see [`toke-reply-2026-11-15.md`](toke-reply-2026-11-15.md).
 
 Defects in ooke found while building loke. The toke ones are in `toke-issues.md`.
@@ -25,6 +29,25 @@ it as `TOKE_DIR` builds loke, moke and the CLI, and every test passes.
 
 **The ask:** end both functions with an explicit `<`, so a later ooke rc builds on current
 toke. Until then, loke builds only against a toke at or before the pin.
+
+**2026-11-15: fixed** in rc.2 (toke-tracked story 138.7, ooke `94607ac`); rc.1 was replaced, not
+repaired. Verified by loke at 3.1.0 (F10.39: rc.2 builds) and measured at toke v3.2.0: ooke
+3.0.0's `src/store.tk` passes `toke --check` (two W1001 lossy-cast warnings), while rc.1's copy in
+`repro-2026-09-27/O-1/` still fails E4071 at 174:3 and 183:3, as expected.
+
+## O-2 — the generated handler registry imports every page, so ~30 routes hit the 32-import cap
+
+Filed in [`handoff-2026-09-27.md`](handoff-2026-09-27.md) §4. **2026-11-15: fixed** (138.7, ooke
+`5d53dae`). Read, not measured: ooke 3.0.0's `scripts/gen_app_makefile.sh` passes
+`--max-imports=N` when the page count passes 32. loke generates its own registry and sets
+`max_imports = 40` in `tkc.toml` (MK6.5).
+
+## O-3 — `[server] host`: ooke needs a bind address too
+
+Filed in [`handoff-2026-09-27.md`](handoff-2026-09-27.md) §4. **2026-11-15: fixed** (138.7, ooke
+`076db84`, `be126df`). Verified by loke at 3.1.0 (loke's generated server mains pass
+`[server] host` to `serve.serverun`); the `127.0.0.1` default is read from ooke 3.0.0's
+`src/config.tk` (`toml.str(server;"host")`, `$err` arm `"127.0.0.1"`).
 
 ## O-4 — the template engine renders an unknown directive, and an unclosed block, as nothing
 
@@ -76,6 +99,6 @@ page rather than an error.
 `A{{raw x}}B|{= x | raw =}|{= x =}` with `x = "<b>"` renders `A{{raw x}}B|<b>|&lt;b&gt;`.
 
 **2026-11-15: fixed in ooke v3.0.0 (`7ac2472`)**, story **138.30** (`d4c9bcb`): the CHANGELOG no
-longer names `{{raw`, and names `{= key | raw =}`; toke reports `docs/public-api.md` and
-`docs/versioning.md` corrected too (not checked by loke). `{{raw x}}` still renders literally, as
+longer names `{{raw`, and names `{= key | raw =}`; `docs/public-api.md` and `docs/versioning.md`
+are corrected too (checked 2026-11-15: no `{{raw`, one `| raw =}` each). `{{raw x}}` still renders literally, as
 it never was syntax. Nothing to change in loke.
