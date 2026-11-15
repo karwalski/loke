@@ -26,7 +26,7 @@ i=log:shared.log;
 f=toolanonymise():$mcptool{
   <$mcptool{
     name:"anonymise";
-    description:"Detect and anonymise PII in text. Returns the anonymised text and how many entities were detected, never the original.";
+    description:"Detect and anonymise PII in text. Returns the anonymised text and how many entities were detected, never the original. The text is sent only to this server's configured detection services: a presidio_url or ollama_url naming any other address is refused.";
     inputschema:"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"presidio_url\":{\"type\":\"string\"},\"ollama_url\":{\"type\":\"string\"}},\"required\":[\"text\"]}"
   }
 };
@@ -114,11 +114,37 @@ f=toolerr(msg:str):$toolresult{
    text before anything scanned it. The anonymised text is quoted with jx.escape: the old
    quoting replaced double quotes only, so a backslash, a newline or a tab in the input made the
    answer invalid JSON. *)
+(* MK6.12. The detection layers are sent the text IN CLEAR, before any of it is anonymised, and
+   this tool used to take their addresses from its caller: whoever called it chose which
+   service received the text. Measured 2026-11-15: a presidio_url naming another port on this
+   machine was sent `POST /analyze` carrying the whole text, and an ollama_url the NER prompt
+   with it. A host off this machine was not sent to only because each layer refuses a host
+   that is not loopback (VM1.6e).
+
+   The text now goes only to the addresses this server was configured with. A caller that names
+   another, or names one with a value that is not a string, is refused before anything is sent,
+   so it learns its choice was not honoured rather than being silently overridden. Naming the
+   configured address is accepted, so a caller that always sends it keeps working. Whether a
+   caller may choose at all is the user's open decision on MK6.12; until it is made, it may not.
+   Neither address is echoed in the refusal. *)
+f=destinationrefusal(obj:$jsonval;key:str;configured:str):str{
+  if(!jx.has(obj;key)){ <"" }el{};
+  if(str.eq(jx.strvalue(obj;key;"");configured)){ <"" }el{};
+  <"anonymise: \(key) is not this server's configured detection address; the text is sent only to the configured services, and nothing was sent"
+};
+
 f=anonymiseobj(obj:$jsonval;presidiourl:str;ollamaurl:str):$toolresult{
   let cid=log.newcorrelationid();
   let text=jx.strvalue(obj;"text";"");
   if(str.len(text)==0){ <toolerr("anonymise: text is required") }el{};
-  let run=privacy.run(text;"";privacy.newconfig(jx.strvalue(obj;"presidio_url";presidiourl);jx.strvalue(obj;"ollama_url";ollamaurl)));
+  let prefused=destinationrefusal(obj;"presidio_url";presidiourl);
+  let orefused=destinationrefusal(obj;"ollama_url";ollamaurl);
+  let refused=if(str.len(prefused)>0){ prefused }el{ orefused };
+  if(str.len(refused)>0){
+    log.warn("anonymise: refused a caller-chosen detection address";"mcp-tools";cid);
+    <toolerr(refused)
+  }el{};
+  let run=privacy.run(text;"";privacy.newconfig(presidiourl;ollamaurl));
   if(!privacy.issafetoforward(run)){
     log.warn("anonymise: no detection layer completed a scan";"mcp-tools";cid);
     <toolerr("anonymise: no detection layer completed a scan, so the text was not anonymised")

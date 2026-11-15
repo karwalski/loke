@@ -1,0 +1,116 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.mcptoke.anonymisedestination;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=proto:core.mcp.protocol;
+i=tools:mcptoke.tools;
+
+(* MK6.12 — anonymise sends the text it is asked to anonymise to the detection services, in
+   clear, before any of it is anonymised. It took `presidio_url` and `ollama_url` from its
+   caller and ran the pipeline against them, so whoever called the tool chose which service
+   received the text. Measured 2026-11-15 before the fix: a call naming a recorder on another
+   loopback port as its presidio_url delivered `POST /analyze` with the whole text to that
+   recorder, and the tool answered success. A non-loopback URL was not sent to, but only
+   because each detection layer refuses a host that is not loopback (VM1.6e), not because
+   the tool did.
+
+   A caller-supplied URL that is not the server's configured one is now refused with a tool
+   error, and nothing is sent anywhere. The configured URL, named or left out, still works.
+
+   Both services here are scripts/lib/http_recorder.py, which logs every request before it
+   answers: `foreign` stands for the address a caller chose, `configured` for the server's
+   Presidio. The configured Ollama is a loopback port nothing listens on. The text is
+   synthetic. *)
+
+f=anonymise(args:str;presidiourl:str;ollamaurl:str):$toolresult{
+  <tools.handletool("anonymise";args;presidiourl;ollamaurl)
+};
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_anondest_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let fbase=scratch();
+  let flog="\(fbase).log";
+  let frec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";flog;"\(fbase).port")) { $ok:h h; $err:e 0 };
+  let fport=waitport("\(fbase).port");
+  let cbase=scratch();
+  let clog="\(cbase).log";
+  let crec=mt process.spawn(@("python3";"scripts/lib/http_recorder.py";clog;"\(cbase).port")) { $ok:h h; $err:e 0 };
+  let cport=waitport("\(cbase).port");
+  if(t.assert(str.len(fport)>0 && str.len(cport)>0 && !str.eq(fport;cport);"control: both recorders came up, on different ports")){pass=pass+1}el{fail=fail+1};
+
+  let foreign="http://127.0.0.1:\(fport)";
+  let presidio="http://127.0.0.1:\(cport)";
+  let ollama="http://127.0.0.1:59993";
+  let text="Please brief alice@example.com on the Larkspur merger";
+
+  (* (a) A caller-chosen Presidio on another loopback port. *)
+  let a=anonymise("{\"text\":\"\(text)\",\"presidio_url\":\"\(foreign)\"}";presidio;ollama);
+  if(t.assert(a.iserror;"anonymise refuses a presidio_url that is not the configured one")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(a.text;"presidio_url is not this server") && str.contains(a.text;"nothing was sent");"and says why, and that nothing was sent")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile(flog);"";"and the address the caller chose received nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* A caller-chosen Ollama, the NER layer's address. *)
+  let o=anonymise("{\"text\":\"\(text)\",\"ollama_url\":\"\(foreign)\"}";presidio;ollama);
+  if(t.assert(o.iserror && str.contains(o.text;"ollama_url is not this server");"anonymise refuses an ollama_url that is not the configured one")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile(flog);"";"and the address the caller chose received nothing")){pass=pass+1}el{fail=fail+1};
+
+  (* A host off this machine, and a value that is not a string. *)
+  let far=anonymise("{\"text\":\"\(text)\",\"presidio_url\":\"http://presidio.example.com:5000\"}";presidio;ollama);
+  if(t.assert(far.iserror && str.contains(far.text;"presidio_url is not this server");"anonymise refuses a presidio_url off this machine")){pass=pass+1}el{fail=fail+1};
+  let num=anonymise("{\"text\":\"\(text)\",\"ollama_url\":5}";presidio;ollama);
+  if(t.assert(num.iserror && str.contains(num.text;"ollama_url is not this server");"and an ollama_url that is not a string")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(readfile(clog);"";"a refused call sends nothing to the configured service either")){pass=pass+1}el{fail=fail+1};
+
+  (* (b) The configured address, named by the caller. *)
+  let same=anonymise("{\"text\":\"\(text)\",\"presidio_url\":\"\(presidio)\",\"ollama_url\":\"\(ollama)\"}";presidio;ollama);
+  if(t.assert(!same.iserror && str.contains(same.text;"entities_found");"anonymise answers when the caller names the configured addresses")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(readfile(clog);"POST /analyze ") && str.contains(readfile(clog);"Larkspur merger");"and the configured Presidio received the text")){pass=pass+1}el{fail=fail+1};
+
+  (* And left out, as most callers do. *)
+  let before=str.len(readfile(clog)) as i64;
+  let plain=anonymise("{\"text\":\"\(text)\"}";presidio;ollama);
+  if(t.assert(!plain.iserror && str.contains(plain.text;"entities_found");"anonymise answers when the caller names no address")){pass=pass+1}el{fail=fail+1};
+  let after=readfile(clog);
+  if(t.assert(str.contains(str.slice(after;before;str.len(after) as i64);"POST /analyze ");"and the configured Presidio received that text too")){pass=pass+1}el{fail=fail+1};
+
+  if(t.asserteq(readfile(flog);"";"after every call, the address the caller chose has received nothing")){pass=pass+1}el{fail=fail+1};
+
+  if(frec!=0){ process.kill(frec); process.wait(frec); }el{};
+  if(crec!=0){ process.kill(crec); process.wait(crec); }el{};
+  file.delete(flog);
+  file.delete("\(fbase).port");
+  file.delete(clog);
+  file.delete("\(cbase).port");
+  <fail
+};
