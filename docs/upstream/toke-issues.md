@@ -2514,6 +2514,10 @@ in the checker until it does.
 and user-function arguments build and exit 1 and 7. Removing loke's bind-the-row-first workaround
 is follow-up under F10.42.
 
+**2026-11-15 (W119): workaround removed (F10.42 Done).** The inline form is back in
+`tests/unit/nocustody/test_artifact.tk`, `packages/moke/tests/test_upload_csv.tk` and
+`packages/cli/src/output.tk`; all three compile at 3.2.0 and the two tests pass.
+
 ## T-63 — the https client cannot be told where to connect, has no body cap and no whole-request deadline (loke MK19.11)
 
 **Severity: feature ask with a security reason (SSRF defences for a user-supplied URL).**
