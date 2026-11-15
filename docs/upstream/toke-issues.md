@@ -9,7 +9,7 @@
 > (`86c432da`). It covers T-60 to T-64 below and ooke O-4/O-5.
 >
 > **Status of every item at toke v3.2.0, 2026-11-15: [`status-2026-11-15.md`](status-2026-11-15.md)**,
-> measured with [`repro-2026-11-15/`](repro-2026-11-15/). Three new items, T-65 to T-67, are at the end. The third
+> measured with [`repro-2026-11-15/`](repro-2026-11-15/). Three new items, T-65 to T-67, are at the end; T-39 is reopened (LS1.3, W123). The third
 > handoff, for what is still open, is drafted (not sent) as [`handoff-2026-11-15.md`](handoff-2026-11-15.md).
 >
 > **Answered 2026-11-15** by toke v3.2.0 (`ea7ddf22`) and ooke v3.0.0 (`7ac2472`): see
@@ -1718,6 +1718,8 @@ at two offsets, which is the same class of problem and is reported far better.
 
 ## T-39 — the `unused-import` lint rule is unsound, and `--lint --fix` breaks the build
 
+
+**2026-11-15: reopened.** Measured at toke v3.2.0 (`ea7ddf22`) by loke LS1.3 (W123): the param-type case is fixed, but an import used only as a struct-field type is still flagged and `--fix` breaks the build (E3011), and an import needed only for field resolution on another module's returned struct is flagged, after which `--check` passes and the compile fails E4034. Reproducers: `repro-2026-11-15/T-39/`. In the third handoff (`handoff-2026-11-15.md` §3).
 **Severity: the auto-fix produces code that does not compile.**
 
 An import is reported unused when its ALIAS never appears. But a TYPE from an imported module is
