@@ -253,9 +253,21 @@ f=main():i64{
   let w=x.openfile(env.getor("XLFILE";"/nonexistent.xlsx"));
   mt w {
     $ok:b dumpbook(b);
-    $err:e io.println(s.concat("open=ERR|";x.lasterr()))
+    $err:e io.println(s.concat("open=ERR|";errtext(e)))
   };
   <0
+};
+
+(* toke 3.2.0 retired x.lasterr (E4027); the $err arm's $xlsxerr variant carries the kind and
+   its message. (F10.53) *)
+f=errtext(e:$xlsxerr):str{
+  <mt e {
+    $badworkbook:m s.concat("badworkbook: ";m);
+    $badpart:m s.concat("badpart: ";m);
+    $nosheet:m s.concat("nosheet: ";m);
+    $toolarge:m s.concat("toolarge: ";m);
+    $io:m s.concat("io: ";m)
+  }
 };
 
 f=dumpbook(b:$xlsxbook):i64{
@@ -263,7 +275,7 @@ f=dumpbook(b:$xlsxbook):i64{
   let r=x.rows(b;"Transactions");
   mt r {
     $ok:rows dumprows(rows);
-    $err:e io.println(s.concat("rows=ERR|";x.lasterr()))
+    $err:e io.println(s.concat("rows=ERR|";errtext(e)))
   };
   x.close(b);
   <0

@@ -242,7 +242,7 @@ ensure_stdlib_archive() {
     find "$VENDOR/cmark/src" -name '*.c'
     echo "$VENDOR/tomlc99/toml.c"
   } | while read -r c; do
-    case "$c" in *infer_stream.c|*cmark/src/main.c) continue ;; esac
+    case "$c" in *cmark/src/main.c) continue ;; esac
     clang $_cf -c "$c" -o "$_objdir/$(echo "$c" | tr '/' '_').o" 2>/dev/null \
       || echo "  skipped (does not build): $c" >&2
   done
@@ -505,17 +505,25 @@ build_ooke_objs() {
   fi
   # rc.2's cli.tk imports ooke.floor, which ooke's Makefile generates from ooke.toml
   # [requires] into src/_floor.tk (ooke story 134.35) and does not track. The same three
-  # keys, the same text, generated here into the temporary copy. (F10.39)
+  # keys, the same text, generated here into the temporary copy. (F10.39; 3.0.0 adds
+  # ookeversion(), F10.53)
   if [ ! -f "$tmp/src/_floor.tk" ]; then
     _req() { sed -n "s/^$1 *= *\"\(.*\)\"/\1/p" "$OOKE_DIR/ooke.toml" | head -1; }
     _mtv=$(_req mintoke); _mtd=$(_req mintokedate); _mtc=$(_req mintokecommit)
     [ -n "$_mtv" ] && [ -n "$_mtd" ] && [ -n "$_mtc" ] \
       || { rm -rf "$tmp"; die "ooke.toml [requires] lacks mintoke, mintokedate or mintokecommit"; }
+    # ooke 3.0.0 (story 121.66) also generates ookeversion() from VERSION, which cli.tk
+    # prints. (F10.53)
+    _ov=$(head -1 "$OOKE_DIR/VERSION" 2>/dev/null)
+    [ -n "$_ov" ] || { rm -rf "$tmp"; die "ooke VERSION is missing or empty"; }
     printf '%s\n' \
       '(* GENERATED from ooke.toml [requires] by loke scripts/lib/build_tree.sh, as ooke'"'"'s Makefile does. *)' \
       'm=ooke.floor;' \
       'f=floortoml():$str{' \
       "  <\"[requires]\\nmintoke = \\\"$_mtv\\\"\\nmintokedate = \\\"$_mtd\\\"\\nmintokecommit = \\\"$_mtc\\\"\\n\"" \
+      '};' \
+      'f=ookeversion():$str{' \
+      "  <\"$_ov\"" \
       '};' > "$tmp/src/_floor.tk"
   fi
   local m src
@@ -625,8 +633,10 @@ fi
 # pages/installer all call them. llm_tool.c was excluded the same way while
 # llm_tool_glue.c was kept, so the glue's calls to llm_chatwithtools,
 # llm_parse_tool_calls, llm_submitresult and llm_tool_result_msgs had no definitions.
-# infer_stream.c stays out: it is the only one of the three that does not build here.
-find "$STDLIB" -name '*.c' ! -name 'infer_stream.c' > "$CLIST"
+# infer_stream.c was kept out because it did not build here. From toke 3.2.0 it builds, and
+# it is required: tk_infer_unload calls tk_infer_stream_cleanup (toke 136.75), which only
+# infer_stream.c defines. (F10.53)
+find "$STDLIB" -name '*.c' > "$CLIST"
 find "$VENDOR/cmark/src" -name '*.c' ! -name 'main.c' >> "$CLIST"
 echo "$VENDOR/tomlc99/toml.c" >> "$CLIST"
 

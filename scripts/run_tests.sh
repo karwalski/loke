@@ -128,7 +128,7 @@ if [ ! -f "$STDLIB_A" ] || [ -n "$NEWEST_C" ] || [ "$(cat "$STDLIB_STAMP" 2>/dev
     find "$VENDOR/cmark/src" -name '*.c'
     echo "$VENDOR/tomlc99/toml.c"
   } | while read -r c; do
-    case "$c" in *infer_stream.c|*cmark/src/main.c) continue ;; esac
+    case "$c" in *cmark/src/main.c) continue ;; esac
     o="$OBJDIR/$(echo "$c" | tr '/' '_').o"
     clang $CFLAGS -c "$c" -o "$o" 2>/dev/null || echo "  skipped (does not build): $c" >&2
   done
