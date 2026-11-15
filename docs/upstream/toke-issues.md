@@ -2564,6 +2564,11 @@ measured `geturl` only. F10.52's caller audit is overtaken once loke builds on 3
 
 **2026-11-15 (W118): toke's wider claim measured.** With [`repro-2026-11-15/T-64/`](repro-2026-11-15/T-64/) at 3.2.0: `http.clientget` and `http.postheaders` answer `$err` for the stall (about 30 s), and `clientget`, `clientpost`, `postheaders` and `geturl` answer `$err` for a chunked body cut before its last chunk and for a close-delimited body ended by a reset, while a clean close answers `$ok` with the 3 bytes. Nothing toke claimed for 138.23 and 138.31 failed.
 
+**2026-11-15 (W119): loke's callers audited (F10.52 Done).** `tests/integration/test_cut_body.tk`
+drives `shared.reachability`, `core.models.ollama`, `moke.lokerelay` and `core.agents.sandbox` against a
+cut and a stalled stand-in (`scripts/lib/cut_body_server.py`): each reports the `$err` as a failure.
+`http.posturl`, not in toke's list above, also answers no body (a NULL str) for a chunked cut and a stall.
+
 ---
 
 ## T-65 — a function parameter named `t<digits>` collides with toke's IR temporaries

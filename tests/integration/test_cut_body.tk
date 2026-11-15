@@ -1,0 +1,157 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.cutbody;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=process:std.process;
+i=reach:shared.reachability;
+i=ollama:core.models.ollama;
+i=at:core.agents.types;
+i=sb:core.agents.sandbox;
+i=relay:moke.lokerelay;
+
+(* F10.52 — what loke's http client callers do with a response cut short, judged against
+   scripts/lib/cut_body_server.py on loopback.
+
+   toke 3.1.0 answered a body cut by its per-read timer as `$ok` with the bytes it had (T-64),
+   so a caller would have read part of an answer as the whole of one. toke 3.2.0 answers
+   `$err` for that, for a chunked body without its last chunk and for a reset close-delimited
+   body, from every client call (W118, docs/upstream/repro-2026-11-15/T-64/). This asserts the
+   other half: that each caller, through its production function, reports the `$err` as a
+   failure and never as a short success.
+
+   The stand-in sends the same complete JSON on three ports, ending it three ways: whole (the
+   control, so a pass below is not a caller that fails on everything), chunked and cut before
+   the last chunk, and Content-Length overstated by 16 then silent. The stall costs toke's
+   30 s per-read timer, so it is driven twice only: http.clientget (healthcheck) and
+   http.posturl (generateplain, through shared.reachability.localpost). Every caller is driven
+   on the chunked cut. *)
+
+f=scratch():str{
+  let hex:str=str.randhex(8);
+  <"/tmp/loke_cutbody_\(hex)"
+};
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let h=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(h!=0){ process.wait(h); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=isrunning(s:$ollamastatus):bool{
+  <mt s {
+    $running:v true;
+    $stopped:v false;
+    $unreachable:v false
+  }
+};
+
+f=modelcount(c:$ollamaclient):i64{
+  let models=mt ollama.listmodels(c) { $ok:v v; $err:e @() };
+  <models.len
+};
+
+f=genopts():$generateopts{
+  <$generateopts{ model:"cut:1b"; prompt:"hello"; system:""; numgpu:0 as i32 }
+};
+
+f=chatopts():$chatopts{
+  <$chatopts{ model:"cut:1b"; messages:@($chatmessage{ role:"user"; content:"hello" }); system:""; numgpu:0 as i32 }
+};
+
+f=agentwith(perms:@$agentpermission):$agentdef{
+  let base=at.newagent("cut-agent";"test";"cut body test";"");
+  <$agentdef{
+    id:base.id;
+    name:base.name;
+    description:base.description;
+    schedule:base.schedule;
+    trigger:base.trigger;
+    modelpreference:base.modelpreference;
+    latencytolerance:base.latencytolerance;
+    risklevel:base.risklevel;
+    permissions:perms;
+    maxcostperrun:base.maxcostperrun;
+    requiresapproval:base.requiresapproval;
+    owner:base.owner;
+    enabled:base.enabled;
+    prompttemplate:base.prompttemplate
+  }
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+  let base=scratch();
+  let srv=mt process.spawn(@("python3";"scripts/lib/cut_body_server.py";"\(base).port")) { $ok:h h; $err:e 0 };
+  let port=str.toint(waitport("\(base).port"));
+  if(t.assert(port>0;"the stand-in came up")){pass=pass+1}el{fail=fail+1};
+  let wholeport=str.fromint(port);
+  let cutport=str.fromint(port+1);
+  let stallport=str.fromint(port+2);
+  let whole="http://127.0.0.1:\(wholeport)";
+  let cut="http://127.0.0.1:\(cutport)";
+  let stall="http://127.0.0.1:\(stallport)";
+
+  (* ── the control: the same body, sent whole, is an answer to every caller ── *)
+  if(t.assert(str.contains(reach.localget(whole;"/api/tags");"cut:1b");"control: localget answers a whole body")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.contains(reach.localpost(whole;"/api/generate";"{}");"partial answer");"control: localpost answers a whole body")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(reach.localanswers(whole;"/health");"control: localanswers is true")){pass=pass+1}el{fail=fail+1};
+  let wholec=ollama.new(whole);
+  if(t.assert(isrunning(ollama.healthcheck(wholec));"control: healthcheck reports running")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(modelcount(wholec)==1;"control: listmodels reads the one model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ollama.generateplain(wholec;genopts());"partial answer";"control: generateplain answers the response")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ollama.sendchatplain(wholec;chatopts());"partial answer";"control: sendchatplain answers the content")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(ollama.pullmodelplain(wholec;"cut:1b");"control: pullmodelplain reads success")){pass=pass+1}el{fail=fail+1};
+  let wholeget:$relayed=relay.getfrom(whole;"/api/health");
+  if(t.assert(wholeget.status==200 && str.contains(wholeget.body;"\"ok\":true");"control: the moke relay GET carries loke's status and body")){pass=pass+1}el{fail=fail+1};
+  let wholepost:$relayed=relay.postto(whole;"/api/pipeline";"{}");
+  if(t.assert(wholepost.status==200 && str.contains(wholepost.body;"\"ok\":true");"control: the moke relay POST carries loke's status and body")){pass=pass+1}el{fail=fail+1};
+  let box=sb.newsandbox(agentwith(@(sb.getpermission(whole);sb.getpermission(cut))));
+  let wholestep:$sandboxstep=sb.httpget(box;"\(whole)/api/tags");
+  if(t.assert(wholestep.ok && str.contains(wholestep.output;"cut:1b");"control: the sandbox fetch succeeds with the body")){pass=pass+1}el{fail=fail+1};
+
+  (* ── chunked, cut before the last chunk: every caller reports a failure ── *)
+  if(t.asserteq(reach.localget(cut;"/api/tags");"";"cut: localget (http.clientget) answers no answer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(str.len(reach.localpost(cut;"/api/generate";"{}"))==0;"cut: localpost (http.posturl) answers no answer")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!reach.localanswers(cut;"/health");"cut: localanswers is false")){pass=pass+1}el{fail=fail+1};
+  let cutc=ollama.new(cut);
+  if(t.assert(!isrunning(ollama.healthcheck(cutc));"cut: healthcheck does not report running")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(modelcount(cutc)==0;"cut: listmodels reads no model")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ollama.generateplain(cutc;genopts());"";"cut: generateplain answers nothing")){pass=pass+1}el{fail=fail+1};
+  let genres=mt ollama.generate(cutc;genopts()) { $ok:v v; $err:e "failed" };
+  if(t.asserteq(genres;"failed";"cut: generate answers $err")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ollama.sendchatplain(cutc;chatopts());"";"cut: sendchatplain answers nothing")){pass=pass+1}el{fail=fail+1};
+  if(t.assert(!ollama.pullmodelplain(cutc;"cut:1b");"cut: a cut pull answer is not a successful pull")){pass=pass+1}el{fail=fail+1};
+  let cutget:$relayed=relay.getfrom(cut;"/api/health");
+  if(t.assert(cutget.status==502 && !str.contains(cutget.body;"\"ok\":true");"cut: the moke relay GET answers moke's 502, not loke's partial body")){pass=pass+1}el{fail=fail+1};
+  let cutpost:$relayed=relay.postto(cut;"/api/pipeline";"{}");
+  if(t.assert(cutpost.status==502 && !str.contains(cutpost.body;"\"ok\":true");"cut: the moke relay POST (http.postheaders) answers 502")){pass=pass+1}el{fail=fail+1};
+  let cutstep:$sandboxstep=sb.httpget(box;"\(cut)/api/tags");
+  if(t.assert(!cutstep.ok && !str.contains(cutstep.output;"cut:1b");"cut: the sandbox fetch (http.geturl) is a failed step")){pass=pass+1}el{fail=fail+1};
+
+  (* ── stalled after the body, short of its Content-Length (T-64's case) ── *)
+  let stallc=ollama.new(stall);
+  if(t.assert(!isrunning(ollama.healthcheck(stallc));"stall: healthcheck (http.clientget) does not report running")){pass=pass+1}el{fail=fail+1};
+  if(t.asserteq(ollama.generateplain(stallc;genopts());"";"stall: generateplain (http.posturl) answers nothing")){pass=pass+1}el{fail=fail+1};
+
+  if(srv!=0){ process.kill(srv); process.wait(srv); }el{};
+  file.delete("\(base).port");
+  <fail
+};
