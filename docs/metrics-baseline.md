@@ -117,7 +117,7 @@ python3 tests/fixtures/pii-corpus/generate.py
 `benchmarks/results/` directory on the measuring machine, and they were never committed, so there is
 nothing to cite. The figures are three-run ranges, not the BCa interval VM1.3 now requires of
 anything a model produced, and `--record` no longer runs (VM1.3b). They were measured at toke
-`0b0bc4e`, not the current toke 3.1.0 (`86c432da`). A re-measurement on 3.1.0 was attempted on
+`0b0bc4e`, not toke 3.1.0 (`86c432da`, current until F10.53) nor 3.2.0. A re-measurement on 3.1.0 was attempted on
 2026-10-01 and recorded nothing: the test runner's keychain guard fails a run this long (X8.10).
 
 **The first measurement of any detection layer other than regex.** Every earlier per-layer figure

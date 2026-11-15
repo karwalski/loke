@@ -265,9 +265,9 @@ step_checks() {
 
   # F10.8 — loke uses four ooke modules and five functions, each at the pinned signature,
   # and its templates use only directives and filters the pinned engine implements (an
-  # unknown one renders as nothing, with no error).
+  # unknown one rendered as nothing at rc.2; 3.0.0 answers $tplerr, O-4).
   if [[ -f ./scripts/check_ooke_surface.py ]]; then
-    echo "  loke's ooke surface is the measured one, and its templates are rc.2 templates"
+    echo "  loke's ooke surface is the measured one, and its templates are templates the pinned ooke reads"
     python3 ./scripts/check_ooke_surface.py --check >/dev/null \
       || { python3 ./scripts/check_ooke_surface.py >&2; failed=1; }
   fi

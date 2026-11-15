@@ -6,13 +6,15 @@
 #   toke  — gated on COMMIT ANCESTRY: a build at or after toke_min_commit. Until
 #           toke 3.1.0 no tagged release worked for loke, and the VERSION file
 #           lagged the tags (it read 2.8.0 well past v2.8.0). Since F10.39 the
-#           minimum IS the v3.1.0 commit, because loke's source calls what 3.1.0
-#           introduced (http.clientget, the typed http.postheaders). Ancestry is
+#           minimum IS a release commit: v3.1.0 then, v3.2.0 (ea7ddf22) since
+#           F10.53, because loke's source is written to what that release checks
+#           and names (the lower-case $jsonval/$dbrow, typed handles). Ancestry is
 #           still the gate, since a tag can be moved and a commit cannot;
 #           VERSION stays advisory.
 #
-#   ooke  — gated on VERSION, pre-releases ordered (3.0.0-rc.2 > 3.0.0-rc.1),
-#           at or after ooke_min_version.
+#   ooke  — gated on VERSION, pre-releases ordered (3.0.0-rc.2 > 3.0.0-rc.1,
+#           and 3.0.0 > any 3.0.0-rc), at or after ooke_min_version (3.0.0 since
+#           F10.53).
 #
 # Exit codes:
 #   0 — requirements met
@@ -121,14 +123,15 @@ else
   ooke_v="unknown"
   [ -f "$OOKE_DIR/VERSION" ] && ooke_v=$(tr -d ' \n' < "$OOKE_DIR/VERSION")
 
-  # The requirement is a named pre-release (v3.0.0-rc.2 since F10.39), so a
-  # pre-release suffix does not disqualify a build. What still has to hold is that the
-  # version is at least the pinned one, and an rc ordering needs its own
+  # The requirement was a named pre-release (v3.0.0-rc.2, F10.39) and is the 3.0.0
+  # release since F10.53, so a pre-release suffix does not by itself disqualify a
+  # build. What still has to hold is that the version is at least the pinned one,
+  # and an rc ordering needs its own
   # comparison: 3.0.0-rc.2 is newer than 3.0.0-rc.1, and plain 3.0.0 is newer
   # than any rc of it.
   #
-  # Accepting an rc is a deliberate reversal of the earlier decision to wait for a
-  # final release. It does not relax the publication bar: a figure measured here is
+  # Accepting an rc was a deliberate reversal of the earlier decision to wait for a
+  # final release. It did not relax the publication bar: a figure measured here is
   # labelled with the exact version it was measured against, so if the final tag
   # moves, every affected number can be found again.
   ooke_core=${ooke_v%%-*}
@@ -143,6 +146,11 @@ else
     STATUS=1
   elif [ "$(printf '%s\n%s\n' "$min_core" "$ooke_core" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" != "$min_core" ]; then
     echo "ERROR: ooke is $ooke_v, older than the required $OOKE_MIN." >&2
+    STATUS=1
+  elif [ "$ooke_core" = "$min_core" ] && [ -z "$min_pre" ] && [ -n "$ooke_pre" ]; then
+    # A release requirement (3.0.0 since F10.53) refuses that release's own candidates:
+    # 3.0.0-rc.2 is older than 3.0.0, though its numeric core is equal.
+    echo "ERROR: ooke is $ooke_v, a pre-release of the required $OOKE_MIN." >&2
     STATUS=1
   elif [ "$ooke_core" = "$min_core" ] && [ -n "$min_pre" ] && [ -n "$ooke_pre" ] \
        && [ "$(printf '%s\n%s\n' "$min_pre" "$ooke_pre" | sort -V | head -1)" != "$min_pre" ]; then

@@ -16,7 +16,10 @@ It imports neither `ooke.store` nor `ooke.router`. `core.feedback.store` and
 already holds the call shapes to the pinned interfaces; what it does not hold is the TEMPLATE
 language, because a `.tkt` file is read at run time. rc.2's engine ignores a directive it does
 not know, so `{! endblock !}` left a block open and /tabs rendered the base layout with no
-content, with no error anywhere (docs/upstream/ooke-issues.md O-4).
+content, with no error anywhere (docs/upstream/ooke-issues.md O-4). ooke 3.0.0 answers $tplerr
+for an unknown directive (O-4 fixed), so the page would now fail loudly at run time; this check
+still finds it before then. Re-run against 3.0.0 on 2026-11-15 (F10.53): the same four modules
+and five functions, and no finding.
 
 This check fails when:
   1. loke imports an ooke module outside MEASURED: adopting one is a deliberate change to
