@@ -1,0 +1,238 @@
+(* Copyright 2026 loke contributors
+   SPDX-License-Identifier: Apache-2.0 *)
+
+m=test.integration.hopfactsparity;
+
+i=t:std.test;
+i=str:std.str;
+i=file:std.file;
+i=std:std;
+i=db:std.db;
+i=process:std.process;
+i=sh:shared.types;
+i=pipe:core.privacy.pipeline;
+i=sp:core.privacy.systemprompt;
+i=sdb:core.storage.db;
+i=dl:core.audit.disclosure;
+i=rtr:core.router.router;
+i=fb:core.router.fallback;
+i=hr:core.audit.hoprecord;
+i=disp:core.providers.dispatcher;
+i=pt:core.providers.types;
+i=h:page.api.pipeline;
+
+(* F5.3. The browser request path (page.api.pipeline) and `loke ask` (core.router.fallback
+   with core.audit.hoprecord) record the same facts about the same input.
+
+   Until 2026-11-15 the browser page kept its own copies of entitysummary, detectionlayers and
+   risklabel, because importing core.audit.hoprecord took it past the 64 struct types a
+   compilation unit could see (T-54, fixed in toke 3.1.0). Two copies of what an assessor reads
+   can drift, and a drift would make the two paths describe one disclosure differently. The
+   page now calls hoprecord's; this test holds the paths to it on what they WRITE, not on what
+   either function returns.
+
+   For each input, one privacy run per path, as each path makes it (sp.runforward with the same
+   text and configuration), and one local hop that answers, each path through its production
+   walk: h.walkchainat (what forward() reaches) and fb.dispatchchain with hr.factsof (what
+   cli.ask runs). scripts/lib/http_recorder.py in `harness` mode stands in for Ollama and
+   answers both. Then, row by row, on each path's correlation id (its request id):
+
+     disclosure_log   entity_types, entities_total, detection_layers, custody, custody_check,
+                      real_values_included, state
+     audit_log        sensitivity and risk_tier of the llm_dispatch and llm_request rows
+     decision_trace   risk_classification, entities_detected, detection_layers
+
+   must be equal across the paths. The use case, the policy decision and the approval outcome
+   are not compared: they differ by design (browser-chat against cli-ask; `loke ask` evaluates
+   no organisation policy, F5.3c). The bytes are not compared: the bodies differ (/api/generate
+   against /api/chat). Equality alone would pass two paths wrong the same way, so the facts are
+   also checked against what the input holds: the counts per type, `none`, and the skipped
+   NER layers (the configuration points NER and Presidio at a dead port). *)
+
+f=readfile(p:str):str{
+  <mt file.read(p) { $ok:v v; $err:e "" }
+};
+
+f=pause():i64{
+  let hd=mt process.spawn(@("sleep";"0.1")) { $ok:h h; $err:e 0 };
+  if(hd != 0){ process.wait(hd); }el{};
+  <0
+};
+
+f=waitport(portfile:str):str{
+  let p=mut."";
+  lp(let k=0;k<100 && str.len(p)==0;k=k+1){
+    p=readfile(portfile);
+    if(str.len(p)==0){ pause() }el{}
+  };
+  <p
+};
+
+f=openfreshstore():i64{
+  let dir=str.concat(std.homedir();"/.loke/test-hop-facts-parity");
+  file.mkdir(dir);
+  file.delete(str.concat(dir;"/loke.db"));
+  file.delete(str.concat(dir;"/loke.db-wal"));
+  file.delete(str.concat(dir;"/loke.db-shm"));
+  <mt sdb.openstore(dir) {
+    $ok:s 1;
+    $err:e 0
+  }
+};
+
+f=localonly():$pipelineconfig{
+  <pipe.newconfig("http://127.0.0.1:59998";"http://127.0.0.1:59999")
+};
+
+f=deadurl():str{
+  <"http://127.0.0.1:59995"
+};
+
+f=ollamahop(id:str):$routingdecision{
+  <$routingdecision{
+    model:$modelspec{
+      id:id;
+      provider:$provider{$ollama:0};
+      contextwindow:32768 as u32;
+      costper1kinput:0.0;
+      costper1koutput:0.0;
+      tier:$modeltier{$interactive:0}
+    };
+    reason:"hand-built hop";
+    tier:$modeltier{$interactive:0};
+    estimatedcost:0.0;
+    estimatedlatencyms:0 as u32
+  }
+};
+
+f=chainof(hop:$routingdecision;run:$pipelinerun):$fallbackchain{
+  let res:$piidetectionresult=run.result;
+  <$fallbackchain{chainhops:@(hop);chainsens:res.sensitivity;chainnote:""}
+};
+
+(* The request cli.ask builds from the run: the anonymised text and the guardian. *)
+f=requestof(run:$pipelinerun):$completionrequest{
+  let res:$piidetectionresult=run.result;
+  <$completionrequest{
+    modelid:"";
+    messages:@(pt.usermsg(res.anonymised));
+    systemprompt:run.finalsystemprompt;
+    maxtokens:64 as u32;
+    temperature:0.0;
+    stream:false
+  }
+};
+
+f=allow():$policydecision{
+  <$policydecision{$allow:""}
+};
+
+(* The distinct values of `expr` over the rows of `table` on correlation id `cid` (and `extra`),
+   joined with " / " in order, so a path that wrote two differing rows shows both. "" for none. *)
+f=factsat(table:str;expr:str;cid:str;extra:str):str{
+  let sep=" / ";
+  let sql="SELECT COALESCE(GROUP_CONCAT(v,?),'') AS v FROM (SELECT DISTINCT \(expr) AS v FROM \(table) WHERE correlation_id=? \(extra) ORDER BY v)";
+  <mt db.many(sql;@(sep;cid)) {
+    $ok:rs rowfirst(rs);
+    $err:e "query failed"
+  }
+};
+
+f=rowfirst(rs:@$dbrow):str{
+  if(rs.len==0){ <"" }el{};
+  <sdb.rowstr(rs.get(0);"v")
+};
+
+f=disclosurefacts(cid:str):str{
+  <factsat("disclosure_log";"entity_types||'|'||entities_total||'|'||detection_layers||'|'||custody||'|'||custody_check||'|'||real_values_included||'|'||state";cid;"")
+};
+
+f=dispatchfacts(cid:str):str{
+  <factsat("audit_log";"sensitivity||'|'||risk_tier";cid;"AND event_type='llm_dispatch'")
+};
+
+f=outcomefacts(cid:str):str{
+  <factsat("audit_log";"sensitivity||'|'||risk_tier";cid;"AND event_type='llm_request'")
+};
+
+f=tracefacts(cid:str):str{
+  <factsat("decision_trace";"risk_classification||'|'||entities_detected||'|'||detection_layers";cid;"")
+};
+
+f=column(cid:str;col:str):str{
+  <factsat("disclosure_log";col;cid;"")
+};
+
+f=main():i64{
+  let pass=mut.0;
+  let fail=mut.0;
+
+  let store=openfreshstore();
+  if(t.assert(store>0;"the test store opens")){pass=pass+1}el{fail=fail+1};
+
+  let hex:str=str.randhex(8);
+  let ob="/tmp/loke_hopfacts_\(hex)";
+  let logp="\(ob).log";
+  file.delete(logp);
+  file.delete("\(ob).port");
+  let rec=mt process.spawn(@("env";"RECORDER_MODELS=fake:latest";"python3";"scripts/lib/http_recorder.py";logp;"\(ob).port";"harness")) { $ok:h h; $err:e 0 };
+  let port=waitport("\(ob).port");
+  if(t.assert(rec!=0 && str.len(port)>0;"the Ollama stand-in came up")){pass=pass+1}el{fail=fail+1};
+  let obase="http://127.0.0.1:\(port)";
+  let live=disp.new($apikeys{anthropic:"";openai:""};obase);
+  let browsercfg=rtr.configfromsettings(store;deadurl());
+  let clicfg=rtr.namedconfig(deadurl();"local-first";true;false);
+
+  (* Two emails and a phone number (a type counted twice, and first-seen order); a card number
+     (a different sensitivity and risk tier); and nothing (the `none` summary, no entities in
+     the trace). `want` is what each input holds and `wantrisk` the sensitivity and risk tier
+     core.governance.policy gives it, measured 2026-11-15 on both paths before the browser
+     page's copies were removed. *)
+  let inputs=@("Write to first.probe@example.com, copy second.probe@example.com, or call 0412 345 678.";"Charge the card 4111 1111 1111 1111 for the March order.";"Summarise the minutes of the planning meeting.");
+  let want=@("email:2,phone_au:1";"credit_card:1";"none");
+  let wantrisk=@("confidential|medium";"restricted|high";"public|low");
+  let wantlayers="scanned=regex;skipped=ner,presidio,privacy_filter";
+
+  lp(let i=0;i<inputs.len;i=i+1){
+    let text:str=inputs.get(i);
+    let expect:str=want.get(i);
+    let expectrisk:str=wantrisk.get(i);
+
+    (* The browser path, from its own privacy run. *)
+    let runb=sp.runforward(text;"";localonly());
+    let ridb:str=runb.requestid;
+    h.recordlayers(store;runb);
+    let rb=h.walkchainat(store;runb;chainof(ollamahop("fake");runb);browsercfg;h.privacyfields(runb);sh.nowms();allow();"user_choice";"user";dl.nosession();"";20;obase;deadurl();"");
+    if(t.assert(str.startswith(rb;"200");"input \(i): the browser path's hop answered (got \(str.slice(rb;0;3)))")){pass=pass+1}el{fail=fail+1};
+
+    (* `loke ask`, from its own privacy run of the same text. *)
+    let runc=sp.runforward(text;"";localonly());
+    let ridc:str=runc.requestid;
+    hr.recordlayers(store;runc);
+    let out=fb.dispatchchain(store;"cli-ask";live;chainof(ollamahop("fake:latest");runc);clicfg;requestof(runc);"";hr.factsof(runc;"cli-ask";"user_choice";"user"));
+    if(t.assert(fb.answered(out);"input \(i): loke ask's hop answered")){pass=pass+1}el{fail=fail+1};
+
+    let db0=disclosurefacts(ridb);
+    let dc0=disclosurefacts(ridc);
+    if(t.assert(str.len(db0)>0 && !str.contains(db0;" / ");"input \(i): the browser path wrote one disclosure row (\(db0))")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(db0;dc0;"input \(i): THE DISCLOSURE ROW'S FACTS ARE THE SAME ON BOTH PATHS")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(dispatchfacts(ridb);dispatchfacts(ridc);"input \(i): the llm_dispatch audit row's sensitivity and risk tier are the same")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(outcomefacts(ridb);outcomefacts(ridc);"input \(i): the llm_request audit row's sensitivity and risk tier are the same")){pass=pass+1}el{fail=fail+1};
+    let tb0=tracefacts(ridb);
+    if(t.assert(str.len(tb0)>0;"input \(i): the browser path wrote its decision trace")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(tb0;tracefacts(ridc);"input \(i): the decision trace's risk, entities and layers are the same")){pass=pass+1}el{fail=fail+1};
+
+    (* What the input holds, so that equality is not two paths wrong the same way. *)
+    if(t.asserteq(column(ridb;"entity_types");expect;"input \(i): entity_types is what the input holds, counted per type in first-seen order")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(column(ridb;"entities_total");str.fromint(runb.totalentities as i64);"input \(i): entities_total is the run's count")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(column(ridb;"detection_layers");wantlayers;"input \(i): detection_layers names regex scanned and the dead layers skipped")){pass=pass+1}el{fail=fail+1};
+    if(t.asserteq(dispatchfacts(ridb);expectrisk;"input \(i): the sensitivity and risk tier are the input's")){pass=pass+1}el{fail=fail+1}
+  };
+
+  if(rec==0){}el{ process.kill(rec); process.wait(rec); };
+  file.delete(logp);
+  file.delete(str.concat(logp;".headers"));
+  file.delete(str.concat(logp;".bodies"));
+  file.delete("\(ob).port");
+  <fail
+};

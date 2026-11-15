@@ -39,6 +39,7 @@ i=popt:core.optimiser.prompt;
 i=fm:core.privacy.filtermetrics;
 i=lmx:core.audit.layermetrics;
 i=dg:core.router.degraded;
+i=hr:core.audit.hoprecord;
 
 (* NC1.9 — this handler is why that story existed, and this is the fix.
 
@@ -181,15 +182,6 @@ f=openstore():i64{
   }
 };
 
-f=risklabel(tier:$risktier):str{
-  <mt tier {
-    $low:v "low";
-    $medium:v "medium";
-    $high:v "high";
-    $critical:v "critical"
-  }
-};
-
 f=isdeny(d:$policydecision):bool{
   <mt d {
     $allow:m false;
@@ -275,7 +267,7 @@ f=auditeventfor(run:$pipelinerun;eventtype:str;provider:str;modelid:str;tokensin
     modelid:modelid;
     provider:provider;
     sensitivity:senslabelof(run.result);
-    risktier:risklabel(risktierof(run));
+    risktier:hr.risklabel(risktierof(run));
     tokensin:tokensin as u32;
     tokensout:tokensout as u32;
     costusd:0.0;
@@ -333,88 +325,19 @@ f=approvaloutcome(d:$policydecision):str{
   }
 };
 
-f=stagelabel(st:$pipelinestage):str{
-  <mt st {
-    $regexscan:v "regex";
-    $nerscan:v "ner";
-    $presidioscan:v "presidio";
-    $dedup:v "dedup";
-    $anonymise:v "anonymise";
-    $guardianinject:v "guardian";
-    $privacyfilterscan:v "privacy_filter";
-    $modelscan:v "model"
-  }
-};
-
-(* F3b.7. How a detection stage is named in detection_layers: a registered model by its layer
-   id (model:<id>, which holds no comma or semicolon), every other stage by its label. *)
-f=stagename(sr:$stageresult):str{
-  if(str.eq(stagelabel(sr.stage);"model")){ <sr.layer }el{};
-  <stagelabel(sr.stage)
-};
-
-f=isdetectionstage(label:str):bool{
-  if(str.eq(label;"regex")){ <true }el{};
-  if(str.eq(label;"ner")){ <true }el{};
-  if(str.eq(label;"presidio")){ <true }el{};
-  if(str.eq(label;"model")){ <true }el{};
-  <str.eq(label;"privacy_filter")
-};
-
-(* "scanned=regex;skipped=ner,presidio". A detection stage that ran is scanned, and one that
-   was skipped (sidecar down, or disabled) is skipped. Assessors need this: "no entities" means
-   something different after one layer than after three. *)
-f=detectionlayers(run:$pipelinerun):str{
-  let scanned=mut.@();
-  let skipped=mut.@();
-  lp(let i=0;i<run.stages.len;i=i+1){
-    let sr:$stageresult=run.stages.get(i);
-    if(isdetectionstage(stagelabel(sr.stage))){
-      if(sr.skipped){ skipped=skipped.push(stagename(sr)) }el{ scanned=scanned.push(stagename(sr)) }
-    }el{}
-  };
-  <str.concat("scanned=";str.concat(str.join(",";scanned);str.concat(";skipped=";str.join(",";skipped))))
-};
-
-f=containsstr(xs:@str;x:str):bool{
-  let found=mut.false;
-  lp(let i=0;i<xs.len;i=i+1){
-    if(str.eq(xs.get(i);x)){ found=true }el{}
-  };
-  <found
-};
-
-(* Types and counts, in first-seen order: "email:1,credit_card:2". Never a value. *)
-f=entitysummary(run:$pipelinerun):str{
-  let res:$piidetectionresult=run.result;
-  let types=mut.@();
-  lp(let i=0;i<res.entities.len;i=i+1){
-    let e:$piientity=res.entities.get(i);
-    if(containsstr(types;e.entitytype)){}el{ types=types.push(e.entitytype) }
-  };
-  if(types.len==0){ <"none" }el{};
-  let parts=mut.@();
-  lp(let j=0;j<types.len;j=j+1){
-    let ty:str=types.get(j);
-    let n=mut.0;
-    lp(let k=0;k<res.entities.len;k=k+1){
-      let e2:$piientity=res.entities.get(k);
-      if(str.eq(e2.entitytype;ty)){ n=n+1 }el{}
-    };
-    let ns:str=str.fromint(n);
-    parts=parts.push("\(ty):\(ns)")
-  };
-  <str.join(",";parts)
-};
-
+(* F5.3. What every record says about the run, the entity types and counts (never a value),
+   the detection layers that scanned and were skipped, and the risk tier label, is
+   core.audit.hoprecord's: the functions `loke ask` writes its records with, so the two paths
+   describe one input the same way (tests/integration/test_hop_facts_parity.tk). This page kept
+   its own copies until toke 3.1.0 lifted the 64-struct-type cap (T-54). *)
 f=persisttrace(store:i64;run:$pipelinerun;outcome:str;provider:str;modelid:str;durationms:i64;policylabel:str;approval:str;killswitch:str):bool{
   if(store==0){ <false }el{};
   (* The original input is NOT put in the trace, even in memory: "" is passed where newtrace
      takes it, so no later change to persist can store it by accident. *)
   let t0=tr.newtrace(run.requestid;run.requestid;"");
   let t1=mut.t0;
-  if(run.totalentities>0 as u32){ t1=tr.recordpii(t0;entitysummary(run)) }el{};
-  <tr.persist(tr.complete(tr.recordrouting(tr.recordpolicy(t1;policylabel;risklabel(risktierof(run)));modelid;provider);durationms as u32);$assessorfields{outcome:outcome;detectionlayers:detectionlayers(run);approvaloutcome:approval;killswitchstate:killswitch})
+  if(run.totalentities>0 as u32){ t1=tr.recordpii(t0;hr.entitysummary(run.result)) }el{};
+  <tr.persist(tr.complete(tr.recordrouting(tr.recordpolicy(t1;policylabel;hr.risklabel(risktierof(run)));modelid;provider);durationms as u32);$assessorfields{outcome:outcome;detectionlayers:hr.detectionlayers(run);approvaloutcome:approval;killswitchstate:killswitch})
 };
 
 (* The two refusals that happen before a policy decision exists. Neither was recorded
@@ -925,7 +848,7 @@ f=pisolocal(p:$provider):bool{
    core.audit.disclosure). *)
 f=reservedispatch(store:i64;run:$pipelinerun;provider:str;providerclass:str;modelid:str;modelversion:str;host:str;sent:str;anonymised:str;fbreason:str;fbby:str;sid:str;decision:$policydecision):bool{
   if(store==0){ <false };
-  <dl.reserveaudited(auditeventfor(run;"llm_dispatch";provider;modelid;0;0;0);run.requestid;sid;providerclass;modelversion;host;str.len(sent);str.len(popt.jsonquoted(anonymised))-2;entitysummary(run);run.totalentities as i64;detectionlayers(run);"redacted-data";"not_run";fbreason;fbby;store)
+  <dl.reserveaudited(auditeventfor(run;"llm_dispatch";provider;modelid;0;0;0);run.requestid;sid;providerclass;modelversion;host;str.len(sent);str.len(popt.jsonquoted(anonymised))-2;hr.entitysummary(run.result);run.totalentities as i64;hr.detectionlayers(run);"redacted-data";"not_run";fbreason;fbby;store)
 };
 
 (* "" for a missing session_id is `none`; anything else must be a valid id, and "" is the
@@ -1539,7 +1462,7 @@ f=heldforapproval(store:i64;run:$pipelinerun;decision:$policydecision;bind:str;s
   }el{};
   recordeventwith(store;run;"policy_require_approval";"none";"none";0;0;t.nowms()-startms;decision;"held_pending");
   log.info("pipeline: held for approval, high risk over restricted data (GA5.26)";"api.pipeline";run.requestid);
-  <http.res(409;"{\"ok\":false,\"error\":\"this request contains restricted data and needs your approval before it is processed. Nothing has been sent.\",\"approval_required\":true,\"approval_id\":\(jx.escape(aid)),\"approval_expires_in_seconds\":\(ag.ttlms()/1000),\"approve_url\":\"/approve\",\"policy_message\":\(jx.escape(policymessage(decision))),\"entity_types\":\(jx.escape(entitysummary(run)))\(privacyfields(run))}")
+  <http.res(409;"{\"ok\":false,\"error\":\"this request contains restricted data and needs your approval before it is processed. Nothing has been sent.\",\"approval_required\":true,\"approval_id\":\(jx.escape(aid)),\"approval_expires_in_seconds\":\(ag.ttlms()/1000),\"approve_url\":\"/approve\",\"policy_message\":\(jx.escape(policymessage(decision))),\"entity_types\":\(jx.escape(hr.entitysummary(run.result)))\(privacyfields(run))}")
 };
 
 (* An approval id was presented and did not pass. Why is read after the refusal, so it
