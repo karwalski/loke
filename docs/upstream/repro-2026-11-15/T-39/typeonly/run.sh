@@ -4,7 +4,7 @@
 # after which --check fails E3011. A param-type-only use (paramonly.tk) is NOT flagged.
 # Usage: TOKE=/path/to/toke sh run.sh
 set -u
-T=${TOKE:-/Users/matthew.watt/loke/toolchain/toke-320/toke}
+T=${TOKE:-${TOKE_DIR:?set TOKE to a toke binary or TOKE_DIR to a toke checkout}/toke}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Build products go to $WORK, never into this directory.
 WORK="${WORK:-${TMPDIR:-/tmp}/loke-repro-T-39-typeonly}"
