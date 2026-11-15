@@ -7,6 +7,10 @@
 > **Second batch, 2026-11-09: see [`handoff-2026-11-09.md`](handoff-2026-11-09.md)** (drafted, not
 > sent), with reproducers in [`repro-2026-11-09/`](repro-2026-11-09/) run at toke v3.1.0
 > (`86c432da`). It covers T-60 to T-64 below and ooke O-4/O-5.
+>
+> **Answered 2026-11-15** by toke v3.2.0 (`ea7ddf22`) and ooke v3.0.0 (`7ac2472`): see
+> [`toke-reply-2026-11-15.md`](toke-reply-2026-11-15.md), loke's record of the answer, measured with the same reproducers
+> ([`results-v3.2.0-ea7ddf22.txt`](repro-2026-11-09/results-v3.2.0-ea7ddf22.txt)).
 
 **Reported by:** the loke project (`github.com/karwalski/loke`)
 **Toolchain under test:** toke `445f519` (mechanisms re-verified against `c4e4704`) (on `feat/type-flow-bytes-redesign`, `toke_min_commit = 6cc9061`), ooke `v3.0.0-rc.1`
@@ -2277,6 +2281,13 @@ array blocks, so it compares element bytes as a C string and stops at the first 
 Measured: `@(1;2)==@(1;2;3)` is true, `@(256)==@(512)` is true, `@(1;2)==@(7;8)` is false (all
 `@i64`). Comparing with the literal `@()` is still the address compare.
 
+**2026-11-15: half fixed in toke v3.2.0 (`ea7ddf22`), half open.** The spawn idiom is fixed by
+**138.21** (`daab5644`): the filed `$err:e @()` arm beside `$ok:h h` is now E4011 at `--check`
+("match arms have inconsistent types: 'handle' vs '@(?)'"), `process.wait("abc")` is E4031, and
+`$err:e 0` (loke's idiom) still checks clean. `==` on arrays is **still open as 138.20** (refuse
+or element-wise is with toke's owner): measured unchanged, exits 2 and 3. loke keeps
+`scripts/find_empty_array_sentinel.py` and the `$err:e 0` arms. See [`toke-reply-2026-11-15.md`](toke-reply-2026-11-15.md).
+
 ## T-61 — adding an untyped integer local to a u32 struct field emits invalid IR
 
 **Severity: build break (the compiler rejects its own output); not silent.**
@@ -2303,6 +2314,11 @@ that clang accepts (the add is i64 throughout). The failing source was never com
 shape that failed is unknown. The handoff makes no ask; the workaround stays. Details in
 `repro-2026-11-09/T-61/result.md`.
 
+**2026-11-15: rejected at compile time in toke v3.2.0 (`ea7ddf22`).** Story 127.356 (`7d8d1e76`,
+`37efd5d0`) type-checks every struct-literal field: `u:q.u+stray` is now E4031 "expected 'u32',
+got 'i64'" at `--check` (`repro.tk:18:20`), so the shape can no longer narrow silently. loke's site
+already writes `((r.unplaced as i64)+stray) as u32`, which is the form 3.2.0 requires.
+
 ## T-62 — an `@@str` row subscripted inline as a call argument emits invalid IR (loke F10.42)
 
 **Severity: build break; `--check` passes and the error is clang's.**
@@ -2320,6 +2336,10 @@ Workaround in loke: bind the row with its declared type before subscripting it
 
 **The ask.** Load the inner element with the outer array's element type, or refuse the shape
 in the checker until it does.
+
+**2026-11-15: fixed in toke v3.2.0 (`ea7ddf22`)**, story 127.274 (`75209d81`). Measured: the std
+and user-function arguments build and exit 1 and 7. Removing loke's bind-the-row-first workaround
+is follow-up under F10.42.
 
 ## T-63 — the https client cannot be told where to connect, has no body cap and no whole-request deadline (loke MK19.11)
 
@@ -2340,6 +2360,11 @@ Workaround in loke: `moke.proxy.fetch` runs the system curl (no shell, absolute 
 against the URL's name; a resolver returning every address; a body-size limit enforced while
 reading; a deadline for the whole request.
 
+**2026-11-15: still open at toke v3.2.0 (`ea7ddf22`).** The deadline and body cap are **138.24**,
+connect-to-address with name verification and a resolver are **138.25**; both are new stdlib API
+needing a spec amendment and an owner decision, no date. Measured at 3.2.0: drip `$ok` at about
+40 s, 64 MiB read whole. loke keeps curl in `moke.proxy.fetch` (MK19.11 stays open).
+
 ## T-64 — a per-read timeout ends a response as `$ok` with a short body
 
 **Severity: silent wrong result.**
@@ -2354,3 +2379,8 @@ Workaround in loke: none in the client; loke's fetch of untrusted servers uses c
 
 **The ask.** A body shorter than its `Content-Length` (or a chunked body without its last
 chunk) is a transport error.
+
+**2026-11-15: fixed in toke v3.2.0 (`ea7ddf22`)**, story **138.23** (`60c319af`), with close-delimited
+bodies in **138.31** (`1046f364`). Measured: the `stall` case now answers `$err` after about 30 s.
+toke states one reader serves `geturl`, `clientget`/`post`/`put`/`delete` and `postheaders`; loke
+measured `geturl` only. F10.52's caller audit is overtaken once loke builds on 3.2.0 (F10.53).

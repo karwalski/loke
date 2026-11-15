@@ -7,9 +7,16 @@
 # TOKE_DIR must contain the built `toke` binary and its stdlib. OOKE_DIR is needed only for
 # O-4 and O-5, which compile ooke's own src/template.tk (copied, never modified).
 # Prints one line per issue:  ID | VERDICT | observed outcome
+# (T-60 prints two lines: T-60eq for `==` on arrays, T-60sp for the spawn-failure idiom.)
 # VERDICT is computed from the EXPECTED stated in each reproducer's header comment:
 #   DEFECT   the defect as filed was observed
 #   OK       the expected behaviour was observed
+#   OK (now rejected at --check)
+#            the program the filed defect needed is now a located compile-time error at
+#            `toke --check` (named in the line): the fix the upstream chose for T-60sp and T-61
+#   OK (docs fixed)
+#            O-5 only: the defect was the documentation, which no longer names `{{raw`
+#            and names `| raw =}`; the rendering is printed for reference
 #   note     no automatic verdict; read the observed text
 # Build products go to $WORK (default: $TMPDIR/loke-repro-2026-11-09/<toke short commit>), never
 # into this directory. MK19.11 starts server.py on 127.0.0.1:47971-47973 and stops it by PID;
@@ -57,20 +64,33 @@ multi() {
     "$TOKE_DIR/toke" --diag-text -I . --out "$bin" "$main" "$@" >>"$CLOG" 2>&1 ); CRC=$?
 }
 
+# chk ID FILE [-I dir] : toke --check of one file in $W; sets KRC, KLOG
+chk() { local f=$2; shift 2; KLOG="$W/check-$f.log"
+  ( cd "$W" && "$TOKE_DIR/toke" --diag-text "$@" --check "$f" > "$KLOG" 2>&1 ); KRC=$?; }
+
 t60() { prep T-60
   std T-60 repro.tk; local a=$(outcome) ar=$RRC
   std T-60 contents.tk; local b=$(outcome) br=$RRC
-  std T-60 spawn.tk --allow-all; local c=$(outcome) cr=$RRC
-  { [ "$ar" = 7 ] && [ "$br" = 0 ] && [ "$cr" = 0 ]; } && v=OK || v=DEFECT
-  line T-60 $v "with @(): $a (expected 7) || named arrays: $b (expected 0) || spawn idiom: $c (expected 0)"; }
+  { [ "$ar" = 7 ] && [ "$br" = 0 ]; } && v=OK || v=DEFECT
+  line T-60eq $v "with @(): $a (expected 7) || named arrays: $b (expected 0)"
+  std T-60 spawn.tk --allow-all; local c=$(outcome) cc=$CRC cr=$RRC
+  chk T-60 spawn.tk
+  if [ "$cc" = 0 ] && [ "$cr" = 0 ]; then v=OK
+  elif [ "$cc" = 0 ] && [ "$cr" = 1 ]; then v=DEFECT
+  elif [ "$KRC" != 0 ] && grep -q 'E4011' "$KLOG"; then v="OK (now rejected at --check)"
+  else v=note; fi
+  line T-60sp "$v" "spawn idiom: $c (expected 0; --check rc=$KRC)"; }
 
 t61() { prep T-61; cp "$HERE/T-61/"*.tk "$W/"
   multi "$W/bin" repro.tk t61lib.tk
   if [ "$CRC" = 0 ]; then ( cd "$W" && run_bin "$W/bin"; printf '%s\n%s' "$RRC" "$ROUT" > run.out )
     RRC=$(sed -n 1p "$W/run.out"); ROUT=$(sed -n '2,$p' "$W/run.out"); RSIG=""; fi
+  chk T-61 repro.tk -I .
   if [ "$CRC" != 0 ] && grep -q "defined with type 'i64' but expected 'i32'" "$CLOG"; then v=DEFECT
-  elif [ "$CRC" = 0 ] && [ "$RRC" = 5 ]; then v=OK; else v=note; fi
-  line T-61 $v "$(outcome) (filed defect: invalid IR i64 vs i32; expected exit 5)"; }
+  elif [ "$CRC" = 0 ] && [ "$RRC" = 5 ]; then v=OK
+  elif [ "$KRC" != 0 ] && grep -q "E4031.*expected 'u32', got 'i64'" "$KLOG"; then v="OK (now rejected at --check)"
+  else v=note; fi
+  line T-61 "$v" "$(outcome); --check rc=$KRC (filed defect: invalid IR i64 vs i32; expected exit 5)"; }
 
 f1042() { prep F10.42
   std F10.42 repro.tk; local a=$(outcome) ac=$CRC ar=$RRC
@@ -93,9 +113,13 @@ o04() { o_tpl O-4; local orev; orev=$(git -C "$OOKE_DIR" rev-parse --short HEAD 
   [ "$CRC" = 0 ] && [ "$RRC" = 0 ] && v=OK || v=DEFECT
   line O-4 $v "ooke $orev: $(outcome) (exit = templates answering \$ok that should fail, 0..3)"; }
 o05() { o_tpl O-5; local orev; orev=$(git -C "$OOKE_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
-  local cl; cl=$(grep -m1 -o 'Use `{{raw[^`]*`' "$OOKE_DIR/CHANGELOG.md" 2>/dev/null || echo "not found")
-  [ "$CRC" = 0 ] && [ "$RRC" = 1 ] && v=DEFECT || v=OK
-  line O-5 $v "ooke $orev: CHANGELOG says: $cl || $(outcome)"; }
+  local cl="$OOKE_DIR/CHANGELOG.md" bad good
+  bad=$(grep -m1 -o '`{{raw[^`]*`' "$cl" 2>/dev/null || echo "no {{raw")
+  good=$(grep -m1 -o '`{= key | raw =}`' "$cl" 2>/dev/null || echo "no | raw =}")
+  if grep -qF '{{raw' "$cl" 2>/dev/null; then v=DEFECT
+  elif grep -qF '| raw =}' "$cl" 2>/dev/null; then v="OK (docs fixed)"
+  else v=note; fi
+  line O-5 "$v" "ooke $orev: CHANGELOG names: $bad, $good || rendering (for reference; {{raw x}} is not syntax): $(outcome)"; }
 
 mk1911() { prep MK19.11; cp "$HERE/MK19.11/repro.tk" "$W/"
   ( cd "$W" && build_direct repro.tk "$W/bin" ); CRC=$?

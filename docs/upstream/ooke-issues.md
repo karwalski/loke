@@ -3,6 +3,7 @@
 > **Current state: see [`handoff-2026-09-27.md`](handoff-2026-09-27.md)** (O-1 re-verified; O-2 and O-3 added).
 > O-4 and O-5 re-verified at rc.2 (`3cc4998`) on 2026-11-09, with reproducers, in
 > [`handoff-2026-11-09.md`](handoff-2026-11-09.md) (drafted, not sent).
+> **Answered 2026-11-15** by ooke v3.0.0 (`7ac2472`, requires toke 3.2.0): see [`toke-reply-2026-11-15.md`](toke-reply-2026-11-15.md).
 
 Defects in ooke found while building loke. The toke ones are in `toke-issues.md`.
 
@@ -52,6 +53,13 @@ a block still open at the end of the template.
 `A{! frobnicate("x") !}B`; a body block closed with `endblock`, or never closed, renders the
 layout with an empty `<main>`; all three answer `$ok`.
 
+**2026-11-15: fixed in ooke v3.0.0 (`7ac2472`)**, toke-tracked story **138.29** (ooke `26c8c16`).
+Measured with the same reproducer: `unknown.tkt`, `endblock.tkt` and `unclosed.tkt` each answer
+`$tplerr` and log it ("template: unknown directive …", "block \"body\" is never closed"); exit 0;
+`control.tkt` still renders BODY. ooke states `ooke.template` is internal (no stability promise),
+which is F10.54. loke keeps `scripts/check_ooke_surface.py`, which catches the same templates at
+the gate rather than as a 500 at runtime.
+
 ## O-5 — the 3.0.0 changelog names a raw syntax the engine does not have
 
 **Severity: documentation; misleads a consumer migrating from 2.0.0.**
@@ -66,3 +74,8 @@ page rather than an error.
 
 **Reproduced 2026-11-09 at rc.2 (`3cc4998`)**, [`repro-2026-11-09/O-5/`](repro-2026-11-09/O-5/):
 `A{{raw x}}B|{= x | raw =}|{= x =}` with `x = "<b>"` renders `A{{raw x}}B|<b>|&lt;b&gt;`.
+
+**2026-11-15: fixed in ooke v3.0.0 (`7ac2472`)**, story **138.30** (`d4c9bcb`): the CHANGELOG no
+longer names `{{raw`, and names `{= key | raw =}`; toke reports `docs/public-api.md` and
+`docs/versioning.md` corrected too (not checked by loke). `{{raw x}}` still renders literally, as
+it never was syntax. Nothing to change in loke.
