@@ -281,8 +281,19 @@ case "$TESTHOME_ROOT" in
     echo "ERROR: BUILDDIR ($BUILDDIR) is inside the real ~/.loke; the test HOMEs must not be" >&2
     exit 3 ;;
 esac
-if [ ! -f "$GUARD_DYLIB" ] || [ "$GUARD_SRC" -nt "$GUARD_DYLIB" ]; then
-  if ! clang -dynamiclib -O1 -o "$GUARD_DYLIB" "$GUARD_SRC"; then
+# The guard is inherited by every process a test starts, not only the test binary, and on a
+# Mac with System Integrity Protection OFF (the GitHub macOS runners) dyld injects it into
+# Apple's own binaries too — /bin/mkdir, /usr/bin/touch, sqlite3, curl — which are arm64e.
+# An arm64-only guard cannot load there, and dyld kills the child before main: run
+# 44990234228 lost ~40 tests to that, and test_migrate_concurrent spun forever waiting for a
+# file a killed `touch` never made. With SIP on, dyld strips the variable for those binaries,
+# so a developer Mac never saw it. Build both slices on Apple silicon; the self-check after
+# the probe below refuses to run if a platform child still cannot start under the guard.
+GUARD_ARCHS=""
+[ "$(uname -m)" = "arm64" ] && GUARD_ARCHS="-arch arm64 -arch arm64e"
+if [ ! -f "$GUARD_DYLIB" ] || [ "$GUARD_SRC" -nt "$GUARD_DYLIB" ] \
+   || { [ -n "$GUARD_ARCHS" ] && ! lipo -archs "$GUARD_DYLIB" 2>/dev/null | grep -qw arm64e; }; then
+  if ! clang -dynamiclib -O1 $GUARD_ARCHS -o "$GUARD_DYLIB" "$GUARD_SRC"; then
     echo "ERROR: could not build the real-HOME guard from $GUARD_SRC (F3b.13)" >&2
     exit 3
   fi
@@ -303,6 +314,15 @@ LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$BUILDDIR/realhome_guard_probe
 if ! grep -q 'f3b13-guard-probe' "$BUILDDIR/realhome_guard_probe.log" 2>/dev/null; then
   echo "ERROR: the real-HOME guard did not record the probe's access, so it is not active and" >&2
   echo "       a test reaching the real ~/.loke would pass unseen. Refusing to run (F3b.13)." >&2
+  exit 3
+fi
+# And prove it does not break the children a test starts (see GUARD_ARCHS above). A guard
+# dyld cannot load into /usr/bin/true would fail every test that spawns a system tool, each
+# as an unexplained assertion failure, and could hang one that waits on such a child.
+if ! LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$BUILDDIR/realhome_guard_probe.log" \
+     DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" /usr/bin/true; then
+  echo "ERROR: a system binary (/usr/bin/true) cannot start with the real-HOME guard injected" >&2
+  echo "       ($(lipo -archs "$GUARD_DYLIB" 2>/dev/null)); every test that spawns a tool would fail. Refusing to run (F3b.13)." >&2
   exit 3
 fi
 mkdir -p "$TESTHOME_ROOT"
