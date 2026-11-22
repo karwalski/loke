@@ -121,7 +121,10 @@ f=main():i64{
      answers the exit status of one more attempt to take it, which must not be 0. *)
   let holdscript="( ( echo 'BEGIN IMMEDIATE;'; i=0; while [ ! -f $0.release$1 ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done; echo 'COMMIT;' ) | sqlite3 -cmd '.timeout 30000' $0; touch $0.released$1 ) > /dev/null 2>&1 &";
   let waitheld="i=0; while sqlite3 $0 'BEGIN IMMEDIATE;' > /dev/null 2>&1 && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; sqlite3 $0 'BEGIN IMMEDIATE;' > /dev/null 2>&1; echo $?";
-  let waitreleased="touch $0.release$1; while [ ! -f $0.released$1 ]; do sleep 0.2; done";
+  (* Bounded: the holder lets go within its own two minutes, so 150 s is past any honest
+     wait. Unbounded, a holder that never started (run 44990234228: a guard dyld could not
+     load killed the sqlite3 and touch it spawned) left this loop spinning until CI's 6 h cancel. *)
+  let waitreleased="touch $0.release$1; i=0; while [ ! -f $0.released$1 ] && [ $i -lt 750 ]; do sleep 0.2; i=$((i+1)); done; [ -f $0.released$1 ] && echo released || echo stuck";
 
   (* An already-migrated store takes no lock to open. While another process holds the write
      lock, an open that took it would wait out the busy timeout and fail; one on the fast path
@@ -137,7 +140,8 @@ f=main():i64{
   io.println("reopen of a migrated store under a held write lock: exit \(reopened), lock already released: \(releasedsaid)");
   if(t.asserteq(reopened;"0";"an already-migrated store opens while another process holds the write lock")){pass=pass+1}el{fail=fail+1};
   if(t.assert(!released;"and it did so without waiting for the lock to be released")){pass=pass+1}el{fail=fail+1};
-  runout(@("/bin/sh";"-c";waitreleased;db;"1"));
+  let relone=runout(@("/bin/sh";"-c";waitreleased;db;"1"));
+  if(t.asserteq(relone;"released";"the first lock holder let go once told to")){pass=pass+1}el{fail=fail+1};
 
   (* An upgrade: a store one migration behind, opened at once by several processes while
      another holds the write lock. On a fresh file the run's first statement creates
@@ -163,7 +167,8 @@ f=main():i64{
   if(t.asserteq(upgraded;"4";"upgrade: every concurrent open of a store one migration behind succeeded")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(upgot;expectedsummary;"upgrade: the missing migration is recorded once, and the store is complete")){pass=pass+1}el{fail=fail+1};
   if(t.asserteq(onces;"1";"upgrade: exactly one of the children applied it")){pass=pass+1}el{fail=fail+1};
-  runout(@("/bin/sh";"-c";waitreleased;db;"2"));
+  let reltwo=runout(@("/bin/sh";"-c";waitreleased;db;"2"));
+  if(t.asserteq(reltwo;"released";"the upgrade lock holder let go once told to")){pass=pass+1}el{fail=fail+1};
 
   let rm=mt process.spawn(@("rm";"-rf";parent)) { $ok:h h; $err:e 0 };
   if(rm!=0){ process.wait(rm); }el{};
