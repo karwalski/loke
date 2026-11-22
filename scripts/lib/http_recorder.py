@@ -100,7 +100,7 @@ that counts as it reads can stop it; /proxy-test/slow waits six seconds before a
 BG1.4: a POST to /api/pipeline whose body holds `bg14-refuse` answers 403 with a refusal body
 in loke's shape, in any mode, so moke's relay can be seen to pass a non-2xx through intact.
 """
-import http.server, json, os, re, ssl, sys, time
+import http.server, json, os, re, socketserver, ssl, sys, time
 
 LOG = sys.argv[1]
 PORTFILE = sys.argv[2]
@@ -449,7 +449,20 @@ CERT = sys.argv[4] if len(sys.argv) > 5 else ""
 KEY = sys.argv[5] if len(sys.argv) > 5 else ""
 
 
-class TLSServer(http.server.ThreadingHTTPServer):
+class Server(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse-DNS lookup in server_bind.
+
+    HTTPServer.server_bind calls socket.getfqdn(host) only to fill in server_name. On the
+    GitHub macOS runner that lookup of 127.0.0.1 took about 35 s (measured in CI), so the
+    port file appeared long after every test's ten-second wait had given up and ~40 tests
+    reported "the recorder came up" as failed. Nothing here reads server_name."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class TLSServer(Server):
     """Handshakes each connection as it is accepted, and records the outcome."""
 
     def get_request(self):
@@ -472,7 +485,7 @@ if CERT:
     TLS_CTX.load_cert_chain(CERT, KEY)
     srv = TLSServer(("127.0.0.1", BINDPORT), H)
 else:
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", BINDPORT), H)
+    srv = Server(("127.0.0.1", BINDPORT), H)
 tmp = PORTFILE + ".tmp"
 with open(tmp, "w") as f:
     f.write(str(srv.server_address[1]))

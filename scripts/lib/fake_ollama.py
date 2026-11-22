@@ -86,4 +86,10 @@ class H(http.server.BaseHTTPRequestHandler):
         elif MULTILINE: reply="Summary:\n\tthe user asked to contact \""+(ph[0] if ph else "nobody")+"\"."
         if self.path.startswith('/api/chat'): self._send({"model":"llama3","message":{"role":"assistant","content":reply},"done":True,"prompt_eval_count":12,"eval_count":9})
         else: self._send({"model":"llama3","response":reply,"done":True,"prompt_eval_count":12,"eval_count":9})
-http.server.ThreadingHTTPServer(('127.0.0.1',PORT),H).serve_forever()
+class Server(http.server.ThreadingHTTPServer):
+    # No reverse-DNS lookup of 127.0.0.1 in server_bind (see scripts/lib/http_recorder.py).
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+Server(('127.0.0.1',PORT),H).serve_forever()
