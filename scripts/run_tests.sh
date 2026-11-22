@@ -364,6 +364,59 @@ else
 fi
 KC_SUSPECTS=""
 
+# ── X-CI: a hung test is a failure, not the end of the run ───────────────────────────
+#
+# tests/unit/storage/test_migrate_concurrent.tk once hung on a CI runner and held the job
+# for GitHub's six-hour limit, so no test after it ran and nothing was reported. Each test
+# binary now runs under a wall-clock limit, LOKE_TEST_TIMEOUT seconds (default 120; 0 turns
+# it off). On expiry the test's whole PROCESS GROUP is sent SIGTERM, then SIGKILL five
+# seconds later, so a server the test spawned dies with it; the test is reported as
+# TIMEOUT, counted as a failure, and the run continues.
+#
+# macOS has no timeout(1), so the watchdog is perl: fork, put the child in its own process
+# group, exec the test, alarm. Two traps it has to step round:
+#   * /usr/bin/perl is SIP-restricted, and the kernel strips every DYLD_* variable when it
+#     launches a restricted binary, so DYLD_INSERT_LIBRARIES set on the perl command would
+#     never reach the test and the real-HOME guard would silently not load. The library is
+#     passed as LOKE_TEST_DYLD instead and perl sets DYLD_INSERT_LIBRARIES itself, after it
+#     is running, for the exec.
+#   * the expiry is reported through a marker file, not an exit status, because any exit
+#     status a watchdog could choose is also an assertion count a test could return.
+TEST_TIMEOUT="${LOKE_TEST_TIMEOUT:-120}"
+case "$TEST_TIMEOUT" in
+  ''|*[!0-9]*) echo "ERROR: LOKE_TEST_TIMEOUT must be a whole number of seconds (0 = none), not '$TEST_TIMEOUT'" >&2; exit 2 ;;
+esac
+WATCHDOG='
+  my ($limit, $marker, @cmd) = @ARGV;
+  my $pid = fork;
+  defined $pid or die "run_tests: fork failed: $!\n";
+  if ($pid == 0) {
+    setpgrp(0, 0);
+    my $dyld = delete $ENV{LOKE_TEST_DYLD};
+    $ENV{DYLD_INSERT_LIBRARIES} = $dyld if defined $dyld && length $dyld;
+    exec { $cmd[0] } @cmd or exit 127;
+  }
+  my $reap = sub { kill "TERM", -$pid; for (1..50) { last if waitpid($pid, 1) > 0; select(undef, undef, undef, 0.1) } kill "KILL", -$pid; };
+  $SIG{INT}  = sub { $reap->(); exit 130 };
+  $SIG{TERM} = sub { $reap->(); exit 143 };
+  $SIG{ALRM} = sub {
+    open my $fh, ">", $marker and close $fh;
+    $reap->();
+    waitpid($pid, 0);
+    exit 1;
+  };
+  alarm $limit if $limit > 0;
+  waitpid($pid, 0);
+  my $st = $?;
+  alarm 0;
+  exit(($st & 127) ? 128 + ($st & 127) : $st >> 8);
+'
+# run_bounded <marker> <binary>: run one test binary under the guard and the time limit.
+# The caller sets HOME, LOKE_GUARD_PREFIX and LOKE_GUARD_LOG on the command.
+run_bounded() {
+  LOKE_TEST_DYLD="$GUARD_DYLIB" perl -e "$WATCHDOG" "$TEST_TIMEOUT" "$1" "$2"
+}
+
 PASS=0
 FAIL=0
 ERRORS=""
@@ -421,10 +474,14 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
   GUARD_LOG="$BUILDDIR/$NAME.realhome.log"
   rm -rf "$TESTHOME" "$GUARD_LOG"
   mkdir -p "$TESTHOME"
+  TIMEOUT_MARK="$BUILDDIR/$NAME.timedout"
+  rm -f "$TIMEOUT_MARK"
   KC_BEFORE=$(kcstat)
   HOME="$TESTHOME" LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$GUARD_LOG" \
-    DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" "$BUILDDIR/$NAME" 2>/dev/null
+    run_bounded "$TIMEOUT_MARK" "$BUILDDIR/$NAME" 2>/dev/null
   EXIT=$?
+  TIMED_OUT=""
+  [ -f "$TIMEOUT_MARK" ] && TIMED_OUT=1
   KC_AFTER=$(kcstat)
   GUARDED=$((GUARDED+1))
   KC_TOUCHED=""
@@ -434,7 +491,7 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
     rm -rf "$TESTHOME"; mkdir -p "$TESTHOME"
     KC_BEFORE2=$(kcstat)
     HOME="$TESTHOME" LOKE_GUARD_PREFIX="$GUARD_PREFIX" LOKE_GUARD_LOG="$GUARD_LOG" \
-      DYLD_INSERT_LIBRARIES="$GUARD_DYLIB" "$BUILDDIR/$NAME" >/dev/null 2>&1
+      run_bounded "$BUILDDIR/$NAME.rerun.timedout" "$BUILDDIR/$NAME" >/dev/null 2>&1
     KC_AFTER2=$(kcstat)
     if [ "$KC_BEFORE2" != "$KC_AFTER2" ]; then
       KC_TOUCHED=1
@@ -456,6 +513,10 @@ for SRC in $(find "$DIR" -name 'test_*.tk' -not -path '*/_archived-tests/*' -not
     sort -u "$GUARD_LOG" | head -5 | sed 's/^/               /'
     FAIL=$((FAIL+1))
     ERRORS="$ERRORS\n  $SRC (touched the real ~/.loke — see $GUARD_LOG)"
+  elif [ -n "$TIMED_OUT" ]; then
+    echo "TIMEOUT      $SRC (still running after ${TEST_TIMEOUT}s; its process group was killed — LOKE_TEST_TIMEOUT)"
+    FAIL=$((FAIL+1))
+    ERRORS="$ERRORS\n  $SRC (timed out after ${TEST_TIMEOUT}s)"
   elif [ "$EXIT" -eq 0 ]; then
     echo "PASS         $SRC"
     PASS=$((PASS+1))
