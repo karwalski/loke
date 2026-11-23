@@ -118,6 +118,16 @@ step_checks() {
     [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  benchmarks/ad13/test_run.py failed" >&2; failed=1; }
   fi
 
+  # X8.13: the privacy-filter sidecar binds without HTTPServer's reverse-DNS lookup of its
+  # address (35 s on the GitHub macOS runner), proved with socket.getfqdn replaced by one that
+  # fails or stalls, so the result does not depend on this machine's resolver. transformers is
+  # stubbed: no model is loaded.
+  if [[ -f packages/privacy-filter/test_server.py ]]; then
+    echo "  privacy-filter sidecar listens without a name lookup (packages/privacy-filter/test_server.py)"
+    python3 packages/privacy-filter/test_server.py 2>&1 | tail -3 >&2
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "  packages/privacy-filter/test_server.py failed" >&2; failed=1; }
+  fi
+
   if [[ -x ./scripts/check_claims.py ]] || [[ -f ./scripts/check_claims.py ]]; then
     echo "  claims register"
     python3 ./scripts/check_claims.py --check || failed=1

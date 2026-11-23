@@ -28,6 +28,7 @@ import json
 import os
 import time
 import sys
+import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from transformers import pipeline
 
@@ -346,9 +347,23 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Suppress request logging
 
+class Server(HTTPServer):
+    """HTTPServer without the reverse-DNS lookup in server_bind (story X8.13).
+
+    HTTPServer.server_bind calls socket.getfqdn(host) only to fill in server_name. On the
+    GitHub macOS runner that lookup of 127.0.0.1 took 35 s (measured in CI for
+    scripts/lib/http_recorder.py, which had the same server), and the sidecar would not
+    listen until it returned: loke fails closed meanwhile, but reports this layer down.
+    server_name is the bound host string instead; nothing here reads it."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 11435
-    server = HTTPServer(("127.0.0.1", port), Handler)
-    print(f"Privacy filter sidecar listening on http://127.0.0.1:{port}")
+    server = Server(("127.0.0.1", port), Handler)
+    print(f"Privacy filter sidecar listening on http://127.0.0.1:{server.server_port}", flush=True)
     print("Endpoints: POST /detect, POST /anonymise, POST /models/add, GET /models, GET /health, DELETE /models/{id}")
     server.serve_forever()
