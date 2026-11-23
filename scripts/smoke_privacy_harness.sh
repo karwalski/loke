@@ -170,7 +170,10 @@ kill "$RECPID" 2>/dev/null; wait "$RECPID" 2>/dev/null
 
 # F3.9 / F5.3: `loke ask` over the built loke-cli. Its stand-in listens on a port the OS hands
 # out, named in the throwaway HOME's config.toml (providers.ollama_url); Presidio's address is a
-# closed loopback port, as on the browser phase where nothing answers it.
+# closed loopback port, as on the browser phase where nothing answers it. That port is taken from
+# the OS (bind port 0, read it, close) rather than fixed: the fixed 59998 it used before sits in
+# the ephemeral range, where any program may be listening (X8.12).
+DEADPRESIDIO=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()') || exit 1
 CLIHOME="$WORK/clihome"
 mkdir -p "$CLIHOME/.loke"
 start_cli_recorder() {  # $1 log name, $2 models that fail
@@ -180,8 +183,8 @@ start_cli_recorder() {  # $1 log name, $2 models that fail
   RECPID=$!
   for _ in $(seq 1 40); do [ -s "$WORK/$1.port" ] && break; sleep 0.25; done
   [ -s "$WORK/$1.port" ] || return 1
-  printf '[providers]\nollama_url = "http://127.0.0.1:%s"\n\n[privacy]\npresidio_url = "http://127.0.0.1:59998"\n' \
-    "$(cat "$WORK/$1.port")" > "$CLIHOME/.loke/config.toml"
+  printf '[providers]\nollama_url = "http://127.0.0.1:%s"\n\n[privacy]\npresidio_url = "http://127.0.0.1:%s"\n' \
+    "$(cat "$WORK/$1.port")" "$DEADPRESIDIO" > "$CLIHOME/.loke/config.toml"
 }
 if start_cli_recorder cli ""; then
   python3 "$ROOT/scripts/lib/privacy_harness.py" --templates "$ROOT/packages/core/src/privacy/template.tk" \
