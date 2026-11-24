@@ -63,31 +63,27 @@ f=defaultconfig(datadir:str):$cacheconfig{
 };
 
 (* vecstore.open returns VecStore!VecErr and vecstore.collection returns
-   VecCollection!VecErr. The previous bodies returned those RESULT wrappers as bare i64
-   handles, so what a caller held was a pointer to a result and not to a store, and
-   vs.collection was then handed that wrapper where a VecStore was expected. A std.* result
-   DOES discriminate, so it can simply be matched — and 0 is the "no store" sentinel, tested
-   with an `if`, the same convention as page.api.pipeline.openstore.
-   toke 3.2.0 types the $ok payload as the handle record (E4031 against an i64 return);
-   the handle is still held as an i64 with 0 for "none", so it is converted explicitly. (F10.53) *)
-f=open(cfg:$cacheconfig):i64{
-  <mt vs.open(cfg.datadir) {
-    $ok:s s as i64;
-    $err:e 0
-  }
+   VecCollection!VecErr. The bodies once returned those RESULT wrappers as bare i64 handles,
+   then (F10.53) the handle records converted to i64 with 0 for "none". std.vecstore reads a
+   store or a collection through its address, and toke 3.3.0 refuses an i64 there (E4031); a
+   record cannot be compared with 0. So they answer the typed results, which the caller
+   matches (F10.56). opencollection is the two in one, for a caller that only wants the
+   collection.
+
+   The parameter is `vstore`, not `store`: this module declares f=store, and a parameter of
+   the same name resolves to the FUNCTION. *)
+f=open(cfg:$cacheconfig):$vecstorehandle!$vecerr{
+  <vs.open(cfg.datadir)
 };
 
-(* The parameter is `vstore`, not `store`. This module declares f=store, and a parameter of
-   the same name resolves to the FUNCTION: `if(store==0)` raised E4031 "expected 'func', got
-   'i64'" against a perfectly ordinary comparison. The old body never compared the parameter,
-   only forwarded it, so the collision was invisible until this guard was added. *)
-f=collection(vstore:i64):i64{
-  if(vstore==0){
-    <0
-  }el{};
-  <mt vs.collection(vstore;"prompt_cache") {
-    $ok:c c as i64;
-    $err:e 0
+f=collection(vstore:$vecstorehandle):$veccollection!$vecerr{
+  <vs.collection(vstore;"prompt_cache")
+};
+
+f=opencollection(cfg:$cacheconfig):$veccollection!$vecerr{
+  <mt vs.open(cfg.datadir) {
+    $ok:s collection(s);
+    $err:e $err(e)
   }
 };
 
@@ -133,14 +129,14 @@ f=hitfrom(response:str;score:f64;age:i64):$cachehit{
    correctly, unlike a result whose error side is a user sum, so these matches can be
    trusted; and the untyped shims take and return bare i64 handles, so the previous body
    matched `mt` on an i64 that json.decode had returned and read fields off it. *)
-f=checkcacheentry(payload:str;col:i64;topid:str;score:f64;cfg:$cacheconfig):$cachehit{
+f=checkcacheentry(payload:str;col:$veccollection;topid:str;score:f64;cfg:$cacheconfig):$cachehit{
   <mt json.dec(payload) {
     $ok:obj entryfromobj(obj;col;topid;score;cfg);
     $err:e cacheparsewarn()
   }
 };
 
-f=entryfromobj(obj:$jsonval;col:i64;topid:str;score:f64;cfg:$cacheconfig):$cachehit{
+f=entryfromobj(obj:$jsonval;col:$veccollection;topid:str;score:f64;cfg:$cacheconfig):$cachehit{
   let createdat=mt json.i64(obj;"created_at") {
     $ok:n n;
     $err:e 0
@@ -194,7 +190,7 @@ f=tof64(v:@f32):@f64{
    an embedding model is the steady state, not an incident, and a warning on every request
    is the definition of crying wolf. The behaviour is unchanged — no embedding means a
    MISS, never a guess. *)
-f=lookup(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cachehit{
+f=lookup(col:$veccollection;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cachehit{
   let embedding=inf.embed(pool;embedmodel();prompt);
   if(embedding.len==0){
     log.debug("cache: no embedding model loaded, treating as a miss";"cache";"");
@@ -215,7 +211,7 @@ f=lookup(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cachehit{
    tell that caller anything — $some:0 was always the payload and still is — and it discards
    the response it now has in hand. Nothing in the repository calls it; new callers use
    lookup and ishit. *)
-f=lookupresult(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cacheresult{
+f=lookupresult(col:$veccollection;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cacheresult{
   if(ishit(lookup(col;prompt;pool;cfg))){
     <$cacheresult{$some:0}
   }el{
@@ -223,7 +219,7 @@ f=lookupresult(col:i64;prompt:str;pool:$inferpool;cfg:$cacheconfig):$cacheresult
   }
 };
 
-f=store(col:i64;prompt:str;response:str;pool:$inferpool):bool{
+f=store(col:$veccollection;prompt:str;response:str;pool:$inferpool):bool{
   let embedding=inf.embed(pool;embedmodel();prompt);
   if(embedding.len==0){
     log.warn("cache: no embedding model loaded, not storing";"cache";"");
@@ -241,7 +237,7 @@ f=store(col:i64;prompt:str;response:str;pool:$inferpool):bool{
   <vs.upsert(col;id;tof64(embedding);payload)
 };
 
-f=evictexpired(col:i64;ttlseconds:i32):i32{
+f=evictexpired(col:$veccollection;ttlseconds:i32):i32{
   <vs.deletebefore(col;time.nowunix()-(ttlseconds as i64))
 };
 
