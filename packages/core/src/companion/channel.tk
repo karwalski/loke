@@ -22,6 +22,17 @@ i=log:shared.log;
 i=str:std.str;
 i=t:core.companion.types;
 
+(* F10.56: connect answered the connection as an i64, with 0 for "not connected", and send,
+   recv, close and pairingcode took it back as an i64. std.tls reads a $tlsconn through its
+   address, and toke 3.3.0 refuses an i64 there (E4031); a record cannot be compared with 0.
+   So a connection is held as a $chanlink: up says whether conn is a live connection that
+   std.tls handed out. When up is false, conn is an empty record that is never given to
+   std.tls: every function below tests up first. *)
+t=$chanlink{
+  up:bool;
+  conn:$tlsconn
+};
+
 f=identityvaliddays():i32{
   <3650 as i32
 };
@@ -40,23 +51,31 @@ f=identityfailed(devicename:str):$tlskeypair{
   <$tlskeypair{certpem:"";keypem:""}
 };
 
+f=down():$chanlink{
+  <$chanlink{up:false;conn:$tlsconn{id:""}}
+};
+
+f=linked(conn:$tlsconn):$chanlink{
+  <$chanlink{up:true;conn:conn}
+};
+
 (* Verifies the companion's certificate. A companion with no pinned certificate is
    refused rather than connected to without authentication. *)
-f=connect(companion:$companion;ourkeypair:$tlskeypair):i64{
+f=connect(companion:$companion;ourkeypair:$tlskeypair):$chanlink{
   if(str.len(companion.certpem)==0){
     log.error("refusing to connect to \(companion.host): no pinned certificate for this companion";"companion";"channel");
-    <0
+    <down()
   }el{
     <mt tls.connect(companion.host;companion.port;tls.mutualconfig(tls.certof(ourkeypair);tls.keyof(ourkeypair);companion.certpem)) {
-      $some:conn conn;
+      $some:conn linked(conn);
       $none:v connectfailed(companion.host)
     }
   }
 };
 
-f=connectfailed(host:str):i64{
+f=connectfailed(host:str):$chanlink{
   log.warn("TLS connection to \(host) failed";"companion";"channel");
-  <0
+  <down()
 };
 
 (* The handler is declared with toke's function-type syntax — `fn` is the .tki's
@@ -65,39 +84,39 @@ f=listen(port:i32;keypair:$tlskeypair;handler:($str):$str):bool{
   <tls.listen(port;tls.tlsconfig(tls.certof(keypair);tls.keyof(keypair));handler)
 };
 
-f=send(conn:i64;msg:str):bool{
-  if(conn==0){
+f=send(link:$chanlink;msg:str):bool{
+  if(!link.up){
     <false
   }el{
-    <tls.write(conn;msg)
+    <tls.write(link.conn;msg)
   }
 };
 
-f=recv(conn:i64):str{
-  if(conn==0){
+f=recv(link:$chanlink):str{
+  if(!link.up){
     <""
   }el{
-    <mt tls.read(conn) {
+    <mt tls.read(link.conn) {
       $some:s s;
       $none:v ""
     }
   }
 };
 
-f=close(conn:i64):bool{
-  if(conn==0){
+f=close(link:$chanlink):bool{
+  if(!link.up){
     <false
   }el{
-    <tls.close(conn)
+    <tls.close(link.conn)
   }
 };
 
 (* The pairing code is derived from the live connection's certificate by std.tls, so
    both ends compute the same value from the same handshake. *)
-f=pairingcode(conn:i64):str{
-  if(conn==0){
+f=pairingcode(link:$chanlink):str{
+  if(!link.up){
     <""
   }el{
-    <tls.pairingcode(conn)
+    <tls.pairingcode(link.conn)
   }
 };
